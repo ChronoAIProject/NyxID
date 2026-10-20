@@ -97,6 +97,8 @@ async fn reload_authority(
     if live.conversation_id != original.conversation_id
         || live.agent_id != original.agent_id
         || live.turn_id != original.turn_id
+        || live.invocation_id != original.invocation_id
+        || live.invocation_controlled != original.invocation_controlled
         || if require_live || original.turn_live {
             !live.turn_live || live.turn_stopped
         } else {

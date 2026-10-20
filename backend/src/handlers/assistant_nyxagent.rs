@@ -1056,7 +1056,7 @@ pub async fn decide_acknowledgement(
     )
     .await;
     // A user decision on a subagent's request resumes the subagent.
-    if row.decider == "orchestrator" {
+    if row.decider == "orchestrator" && row.invocation_id.is_none() {
         super::assistant_team::permission_decided(&state, &user, &row).await;
     }
     if matches!(body.decision, Decision::Deny) {
@@ -1222,6 +1222,12 @@ pub async fn delete(
         }
     }
     let rows = engine::delete(&state.db, &user_id, &id).await?;
+    for row in &rows {
+        crate::services::assistant_invocation_service::cancel_deleted_conversation(
+            &state, &user_id, &row.id,
+        )
+        .await?;
+    }
     let policy = request.extensions().get::<BillingRoutePolicy>().copied();
     for row in rows {
         let Some(session_id) = row.nyxagent_session_id.clone() else {
@@ -1784,7 +1790,7 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_turn(
+pub(crate) async fn run_turn(
     state: AppState,
     auth: AuthUser,
     row: AssistantConversation,

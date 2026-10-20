@@ -495,7 +495,23 @@ async fn run_billing_route_coverage_smoke() {
         &downstream_url,
     ))
     .await;
+    // Admission is disabled by default; still exercise the mounted billing boundary.
+    let refusal = app
+        .clone()
+        .oneshot(route_request(
+            Method::POST,
+            "/api/v1/assistant/nyxagent/invocations",
+            &token,
+            Body::from(
+                serde_json::json!({"idempotency_key":Uuid::new_v4().to_string(),"text":"boundary"})
+                    .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refusal.status(), StatusCode::NOT_FOUND);
     exercised_routes.extend([
+        "/api/v1/assistant/nyxagent/invocations",
         "/api/v1/assistant/nyxagent/turns",
         "/api/v1/assistant/nyxagent/models",
         "/api/v1/assistant/nyxagent/conversations/{id}",
@@ -2129,6 +2145,8 @@ fn route_request(method: Method, uri: &str, token: &str, body: Body) -> Request<
 }
 
 async fn call_mounted_route(app: &Router, request: Request<Body>) -> bytes::Bytes {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
     let response = app
         .clone()
         .oneshot(request)
@@ -2140,7 +2158,7 @@ async fn call_mounted_route(app: &Router, request: Request<Body>) -> bytes::Byte
         .expect("consume mounted route response");
     assert!(
         status.is_success(),
-        "mounted route returned {status}: {}",
+        "mounted route {method} {path} returned {status}: {}",
         String::from_utf8_lossy(&body)
     );
     body

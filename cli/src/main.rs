@@ -85,7 +85,13 @@ async fn run_main() {
             .track(telemetry::CliEvent::CommandInvoked {
                 command_group: group,
                 subcommand: sub,
-                exit_code: if result.is_ok() { 0 } else { 1 },
+                exit_code: match &result {
+                    Ok(()) => 0,
+                    Err(error) => error
+                        .downcast_ref::<commands::nyxbot::OutcomeExit>()
+                        .map(|outcome| outcome.0)
+                        .unwrap_or(1),
+                },
                 duration_ms: start.elapsed().as_millis() as u64,
                 os: std::env::consts::OS,
                 arch: std::env::consts::ARCH,
@@ -98,6 +104,9 @@ async fn run_main() {
     }
 
     if let Err(e) = result {
+        if let Some(outcome) = e.downcast_ref::<commands::nyxbot::OutcomeExit>() {
+            std::process::exit(outcome.0);
+        }
         if let Some(error) = e.downcast_ref::<auth::login_exchange::LoginFailure>() {
             if json_output_from_argv {
                 println!("{}", error.json());
@@ -159,6 +168,7 @@ fn selected_profile(matches: &clap::ArgMatches) -> Option<String> {
 
 fn command_names(command: &Commands) -> (&'static str, &'static str) {
     match command {
+        Commands::Nyxbot { .. } => ("nyxbot", "subcommand"),
         Commands::Login(_) => ("auth", "login"),
         Commands::Logout(_) => ("auth", "logout"),
         Commands::Register(_) => ("auth", "register"),
@@ -248,6 +258,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Keys(auth) => commands::service::run(cli::ServiceCommands::List { auth }).await,
         Commands::Service { command } => commands::service::run(command).await,
         Commands::Pool { command } => commands::pool::run(command).await,
+        Commands::Nyxbot { command } => commands::nyxbot::run(command).await,
         Commands::Trigger { command } => commands::trigger::run(command).await,
         Commands::Billing { command } => commands::billing::run(command).await,
         Commands::Provider { command } => commands::provider::run(command).await,

@@ -909,6 +909,9 @@ async fn specialist_platform_voice_funding_new_personal_grant_immediately_allows
         assert!(failed.provider_session_id.is_none());
 
         let grant = grants::issue_grants(&f.state.db, grants::IssueCreditGrantInput {
+            amount: None,
+            service_limits: Vec::new(),
+            request_id: None,
             amount_credits:100, target_kind:BillingTargetKind::SelectedUsers,
             target_user_ids:vec![f.owner.clone()], target_org_ids:vec![], target_group_ids:vec![],
             all_services:false, service_refs:vec![service.id.clone()], expires_at:None,

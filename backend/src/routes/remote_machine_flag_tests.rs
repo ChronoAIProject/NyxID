@@ -156,6 +156,7 @@ async fn fixture(label: &str) -> Fixture {
     role_service::seed_system_roles(&db).await.unwrap();
     let config = crate::config::AppConfig {
         billing_enabled: true,
+        billing_allocations_enabled: false,
         ..test_utils::test_app_config()
     };
     let lago = Arc::new(LocalLago {

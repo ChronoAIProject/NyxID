@@ -934,6 +934,8 @@ mod tests {
     ) -> ChatAuthority {
         ChatAuthority {
             channel_adapter_origin: None,
+            invocation_controlled: false,
+            invocation_id: None,
             platform_thread: false,
             platform_origin: None,
             report_to: None,

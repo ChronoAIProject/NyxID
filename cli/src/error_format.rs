@@ -139,6 +139,7 @@ fn parse_http_error(message: &str) -> Option<HttpError<'_>> {
 }
 
 fn parse_request_path(request: &str) -> Option<&str> {
+    let request = request.strip_prefix("Proxy request ").unwrap_or(request);
     let mut parts = request.split_whitespace();
     let first = parts.next()?;
     let second = parts.next();

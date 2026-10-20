@@ -163,6 +163,13 @@ macro_rules! assistant_direct_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
+                "/nyxagent/invocations",
+                "/api/v1/assistant/nyxagent/invocations",
+                "handlers::assistant_invocations::create",
+                post(handlers::assistant_invocations::create),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(crate::services::billing::BillingIngress::Proxy)
+            ),
+            (
                 "/nyxagent/turns",
                 "/api/v1/assistant/nyxagent/turns",
                 "handlers::assistant_nyxagent::turns",
@@ -1313,6 +1320,26 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .put(handlers::admin_billing::update_service_billing),
         )
         .route(
+            "/credits/allocations/summary",
+            get(handlers::billing_credits::allocation_summary),
+        )
+        .route(
+            "/credits/allocations",
+            post(handlers::billing_credits::allocate),
+        )
+        .route(
+            "/credits/allocations/{grant_id}",
+            delete(handlers::billing_credits::reclaim),
+        )
+        .route(
+            "/credits/allocations/schedules",
+            post(handlers::billing_credit_schedules::allocate_recurring),
+        )
+        .route(
+            "/credits/allocations/schedules/{schedule_id}",
+            patch(handlers::billing_credit_schedules::edit_allocation_recurring),
+        )
+        .route(
             "/credits/grants",
             get(handlers::billing_credits::admin_list_grants)
                 .post(handlers::billing_credits::issue_grant),
@@ -2386,6 +2413,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         ),
     ));
     let assistant_routes = Router::new()
+        .route(
+            "/nyxagent/invocations/{key}",
+            get(handlers::assistant_invocations::show),
+        )
+        .route(
+            "/nyxagent/invocations/{key}/cancel",
+            post(handlers::assistant_invocations::cancel),
+        )
         .route(
             "/nyxagent/conversations/{id}/machine-preview-policy",
             get(handlers::machine_activity::get_preview_policy)

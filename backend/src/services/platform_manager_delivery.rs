@@ -105,6 +105,15 @@ fn refused() -> AppError {
 
 pub(crate) fn fixed_text(reason: UnavailableReason) -> &'static str {
     match reason {
+        UnavailableReason::ConfirmationRejected => {
+            "This confirmation could not be accepted. The code or account review may be expired, invalid, or for another chat, or linking may be unavailable. Send /link for a fresh account review when personal linking is enabled, then use its one-time confirmation in this same private chat."
+        }
+        UnavailableReason::ControlInvalid => {
+            "That command could not be completed. Use /help for supported controls, or send /link for a fresh account review in this private chat."
+        }
+        UnavailableReason::ControlRateLimited => {
+            "Too many chat controls were requested. Wait a moment, then retry here. Use /help for supported controls."
+        }
         UnavailableReason::UnsupportedInput => {
             "This chat supports text questions. Use /help for the available controls, or open NyxID for attachments and actions."
         }
@@ -2408,6 +2417,9 @@ fn fixed_reason(reason: &str) -> Option<UnavailableReason> {
         RuntimeUninitialized,
         EngineUnavailable,
         UnsupportedInput,
+        ConfirmationRejected,
+        ControlInvalid,
+        ControlRateLimited,
         ModeDisabled,
     ]
     .into_iter()
@@ -2443,6 +2455,41 @@ mod native_render_tests {
             "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(10)),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn control_failures_reconstruct_exact_safe_provider_guidance() {
+        for platform in [EntryPlatform::Slack, EntryPlatform::Discord] {
+            let entry = EntryIdentity::NativeV2 {
+                platform_entry: crate::models::platform_entry_identity::NativeEntryIdentity {
+                    version: 2,
+                    platform,
+                    channel_bot_id: uuid::Uuid::new_v4().to_string(),
+                    platform_bot_id: "100".into(),
+                },
+            };
+            for reason in [
+                UnavailableReason::ConfirmationRejected,
+                UnavailableReason::ControlInvalid,
+                UnavailableReason::ControlRateLimited,
+            ] {
+                assert_eq!(fixed_reason(&format!("{reason:?}")), Some(reason));
+                let body = fixed_text_for(reason, &entry).unwrap();
+                assert!(!body.contains("/link") && !body.contains("P-AAAA-BBBB"));
+                let guidance = match (platform, reason) {
+                    (EntryPlatform::Discord, UnavailableReason::ConfirmationRejected) => {
+                        "/nyx login"
+                    }
+                    (EntryPlatform::Slack, UnavailableReason::ConfirmationRejected) => "Send login",
+                    (EntryPlatform::Discord, _) => "/nyx help",
+                    _ => "help",
+                };
+                assert!(body.contains(guidance));
+                if reason == UnavailableReason::ControlRateLimited {
+                    assert!(body.contains("Wait a moment, then retry here"));
+                }
+            }
+        }
     }
 
     #[test]

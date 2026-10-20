@@ -474,6 +474,7 @@ pub(crate) mod platform_bot_status_service;
 pub(crate) mod platform_entry_scope;
 pub(crate) mod platform_faq_service;
 
+pub mod assistant_invocation_service;
 pub(crate) mod platform_native_reply_service;
 
 pub mod session_authority;

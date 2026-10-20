@@ -1,10 +1,7 @@
 //! Owner-reviewed setup intents and device-style machine pairing.
 use crate::{
     errors::{AppError, AppResult},
-    models::{
-        machine_setup::{COLLECTION_NAME, Choices, MachineSetup},
-        nyxbot_channel::{NyxbotWatch, WATCHES_COLLECTION_NAME},
-    },
+    models::machine_setup::{COLLECTION_NAME, Choices, MachineSetup},
 };
 use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
@@ -361,13 +358,14 @@ pub async fn watch(
     let now = Utc::now();
     let mut insert = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":owner,"kind":"machine_setup","connect_link_id":id,"conversation_id":conversation,"status":"pending","created_at":bson::DateTime::from_chrono(now),"expires_at":bson::DateTime::from_chrono(expires+Duration::hours(1))};
     insert.extend(provenance.fields());
-    db.collection::<NyxbotWatch>(WATCHES_COLLECTION_NAME)
-        .update_one(
-            doc! {"kind":"machine_setup","connect_link_id":id,"user_id":owner},
-            doc! {"$setOnInsert":insert},
-        )
-        .upsert(true)
-        .await?;
+    super::nyxbot_watch_service::upsert(
+        db,
+        owner,
+        provenance.invocation_id.as_deref(),
+        doc! {"kind":"machine_setup","connect_link_id":id,"user_id":owner},
+        doc! {"$setOnInsert":insert},
+    )
+    .await?;
     Ok(())
 }
 

@@ -1,3 +1,6 @@
+mod billing;
+pub use billing::*;
+
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -18,6 +21,11 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Control NyxBot with the owner's first-party session (API keys are rejected)
+    Nyxbot {
+        #[command(subcommand)]
+        command: crate::commands::nyxbot::NyxbotCommands,
+    },
     /// Log in to NyxID (opens browser by default)
     Login(LoginArgs),
     /// Log out and clear stored token
@@ -323,6 +331,18 @@ pub struct RepoArgs {
 
 #[derive(Subcommand)]
 pub enum AdminCommands {
+    /// Configure billing, exact rates and ledger integrity
+    Billing {
+        #[command(subcommand)]
+        command: AdminBillingCommands,
+    },
+    /// Inspect platform usage in a bounded time window
+    Usage(AdminUsageArgs),
+    /// Manage credit benefits
+    Credits {
+        #[command(subcommand)]
+        command: AdminCreditsCommands,
+    },
     /// Manage NyxID-owned messaging platform credentials
     PlatformCredentials {
         #[command(subcommand)]
@@ -444,7 +464,7 @@ pub struct ManifestArgs {
     #[arg(long)]
     pub file: std::path::PathBuf,
     /// Value for a manifest `${name}` variable, as name=value (repeatable)
-    #[arg(long = "set", value_name = "NAME=VALUE")]
+    #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
     pub vars: Vec<String>,
 }
 
@@ -462,14 +482,17 @@ pub enum AdminCatalogCommands {
     },
     /// Interactive wizard: create a provider and service, set the OAuth client, then validate
     Add {
+        /// Print the proposed changes without writing or reading credentials
+        #[arg(long)]
+        dry_run: bool,
         /// Start from a manifest instead of answering every question
         #[arg(long, conflicts_with = "template")]
         file: Option<std::path::PathBuf>,
-        /// Start from a built-in manifest (zoho-mail)
+        /// Start from a built-in manifest (zoho-mail or telnyx-platform)
         #[arg(long)]
         template: Option<String>,
         /// Value for a manifest `${name}` variable, as name=value (repeatable)
-        #[arg(long = "set", value_name = "NAME=VALUE")]
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
         /// Write the manifest built by the wizard to this path
         #[arg(long)]
@@ -491,6 +514,9 @@ pub enum AdminCatalogCommands {
     },
     /// Create or update every provider and service in a manifest; safe to rerun
     Apply {
+        /// Allow disabling live platform access or clearing its owner allowlist
+        #[arg(long)]
+        allow_access_change: bool,
         #[command(flatten)]
         manifest: ManifestArgs,
         /// Show the plan without changing anything
@@ -532,7 +558,7 @@ pub enum AdminToolsCommands {
         skip_credentials: bool,
         #[arg(long)]
         credential_env: Option<String>,
-        #[arg(long = "set", value_name = "NAME=VALUE")]
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -543,7 +569,7 @@ pub enum AdminToolsCommands {
         file: std::path::PathBuf,
         #[arg(long)]
         dry_run: bool,
-        #[arg(long = "set", value_name = "NAME=VALUE")]
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -552,7 +578,7 @@ pub enum AdminToolsCommands {
     Validate {
         #[arg(long)]
         file: std::path::PathBuf,
-        #[arg(long = "set", value_name = "NAME=VALUE")]
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -2117,12 +2143,17 @@ impl BillingUsagePeriodArg {
 
 #[derive(Subcommand)]
 pub enum BillingCommands {
+    /// Inspect self-scoped managed execution metadata
+    Executions {
+        #[command(subcommand)]
+        command: BillingExecutionCommands,
+    },
     /// Show or provision the billing wallet
     Wallet {
         /// Provision the wallet if it does not exist
         #[arg(long)]
         provision: bool,
-        /// Owner ID to manage, usually an org user ID (org admin access required)
+        /// Owner ID (org admin required); uses POST and provisions if missing
         #[arg(long)]
         owner_id: Option<String>,
         #[command(flatten)]
@@ -4710,6 +4741,9 @@ pub enum ProxyCommands {
         /// Stream the response (for SSE, video, audio, large files)
         #[arg(long)]
         stream: bool,
+        /// Wrap the nonstreaming response in JSON (requires --output json)
+        #[arg(long, conflicts_with = "stream")]
+        envelope: bool,
         /// Use service ID instead of slug
         #[arg(long)]
         by_id: bool,
@@ -4831,6 +4865,30 @@ pub enum OpenClawCommands {
 
 #[derive(Subcommand)]
 pub enum McpCommands {
+    /// List MCP tools and input schemas through Streamable HTTP
+    Tools {
+        /// Service slug; enumerate all operations from the authoritative catalog
+        #[arg(long)]
+        service: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Invoke an MCP tool once using a saved human session
+    Call {
+        /// Fully qualified MCP tool name
+        tool: String,
+        /// JSON object or @path to a JSON arguments file
+        #[arg(long)]
+        args: String,
+        /// Include the tool name and RFC3339 execution correlation bounds
+        #[arg(long)]
+        envelope: bool,
+        /// Total timeout in seconds; 0 waits indefinitely, like proxy request
+        #[arg(long, default_value_t = 0)]
+        timeout_secs: u64,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Discover services and operations visible to the current credential, including input schemas
     Discover {
         #[command(flatten)]

@@ -1985,20 +1985,14 @@ pub(crate) async fn setup_link_tool(
             created.link.expires_at + ChronoDuration::minutes(CONNECT_WATCH_GRACE_MINUTES),
         ),
     );
-    // One pending link per owner and platform: a new link replaces the last.
-    state
-        .db
-        .collection::<NyxbotWatch>(WATCHES)
-        .update_one(
-            doc! {"user_id": owner, "kind": "channel_bot", "platform": &family,
-            "status": "pending"},
-            doc! {
-                "$set": set,
-                "$setOnInsert": {"_id": Uuid::new_v4().to_string()},
-            },
-        )
-        .upsert(true)
-        .await?;
+    crate::services::nyxbot_watch_service::upsert(
+        &state.db,
+        owner,
+        provenance.invocation_id.as_deref(),
+        doc! {"user_id":owner,"kind":"channel_bot","platform":&family,"status":"pending"},
+        doc! {"$set":set,"$setOnInsert":{"_id":Uuid::new_v4().to_string()}},
+    )
+    .await?;
     let steps = if platform == "telegram-new" {
         "Open the link, check the bot name, and press Continue in Telegram. Telegram creates \
         the bot; no token to copy."
@@ -2050,28 +2044,31 @@ pub(crate) async fn watch_connect_link(
         .await?
         .ok_or_else(|| AppError::NotFound("Connect link not found".into()))?;
     let now = Utc::now();
-    db.collection::<NyxbotWatch>(WATCHES)
-        .insert_one(NyxbotWatch {
-            trigger_prefill: None,
-            trigger_id: None,
-            id: Uuid::new_v4().to_string(),
-            user_id: owner.into(),
-            kind: "connect_link".into(),
-            conversation_id: conversation_id.into(),
-            status: "pending".into(),
-            platform: None,
-            agent_id: None,
-            channel_bot_id: None,
-            connect_link_id: Some(connect_link_id.into()),
-            last_error: None,
-            report_to: provenance.report_to,
-            report_provenance: provenance.version,
-            checked_at: None,
-            created_at: now,
-            expires_at: link.expires_at.max(now)
-                + ChronoDuration::minutes(CONNECT_WATCH_GRACE_MINUTES),
-        })
-        .await?;
+    let invocation_id = provenance.invocation_id.clone();
+    let watch = NyxbotWatch {
+        invocation_id: provenance.invocation_id.clone(),
+        trigger_prefill: None,
+        trigger_id: None,
+        id: Uuid::new_v4().to_string(),
+        user_id: owner.into(),
+        kind: "connect_link".into(),
+        conversation_id: conversation_id.into(),
+        status: "pending".into(),
+        platform: None,
+        agent_id: None,
+        channel_bot_id: None,
+        connect_link_id: Some(connect_link_id.into()),
+        last_error: None,
+        report_to: provenance.report_to,
+        report_provenance: provenance.version,
+        checked_at: None,
+        created_at: now,
+        expires_at: link.expires_at.max(now) + ChronoDuration::minutes(CONNECT_WATCH_GRACE_MINUTES),
+    };
+    crate::services::nyxbot_watch_service::upsert(db,owner,invocation_id.as_deref(),
+        doc!{"_id":&watch.id,"user_id":owner},
+        doc!{"$setOnInsert":bson::to_document(&watch).map_err(|_|AppError::Internal("Invalid watch".into()))?},
+    ).await?;
     Ok(())
 }
 
@@ -2116,16 +2113,37 @@ async fn settle(state: &AppState, watch: &NyxbotWatch, error: Option<&'static st
         .await;
 }
 
-async fn wake_with(state: &AppState, watch: &NyxbotWatch, kind: &str, text: String) {
-    super::assistant_team::notify(
-        state,
-        &watch.user_id,
-        &watch.conversation_id,
-        vec![crate::services::nyxbot_watch_service::watch_event(
-            watch, kind, text,
-        )],
-    )
-    .await;
+async fn settle_and_wake(
+    state: &AppState,
+    watch: &NyxbotWatch,
+    kind: &str,
+    text: String,
+    error: Option<&'static str>,
+) -> AppResult<()> {
+    if watch.invocation_id.is_some() {
+        if crate::services::machine_service::settle_watch(&state.db, watch, kind, text, error)
+            .await?
+        {
+            Box::pin(super::assistant_team::wake(
+                state,
+                &watch.user_id,
+                &watch.conversation_id,
+            ))
+            .await;
+        }
+    } else {
+        settle(state, watch, error).await;
+        super::assistant_team::notify(
+            state,
+            &watch.user_id,
+            &watch.conversation_id,
+            vec![crate::services::nyxbot_watch_service::watch_event(
+                watch, kind, text,
+            )],
+        )
+        .await;
+    }
+    Ok(())
 }
 
 /// Resolve pending watches: link bots created from setup links, and report
@@ -2309,8 +2327,14 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
                         "This bot creation request expired. No bot was linked by this request. Offer a new setup link if the user wants to continue.",
                     )
                 };
-                settle(state, watch, Some(code)).await;
-                wake_with(state, watch, "channel_bot_setup_finished", text.into()).await;
+                settle_and_wake(
+                    state,
+                    watch,
+                    "channel_bot_setup_finished",
+                    text.into(),
+                    Some(code),
+                )
+                .await?;
             }
             return Ok(());
         }
@@ -2385,8 +2409,14 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
             bot.id
         ),
     };
-    settle(state, watch, outcome.as_ref().err().map(error_code)).await;
-    wake_with(state, watch, "channel_bot_linked", text).await;
+    settle_and_wake(
+        state,
+        watch,
+        "channel_bot_linked",
+        text,
+        outcome.as_ref().err().map(error_code),
+    )
+    .await?;
     Ok(())
 }
 
@@ -2426,8 +2456,7 @@ async fn connect_link_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<
     if !claim(state, watch, doc! {}).await? {
         return Ok(());
     }
-    settle(state, watch, None).await;
-    wake_with(state, watch, "connection_finished", text).await;
+    settle_and_wake(state, watch, "connection_finished", text, None).await?;
     Ok(())
 }
 
@@ -3124,6 +3153,7 @@ async fn start_chat_turn(
     };
     late_delivery::prepare(state, event_key, row, &origin, sender, guest, addressed).await?;
     let start = TurnStart {
+        invocation_id: None,
         acknowledgement_id: None,
         retry_of: None,
         channel_event_id: Some(event_key.to_owned()),
@@ -3292,7 +3322,7 @@ async fn repeated_question(
     if let Some(turn) = current
         .active_turn
         .as_ref()
-        .filter(|turn| turn.question_key.as_deref() == Some(key))
+        .filter(|turn| turn.invocation_id.is_none() && turn.question_key.as_deref() == Some(key))
     {
         if turn.asked_from.as_ref() == Some(origin) {
             return Ok(Some(
@@ -3316,7 +3346,7 @@ async fn repeated_question(
     if current
         .pending_events
         .iter()
-        .any(|event| event.question_key.as_deref() == Some(key))
+        .any(|event| event.invocation_id.is_none() && event.question_key.as_deref() == Some(key))
     {
         if !engine::also_reply_to_queued(&state.db, &row.user_id, conversation_id, key, origin)
             .await?
@@ -3325,9 +3355,11 @@ async fn repeated_question(
             // unless the turn already answers this chat.
             let current = engine::get(&state.db, &row.user_id, conversation_id).await?;
             let waiting = match current.active_turn.as_ref().filter(|turn| {
-                turn.events
-                    .iter()
-                    .any(|event| event.question_key.as_deref() == Some(key))
+                turn.invocation_id.is_none()
+                    && turn
+                        .events
+                        .iter()
+                        .any(|event| event.question_key.as_deref() == Some(key))
             }) {
                 Some(turn) => {
                     let answered_here = match turn.origin {
@@ -5195,29 +5227,28 @@ pub(crate) async fn trigger_setup_link(
     }
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
-    state
-        .db
-        .collection::<NyxbotWatch>(WATCHES)
-        .insert_one(NyxbotWatch {
-            agent_id: Some(prefill.agent_id.clone()),
-            trigger_prefill: Some(prefill),
-            trigger_id: None,
-            id: id.clone(),
-            user_id: owner.into(),
-            kind: "trigger_created".into(),
-            conversation_id: conversation.into(),
-            status: "pending".into(),
-            platform: None,
-            channel_bot_id: None,
-            connect_link_id: None,
-            last_error: None,
-            report_to: provenance.report_to,
-            report_provenance: provenance.version,
-            checked_at: None,
-            created_at: now,
-            expires_at: now + ChronoDuration::minutes(120),
-        })
-        .await?;
+    let invocation_id = provenance.invocation_id.clone();
+    let watch = NyxbotWatch {
+        invocation_id: provenance.invocation_id.clone(),
+        agent_id: Some(prefill.agent_id.clone()),
+        trigger_prefill: Some(prefill),
+        trigger_id: None,
+        id: id.clone(),
+        user_id: owner.into(),
+        kind: "trigger_created".into(),
+        conversation_id: conversation.into(),
+        status: "pending".into(),
+        platform: None,
+        channel_bot_id: None,
+        connect_link_id: None,
+        last_error: None,
+        report_to: provenance.report_to,
+        report_provenance: provenance.version,
+        checked_at: None,
+        created_at: now,
+        expires_at: now + ChronoDuration::minutes(120),
+    };
+    crate::services::nyxbot_watch_service::upsert(&state.db,owner,invocation_id.as_deref(),doc!{"_id":&id,"user_id":owner},doc!{"$setOnInsert":bson::to_document(&watch).map_err(|_|AppError::Internal("Invalid watch".into()))?}).await?;
     Ok(json!({
         "url": AssistantPage::Automations { setup: Some(&id), agent: None }.url(&state.config.frontend_url),
         "note": "Open this page to create the webhook trigger and save its URL and one-time secret. Never paste the secret into chat. NyxID resumes this thread once it exists. Webhooks default to a dedicated thread. Choose home only with explicit owner consent: untrusted event text would remain in later full-authority owner turns, including private channel chats; webhook confirmation policy does not protect those later turns.",
@@ -5233,8 +5264,7 @@ async fn trigger_created_watch(state: &AppState, watch: &NyxbotWatch) -> AppResu
     if let Some(trigger) = row
         && claim(state, watch, doc! {}).await?
     {
-        settle(state, watch, None).await;
-        wake_with(
+        settle_and_wake(
             state,
             watch,
             "trigger_created",
@@ -5243,8 +5273,9 @@ async fn trigger_created_watch(state: &AppState, watch: &NyxbotWatch) -> AppResu
                  Automations page; never ask to see it. Explain how to configure their event source.",
                 trigger.id,
             ),
+            None,
         )
-        .await;
+        .await?;
     }
     Ok(())
 }

@@ -4844,3 +4844,342 @@ async fn missing_access_mcp_service_and_connect_results_have_absolute_instructio
     }
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn invocation_cancel_during_approval_wait_denies_direct_meta_and_http_dispatch() {
+    use crate::models::{approval_request as approvals, service_approval_config as configs};
+    use crate::services::{assistant_invocation_service as receipts, assistant_nyxagent as engine};
+    use mongodb::bson::Document;
+    use tower::ServiceExt;
+    for (dispatch, credential_header) in [
+        ("mcp_direct", "x-api-key"),
+        ("mcp_meta", "x-api-key"),
+        ("proxy_uuid", "x-api-key"),
+        ("proxy_slug", "x-api-key"),
+        ("llm_provider", "x-api-key"),
+        ("llm_provider", "authorization"),
+        ("llm_gateway", "x-api-key"),
+        ("llm_gateway", "authorization"),
+    ] {
+        let mut f = orchestrator_fixture(&format!(
+            "invocation_approval_wait_{dispatch}_{credential_header}"
+        ))
+        .await;
+        receipts::ensure_indexes(&f.state.db).await.unwrap();
+        engine::force_stop(
+            &f.state.db,
+            &f.owner,
+            &f.row.id,
+            &f.row.active_turn.as_ref().unwrap().turn_id,
+        )
+        .await
+        .unwrap();
+        let request = engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: vec![],
+            agent_id: None,
+            conversation_id: Some(f.row.id.clone()),
+            text: "approval fixture".into(),
+            model: None,
+            access_mode: None,
+        };
+        let start = engine::TurnStart::from(&request);
+        let key = uuid::Uuid::new_v4().to_string();
+        let admission = receipts::admit(
+            &f.state.db,
+            &f.owner,
+            &key,
+            "fixture",
+            &start,
+            &f.state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        f.row = admission.claim.unwrap().conversation;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let count = hits.clone();
+        let upstream = Router::new().route(
+            "/{*path}",
+            any(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!({"ok":true})) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let service = connected(&f.state.db, &f.owner, "approval-fixture", &address).await;
+        let mut approval_services = vec![service.clone()];
+        let mut provider_config_id = None;
+        if dispatch.starts_with("llm_") {
+            let provider_id = uuid::Uuid::new_v4().to_string();
+            let now = mongodb::bson::DateTime::now();
+            let provider: crate::models::provider_config::ProviderConfig =
+                mongodb::bson::from_document(doc! {
+                    "_id": &provider_id,
+                    "slug": "openai",
+                    "name": "Approval fixture provider",
+                    "provider_type": "api_key",
+                    "is_active": true,
+                    "created_by": &f.owner,
+                    "created_at": now,
+                    "updated_at": now,
+                })
+                .unwrap();
+            f.state
+                .db
+                .collection::<crate::models::provider_config::ProviderConfig>(
+                    crate::models::provider_config::COLLECTION_NAME,
+                )
+                .insert_one(provider)
+                .await
+                .unwrap();
+            provider_config_id = Some(provider_id);
+        }
+        let route_catalog_id = if dispatch.starts_with("proxy_") || dispatch.starts_with("llm_") {
+            let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+            catalog.id = uuid::Uuid::new_v4().to_string();
+            catalog.slug = if dispatch.starts_with("llm_") {
+                "llm-openai"
+            } else {
+                "approval-fixture"
+            }
+            .into();
+            catalog.base_url = address.clone();
+            catalog.provider_config_id = provider_config_id;
+            f.state
+                .db
+                .collection::<crate::models::downstream_service::DownstreamService>(
+                    crate::models::downstream_service::COLLECTION_NAME,
+                )
+                .insert_one(&catalog)
+                .await
+                .unwrap();
+            f.state
+                .db
+                .collection::<Document>(crate::models::user_service::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id": &service},
+                    doc! {"$set": {"catalog_service_id": &catalog.id}},
+                )
+                .await
+                .unwrap();
+            approval_services.push(catalog.id.clone());
+            Some(catalog.id)
+        } else {
+            None
+        };
+        set_access_mode(
+            &f,
+            crate::models::assistant_settings::AccessMode::AskEveryTime,
+        )
+        .await;
+        let now = chrono::Utc::now();
+        for service_id in &approval_services {
+            f.state
+                .db
+                .collection(configs::COLLECTION_NAME)
+                .insert_one(configs::ServiceApprovalConfig {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    user_id: f.owner.clone(),
+                    service_id: service_id.clone(),
+                    service_name: "fixture".into(),
+                    approval_required: true,
+                    approval_mode: Default::default(),
+                    rules: vec![],
+                    default_effect: None,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .unwrap();
+        }
+        let auth = authenticate(&f).await;
+        assert_eq!(
+            acks::effective_access_mode(&f.state.db, auth.chat.as_ref().unwrap())
+                .await
+                .unwrap(),
+            crate::models::assistant_settings::AccessMode::AskEveryTime
+        );
+        let name = if dispatch.starts_with("mcp_") {
+            let search = result(
+                handle_meta_search(
+                    &f.state,
+                    &auth,
+                    None,
+                    &json!({"query":"approval-fixture"}),
+                    None,
+                    false,
+                )
+                .await,
+                false,
+            )
+            .await;
+            Some(
+                search["matches"][0]["name"]
+                    .as_str()
+                    .expect("MCP fixture must expose its generic HTTP tool")
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        let credential = credentials::load_for_conversation(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.owner,
+            &f.row.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let credential_value = zeroize::Zeroizing::new(if credential_header == "authorization" {
+            format!("Bearer {}", credential.raw_key.as_str())
+        } else {
+            credential.raw_key.to_string()
+        });
+        let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+        let mounted = private.with_state(f.state.clone());
+        for denied_path in [
+            format!("/api/v1/ssh/{service}"),
+            "/api/v1/assistant/nyxagent/settings".into(),
+        ] {
+            let refusal = mounted
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(denied_path)
+                        .header(credential_header, credential_value.as_str())
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(refusal.status(), axum::http::StatusCode::FORBIDDEN);
+        }
+        let action = async {
+            let args = json!({"method":"GET","path":"/effect"});
+            match dispatch {
+                "mcp_direct" => {
+                    direct_call(&f, &auth, name.as_deref().expect("MCP fixture tool"), args).await
+                }
+                "mcp_meta" => {
+                    call(&f, &auth, name.as_deref().expect("MCP fixture tool"), args).await
+                }
+                _ => {
+                    let path = match dispatch {
+                        "proxy_uuid" => format!(
+                            "/api/v1/proxy/{}/effect",
+                            route_catalog_id.as_deref().expect("proxy catalog fixture")
+                        ),
+                        "proxy_slug" => "/api/v1/proxy/s/approval-fixture/effect".into(),
+                        "llm_provider" => "/api/v1/llm/openai/v1/chat/completions".into(),
+                        "llm_gateway" => "/api/v1/llm/gateway/v1/chat/completions".into(),
+                        _ => unreachable!(),
+                    };
+                    let llm = dispatch.starts_with("llm_");
+                    let body = if llm {
+                        axum::body::Body::from(
+                            json!({"model":"gpt-fixture","messages":[{"role":"user","content":"fixture"}]})
+                                .to_string(),
+                        )
+                    } else {
+                        axum::body::Body::empty()
+                    };
+                    mounted
+                        .oneshot(
+                            axum::http::Request::builder()
+                                .method(if llm { "POST" } else { "GET" })
+                                .uri(path)
+                                .header(credential_header, credential_value.as_str())
+                                .header("content-type", "application/json")
+                                .body(body)
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap()
+                }
+            }
+        };
+        tokio::pin!(action);
+        let pending_approval = async {
+            loop {
+                if let Some(card) = f
+                    .state
+                    .db
+                    .collection::<Document>(approvals::COLLECTION_NAME)
+                    .find_one(doc! {"service_id": {"$in": &approval_services}, "status": "pending"})
+                    .await
+                    .unwrap()
+                {
+                    break card;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                response = &mut action => {
+                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap();
+                    let body: Value = serde_json::from_slice(&bytes).unwrap();
+                    // These fixtures send no secret-bearing arguments. Report
+                    // only the tool's safe error text, never auth/fixture state.
+                    panic!(
+                        "{dispatch} ({credential_header}) returned before service approval: {}",
+                        body["result"]["content"][0]["text"]
+                            .as_str()
+                            .or_else(|| body["message"].as_str())
+                            .unwrap_or("missing error result")
+                    );
+                }
+                pending = pending_approval => pending,
+            }
+        })
+        .await
+        .expect("tool must reach service approval before cancellation");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        receipts::cancel(&f.state, &f.owner, &key).await.unwrap();
+        f.state
+            .db
+            .collection::<Document>(approvals::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":pending.get_str("_id").unwrap()},
+                doc! {"$set":{"status":"approved"}},
+            )
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), action)
+            .await
+            .expect("approved cancelled request must resume and refuse dispatch");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        if dispatch.starts_with("mcp_") {
+            assert_eq!(body["result"]["isError"], true);
+            assert!(
+                body["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("originating invocation")
+            );
+        } else {
+            assert_eq!(
+                status,
+                axum::http::StatusCode::CONFLICT,
+                "{dispatch} ({credential_header})"
+            );
+            assert_eq!(
+                body["error_code"], 12102,
+                "{dispatch} ({credential_header})"
+            );
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        server.abort();
+        f.state.db.drop().await.unwrap();
+    }
+}

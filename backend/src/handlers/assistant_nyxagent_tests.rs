@@ -229,14 +229,14 @@ async fn setup_options_with_tool_gate(
                         engine::attach_routed_image(&image_state.db, &image_state.encryption_keys, OWNER, &row.id,
                             "camera__snapshot", "image/png", b"fixture pixels", true).await.unwrap();
                     }
-                    if matches!(failure, Some("http_capacity" | "http_capacity_long" | "http_draining" | "http_busy" | "http_slow_body")) {
+                    if matches!(failure, Some("http_capacity" | "http_capacity_long" | "http_capacity_observed" | "http_draining" | "http_busy" | "http_slow_body")) {
                         let status = if failure == Some("http_busy") { StatusCode::CONFLICT } else { StatusCode::SERVICE_UNAVAILABLE };
                         let code = if failure == Some("http_draining") { "draining" } else if failure == Some("http_busy") { "session_busy" } else { "capacity_exceeded" };
                         let body = async_stream::stream! {
                             if failure == Some("http_slow_body") { tokio::time::sleep(Duration::from_secs(2)).await; }
                             yield Ok::<_, Infallible>(axum::body::Bytes::from(json!({"error":{"code":code}}).to_string()));
                         };
-                        return (status, [("content-type", "application/json"), ("retry-after", if failure == Some("http_capacity_long") { "33" } else { "1" })], Body::from_stream(body)).into_response();
+                        return (status, [("content-type", "application/json"), ("retry-after", if failure == Some("http_capacity_observed") { "60" } else if failure == Some("http_capacity_long") { "33" } else { "1" })], Body::from_stream(body)).into_response();
                     }
                     let failure = if failure == Some("http_slow_accept") {
                         tokio::time::sleep(engine_policy::ACK_DELAY + Duration::from_secs(1)).await;
@@ -2462,6 +2462,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        invocation_id: None,
         routing: None,
         link: None,
         requester_agent_id: None,
@@ -4330,8 +4331,45 @@ async fn stop_during_capacity_wait_releases_owner_permit_without_replay() {
 
 #[tokio::test]
 async fn capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot() {
+    async fn snapshot(
+        state: &AppState,
+        calls: &Captures,
+        conversation_id: &str,
+        turn_id: &str,
+    ) -> Value {
+        let calls = calls.lock().await.len();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let row = engine::get(&state.db, OWNER, conversation_id).await;
+            let active = row.as_ref().ok().and_then(|row| row.active_turn.as_ref());
+            let settled = state
+                .db
+                .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+                .find_one(
+                    doc! {"conversation_id": conversation_id, "turn_id": turn_id,
+                    "role": "assistant"},
+                )
+                .await;
+            json!({
+                "provider_calls": calls,
+                "conversation_read_failed": row.is_err(),
+                "same_active_turn": active.is_some_and(|turn| turn.turn_id == turn_id),
+                "waiting_for_capacity": active.map(|turn| turn.waiting_for_capacity),
+                "engine_attempts": active.map(|turn| turn.engine_attempts),
+                "engine_accepted": active.map(|turn| turn.capacity_accepted_at.is_some()),
+                "heartbeat_age_ms": active.and_then(|turn| turn.heartbeat_at)
+                    .map(|at| (Utc::now() - at).num_milliseconds()),
+                "settled_read_failed": settled.is_err(),
+                "settled_status": settled.ok().flatten().map(|message| message.status),
+            })
+        })
+        .await
+        .unwrap_or_else(|_| json!({"provider_calls": calls, "diagnostic_read_timed_out": true}))
+    }
+
+    // Leave observation time between the heartbeat checks and provider retry.
+    // Other capacity tests keep their existing short/33-second fixture delays.
     let (state, calls, server) =
-        setup_script(None, Duration::ZERO, vec!["http_capacity_long"]).await;
+        setup_script(None, Duration::ZERO, vec!["http_capacity_observed"]).await;
     let started = std::time::Instant::now();
     let response = turns(
         State(state.clone()),
@@ -4340,16 +4378,58 @@ async fn capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot() {
     )
     .await
     .unwrap();
+    let waiting = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(row) = state
+                .db
+                .collection::<AssistantConversation>(
+                    crate::models::assistant_conversation::COLLECTION_NAME,
+                )
+                .find_one(doc! {"user_id": OWNER, "active_turn.waiting_for_capacity": true})
+                .await
+                .unwrap()
+            {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("durable capacity wait");
+    let turn_id = waiting.active_turn.as_ref().unwrap().turn_id.clone();
+    let wait_observed = std::time::Instant::now();
     tokio::time::sleep(Duration::from_secs(31)).await;
-    let row = state
-        .db
-        .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .find_one(doc! {"user_id": OWNER})
-        .await
-        .unwrap()
-        .unwrap();
+    let baseline = engine::get(&state.db, OWNER, &waiting.id).await.unwrap();
+    let heartbeat_before = baseline.active_turn.as_ref().unwrap().heartbeat_at.unwrap();
+    // A single observation at 31s can land on a delayed scheduler/DB tick.
+    // Require a fresh persisted heartbeat *after* that observation instead.
+    let row = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let row = engine::get(&state.db, OWNER, &waiting.id).await.unwrap();
+            let turn = row
+                .active_turn
+                .as_ref()
+                .expect("same capacity-wait turn remains live");
+            assert_eq!(turn.turn_id, turn_id);
+            assert!(turn.waiting_for_capacity);
+            assert_eq!(
+                calls.lock().await.len(),
+                1,
+                "no provider retry before fixture Retry-After"
+            );
+            if turn
+                .heartbeat_at
+                .is_some_and(|heartbeat| heartbeat > heartbeat_before)
+            {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("capacity-wait worker advances heartbeat after 31s");
     let turn = row.active_turn.as_ref().unwrap();
-    assert!(turn.waiting_for_capacity);
+    assert!(wait_observed.elapsed() >= Duration::from_secs(31));
     assert!(turn.capacity_wait_started_at.is_some());
     assert!(turn.capacity_wait_deadline.is_some());
     assert!((Utc::now() - turn.heartbeat_at.unwrap()).num_seconds() < 15);
@@ -4360,12 +4440,65 @@ async fn capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot() {
         Err(AppError::RateLimited)
     ));
     drop(other);
-    let events = drain(response).await;
+    // The durable wait is visible before the worker starts sleeping. Observe
+    // retry arrival within its original admission deadline, then bound settlement
+    // separately so that residual backoff does not consume the stream's budget.
+    let remaining = (turn.capacity_wait_deadline.unwrap() - Utc::now())
+        .to_std()
+        .unwrap_or_default()
+        .min(engine_policy::INTERACTIVE_CAPACITY_BUDGET);
+    if tokio::time::timeout(remaining, async {
+        loop {
+            let count = calls.lock().await.len();
+            assert!(count <= 2, "only one provider retry is allowed");
+            if count == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .is_err()
+    {
+        panic!(
+            "provider retry not observed within admission deadline: {}",
+            snapshot(&state, &calls, &waiting.id, &turn_id).await
+        );
+    }
+    let completion = tokio::time::timeout(Duration::from_secs(40), async {
+        let events = drain(response).await;
+        loop {
+            let row = engine::get(&state.db, OWNER, &waiting.id).await.unwrap();
+            let message = state
+                .db
+                .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+                .find_one(doc! {"conversation_id": &waiting.id, "turn_id": &turn_id,
+                "role": "assistant"})
+                .await
+                .unwrap();
+            if row.active_turn.is_none()
+                && let Some(message) = message
+            {
+                assert_eq!(message.status, "completed");
+                break events;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    let events = match completion {
+        Ok(events) => events,
+        Err(_) => panic!(
+            "observed provider retry did not stream and settle: {}",
+            snapshot(&state, &calls, &waiting.id, &turn_id).await
+        ),
+    };
     assert!(events.contains("waiting_for_capacity"));
     assert!(events.contains("\"status\":\"completed\""));
-    assert!(started.elapsed() >= Duration::from_secs(33));
+    assert!(started.elapsed() >= Duration::from_secs(60));
     assert_eq!(calls.lock().await.len(), 2);
     server.abort();
+    state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -4551,6 +4684,8 @@ async fn proxy_model_billing_refusals_settle_with_specific_code_and_original_ups
         auth.api_key_id = Some(row.credential_api_key_id.clone());
         auth.assistant_turn_fence = Some(Box::new(AssistantTurnFence {
             channel_adapter_origin: None,
+            invocation_id: None,
+            invocation_controlled: false,
             platform_origin: None,
             platform_thread: false,
             conversation_id: row.id.clone(),

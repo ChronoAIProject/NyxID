@@ -1805,6 +1805,7 @@ async fn machine_watches_and_jobs_carry_validated_report_provenance() {
         (7, Some("nyxa-assigning"), false, None),
     ] {
         let watch = NyxbotWatch {
+            invocation_id: None,
             trigger_prefill: None,
             trigger_id: None,
             id: Uuid::new_v4().to_string(),
@@ -1887,6 +1888,7 @@ async fn machine_watches_and_jobs_carry_validated_report_provenance() {
     // action (no chat) stores legacy provenance.
     use super::nyxbot_watch_service::ReportProvenance;
     let assigned = ReportProvenance {
+        invocation_id: None,
         report_to: Some("nyxa-assigning".into()),
         version: REPORT_PROVENANCE_V1,
     };

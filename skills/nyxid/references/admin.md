@@ -8,6 +8,7 @@
   - [Platform roles](#platform-roles)
   - [User Management](#user-management)
   - [Invite Codes](#invite-codes)
+- [Billing, usage and credit grants](#billing-usage-and-credit-grants)
 - [MCP Configuration](#mcp-configuration)
 - [Approval and Errors](#approval-and-errors)
 
@@ -113,6 +114,40 @@ Notes for admins helping new users:
 - Create and deactivate are audited (`admin_invite_code_create`, `admin_invite_code_deactivate`) and visible in `nyxid` audit tooling.
 - **Turning the gate off entirely:** disable the global `auth:invitation-code` flag in Admin > Feature Flags. Public registration then works without a code and first-time social sign-ups succeed normally. Enable the flag again to require codes. The change takes effect without a server restart.
 
+## Billing, usage and credit grants
+
+Use [billing.md](billing.md) for complete command flags, exact-decimal prices,
+managed Telnyx setup, grant confirmation, pending execution handling and exit
+codes. `admin billing`, `admin usage`, `admin credits` and `billing` refuse API
+key credentials locally. Explicit and environment credentials retain precedence
+over saved profiles; authorize a human session with `nyxid login`.
+
+```sh
+nyxid admin billing config show
+nyxid admin billing config set --default-overdraft-cap-credits default
+nyxid admin billing overview
+nyxid admin billing rates --service telnyx-platform --include-retired
+nyxid admin billing service show telnyx-platform
+nyxid admin billing service update telnyx-platform --file billing.json --dry-run
+nyxid admin billing service resync telnyx-platform
+nyxid admin billing service verify telnyx-platform --managed
+nyxid admin billing ledger verify --all
+nyxid admin usage --period 24h --service telnyx-platform
+nyxid admin credits grant list --user "$PILOT_UUID"
+```
+
+`set-managed` provides typed contract and three-price flags; see the billing
+reference before using it. `credits grant issue` requires a reason and explicit
+confirmation or `--yes`; each invocation creates a new batch. Ready, pending,
+and broken results use exits 0/2; server HTTP errors preserve status and body.
+
+Grant lists support `--page` and `--per-page` (1..=500), and include `total`.
+`admin catalog apply` asks before disabling platform access or clearing a live
+service's owner allowlist. Non-interactive applies require
+`--allow-access-change`; `--dry-run` only warns. `catalog add --yes` does not
+authorize this change; use `nyxid admin catalog apply --allow-access-change
+--file <manifest>` after reviewing it.
+
 ## MCP Configuration
 
 ```bash
@@ -120,6 +155,28 @@ nyxid mcp config --tool cursor                         # generate MCP config for
 nyxid mcp config --tool claude-code                    # generate MCP config for Claude Code
 nyxid mcp config --tool vscode                         # generate MCP config for VS Code
 ```
+
+The native Streamable HTTP client supports tool discovery and calls with a
+human session. Calls may spend funds; run this example only with spending
+authorized. Save the MCP envelope to correlate executions using its RFC3339
+bounds:
+
+```sh
+nyxid mcp tools --service telnyx-platform --output json
+nyxid mcp call telnyx-platform__chat_completions --args @chat-request.json --envelope --output json > mcp.json
+nyxid billing executions list --since "$(jq -r .started_at mcp.json)"
+nyxid billing executions show "$EXECUTION_UUID" --wait --timeout-secs 120
+```
+
+Select `EXECUTION_UUID` from the self-scoped latest-50 list by the called service
+and creation time between `started_at` and `finished_at`. An `isError` result
+exits 1; managed pending usage exits 2 with its execution ID. Plain execution
+show exits 0 for nonterminal state; `--wait` exits 2 on a nonterminal timeout.
+MCP calls wait indefinitely by default. `--timeout-secs` bounds the exchange:
+timeout before tool dispatch exits 1 with nothing executed; after dispatch it
+exits 2 with `managed_outcome_uncertain`. Inspect execution state before
+retrying. See [billing.md](billing.md#execute-and-correlate) for complete
+discovery, session, envelope and timeout behavior.
 
 ## Approval and Errors
 

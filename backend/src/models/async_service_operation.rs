@@ -22,6 +22,8 @@ pub struct AsyncOperationContract {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DeliveryBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
     #[serde(default)]
     pub platform_reply: Option<super::assistant_conversation::PlatformReplyRouting>,
     /// Original result destination; independent of a later event turn's fresh
