@@ -48,6 +48,11 @@ jobs:
         with:
           name: website-public-${{ github.sha }}
           path: frontend/website-public-release.tar.gz
+      - name: Runtime diagnostics
+        if: failure()
+        run: |
+          docker logs nyxid-public-test || true
+          test ! -f /tmp/public-fixture.log || cat /tmp/public-fixture.log
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

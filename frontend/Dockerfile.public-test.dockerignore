@@ -1,0 +1,5 @@
+*
+!dist/
+!dist/**
+!nginx.conf.template
+!Dockerfile.public-test

@@ -51,6 +51,24 @@ const titles = new Set();
 const sitemap = await fs.readFile(path.join(dist, "sitemap.xml"), "utf8");
 const llms = await fs.readFile(path.join(dist, "llms.txt"), "utf8");
 const failures = [];
+const appRoutes = JSON.parse(
+  await fs.readFile(path.join(dist, "application-routes.json"), "utf8"),
+);
+const appPatterns = appRoutes.map(
+  (route) =>
+    new RegExp(
+      "^" +
+        route
+          .split("/")
+          .map((segment) =>
+            segment.startsWith("$")
+              ? ".+"
+              : segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+          )
+          .join("/") +
+        "$",
+    ),
+);
 for (const page of release.pages) {
   try {
     const html = await fs.readFile(path.join(dist, page.file), "utf8"),
@@ -139,6 +157,30 @@ for (const page of release.pages) {
         .digest("hex");
       assert.equal(computed, page.revision, "Content revision drift");
     }
+    for (const anchor of doc.querySelectorAll("a[href]")) {
+      const href = anchor.getAttribute("href"),
+        target = new URL(href, `https://nyx.chrono-ai.fun${page.path}`);
+      if (target.origin !== "https://nyx.chrono-ai.fun") continue;
+      const known =
+        paths.has(target.pathname) ||
+        ["/privacy.html", "/terms.html"].includes(target.pathname) ||
+        appPatterns.some((pattern) => pattern.test(target.pathname)) ||
+        /^\/(?:api|oauth|mcp|health|\.well-known)(?:\/|$)/.test(
+          target.pathname,
+        );
+      if (!known) {
+        try {
+          await fs.access(path.join(dist, target.pathname));
+        } catch {
+          throw new Error(`Unknown public link: ${href}`);
+        }
+      }
+      if (target.pathname === page.path && target.hash)
+        assert.ok(
+          doc.getElementById(decodeURIComponent(target.hash.slice(1))),
+          `Missing fragment: ${href}`,
+        );
+    }
     const schema = JSON.parse(
       doc.querySelector('script[type="application/ld+json"]').textContent,
     );
@@ -209,6 +251,7 @@ const report = {
     "sitemap",
     "llms",
     "publication-footprint",
+    "internal-links",
   ],
   pages: release.pages.length,
   failures,
@@ -219,3 +262,5 @@ await fs.writeFile(
 );
 assert.equal(failures.length, 0, failures.join("\n"));
 console.log(`Public artifact gate passed: ${release.pages.length} pages.`);
+
+console.log("Public release proof:", JSON.stringify({sourceCommit:release.sourceCommit,contentRevision:release.contentRevision,pages:release.pages.length,status:report.status}));

@@ -134,3 +134,29 @@ test("records a bounded lab resource sample", async ({ page }) => {
   const { writeFile } = await import("node:fs/promises");
   await writeFile("dist/public-lab.json", JSON.stringify(sample, null, 2));
 });
+
+test("retains authenticated home redirects and Docs controls", async ({
+  page,
+  context,
+}) => {
+  await context.addCookies([
+    {
+      name: "fixture-auth",
+      value: "1",
+      url: "http://127.0.0.1:4188",
+      httpOnly: true,
+    },
+  ]);
+  for (const path of ["/", "/zh"]) {
+    await page.goto(path);
+    await expect(page).toHaveURL(/\/dashboard$/);
+  }
+  await page.goto("/docs/ai/guides/agent-isolation");
+  await expect(
+    page.getByRole("link", { name: "Dashboard", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /Switch to (light|dark) mode/ }),
+  ).toBeVisible();
+  await expect(page.locator('aside a[href^="#"]')).not.toHaveCount(0);
+});
