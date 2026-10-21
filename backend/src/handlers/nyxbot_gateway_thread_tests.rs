@@ -1019,8 +1019,8 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
         }
         if gateway {
             let (a, b) = tokio::join!(
-                respond(&f.state, &f.key, &a, &id_a),
-                respond(&f.state, &f.key, &b, &id_b)
+                Box::pin(respond(&f.state, &f.key, &a, &id_a)),
+                Box::pin(respond(&f.state, &f.key, &b, &id_b))
             );
             assert_eq!(a.status(), StatusCode::OK);
             assert_eq!(b.status(), StatusCode::OK);
@@ -1049,8 +1049,18 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
             let (ha, ba) = signed(&id_a);
             let (hb, bb) = signed(&id_b);
             let (a, b) = tokio::join!(
-                relay_callback(State(f.state.clone()), Path(f.row.id.clone()), ha, ba),
-                relay_callback(State(f.state.clone()), Path(f.row.id.clone()), hb, bb)
+                Box::pin(relay_callback(
+                    State(f.state.clone()),
+                    Path(f.row.id.clone()),
+                    ha,
+                    ba
+                )),
+                Box::pin(relay_callback(
+                    State(f.state.clone()),
+                    Path(f.row.id.clone()),
+                    hb,
+                    bb
+                ))
             );
             assert_eq!(a.status(), StatusCode::ACCEPTED);
             assert_eq!(b.status(), StatusCode::ACCEPTED);

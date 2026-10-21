@@ -401,7 +401,7 @@ async fn pending_legacy_onboarding_confirmation_survives_personal_runtime_upgrad
         )
         .await
         .unwrap();
-        crate::services::platform_binding_service::decide(
+        let confirmation = crate::services::platform_binding_service::decide(
             &j.state.db,
             key,
             &j.owner,
@@ -411,6 +411,8 @@ async fn pending_legacy_onboarding_confirmation_survives_personal_runtime_upgrad
             false,
         )
         .await
+        .unwrap()
+        .confirmation_code
         .unwrap();
         let account = uuid::Uuid::new_v4().to_string();
         j.state
@@ -429,7 +431,22 @@ async fn pending_legacy_onboarding_confirmation_survives_personal_runtime_upgrad
             code.to_string()
         }
         .to_lowercase();
-        let text = zeroize::Zeroizing::new(format!("/confirm {formatted}"));
+        // The initiation code was known before browser review and cannot finish
+        // linking, including its formerly accepted grouped/lowercase spelling.
+        j.webhook(&j.update(5202, &format!("/confirm {formatted}"), false))
+            .await;
+        assert!(
+            crate::services::platform_binding_service::live_for_sender(
+                &j.state.db,
+                &profile,
+                "700",
+                "700"
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        let text = zeroize::Zeroizing::new(format!("/confirm {}", confirmation.as_str()));
         j.webhook(&j.update(5203, &text, true)).await;
         assert!(
             crate::services::platform_binding_service::live_for_sender(
@@ -442,8 +459,9 @@ async fn pending_legacy_onboarding_confirmation_survives_personal_runtime_upgrad
             .unwrap()
             .is_none()
         );
-        j.webhook(&j.update(5204, &format!("/confirm@OtherBot {formatted}"), false))
-            .await;
+        let wrong_bot =
+            zeroize::Zeroizing::new(format!("/confirm@OtherBot {}", confirmation.as_str()));
+        j.webhook(&j.update(5204, &wrong_bot, false)).await;
         assert!(
             crate::services::platform_binding_service::live_for_sender(
                 &j.state.db,

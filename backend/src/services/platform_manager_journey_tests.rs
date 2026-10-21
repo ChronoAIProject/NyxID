@@ -1312,18 +1312,37 @@ async fn stopped_reply_and_mismatched_current_token_never_send() {
         Err(AppError::Conflict(_))
     ));
     assert_eq!(j.sends().await.len(), 2);
-    // Numeric identity or epoch changes also fail; an ordinary readiness flag
-    // cannot turn an admitted proof into authority for a different manager.
+    // Ready metadata cannot authorize a token belonging to another manager.
+    // Keep this row selectable by the admitted identity so the decrypted-token
+    // check, rather than missing-credential deferral, must refuse the send.
     let (destination, reply, saved) = j.prepared_reply(51).await;
-    j.state
-        .db
-        .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
-        .update_one(
-            doc! {"provider":"telegram-new"},
-            doc! {"$set":{"fields.manager_bot_id":"101"}},
-        )
+    crate::services::platform_credential_service::update(
+        &j.state.db,
+        &j.state.encryption_keys,
+        &crate::services::channel_adapters::telegram_new::credential_descriptor(),
+        &j.owner,
+        &[(
+            "manager_bot_token".into(),
+            Some(Zeroizing::new("101:mismatched-manager-test-secret".into())),
+        )]
+        .into(),
+        false,
+    )
+    .await
+    .unwrap();
+    let current = crate::services::telegram_manager_registry::load(&j.state.db, Some("100"))
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the admitted manager still has ready credential metadata");
+    assert_eq!(
+        current.fields.get("manager_bot_id").map(String::as_str),
+        Some("100")
+    );
+    assert_eq!(
+        current.fields.get("webhook_ready").map(String::as_str),
+        Some("true")
+    );
+    let requests_before = j.server.received_requests().await.unwrap().len();
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     assert!(matches!(
         j.deliver(
@@ -1336,6 +1355,10 @@ async fn stopped_reply_and_mismatched_current_token_never_send() {
         DeliveryOutcome::Refused(_)
     ));
     assert_eq!(j.sends().await.len(), 2);
+    assert_eq!(
+        j.server.received_requests().await.unwrap().len(),
+        requests_before
+    );
     j.state.db.drop().await.unwrap();
 }
 
