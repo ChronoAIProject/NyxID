@@ -1,3 +1,4 @@
+import { assertPublicConfiguration } from "./configuration-boundary";
 import { createRoot, hydrateRoot } from "react-dom/client";
 import { RouterProvider } from "@tanstack/react-router";
 import { publicRouter } from "./router";
@@ -5,6 +6,7 @@ import "../../app.css";
 export async function bootPublicSite() {
   const root = document.getElementById("root");
   if (!root) throw new Error("Root element not found");
+  assertPublicConfiguration(root);
   const router = publicRouter();
   // TanStack's native SSR marker preserves its server boundary shape. Loaders
   // are resolved explicitly here, so no serialized private application state is needed.

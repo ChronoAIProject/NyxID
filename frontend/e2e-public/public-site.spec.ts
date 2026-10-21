@@ -1,3 +1,7 @@
+import fs from "node:fs";
+const publication = JSON.parse(
+  fs.readFileSync("dist/public-release.json", "utf8"),
+);
 import { test, expect } from "@playwright/test";
 test("initial body remains readable with JavaScript disabled", async ({
   browser,
@@ -80,14 +84,22 @@ test("contact preselection and disabled solution gate survive hydration", async 
   await expect(
     page.locator("#cForm input,#cForm select,#cForm textarea"),
   ).toHaveCount(5);
-  await expect(page.locator('[role="log"]')).toHaveCount(0);
+  await expect(page.locator('[role="log"]')).toHaveCount(
+    publication.visibility.contactChat ? 1 : 0,
+  );
   await page.goto("/solutions/help-desk");
-  await expect(
-    page.getByRole("button", { name: "Use this solution", exact: true }),
-  ).toBeDisabled();
-  await expect(
-    page.getByText("Not available yet", { exact: true }),
-  ).toBeVisible();
+  if (publication.configuration.solutions["help-desk"]) {
+    await expect(
+      page.locator('[data-solution-activation="help-desk"]'),
+    ).toHaveAttribute("href", publication.configuration.solutions["help-desk"]);
+  } else {
+    await expect(
+      page.getByRole("button", { name: "Use this solution", exact: true }),
+    ).toBeDisabled();
+    await expect(
+      page.getByText("Not available yet", { exact: true }),
+    ).toBeVisible();
+  }
 });
 
 test("records a bounded lab resource sample", async ({ page }) => {
@@ -369,4 +381,82 @@ test("F03 retries a failed Docs fetch and recovers a failed route import by expl
     ),
   ).toBeUndefined();
   expect(imports).toBeGreaterThan(rejected);
+});
+
+test("published visibility matches the release and makes no feature POST requests on view", async ({
+  page,
+}) => {
+  const writes: string[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).origin === "http://127.0.0.1:4188"
+    )
+      writes.push(request.url());
+  });
+  for (const path of [
+    "/blog",
+    "/zh/blog",
+    "/contact",
+    "/zh/contact",
+    "/security",
+  ]) {
+    await page.goto(path);
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-public-ready",
+      "v1",
+    );
+    expect(
+      JSON.parse(
+        (await page
+          .locator("[data-website-visibility]")
+          .getAttribute("data-website-visibility"))!,
+      ),
+    ).toEqual(publication.visibility);
+    for (const [name, enabled] of [
+      [
+        "newsletter",
+        publication.visibility.newsletter && path.endsWith("blog"),
+      ],
+      [
+        "contact-chat",
+        publication.visibility.contactChat && path.endsWith("contact"),
+      ],
+      ["footer-status", publication.visibility.footerStatus],
+    ] as const)
+      await expect(
+        page.locator(`[data-website-feature="${name}"]`),
+      ).toHaveCount(enabled ? 1 : 0);
+    await expect(page.locator('nav [data-nav="blog"]')).toHaveCount(
+      publication.visibility.blogMenu ? 1 : 0,
+    );
+    if (path.includes("contact")) {
+      await expect(page.locator("#cForm")).toBeVisible();
+      await expect(
+        page.locator('a[href="mailto:contact@chrono-ai.fun"]').first(),
+      ).toBeVisible();
+    }
+  }
+  expect(writes).toEqual([]);
+});
+
+test("Blog menu visibility applies to mobile and desktop without changing direct access", async ({
+  page,
+}) => {
+  for (const width of [700, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const path of ["/blog", "/zh/blog"]) {
+      await page.goto(path);
+      await expect(page.locator("html")).toHaveAttribute(
+        "data-public-ready",
+        "v1",
+      );
+      await expect(page.locator("h1")).toBeVisible();
+      if (width === 700) await page.locator("#burger").click();
+      await expect(page.locator('nav [data-nav="blog"]')).toHaveCount(
+        publication.visibility.blogMenu ? 1 : 0,
+      );
+      await expect(page.locator(`footer a[href="${path}"]`)).toHaveCount(1);
+    }
+  }
 });

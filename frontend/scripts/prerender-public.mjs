@@ -3,6 +3,9 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import {
   renderPage,
+  websiteRelease,
+  websiteVisibility,
+  websiteConfiguration,
   publishedPages,
   publicationInventory,
   publicationPath,
@@ -83,7 +86,7 @@ for (const route of paths) {
     .replace("</head>", metadataHead(meta, origin) + "</head>")
     .replace(
       '<div id="root"></div>',
-      `<div id="root" data-public-render="v1">${html}</div>`,
+      `<div id="root" data-public-render="v1" data-website-config="${encodeURIComponent(websiteConfiguration)}">${html}</div>`,
     );
   await fs.mkdir(path.dirname(path.join(dist, file)), { recursive: true });
   await fs.writeFile(path.join(dist, file), pageHtml);
@@ -142,6 +145,9 @@ for (const locale of ["en", "zh"]) {
 await fs.writeFile(
   path.join(dist, "llms.txt"),
   `# NyxID\n\n> Public product and documentation reading index. Unavailable solutions are explicitly marked on their pages.\n\n- [English](${PUBLIC_ORIGIN}/read/en/index.md)\n- [中文](${PUBLIC_ORIGIN}/read/zh/index.md)\n- [API developer tool playbook](https://nyx-api.chrono-ai.fun/llms.txt)\n- [API full tool playbook](https://nyx-api.chrono-ai.fun/llms-full.txt)\n\n` +
+    (websiteRelease.footerStatus
+      ? `- [Service status](${websiteRelease.footerStatus})\n`
+      : "") +
     results
       .map((p) => `- [${p.title}](${PUBLIC_ORIGIN}${p.markdown})`)
       .join("\n") +
@@ -161,7 +167,16 @@ await fs.writeFile(
     {
       schemaVersion: 1,
       sourceCommit: process.env.SOURCE_COMMIT || null,
-      contentRevision: hash(JSON.stringify(results)),
+      contentRevision: hash(
+        JSON.stringify({
+          pages: results,
+          visibility: websiteVisibility,
+          configRevision: hash(websiteConfiguration),
+        }),
+      ),
+      visibility: websiteVisibility,
+      configuration: JSON.parse(websiteConfiguration),
+      configRevision: hash(websiteConfiguration),
       origin,
       pages: results,
     },

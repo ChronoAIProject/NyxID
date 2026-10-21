@@ -36,3 +36,9 @@ export async function renderPage(
     ).meta,
   };
 }
+
+export {
+  websiteRelease,
+  websiteVisibility,
+  websiteConfiguration,
+} from "../src/features/website-a/release-config";

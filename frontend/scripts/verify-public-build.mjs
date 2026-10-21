@@ -1,3 +1,7 @@
+import {
+  verifyReleaseConfiguration,
+  retainedDisabledFeatureCode,
+} from "./public-visibility-contract.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -10,6 +14,7 @@ const root = path.resolve(import.meta.dirname, ".."),
 const release = JSON.parse(
   await fs.readFile(path.join(dist, "public-release.json"), "utf8"),
 );
+verifyReleaseConfiguration(release);
 const inventory = JSON.parse(
   await fs.readFile(path.join(root, "content/publication.json"), "utf8"),
 );
@@ -52,6 +57,10 @@ const titles = new Set();
 const sitemap = await fs.readFile(path.join(dist, "sitemap.xml"), "utf8");
 const llms = await fs.readFile(path.join(dist, "llms.txt"), "utf8");
 const failures = [];
+assert.equal(
+  llms.includes("- [Service status]("),
+  release.visibility.footerStatus,
+);
 const appRoutes = JSON.parse(
   await fs.readFile(path.join(dist, "application-routes.json"), "utf8"),
 );
@@ -159,6 +168,65 @@ for (const page of release.pages) {
         .digest("hex");
       assert.equal(computed, page.revision, "Content revision drift");
     }
+    for (const [feature, enabled] of [
+      ["newsletter", release.visibility.newsletter],
+      ["contact-chat", release.visibility.contactChat],
+      ["footer-status", release.visibility.footerStatus],
+    ]) {
+      const expected =
+        enabled &&
+        (feature === "footer-status" ||
+          (feature === "newsletter"
+            ? /\/blog$/.test(page.path)
+            : /\/contact$/.test(page.path))) &&
+        !page.path.startsWith("/docs") &&
+        !["/privacy", "/terms"].includes(page.path);
+      assert.equal(
+        Boolean(doc.querySelector(`[data-website-feature="${feature}"]`)),
+        Boolean(expected),
+        `${page.path}: ${feature} output disagrees with release configuration`,
+      );
+    }
+    const site = doc.querySelector("[data-website-visibility]");
+    if (site)
+      assert.deepEqual(
+        JSON.parse(site.getAttribute("data-website-visibility")),
+        release.visibility,
+        "SSR visibility snapshot differs from release manifest",
+      );
+    for (const node of doc.querySelectorAll("[data-website-config]"))
+      assert.equal(
+        node.getAttribute("data-website-config"),
+        encodeURIComponent(JSON.stringify(release.configuration)),
+        "HTML configuration differs from manifest",
+      );
+    const status = doc.querySelector('[data-website-feature="footer-status"]');
+    if (status)
+      assert.equal(
+        status.getAttribute("href"),
+        release.configuration.footerStatus,
+      );
+    const newsletter = doc.querySelector('[data-website-feature="newsletter"]');
+    if (newsletter) {
+      assert.equal(
+        newsletter
+          .querySelector("[data-newsletter-privacy]")
+          .getAttribute("href"),
+        release.configuration.newsletter.privacyUrl,
+      );
+      assert.equal(
+        newsletter
+          .querySelector("[data-newsletter-unsubscribe]")
+          .getAttribute("href"),
+        release.configuration.newsletter.unsubscribeUrl,
+      );
+    }
+    if (site)
+      assert.equal(
+        Boolean(doc.querySelector('nav [data-nav="blog"]')),
+        release.visibility.blogMenu,
+        "Blog menu visibility mismatch",
+      );
     for (const anchor of doc.querySelectorAll("a[href]")) {
       const href = anchor.getAttribute("href"),
         target = new URL(href, `https://nyx.chrono-ai.fun${page.path}`);
@@ -197,10 +265,24 @@ for (const page of release.pages) {
     );
     assert.ok(!html.includes("<!--$!-->"), "Suspended body");
     if (page.route.startsWith("/solutions/")) {
-      assert.ok(doc.querySelector("button[disabled]"));
+      const slug = page.route.slice(11);
+      const enabled = release.visibility.solutions.includes(slug);
+      assert.equal(
+        Boolean(doc.querySelector(".solution-activation button[disabled]")),
+        !enabled,
+      );
+      if (enabled) {
+        const link = doc.querySelector(`[data-solution-activation="${slug}"]`);
+        assert.ok(link, "Missing enabled activation CTA");
+        assert.equal(
+          link.getAttribute("href"),
+          release.configuration.solutions[slug],
+        );
+      }
       assert.ok(!doc.querySelector('a[href^="/start"]'));
       assert.ok(
-        md.includes(page.locale === "zh" ? "暂未开放" : "Not available yet"),
+        enabled ||
+          md.includes(page.locale === "zh" ? "暂未开放" : "Not available yet"),
       );
     }
     if (page.path.endsWith("contact")) {
@@ -209,7 +291,10 @@ for (const page of release.pages) {
           .length,
         5,
       );
-      assert.equal(doc.querySelector('[role="log"]'), null);
+      assert.equal(
+        Boolean(doc.querySelector('[role="log"]')),
+        release.visibility.contactChat,
+      );
     }
   } catch (error) {
     failures.push(`${page.path}: ${error.message}`);
@@ -224,6 +309,14 @@ async function scan(dir) {
     if (entry.isDirectory()) await scan(file);
     else if (/\.(js|json|map|md|html|xml|txt)$/.test(file)) {
       const text = await fs.readFile(file, "utf8");
+      if (/\.js$/.test(file))
+        for (const feature of retainedDisabledFeatureCode(
+          text,
+          release.visibility,
+        ))
+          failures.push(
+            `${path.relative(dist, file)} retains disabled ${feature} code`,
+          );
       for (const marker of [
         ...forbidden,
         "A code is a blank cheque",
@@ -265,4 +358,12 @@ await fs.writeFile(
 assert.equal(failures.length, 0, failures.join("\n"));
 console.log(`Public artifact gate passed: ${release.pages.length} pages.`);
 
-console.log("Public release proof:", JSON.stringify({sourceCommit:release.sourceCommit,contentRevision:release.contentRevision,pages:release.pages.length,status:report.status}));
+console.log(
+  "Public release proof:",
+  JSON.stringify({
+    sourceCommit: release.sourceCommit,
+    contentRevision: release.contentRevision,
+    pages: release.pages.length,
+    status: report.status,
+  }),
+);
