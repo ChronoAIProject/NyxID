@@ -376,22 +376,36 @@ async fn manager_outbound_revalidates_stop_after_an_accepted_prefix() {
 
 async fn attach(j: &Journey, saved: &mut AssistantMessage, mime: &str, bytes: &[u8]) -> String {
     let id = uuid::Uuid::new_v4().to_string();
+    let mut attachment = crate::models::assistant_attachment::AssistantAttachment {
+        secret_context_versions: Default::default(),
+        id: id.clone(),
+        user_id: j.owner.clone(),
+        conversation_id: saved.conversation_id.clone(),
+        turn_id: saved.turn_id.clone(),
+        origin: "tool".into(),
+        content_type: mime.into(),
+        size: bytes.len() as i64,
+        data_encrypted: Vec::new(),
+        created_at: Utc::now(),
+    };
+    attachment.data_encrypted = crate::services::assistant_record_service::encrypt_image(
+        &j.state.encryption_keys,
+        &attachment,
+        bytes,
+    )
+    .await
+    .unwrap();
+    crate::services::credential_record_service::mark_version(
+        &mut attachment.secret_context_versions,
+        &j.state.encryption_keys,
+        "data_encrypted",
+    );
     j.state
         .db
         .collection::<crate::models::assistant_attachment::AssistantAttachment>(
             crate::models::assistant_attachment::COLLECTION_NAME,
         )
-        .insert_one(crate::models::assistant_attachment::AssistantAttachment {
-            id: id.clone(),
-            user_id: j.owner.clone(),
-            conversation_id: saved.conversation_id.clone(),
-            turn_id: saved.turn_id.clone(),
-            origin: "tool".into(),
-            content_type: mime.into(),
-            size: bytes.len() as i64,
-            data_encrypted: j.state.encryption_keys.encrypt(bytes).await.unwrap(),
-            created_at: Utc::now(),
-        })
+        .insert_one(attachment)
         .await
         .unwrap();
     saved

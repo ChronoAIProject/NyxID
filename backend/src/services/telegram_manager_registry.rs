@@ -90,11 +90,16 @@ impl<'a> TelegramNewService<'a> {
                     .into(),
             ));
         }
-        let previous = self
+        let source = self
             .db
-            .collection::<PlatformCredential>(COLLECTION_NAME)
+            .collection::<bson::Document>(COLLECTION_NAME)
             .find_one(doc! {"provider":self.manager_provider()})
             .await?;
+        let previous = source
+            .clone()
+            .map(bson::from_document::<PlatformCredential>)
+            .transpose()
+            .map_err(|_| AppError::Internal("Invalid platform credential storage".into()))?;
         let mut row = previous.unwrap_or_else(|| PlatformCredential {
             secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
@@ -161,18 +166,45 @@ impl<'a> TelegramNewService<'a> {
         row.fields.insert("manager_bot_id".into(), id.to_string());
         row.updated_by = actor.into();
         row.updated_at = chrono::Utc::now();
-        let mut session = self.db.client().start_session().await?;
-        session.start_transaction().await?;
-        super::platform_bot_config_service::fence_admin(self.db, actor, &mut session).await?;
-        self.db
-            .collection::<PlatformCredential>(COLLECTION_NAME)
-            .replace_one(doc! {"provider":self.manager_provider()}, row)
-            .upsert(true)
-            .session(&mut session)
-            .await?;
-        session.commit_transaction().await?;
-        Ok(())
+        save_scoped_snapshot(self.db, actor, source.as_ref(), &row).await
     }
+}
+
+async fn save_scoped_snapshot(
+    db: &Database,
+    actor: &str,
+    source: Option<&bson::Document>,
+    row: &PlatformCredential,
+) -> AppResult<()> {
+    let mut candidate = source.cloned().unwrap_or_default();
+    candidate.extend(
+        bson::to_document(row)
+            .map_err(|_| AppError::Internal("Invalid platform credential storage".into()))?,
+    );
+    let filter = source
+        .map(super::record_storage::exact_document_predicate)
+        .unwrap_or_else(|| doc! {"_id":&row.id,"provider":&row.provider});
+    let db = super::transaction_service::durable_database(db);
+    let context = (&db, actor, &filter, &candidate, source.is_none());
+    super::transaction_service::run_db_only(&db, &context, |tx, context| {
+        let &(db, actor, filter, candidate, upsert) = context;
+        Box::pin(async move {
+            super::platform_bot_config_service::fence_admin(db, actor, tx).await?;
+            let changed = db
+                .collection::<bson::Document>(COLLECTION_NAME)
+                .replace_one(filter.clone(), candidate.clone())
+                .upsert(upsert)
+                .session(tx)
+                .await?;
+            if changed.matched_count == 0 && changed.upserted_id.is_none() {
+                return Err(AppError::Conflict(
+                    "Platform credentials changed; reload and retry".into(),
+                ));
+            }
+            Ok(())
+        })
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -289,6 +321,53 @@ mod tests {
             .configure_manager(&actor, &fields, false)
             .await
             .unwrap();
+        let rows = state.db.collection::<bson::Document>(COLLECTION_NAME);
+        let source = rows
+            .find_one(doc! {"provider":"telegram-new/200"})
+            .await
+            .unwrap()
+            .unwrap();
+        let stale: PlatformCredential = bson::from_document(source.clone()).unwrap();
+        // A concurrent key rewrap changes ciphertext while preserving the token.
+        let token_field = super::super::channel_adapters::telegram_new::MANAGER_TOKEN;
+        let rewrapped = super::super::platform_credential_service::encrypt_platform_field(
+            &state.encryption_keys,
+            &stale.id,
+            token_field,
+            token.as_bytes(),
+        )
+        .await
+        .unwrap();
+        rows.update_one(doc! {"_id":&stale.id}, doc! {"$set":{
+            "secrets.manager_bot_token":bson::Binary {subtype:bson::spec::BinarySubtype::Generic, bytes:rewrapped},
+            "future_storage_marker":"preserve"
+        }}).await.unwrap();
+        assert!(matches!(
+            save_scoped_snapshot(&state.db, &actor, Some(&source), &stale).await,
+            Err(AppError::Conflict(_))
+        ));
+        let concurrent = rows
+            .find_one(doc! {"_id":&stale.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            concurrent.get_document("secrets").unwrap(),
+            source.get_document("secrets").unwrap()
+        );
+        additional
+            .configure_manager(&actor, &fields, false)
+            .await
+            .unwrap();
+        let refreshed = rows
+            .find_one(doc! {"_id":&stale.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            refreshed.get_str("future_storage_marker").unwrap(),
+            "preserve"
+        );
         let saved = additional.manager_values().await.unwrap();
         assert_eq!(saved.get("manager_bot_id"), Some("200"));
         let mut strict_keys = state.encryption_keys.clone();
