@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Fingerprint the measurement recipe and this coverage job's runner image."""
+"""Fingerprint the measurement recipe and require matching measurement images."""
 
+import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import platform
@@ -9,7 +11,9 @@ import platform
 
 INPUTS = (
     ".github/workflows/ci.yml",
+    ".github/workflows/backend-tests.yml",
     ".config/nextest.toml",
+    ".github/scripts/backend_shards.py",
     ".github/scripts/coverage_identity.py",
     ".github/scripts/ci_resources.py",
     ".github/scripts/start-test-mongodb.sh",
@@ -28,12 +32,31 @@ def fingerprint(root, image_os, image_version, architecture):
     return digest.hexdigest()
 
 
+def matching_identities(paths, value):
+    for path in paths:
+        try:
+            identity = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return False
+        if not isinstance(identity, dict) or identity.get("fingerprint") != value \
+                or identity.get("reusable") is not True:
+            return False
+    return True
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--record", type=Path)
+    parser.add_argument("--require-identities", type=Path, nargs="*", default=[])
+    args = parser.parse_args()
     image_os = os.environ.get("ImageOS", "")
     image_version = os.environ.get("ImageVersion", "")
-    # Missing image identity makes cached report reuse unsafe; measure fresh.
-    reusable = bool(image_os and image_version)
     value = fingerprint(Path.cwd(), image_os, image_version, platform.machine())
+    # An image rollout between build, execution, and reporting must not label a
+    # heterogeneous measurement as an exact reusable baseline.
+    reusable = bool(image_os and image_version) and matching_identities(args.require_identities, value)
+    if args.record:
+        args.record.write_text(json.dumps({"fingerprint": value, "reusable": reusable}))
     print(f"Coverage recipe: {value}; runner image: {image_os}/{image_version}; reusable: {reusable}")
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(f"fingerprint={value}\nreusable={str(reusable).lower()}\n")

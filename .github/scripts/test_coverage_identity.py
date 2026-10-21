@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -5,7 +6,7 @@ import sys
 import tempfile
 import unittest
 
-from coverage_identity import INPUTS, fingerprint
+from coverage_identity import INPUTS, fingerprint, matching_identities
 
 
 SCRIPT = Path(__file__).with_name("coverage_identity.py").resolve()
@@ -42,6 +43,23 @@ class CoverageIdentityTests(unittest.TestCase):
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text("[profile.ci]\ntest-threads = 1\n")
         self.assertNotEqual(original, self.identity())
+
+    def test_all_measurement_runners_must_match_for_report_reuse(self):
+        paths = [self.root / f"runner-{index}.json" for index in range(4)]
+        for path in paths:
+            path.write_text(json.dumps({"fingerprint": self.identity(), "reusable": True}))
+        self.assertTrue(matching_identities(paths, self.identity()))
+        for identity in ({"fingerprint": "old-image", "reusable": True},
+                         {"fingerprint": self.identity(), "reusable": False}, []):
+            with self.subTest(identity=identity):
+                paths[-1].write_text(json.dumps(identity))
+                self.assertFalse(matching_identities(paths, self.identity()))
+
+    def test_missing_or_invalid_runner_identity_disables_reuse(self):
+        path = self.root / "identity.json"
+        self.assertFalse(matching_identities([path], self.identity()))
+        path.write_text("invalid json")
+        self.assertFalse(matching_identities([path], self.identity()))
 
     def test_missing_runner_identity_disables_reuse(self):
         for image_os, image_version, reusable in [("ubuntu24", "v1", "true"),
