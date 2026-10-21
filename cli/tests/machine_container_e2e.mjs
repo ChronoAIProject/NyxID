@@ -160,7 +160,8 @@ try{
  assert.equal(profile.commands_isolated,true);
  assert.equal(profile.computer_ready,true,'cua MCP must be ready');
  assert.equal(profile.saved_login_ready,true,'production signed extension and native host must connect');
- // Shell-only separated VM reports command isolation without a browser.
+ // Read-only status claims command isolation only from a fresh daemon
+ // custody observation; the live separated node above proves the positive case.
  for (const separated of [true,false]) {
   const dir=`${testDirectory}/${separated?'separated':'single-user'}`;
   await fs.mkdir(dir,{mode:0o700});
@@ -169,7 +170,7 @@ try{
   if(!separated){await fs.chown(dir,1000,1000);await fs.chown(`${dir}/config.toml`,1000,1000);}
   const args=['nyxid','node','machine','--config',dir,'status'];
   const result=separated?run(args[0],args.slice(1)):run('runuser',['-u','agent','--',...args]);
-  const reported=JSON.parse(result);assert.equal(reported.commands_isolated,separated);assert.equal(reported.computer,false);
+  const reported=JSON.parse(result);assert.equal(reported.commands_isolated,false,'status without a fresh custody observation must not claim isolation');assert.equal(reported.credential_custody?.command,'unknown',JSON.stringify(reported.credential_custody));assert.equal(reported.computer,false);
   if(separated){
    await fs.chmod(dir,0o755);
    const exposed=JSON.parse(run(args[0],args.slice(1)));
