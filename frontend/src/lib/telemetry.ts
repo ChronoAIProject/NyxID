@@ -20,7 +20,9 @@
  * double-invoke safe.
  */
 
-import posthog from 'posthog-js';
+// The reviewed bundled client cannot inject remote feature/config scripts.
+import posthog from 'posthog-js/dist/module.no-external';
+import { isHttpUrl } from './http-origin';
 
 import type { UiEvent } from './telemetry-schema';
 
@@ -184,6 +186,8 @@ export function initTelemetry(args: InitTelemetryArgs): void {
   }
   if (!dsn) return;
   if (!host) host = 'https://us.i.posthog.com';
+  if (!isHttpUrl(host, true)) return;
+  host = new URL(host).origin;
 
   // Clear any persistent PostHog opt-out flag. `opt_out_capturing()`
   // (called from `disableTelemetry()`) writes a flag to localStorage
@@ -198,6 +202,12 @@ export function initTelemetry(args: InitTelemetryArgs): void {
 
   posthog.init(dsn, {
     api_host: host,
+    disable_external_dependency_loading: true,
+    advanced_disable_flags: true,
+    advanced_disable_feature_flags: true,
+    disable_session_recording: true,
+    disable_surveys: true,
+    remote_config_refresh_interval_ms: 0,
 
     // --- Capture behavior ---
     // `mask_all_text` masks every captured innerText/value; posthog-js

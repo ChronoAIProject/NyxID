@@ -242,6 +242,28 @@ mod tests {
     }
 
     #[test]
+    fn legacy_missing_grants_and_missing_or_null_expiry_keep_stored_policy() {
+        for missing_expiry in [false, true] {
+            let mut document = bson::to_document(&make_api_key()).unwrap();
+            if missing_expiry {
+                document.remove("expires_at");
+            }
+            for field in [
+                "allow_all_services",
+                "allow_all_nodes",
+                "allowed_service_ids",
+                "allowed_node_ids",
+            ] {
+                document.remove(field);
+            }
+            let key: ApiKey = bson::from_document(document).unwrap();
+            assert!(key.expires_at.is_none());
+            assert!(key.allow_all_services && key.allow_all_nodes);
+            assert!(key.allowed_service_ids.is_empty() && key.allowed_node_ids.is_empty());
+        }
+    }
+
+    #[test]
     fn bson_roundtrip_with_callback_url() {
         let mut key = make_api_key();
         key.callback_url = Some("https://agent.example.com/callback".to_string());

@@ -26,11 +26,15 @@ Nothing here may break existing nodes, proxying, SSH, NyxBot or specialists.
 
 ## Shared machines, action cards and activity
 
-Existing machines share one workspace and browser session among their granted
-agents. The Machines page, settings and action cards say **Shared workspace and
-browser**. Command/browser credential isolation does not separate specialists'
-files or authenticated tabs. Use separate machine containers for stronger
-separation. See [the phased isolation design](MACHINE_AGENT_ISOLATION.md).
+Existing `shared_legacy` assignments share the node's legacy workspace and browser
+session. A `separated` assignment uses its agent/person/group context's private
+workspace and secure/developer browser profiles. The Machines page and node
+settings say **Sharing set per agent**; each assignment shows **Shared legacy**,
+**Separate workspace and browser**, or **Owner selection required**. Command/node
+credential separation alone does not separate specialists' files or authenticated
+tabs. Use a separate machine container or VM per agent for stronger separation;
+containers still share their host kernel. See [the separation contract and
+residuals](MACHINE_AGENT_ISOLATION.md#w94-new-assignment-selection).
 
 Machine actions in chat have metadata cards: browser action and an existing
 encrypted screenshot thumbnail when one was returned, file read/write byte
@@ -121,7 +125,9 @@ Nothing the server sends can enable a capability.
   level: machine access is the owner's, like SSH. Other API keys, delegated
   tokens, relay tokens and service accounts get no machine tools.
 - **Which machines:**
-  - NyxBot may use every machine node the owner can use;
+  - NyxBot uses its stored assignments on machine nodes the owner can use;
+    flag-off compatibility preserves reachability frozen at the W9.4 cutover,
+    while new reachability requires a recorded owner separation choice;
   - a specialist may use only the machine nodes granted to it;
   - "can use" = the node's owner is the agent's owner, or the node is org-owned
     and `org_service::resolve_owner_access(owner, node.user_id)` gives the owner
@@ -866,10 +872,58 @@ Measurements and reproduction commands are under
 - **Additive.** Every model field is additive and serde-defaulted. No new
   environment variables unless unavoidable; if one is added, document it in
   `docs/ENV.md` and CLAUDE.md.
-- **Mixed versions.** Old nodes are unchanged and never receive machine
-  requests. Old servers never send them. Old frontends ignore the new fields.
+- **Mixed versions.** Nodes that predate machine capability never receive machine
+  requests. Machine-capable nodes that predate W9.4 retain existing legacy
+  assignments; absent evidence never establishes a new separated assignment.
+  Upgrade and drain every API replica before relying on the W9.4 selection
+  contract, then publish the matching frontend and CLI/images. Older servers
+  ignore the new intent and do not enforce this contract. Keep old writers
+  drained while relying on the new selection rules.
+- **W9.4 cutover.** The first capable server atomically persists the immutable
+  `machine-separation-defaults-v1` marker and snapshot through machine access
+  index initialization. Its fixed snapshot version freezes enabled-node ceilings
+  and pre-marker organization-admin reachability. Flag-off NyxBot compatibility
+  materializes only that frozen reachability with live ACL checks. Later node
+  enablement, promotions or broader capabilities do not enlarge it; tombstones
+  and explicit restrictions win. Keep the marker and snapshot across restarts.
+- **Support and choice.** New setup intent is automatic by default, with positive
+  v4 OS evidence and positively verified `credential_custody` required for
+  separated access. Earlier v1/v2/v3 reports, missing custody and unknown
+  versions are insufficient for new automatic/required assignments.
+  Browser evidence is bound to the launched package browser through a pidfd and
+  kernel parent links, with UID/GID, map, PID-depth, network and seccomp checks;
+  names/arguments never prove ancestry. These observations are not attestation.
+  Containers hiding required facts explicitly report sandbox=false and
+  `separated_browser_sandbox_unobservable_in_container`: use supported native
+  Linux or a separate machine container/VM per agent, without adding capabilities.
+  `node_custody_unverified` directs the owner to repair protected storage and
+  rerun the probe. Explicit shared legacy requires the complete warning and
+  owner consent. Missing intent or evidence surfaces
+  `selection_required` in the API, settings and NyxBot result/watch; it grants
+  nothing and directs the owner to Assistant → Machines. Changing a feature flag
+  or node intent never rewrites existing assignments. New external OAuth/API-key
+  grants support explicit legacy consent only; automatic and required contexts
+  are refused until that authority supports them.
 - **Existing features.** Proxy, credential, SSH and oracle behaviour are
   unchanged.
+
+Linux managed-browser setup accepts `NYXID_MACHINE_BROWSER` as an absolute,
+executable package path. An explicit missing, non-executable or unknown package
+fails setup; it never falls back to another installed browser. Resolved package
+metadata still selects the policy directory: Debian Chromium uses
+`/etc/chromium/policies/managed`, Ubuntu Snap Chromium uses
+`/etc/chromium-browser/policies/managed`, and Google Chrome deb uses
+`/etc/opt/chrome/policies/managed`. This selection does not bypass the live
+policy-effectiveness or renderer-sandbox checks.
+
+Native acceptance (`bash cli/tests/machine_native_acceptance.sh --disposable`)
+defaults explicitly to `/usr/bin/google-chrome`, regardless of installed Chromium
+transitional shims. The prerequisite check and harness share one selector and
+print every candidate's resolved path and the selected policy directory. The
+hosted amd64 prerequisite requires the Google Chrome deb layout. Native Snap or
+Debian acceptance must explicitly pass the corresponding supported package path,
+for example `NYXID_MACHINE_BROWSER=/usr/bin/chromium`; these layouts remain covered
+by package-detection tests and the Snap guest / Debian container acceptance runs.
 
 ### D12. Documentation
 
@@ -1266,8 +1320,14 @@ controller lock. They require no writable system temporary directory. The
 rendered migration and companion commands nevertheless include
 `--tmpfs /tmp:rw,noexec,nosuid,size=16m` for compatibility with the published
 0.41.0 helper while the 0.41.1 image is being published. Native `nyxid update`
-keeps its normal temporary datastore: it installs into a writable native host,
-and container image updates use the companion instead.
+retains authenticated TUF state in `$HOME/.nyxid/tuf-public` (override with
+`NYXID_TUF_STATE_DIR`). The backend also verifies the suggested companion image
+using its own private durable `NYXID_SERVER_TUF_STATE_DIR`, defaulting to
+`$HOME/.nyxid/server-tuf` natively and `/var/lib/nyxid/tuf` in the backend image.
+Compose retains that directory in `backend_tuf`; custom read-only deployments
+must mount a private writable durable volume there, owned by the backend UID.
+Missing permissions, corrupt state and rollback fail closed; no consumer resets
+to an ephemeral datastore. See [release trust state](RELEASING.md#accepted-provenance-and-authenticated-time).
 
 Preflight failures print only a fixed stage and reason, for example
 `machine_update failed at verify_updater_image: trust_root_unavailable`.

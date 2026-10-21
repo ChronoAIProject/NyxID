@@ -256,6 +256,7 @@ export interface ApiKeyCreateResponse {
   readonly key_prefix: string;
   readonly scopes: string;
   readonly created_at: string;
+  readonly expires_at: string | null;
 }
 
 export interface ApiKeyUsageService {

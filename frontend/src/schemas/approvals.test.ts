@@ -8,7 +8,7 @@ import {
 const valid = {
   telegram_enabled: true,
   push_enabled: false,
-  approval_required: true,
+  global_approval_mode: "all",
   approval_timeout_secs: 60,
   grant_expiry_days: 30,
 };
@@ -16,6 +16,14 @@ const valid = {
 describe("updateNotificationSettingsSchema", () => {
   it("accepts a fully valid payload", () => {
     expect(updateNotificationSettingsSchema.safeParse(valid).success).toBe(true);
+  });
+
+  it("requires a distinct global mode and accepts all three choices", () => {
+    for (const mode of ["writes_only", "all", "off"]) {
+      expect(updateNotificationSettingsSchema.parse({ ...valid, global_approval_mode: mode }).global_approval_mode).toBe(mode);
+    }
+    expect(updateNotificationSettingsSchema.safeParse({ ...valid, global_approval_mode: "unknown" }).success).toBe(false);
+    expect(updateNotificationSettingsSchema.safeParse({ ...valid, global_approval_mode: undefined, approval_required: true }).success).toBe(false);
   });
 
   it("enforces the 10–300s approval_timeout_secs bounds inclusively", () => {

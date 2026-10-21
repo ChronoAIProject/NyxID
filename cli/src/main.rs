@@ -59,6 +59,15 @@ async fn run_main() {
     // and duration after dispatch returns, regardless of success.
     let start = std::time::Instant::now();
     let cli = Cli::parse();
+    // Local observation must precede telemetry, update checks and skill repair.
+    if matches!(
+        cli.command,
+        Commands::Node {
+            command: cli::NodeCommands::CustodyProbe
+        }
+    ) {
+        node::custody::worker();
+    }
     let profile = extract_profile(&cli.command);
 
     // Telemetry is hard-off by default: if no DSN is configured and

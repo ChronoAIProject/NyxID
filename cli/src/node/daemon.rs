@@ -370,6 +370,7 @@ fn install_launchd(
     let cargo_bin = home_dir()?.join(".cargo/bin").display().to_string();
 
     let ca_environment = plist_ca_environment(&ca_environment_from_env()?);
+    let session = key_service_session(config_dir, true)?;
     let plist_content = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -381,7 +382,7 @@ fn install_launchd(
     <array>
 {program_args_xml}
     </array>
-    <key>RunAtLoad</key>
+{session}    <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <dict>
@@ -613,6 +614,20 @@ fn unit_path_for(profile: Option<&str>) -> Result<PathBuf> {
     Ok(home.join(".config/systemd/user").join(unit))
 }
 
+/// Only explicit install/reinstall re-renders definitions. Start and cutover
+/// keep accepting existing definitions with their original session environment.
+fn key_service_session(config_dir: &Path, macos: bool) -> Result<&'static str> {
+    let config = config::NodeConfig::load(&config_dir.join("config.toml"))?;
+    match config.storage_backend.as_str() {
+        "file" => Ok(""),
+        "keychain" if macos => {
+            Ok("    <key>LimitLoadToSessionType</key>\n    <string>Aqua</string>\n")
+        }
+        "keychain" => Ok("Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus\n"),
+        _ => Err(Error::Config("node_key_service_backend_invalid".into())),
+    }
+}
+
 fn install_systemd(
     nyxid_bin: &Path,
     config_dir: &Path,
@@ -634,15 +649,21 @@ fn install_systemd(
     let cargo_bin = home_dir()?.join(".cargo/bin").display().to_string();
 
     let ca_environment = systemd_ca_environment(&ca_environment_from_env()?);
+    let session = key_service_session(config_dir, false)?;
+    let dbus_ordering = if session.is_empty() {
+        ""
+    } else {
+        "Requires=dbus.socket\nAfter=dbus.socket\n"
+    };
     let unit_content = format!(
         r#"[Unit]
 Description=NyxID Node Agent
 After=network-online.target
 Wants=network-online.target
-
+{dbus_ordering}
 [Service]
 Type=simple
-ExecStart={exec_start}
+{session}ExecStart={exec_start}
 Restart=always
 RestartSec=5
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:{cargo_bin}
@@ -1184,6 +1205,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("config.toml"), "# test").unwrap();
         assert!(ensure_config_exists(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn native_key_service_session_is_backend_specific_and_never_falls_back() {
+        for backend in ["file", "keychain"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("config.toml");
+            let config =
+                config::NodeConfig::new("wss://example.test".into(), "node".into(), backend.into());
+            config.save(&path).unwrap();
+            let linux = key_service_session(directory.path(), false).unwrap();
+            let mac = key_service_session(directory.path(), true).unwrap();
+            if backend == "file" {
+                assert!(linux.is_empty() && mac.is_empty());
+            } else {
+                assert_eq!(
+                    linux,
+                    "Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus\n"
+                );
+                assert!(mac.contains("Aqua"));
+            }
+            assert_eq!(
+                config::NodeConfig::load(&path).unwrap().storage_backend,
+                backend
+            );
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let config = config::NodeConfig::new(
+            "wss://example.test".into(),
+            "node".into(),
+            "keychian".into(),
+        );
+        // Unknown storage must never silently select file.
+        std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
+        assert!(key_service_session(directory.path(), false).is_err());
     }
 
     #[test]

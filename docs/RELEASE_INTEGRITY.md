@@ -53,6 +53,16 @@ script artifacts have matching `sha384-*` SRI attributes in the HTML, and emits
 a strict CSP. The backend does not read credential plaintext and does not
 perform remote credential cryptography.
 
+The backend image packages this standalone output at `/app/frontend/dist/`;
+its Node builder and the frontend builder share the exact npm lockfile,
+`SOURCE_COMMIT` and `SOURCE_DATE_EPOCH` inputs. The build plugin honors the
+source commit and produces deterministic manifest time when the epoch is set.
+Both builds require those inputs for release fingerprint parity. Publication
+must validate the actual image-extracted manifest and script hashes, rather
+than trusting a separate build of the same source. The backend emits
+`Referrer-Policy: no-referrer`, and frontend nginx preserves its strict CSP
+without adding the SPA policy. See [Production browser policy](BROWSER_SECURITY_POLICY.md).
+
 In split deployments where a reverse proxy sends the SPA/static frontend and
 backend to different upstreams, route these accept paths and
 `/credential-accept/assets/*` to the backend upstream, not the SPA/static

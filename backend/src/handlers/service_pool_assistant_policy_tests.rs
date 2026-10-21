@@ -4,6 +4,9 @@ use crate::services::assistant_acknowledgement_service as acks;
 async fn assistant(label: &str, strategy: &str) -> Fixture {
     let mut f = fixture(label, StatusCode::OK, strategy, true).await;
     let owner = f.auth.user_id.to_string();
+    // Assistant acknowledgements remain required independently of generic service approval.
+    crate::test_utils::set_test_approval_preference(&f.state.db, &owner, false).await;
+
     let row = crate::services::assistant_authority_tests::new_orchestrator(
         &f.state,
         &owner,

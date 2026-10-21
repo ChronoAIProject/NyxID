@@ -7,6 +7,43 @@ use crate::models::service_approval_config::{
 };
 use crate::services::operation_descriptor::{OperationDescriptor, Protocol};
 
+/// Global preference is distinct from the per-service binary/rule policy.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum GlobalApprovalMode {
+    WritesOnly,
+    All,
+    Off,
+}
+
+impl GlobalApprovalMode {
+    pub fn from_stored(preference: Option<bool>) -> Self {
+        match preference {
+            Some(true) => Self::All,
+            Some(false) => Self::Off,
+            None => Self::WritesOnly,
+        }
+    }
+
+    pub fn stored(self) -> Option<bool> {
+        match self {
+            Self::All => Some(true),
+            Self::Off => Some(false),
+            Self::WritesOnly => None,
+        }
+    }
+
+    pub fn requires(self, verb: &ApprovalVerb) -> bool {
+        match self {
+            Self::All => true,
+            Self::Off => false,
+            Self::WritesOnly => !matches!(verb, ApprovalVerb::Read),
+        }
+    }
+}
+
 pub const MAX_APPROVAL_RULES: usize = 50;
 pub const MAX_RULE_METHODS: usize = 16;
 pub const MAX_RULE_RESOURCE_PATTERN_LEN: usize = 256;

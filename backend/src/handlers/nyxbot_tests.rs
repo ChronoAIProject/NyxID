@@ -4557,6 +4557,9 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
 async fn org_group_bots_moved_to_a_specialist_keep_answering() {
     use crate::models::org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgMembership, OrgRole};
     let (state, calls, server) = setup("nyxbot_org_specialist").await;
+    // The receiving human retains independent generic service approval preferences.
+    crate::test_utils::set_test_approval_preference(&state.db, OWNER, false).await;
+
     let org = Uuid::new_v4().to_string();
     state
         .db

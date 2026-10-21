@@ -201,6 +201,7 @@ pub mod reporting_identity_service;
 pub mod resource_adapter;
 pub mod role_service;
 pub mod scope_catalog;
+pub mod security_readiness_service;
 pub mod service_account_key_read_service;
 pub mod service_account_service;
 pub mod service_endpoint_service;

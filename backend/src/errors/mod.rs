@@ -154,6 +154,9 @@ pub enum AppError {
     #[error("Service concurrency limit reached; retry after an in-flight request completes")]
     ServiceConcurrencyLimited,
 
+    #[error("Security rollout is not ready; inspect admin security readiness")]
+    SecurityReadinessUnavailable,
+
     #[error("Internal server error: {0}")]
     Internal(String),
 
@@ -805,6 +808,7 @@ impl AppError {
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
+            Self::SecurityReadinessUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
@@ -1030,6 +1034,7 @@ impl AppError {
             Self::Conflict(_) => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
+            Self::SecurityReadinessUnavailable => 12900,
             Self::VoiceProviderUnavailable => 12501,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
@@ -1295,6 +1300,7 @@ impl AppError {
             Self::Conflict(_) => "conflict",
             Self::AssistantTurnActive => "turn_active",
             Self::VoiceQueueFull => "voice_queue_full",
+            Self::SecurityReadinessUnavailable => "security_readiness_unavailable",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
@@ -1581,7 +1587,7 @@ impl AppError {
                     "Consent required. Complete authorization in browser flow.".to_string()
                 }
                 AppError::ApprovalRequired { .. } => {
-                    "Approval required. A notification has been sent to the resource owner."
+                    "Approval required. Review the pending request in Approval History; configured notifications are attempted."
                         .to_string()
                 }
                 AppError::ApprovalFailed {

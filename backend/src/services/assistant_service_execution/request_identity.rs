@@ -60,7 +60,7 @@ pub fn http_operation(
 /// Recognize only supported, account-independent generation requests. Unknown
 /// provider extensions retain exact action consent. Function tools describe
 /// callbacks to NyxAgent; provider-hosted tools can execute effects themselves.
-pub(super) fn stateless_inference(path: &str, body: &Value) -> bool {
+pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
     let path = path
         .trim_matches('/')
         .strip_prefix("v1/")

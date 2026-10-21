@@ -6,7 +6,8 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // Recorded upstream fixtures retain their authenticated bytes and syntax.
+  globalIgnores(['dist', 'e2e-production/fixtures']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

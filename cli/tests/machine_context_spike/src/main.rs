@@ -4,6 +4,11 @@
 #[path = "../../../src/node/machine/process.rs"]
 mod production_process;
 
+// The same package-layout regressions can run without linking the whole CLI.
+#[cfg(test)]
+#[path = "../../../src/node/machine/browser_layout.rs"]
+pub mod browser_layout;
+
 use anyhow::{Context, Result, bail, ensure};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;

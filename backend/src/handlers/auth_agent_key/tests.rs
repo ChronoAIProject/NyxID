@@ -397,6 +397,9 @@ async fn enrolled_credential_executes_only_allowed_proxy_with_live_parent_bindin
     let server = Server::new("akl_proxy_http").await;
     let (actor, human) = server.human().await;
     let db = &server.state.db;
+    // This mounted flow exercises enrollment and live key scope, not generic consent.
+    crate::test_utils::set_test_approval_preference(db, &actor, false).await;
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let downstream_url = format!("http://{}", listener.local_addr().unwrap());
     let downstream = tokio::spawn(async move {

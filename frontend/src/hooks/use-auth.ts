@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
+import { useRef, useState } from "react";
+import { api, ApiError } from "@/lib/api-client";
 import type {
   User,
   RegisterResponse,
@@ -88,16 +89,46 @@ export function useMfaSetup() {
 export function useMfaVerify() {
   const queryClient = useQueryClient();
   const clearMfaState = useAuthStore((s) => s.clearMfaState);
+  const checkAuth = useAuthStore((s) => s.checkAuth);
+  const attempt = useRef<{ token: string; needsSessionCheck: boolean } | null>(null);
+  const [sessionConfirmationPending, setSessionConfirmationPending] = useState(false);
 
-  return useMutation({
+  const mutation = useMutation({
+    scope: { id: "mfa-login" },
+    retry: false,
     mutationFn: async (data: MfaVerifyRequest): Promise<void> => {
-      await api.post<void>("/auth/mfa/verify", { ...data, client: "web" });
+      if (attempt.current?.token !== data.mfa_token) {
+        attempt.current = { token: data.mfa_token, needsSessionCheck: false };
+      }
+      if (!attempt.current.needsSessionCheck) {
+        try {
+          await api.post<void>("/auth/mfa/verify", { ...data, client: "web" });
+        } catch (error) {
+          // A definite client rejection leaves the challenge available for a
+          // corrected code. Network/5xx uncertainty can follow consumption of
+          // the one-shot token: check the cookie instead of replaying the POST.
+          if (error instanceof ApiError && error.status < 500) throw error;
+        }
+        attempt.current.needsSessionCheck = true;
+        setSessionConfirmationPending(true);
+      }
+      try {
+        await checkAuth({ requireSession: true });
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401) {
+          // The consumed/uncertain challenge cannot recover this session.
+          // Return to the existing login flow to obtain a fresh challenge.
+          clearMfaState();
+        }
+        throw new Error("Could not confirm your session. Retry the session check, or return to login.");
+      }
     },
     onSuccess: () => {
       clearMfaState();
       void queryClient.invalidateQueries({ queryKey: ["user"] });
     },
   });
+  return { ...mutation, sessionConfirmationPending };
 }
 
 export function useMfaDisable() {

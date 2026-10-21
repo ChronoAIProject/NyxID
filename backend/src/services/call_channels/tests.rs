@@ -218,6 +218,8 @@ struct Fixture {
     reads: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<Value>>>,
     callback_codes: Arc<Mutex<Vec<u16>>>,
+    callback_error_codes: Arc<Mutex<Vec<Option<u64>>>>,
+    faq_service_id: String,
     upstream_finished: tokio_util::sync::CancellationToken,
     gate: Arc<Semaphore>,
     chunks: Arc<AtomicUsize>,
@@ -281,6 +283,39 @@ async fn fixture(profile: Profile, gated: bool) -> Fixture {
         "notion-fixture",
     )
     .await;
+    let faq_service_id = state
+        .db
+        .collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": &notion})
+        .await
+        .unwrap()
+        .unwrap()
+        .catalog_service_id
+        .unwrap();
+    // Only this owner's FAQ connection allows guest execution without approval.
+    crate::services::approval_service::set_service_approval_config(
+        &state.db,
+        &owner,
+        &faq_service_id,
+        "FAQ",
+        Some(false),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        crate::services::approval_service::user_requires_approval(
+            &state.db,
+            &owner,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .unwrap()
+    );
     let mut b = binding(profile, &owner);
     let auth = if profile == Profile::ElevenlabsCustomLlm {
         "header"
@@ -343,9 +378,11 @@ async fn fixture(profile: Profile, gated: bool) -> Fixture {
         .with_state(state.clone());
     let requests = Arc::new(Mutex::new(Vec::new()));
     let callback_codes = Arc::new(Mutex::new(Vec::new()));
+    let callback_error_codes = Arc::new(Mutex::new(Vec::new()));
     let gate = Arc::new(Semaphore::new(if gated { 0 } else { 16 }));
     let captures = requests.clone();
     let codes = callback_codes.clone();
+    let error_codes = callback_error_codes.clone();
     let g = gate.clone();
     let chunks = Arc::new(AtomicUsize::new(1));
     let chunk_delay_ms = Arc::new(AtomicUsize::new(0));
@@ -355,12 +392,13 @@ async fn fixture(profile: Profile, gated: bool) -> Fixture {
     let stream_fail = fail_turn.clone();
     let upstream_finished = tokio_util::sync::CancellationToken::new();
     let finished = upstream_finished.clone();
-    let upstream=Router::new().route("/v1/capabilities",get(||async{StatusCode::NOT_FOUND})).route("/v1/models",get(||async{Json(json!({"data":[{"id":engine::DEFAULT_MODEL}]}))})).route("/v1/responses",post(move|headers:HeaderMap,Json(body):Json<Value>|{let proxy=proxy.clone();let notion=notion.clone();let captures=captures.clone();let codes=codes.clone();let g=g.clone();let chunks=stream_chunks.clone();let delay=stream_delay.clone();let failed=stream_fail.clone();let finished=finished.clone();async move{
+    let upstream=Router::new().route("/v1/capabilities",get(||async{StatusCode::NOT_FOUND})).route("/v1/models",get(||async{Json(json!({"data":[{"id":engine::DEFAULT_MODEL}]}))})).route("/v1/responses",post(move|headers:HeaderMap,Json(body):Json<Value>|{let proxy=proxy.clone();let notion=notion.clone();let captures=captures.clone();let codes=codes.clone();let error_codes=error_codes.clone();let g=g.clone();let chunks=stream_chunks.clone();let delay=stream_delay.clone();let failed=stream_fail.clone();let finished=finished.clone();async move{
         let _finished = finished.drop_guard();
         captures.lock().await.push(body);g.acquire().await.unwrap().forget();
         let authorization=headers.get("authorization").unwrap().clone();
         let response=proxy.oneshot(Request::builder().uri(format!("/proxy/s/api-notion/faq?_nyxid_via={notion}")).header("authorization",authorization).body(Body::empty()).unwrap()).await.unwrap();
         let status=response.status();codes.lock().await.push(status.as_u16());let bytes=axum::body::to_bytes(response.into_body(),65536).await.unwrap();
+        error_codes.lock().await.push(serde_json::from_slice::<Value>(&bytes).ok().and_then(|body| body["error_code"].as_u64()));
         let text=if status.is_success(){serde_json::from_slice::<Value>(&bytes).unwrap()["faq"].as_str().unwrap().to_owned()}else{"Callback denied.".into()};
         let stream=async_stream::stream! {
             let count=chunks.load(Ordering::SeqCst).max(1);let chars:Vec<char>=text.chars().collect();let width=chars.len().div_ceil(count).max(1);let mut sequence=0;
@@ -393,6 +431,8 @@ async fn fixture(profile: Profile, gated: bool) -> Fixture {
         reads,
         requests,
         callback_codes,
+        callback_error_codes,
+        faq_service_id,
         upstream_finished,
         gate,
         chunks,
@@ -476,6 +516,77 @@ async fn coordinator_faq_is_fresh_and_specialist_instructions_refresh_for_both_c
         assert!(row.guest_turn);
         assert_ne!(row.id, f.b.user_id);
         drop(requests);
+        f.state.db.drop().await.unwrap();
+    }
+}
+#[tokio::test]
+async fn guest_faq_requires_explicit_no_approval_policy_without_forwarding_or_approval_effects() {
+    for explicit_required in [false, true] {
+        let f = fixture(Profile::TelnyxRelay, false).await;
+        if explicit_required {
+            crate::services::approval_service::set_service_approval_config(
+                &f.state.db,
+                &f.b.user_id,
+                &f.faq_service_id,
+                "FAQ",
+                Some(true),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        } else {
+            f.state
+                .db
+                .collection::<bson::Document>(
+                    crate::models::service_approval_config::COLLECTION_NAME,
+                )
+                .delete_one(doc! {"user_id": &f.b.user_id, "service_id": &f.faq_service_id})
+                .await
+                .unwrap();
+        }
+        // A read is gated without a per-service row only when the owner chose
+        // All requests. The unset global default now allows reads; write denial
+        // under that default is covered by the default-policy integration tests.
+        if !explicit_required {
+            crate::test_utils::set_test_approval_preference(&f.state.db, &f.b.user_id, true).await;
+        }
+        assert!(
+            crate::services::approval_service::user_requires_approval(
+                &f.state.db,
+                &f.b.user_id,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
+        );
+        let s = active_session(&f, "approval-required-call").await;
+        let (mut output, worker) =
+            coordinator::turn(f.state.clone(), &f.b, &s, "utterance-1", "Read the FAQ")
+                .await
+                .unwrap();
+        while output.recv().await.is_some() {}
+        worker.await.unwrap().unwrap();
+        assert_eq!(*f.callback_codes.lock().await, vec![403]);
+        assert_eq!(*f.callback_error_codes.lock().await, vec![Some(9000)]);
+        assert_eq!(f.reads.load(Ordering::SeqCst), 0);
+        for collection in [
+            crate::models::approval_request::COLLECTION_NAME,
+            crate::models::approval_grant::COLLECTION_NAME,
+            "assistant_acknowledgements",
+        ] {
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "unexpected effect in {collection}"
+            );
+        }
         f.state.db.drop().await.unwrap();
     }
 }

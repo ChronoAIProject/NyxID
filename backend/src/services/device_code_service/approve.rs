@@ -190,6 +190,7 @@ pub async fn approve(
         device_label: label,
         hw_id: row.hw_id,
         api_key_id: created_key.id,
+        api_key_expires_at: created_key.expires_at.map(|value| value.to_rfc3339()),
         node_id: node.id,
         owner_user_id,
         org_id: input.org_id,
@@ -449,6 +450,7 @@ mod tests {
             node_id,
             refresh_token,
             expires_in,
+            api_key_expires_at,
         } = delivery
         else {
             panic!("expected approved");
@@ -457,6 +459,8 @@ mod tests {
         assert_eq!(node_id, approval.node_id);
         assert_eq!(refresh_token, decrypted_refresh_token);
         assert_eq!(expires_in, DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS);
+        assert_eq!(api_key_expires_at, approval.api_key_expires_at);
+        assert!(api_key_expires_at.is_some());
     }
 
     #[tokio::test]

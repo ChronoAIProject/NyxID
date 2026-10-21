@@ -38,6 +38,7 @@ describe("actual shared Machine grant editor disclosures", () => {
     render(<MachineGrantEditor onSubmit={mocks.submit} />);
     await userEvent.click(screen.getByRole("checkbox", { name: "Allow this Machine" }));
     expect(screen.getByRole("note", { name: "Shell access and credentials" })).toHaveTextContent(/excluding these tools does not protect their underlying files/i);
+    await userEvent.click(screen.getByRole("checkbox", { name: /I explicitly allow shared legacy/ }));
     await userEvent.click(screen.getByRole("button", { name: "Save Machine permissions" }));
     await waitFor(() => expect(mocks.submit).toHaveBeenCalledWith(expect.objectContaining({
       assignments: { [nodeId]: {
@@ -60,4 +61,15 @@ describe("actual shared Machine grant editor disclosures", () => {
     expect(warning).toHaveTextContent(/does not isolate clients or their workspace secrets/i);
     expect(warning).toHaveTextContent(/file roots.*not what shell commands can access/i);
   });
+});
+
+it("never preselects legacy consent, including while editing an existing grant", async () => {
+  render(<MachineGrantEditor initial={{ separation: "shared_legacy", legacy_warning_acknowledged: true, assignments: { [nodeId]: { capabilities: { shell: true, files: true, browser: false, computer: false, developer_browser: false }, file_roots: ["/workspace"], service_ids: [] } } }} onSubmit={mocks.submit} />);
+  expect(screen.getByRole("checkbox", { name: /I explicitly allow shared legacy/ })).not.toBeChecked();
+  await userEvent.click(screen.getByRole("button", { name: "Save Machine permissions" }));
+  expect(await screen.findByText(/External Machine access requires explicit shared legacy consent/)).toBeInTheDocument();
+  expect(mocks.submit).not.toHaveBeenCalled();
+  const warning = screen.getByRole("note", { name: "Shell access and credentials" });
+  expect(warning).toHaveTextContent(/share the host kernel/);
+  expect(warning).toHaveTextContent(/separate machine container or VM per agent/);
 });

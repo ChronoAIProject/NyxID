@@ -458,7 +458,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     {issuanceNotice(selection?.kind === "existing")}
                   </Text>
                   <Text style={styles.inputLabel}>
-                    Credential expiry (optional)
+                    Credential expiry (blank: 90 days, bounded by key expiry)
                   </Text>
                   <TextInput
                     accessibilityLabel="Credential expiry"

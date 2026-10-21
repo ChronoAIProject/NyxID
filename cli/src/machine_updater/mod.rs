@@ -695,6 +695,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tagged_digest_bootstrap_and_replace_preserve_premutation_fences() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        for (suffix, target, rollback, expected) in [
+            (format!("0.41.0@{digest}"), "0.41.1", false, None),
+            (
+                format!("0.41.0@{digest}"),
+                "0.40.0",
+                false,
+                Some("downgrade_refused"),
+            ),
+            (format!("0.41.0@{digest}"), "0.40.0", true, None),
+            (
+                format!("latest@{digest}"),
+                "0.41.1",
+                false,
+                Some("source_version_unknown"),
+            ),
+            (
+                "0.41.0@".into(),
+                "0.41.1",
+                false,
+                Some("source_version_unknown"),
+            ),
+            (
+                format!("0.41.0@sha256:{}", "g".repeat(64)),
+                "0.41.1",
+                false,
+                Some("source_version_unknown"),
+            ),
+            (
+                format!("0.41.0@{digest}@{digest}"),
+                "0.41.1",
+                false,
+                Some("source_version_unknown"),
+            ),
+        ] {
+            for bootstrap in [false, true] {
+                // Migration never accepts a rollback override.
+                if bootstrap && rollback {
+                    continue;
+                }
+                let root = private_test_directory();
+                let server = MockServer::start().await;
+                let mut source = original();
+                source["Config"]["Image"] = json!(format!("{}:{suffix}", update::MACHINE_IMAGE));
+                // A label must not rescue malformed tags or content pins.
+                source["Config"]["Labels"]["dev.nyxid.machine.version"] = json!("0.41.0");
+                Mock::given(method("GET"))
+                    .and(path("/v1.45/containers/test-machine/json"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(source))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path("/v1.45/containers/test-machine-updater/json"))
+                    .respond_with(ResponseTemplate::new(404))
+                    .mount(&server)
+                    .await;
+                let api = docker::Docker::fixture(
+                    server.uri(),
+                    Err("verification intentionally refused"),
+                );
+                let error = if bootstrap {
+                    bootstrap_with_api(
+                        root.path().into(),
+                        "test-machine".into(),
+                        target.into(),
+                        api,
+                    )
+                    .await
+                    .unwrap_err()
+                } else {
+                    replace(&api, root.path(), "test-machine", target, rollback, false)
+                        .await
+                        .unwrap_err()
+                };
+                let expected = expected
+                    .map(|reason| format!("bootstrap:{reason}"))
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{}:image_resolution_failed",
+                            if bootstrap {
+                                "verify_updater_image"
+                            } else {
+                                "verify_machine_image"
+                            }
+                        )
+                    });
+                assert_eq!(Failure::classify(&error, "bootstrap").code(), expected);
+                let requests = server.received_requests().await.unwrap();
+                assert!(!requests.is_empty());
+                assert!(requests.iter().all(|request| request.method == "GET"));
+                assert!(!root.path().join("journal.json").exists());
+                server.verify().await;
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn bootstrap_checks_persist_actionable_codes_before_any_mutation() {
         for reason in [
             "invalid_container_name",
