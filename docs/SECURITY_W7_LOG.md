@@ -635,3 +635,29 @@
 - The complete command/exit/log ledger and reviewable source/policy deltas are
   ~/Library/Caches/nyxid-targets/w7-apt-followup/command-results.md and
   delta-report.md, with raw JSONL ledgers and signed metadata alongside them.
+
+## W7 PR #1976 follow-up — PM-approved additional header advisories
+
+- PM Claude (01a15d77-278a-7452-9279-6ca50833ffd5) explicitly approves the
+  prepared 616 exact linux-libc-dev records: 77 CVEs across the existing eight
+  component/architecture mappings. This approval resolves the pending review
+  status recorded above for those 77 identities.
+- Append the prepared records exactly, changing only their owner to
+  "NyxID W7 release integrity; PM Claude (01a15d77-278a-7452-9279-6ca50833ffd5)".
+  All 2,472 existing records remain unchanged. Preserve exact finding hashes,
+  package/source versions, content/catalog bindings, named absent kernel APIs,
+  linux-uapi-package-has-no-code-v1 and exclusive expiry 2026-11-19.
+- Reviewed source and evidence are under
+  ~/Library/Caches/nyxid-targets/w7-apt-followup/: the approved source is
+  proposed-new-header-dispositions.json (SHA-256
+  8a17c1f01c52b8e61ed8ce0cb3d487504e8fd7e0cc3ebe95dadb2abad453fcdf);
+  delta-report.md, header-proof/results.json and the raw machine-node-only
+  scan retain the advisory and byte-level package proofs. Applied records and
+  per-line deltas are in pm-approved-header-records.json and
+  pm-approved-header-records.md.
+- Re-run python3 scripts/test-image-dispositions.py (16/16 pass) and
+  python3 scripts/test-image-vulnerabilities.py (15/15 pass). The strict policy
+  loader accepts all 3,088 records. Command results/logs remain in results.jsonl
+  and logs/ beside the approval evidence. Hosted validation limits recorded
+  above are unchanged; no other code, policy or workflow changes accompany this
+  approval.
