@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 use mongodb::bson::{self, doc};
 use std::sync::LazyLock;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
@@ -22,6 +22,44 @@ static TOKEN_EXCHANGE_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 /// Get the no-redirect HTTP client for OAuth token exchange operations.
 pub fn token_exchange_client() -> &'static reqwest::Client {
     &TOKEN_EXCHANGE_CLIENT
+}
+
+/// Validate only the opt-in hosted authorization nonce contract. Legacy URLs
+/// and parameter names keep their existing behavior while the flag is off.
+pub fn validate_authorization_nonce_config(
+    required: bool,
+    authorization_url: Option<&str>,
+    client_id_param_name: Option<&str>,
+) -> AppResult<()> {
+    if !required {
+        return Ok(());
+    }
+    if client_id_param_name.is_some_and(|name| name.trim() == "nonce") {
+        return Err(AppError::ValidationError(
+            "client_id_param_name cannot be nonce when authorization_nonce_required is enabled"
+                .to_string(),
+        ));
+    }
+    let url = authorization_url
+        .and_then(|value| url::Url::parse(value).ok())
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "A valid authorization URL is required for authorization_nonce_required"
+                    .to_string(),
+            )
+        })?;
+    if url.fragment().is_some() {
+        return Err(AppError::ValidationError(
+            "authorization_url cannot contain a fragment when authorization_nonce_required is enabled".to_string(),
+        ));
+    }
+    if url.query_pairs().any(|(key, _)| key == "nonce") {
+        return Err(AppError::ValidationError(
+            "authorization_url cannot contain nonce when authorization_nonce_required is enabled"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn expect_json_response(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -98,14 +136,19 @@ pub fn token_request(
     token_url: &str,
     params: &[(String, String)],
 ) -> AppResult<reqwest::RequestBuilder> {
-    let mut params = params.to_vec();
+    let mut params = Zeroizing::new(params.to_vec());
     apply_token_resource(provider, &mut params);
     if is_stripe_apps(provider) {
-        params.retain(|(name, _)| {
-            !matches!(
+        params.retain_mut(|(name, value)| {
+            let keep = !matches!(
                 name.as_str(),
                 "redirect_uri" | "client_id" | "client_secret" | "code_verifier"
-            )
+            );
+            if !keep {
+                name.zeroize();
+                value.zeroize();
+            }
+            keep
         });
     }
     encode_oauth_request(
@@ -219,6 +262,25 @@ pub async fn refresh_oauth_token(
     encryption_keys: &EncryptionKeys,
     token: &UserProviderToken,
 ) -> AppResult<String> {
+    use super::credential_record_service as records;
+    let raw = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {"_id":&token.id})
+        .await?
+        .ok_or_else(|| AppError::Conflict("Credential disappeared before refresh".into()))?;
+    let stored: UserProviderToken = bson::from_document(raw.clone())
+        .map_err(|_| AppError::Internal("Invalid credential storage".into()))?;
+    if stored.user_id != token.user_id
+        || stored.state_version != token.state_version
+        || stored.secret_context_versions != token.secret_context_versions
+        || stored.updated_at.timestamp_millis() != token.updated_at.timestamp_millis()
+        || stored.refresh_token_encrypted != token.refresh_token_encrypted
+    {
+        return Err(AppError::Conflict(
+            "Credential changed before refresh".into(),
+        ));
+    }
+    let predicate = records::exact_source_filter(COLLECTION_NAME, &raw)?;
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
         .find_one(doc! { "_id": &token.provider_config_id })
@@ -236,33 +298,31 @@ pub async fn refresh_oauth_token(
         token.credential_user_id.as_deref(),
     )
     .await?;
-    let client_id = resolved.client_id;
-    let client_secret = resolved.client_secret;
+    let client_id = &resolved.client_id;
+    let client_secret = &resolved.client_secret;
 
-    let decrypted_rt = Zeroizing::new(
-        encryption_keys
-            .decrypt(
-                token
-                    .refresh_token_encrypted
-                    .as_ref()
-                    .ok_or_else(|| AppError::Internal("Token missing refresh_token".to_string()))?,
-            )
-            .await?,
-    );
-    let refresh_token = String::from_utf8((*decrypted_rt).clone())
-        .map_err(|e| AppError::Internal(format!("Failed to decode refresh_token: {e}")))?;
+    let refresh_token = records::CredentialRecord::token(token)
+        .text(
+            encryption_keys,
+            "refresh_token_encrypted",
+            token
+                .refresh_token_encrypted
+                .as_deref()
+                .ok_or_else(|| AppError::Internal("Token missing refresh token".into()))?,
+        )
+        .await?;
 
     let use_basic_auth = provider.token_endpoint_auth_method == "client_secret_basic";
-    let mut params = vec![
+    let mut params = zeroize::Zeroizing::new(vec![
         ("grant_type".to_string(), "refresh_token".to_string()),
-        ("refresh_token".to_string(), refresh_token.clone()),
-    ];
+        ("refresh_token".to_string(), refresh_token.to_string()),
+    ]);
     if use_basic_auth {
         // Credentials go in Authorization header, not body
     } else {
-        params.push(client_id_form_field(&provider, &client_id));
-        if let Some(ref secret) = client_secret {
-            params.push(("client_secret".to_string(), secret.clone()));
+        params.push(client_id_form_field(&provider, client_id));
+        if let Some(secret) = client_secret {
+            params.push(("client_secret".to_string(), secret.to_string()));
         }
     }
 
@@ -276,22 +336,50 @@ pub async fn refresh_oauth_token(
         &params,
     )?;
     if use_basic_auth {
-        let (username, password) =
-            token_basic_auth_credentials(&provider, &client_id, client_secret.as_deref())?;
+        let (username, password) = token_basic_auth_credentials(
+            &provider,
+            client_id,
+            client_secret.as_ref().map(|secret| secret.as_str()),
+        )?;
         request = request.basic_auth(username, password);
     }
+    let lifecycle_owner = super::erasure_admission::credential_owner(db, &token.user_id).await?;
+    let attempt = super::personal_erasure_service::issuance::begin(
+        db,
+        &lifecycle_owner,
+        &token.user_id,
+        &token.id,
+        &provider.id,
+    )
+    .await?;
     let response = request
         .send()
         .await
         .map_err(|_| AppError::Internal("Token refresh request failed".into()))?;
 
-    if !response.status().is_success() {
-        let now = Utc::now();
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+    let status = response.status();
+    let response_body = Zeroizing::new(
+        response
+            .text()
+            .await
+            .map_err(|_| AppError::Internal("Token refresh response could not be read".into()))?,
+    );
+    super::personal_erasure_service::issuance::observe_body(
+        db,
+        encryption_keys,
+        &attempt,
+        &lifecycle_owner,
+        &provider,
+        &resolved,
+        &response_body,
+    )
+    .await?;
 
-        // SEC-M5: Truncate error body before storing to prevent leaking provider internals
-        let truncated_body: String = body.chars().take(200).collect();
+    if !status.is_success() {
+        let now = Utc::now();
+        let body = response_body.as_str();
+
+        let diagnostic = super::provider_diagnostics::refresh_failure(status, body);
 
         let update = db
             .collection::<UserProviderToken>(COLLECTION_NAME)
@@ -299,7 +387,7 @@ pub async fn refresh_oauth_token(
                 provider_token_refresh_revision_filter(token),
                 doc! { "$set": {
                     "status": "refresh_failed",
-                    "error_message": format!("Refresh failed: {status} {truncated_body}"),
+                    "error_message": diagnostic,
                     "updated_at": bson::DateTime::from_chrono(now),
                 }},
             )
@@ -320,20 +408,43 @@ pub async fn refresh_oauth_token(
         )));
     }
 
-    let token_data: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to parse refresh response: {e}")))?;
+    let token_data: crate::crypto::secret_json::SecretJson =
+        serde_json::from_str(&response_body)
+            .map_err(|_| AppError::Internal("Invalid token refresh response".into()))?;
+    let token_data = &token_data.0;
 
+    super::personal_erasure_service::issuance::received(
+        db,
+        encryption_keys,
+        &attempt,
+        &lifecycle_owner,
+        &provider,
+        &resolved,
+        crate::services::personal_erasure_service::issuance::IssuedTokens {
+            access: token_data["access_token"].as_str(),
+            refresh: token_data["refresh_token"].as_str(),
+        },
+    )
+    .await?;
     let new_access_token = token_data["access_token"].as_str().ok_or_else(|| {
         AppError::Internal("Missing access_token in refresh response".to_string())
     })?;
 
     let new_refresh_token = token_data["refresh_token"].as_str();
-    let expires_in = token_expires_in(&provider, &token_data);
+    let expires_in = token_expires_in(&provider, token_data);
     let now = Utc::now();
 
-    let access_enc = encryption_keys.encrypt(new_access_token.as_bytes()).await?;
+    let mut versions = token.secret_context_versions.clone();
+    let access_enc = records::encrypt(
+        encryption_keys,
+        COLLECTION_NAME,
+        &token.id,
+        &token.user_id,
+        "access_token_encrypted",
+        new_access_token.as_bytes(),
+    )
+    .await?;
+    records::mark_version(&mut versions, encryption_keys, "access_token_encrypted");
 
     let mut set_doc = doc! {
         "access_token_encrypted": bson::Binary {
@@ -352,7 +463,16 @@ pub async fn refresh_oauth_token(
     }
 
     if let Some(rt) = new_refresh_token {
-        let rt_enc = encryption_keys.encrypt(rt.as_bytes()).await?;
+        let rt_enc = records::encrypt(
+            encryption_keys,
+            COLLECTION_NAME,
+            &token.id,
+            &token.user_id,
+            "refresh_token_encrypted",
+            rt.as_bytes(),
+        )
+        .await?;
+        records::mark_version(&mut versions, encryption_keys, "refresh_token_encrypted");
         set_doc.insert(
             "refresh_token_encrypted",
             bson::Binary {
@@ -362,19 +482,55 @@ pub async fn refresh_oauth_token(
         );
     }
 
-    let update = db
-        .collection::<UserProviderToken>(COLLECTION_NAME)
-        .update_one(
-            provider_token_refresh_revision_filter(token),
-            doc! { "$set": set_doc },
+    set_doc.insert(
+        records::VERSIONS,
+        bson::to_bson(&versions)
+            .map_err(|_| AppError::Internal("Invalid credential version map".into()))?,
+    );
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result: AppResult<()> = async {
+        super::erasure_admission::fence_credential_target_in_session(
+            db,
+            &token.user_id,
+            &lifecycle_owner,
+            &mut tx,
         )
         .await?;
-
-    if update.modified_count == 0 {
-        return Err(AppError::Conflict(
-            "OAuth credential changed while it was being refreshed".to_string(),
-        ));
+        let update = db
+            .collection::<UserProviderToken>(COLLECTION_NAME)
+            .update_one(predicate, doc! {"$set":set_doc})
+            .session(&mut tx)
+            .await?;
+        if update.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "OAuth credential changed while it was being refreshed".into(),
+            ));
+        }
+        super::personal_erasure_service::issuance::installed_in_session(
+            db,
+            &attempt,
+            crate::services::personal_erasure_service::issuance::InstallationTarget {
+                owner: &token.user_id,
+                provider: &token.provider_config_id,
+                collection: COLLECTION_NAME,
+                record_id: &token.id,
+            },
+            super::personal_erasure_service::issuance::installation_tokens(
+                Some(new_access_token),
+                new_refresh_token,
+            )?,
+            &mut tx,
+        )
+        .await?;
+        Ok(())
     }
+    .await;
+    super::org_membership_authority::finish(tx, result).await?;
+    super::personal_erasure_service::issuance::settled(db, &attempt, true).await?;
 
     tracing::info!(
         user_id = %token.user_id,
@@ -391,6 +547,7 @@ mod tests {
 
     fn test_provider() -> ProviderConfig {
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: "provider-id".to_string(),
             slug: "provider".to_string(),
             name: "Provider".to_string(),
@@ -421,6 +578,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "test".to_string(),
             revocation_seed_version: 0,
@@ -436,13 +594,13 @@ mod tests {
         provider.authorization_url =
             Some("https://marketplace.stripe.com/oauth/v2/authorize".into());
         provider.token_endpoint_auth_method = "client_secret_basic".into();
-        let params = vec![
+        let params = zeroize::Zeroizing::new(vec![
             ("grant_type".into(), "authorization_code".into()),
             ("code".into(), "ac_fixture".into()),
             ("redirect_uri".into(), "https://nyx.example/callback".into()),
             ("client_id".into(), "ca_fixture".into()),
             ("client_secret".into(), "sk_fixture".into()),
-        ];
+        ]);
         for grant in ["authorization_code", "refresh_token"] {
             let mut params = params.clone();
             params[0].1 = grant.into();
@@ -497,11 +655,11 @@ mod tests {
         provider.slug = "stripe".into();
         provider.authorization_url = Some("https://connect.stripe.com/oauth/authorize".into());
         assert!(!is_stripe_apps(&provider));
-        let params = vec![
+        let params = zeroize::Zeroizing::new(vec![
             ("redirect_uri".into(), "https://nyx.example/callback".into()),
             ("client_id".into(), "client".into()),
             ("code_verifier".into(), "verifier".into()),
-        ];
+        ]);
         let (username, password) =
             token_basic_auth_credentials(&provider, "client", Some("secret")).unwrap();
         let request = token_request(&provider, "https://example.com/token", &params)

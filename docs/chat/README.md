@@ -12,7 +12,9 @@ Each verified upstream contract wins over prose. If the deployed or pinned upstr
 1. [Architecture](01-architecture.md) defines default NyxAgent, retained typed `NyxIdChat`, flag-gated stateless Direct, legacy history-only compatibility, ownership, authentication, and the Aevatar cutover gate.
 2. [Wire contract](02-wire-contract.md) specifies every browser call for all implemented engines, strict bodies, legacy read/delete resources, actor `/state`, fences, and retries.
 3. [NyxAgent engine](08-nyxagent-engine.md) is the normative request, persistence, credential, recovery, and Stop contract, verified against NxyAgent `58f647e4`.
-   - [NyxBot orchestrator](09-nyxbot-orchestrator.md): Full access only, an orchestrator with disposable, key-scoped subagents that ask it for permission, and NyxBot as the agent behind channel bots through the Agent Event Gateway (0.31.0).
+   - [NyxBot orchestrator](09-nyxbot-orchestrator.md): three existing permission modes, personal-first service priority and explicit organization-use confirmation, an orchestrator with persistent, key-scoped specialists that ask it for permission for work it assigned (a specialist you talk to directly handles the request itself and reports missing access to you), and NyxBot as the agent behind channel bots through the Agent Event Gateway (0.31.0).
+   - [Owner CLI and invocation API](09-owner-cli-api.md): first-party owner commands, durable recovery, exact cancellation, authentication boundaries, and rollout requirements.
+   - [Source resources and image display](10-source-resources.md): shared image references, the first Notion source adapter, authorized file retrieval, display/inspection intents and attachment commit fences.
 4. [Direct Chrono-LLM spec](direct-chronollm-spec.md) is the detailed v3.2 contract implemented by the default-off `experimental:direct-chat-engine` surface.
 5. [Endpoint selector addendum](direct-chronollm-endpoints-addendum.md) is a proposed spec v4 follow-up. Its consolidated flag, typed endpoint configuration, `chat-config` API, and gear panel are not implemented by the current branch.
 6. [Stream protocol](03-stream-protocol.md) specifies SSE decoding, typed identity adoption, actor-projection convergence, terminal settlement, and transcript boundaries.
@@ -40,6 +42,7 @@ alternate send, stream, recovery, or control path.
 This set does not specify:
 
 - Channel bots, inbound channel events, or asynchronous channel replies. Those are separate webhook and relay surfaces under `/api/v1/channel-*`; see `docs/CHANNEL_BOT_RELAY.md` and `docs/CHANNEL_EVENT_GATEWAY.md`.
+- Phone, SMS and external speech connections to NyxBot specialists. See [NyxBot service adapters](../NYXBOT_SERVICE_ADAPTERS.md) for Telnyx, Twilio and ElevenLabs setup, capabilities, guest authority and billing.
 - The general downstream proxy at `/api/v1/proxy/**`, including node-routed and WebSocket proxy streaming. See `docs/PROXY_STREAMING_ARCHITECTURE.md` and `docs/NODE_PROXY_ARCHITECTURE.md`.
 - The older standalone chatbot products described by `docs/NYXID_CHATBOT_SPEC.md` and `docs/CHATBOT_3RD_PARTY_INTEGRATION_SPEC.md`.
 - Oracle browser-worker pools. See `docs/ORACLE_RELAY.md`.

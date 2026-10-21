@@ -19,9 +19,49 @@ export const agentSkillsSchema = z.object({
   skills: agentSkillSchema.array(),
   metadata: z.record(
     z.string(),
-    z.object({ description: z.string(), size_bytes: z.number() }),
+    z.object({
+      description: z.string(),
+      size_bytes: z.number(),
+      preload_paths: z.array(z.string()).default([]),
+      preload_bytes: z.number().default(0),
+    }),
   ),
 });
+export const skillPreloadFormSchema = z
+  .object({
+    enabled: z.boolean(),
+    paths: z.string().max(2048),
+  })
+  .superRefine((value, context) => {
+    if (!value.enabled) return;
+    const paths = value.paths
+      .split("\n")
+      .map((path) => path.trim())
+      .filter(Boolean);
+    let message: string | undefined;
+    if (paths.length > 8 || !paths.includes("SKILL.md")) {
+      message = "Include SKILL.md and choose at most 8 files.";
+    } else if (
+      new Set(paths).size !== paths.length ||
+      paths.some(
+        (path) =>
+          path.length > 256 ||
+          path.includes("\\") ||
+          path.includes(":") ||
+          Array.from(path).some((character) => {
+            const code = character.codePointAt(0)!;
+            return code < 32 || (code >= 127 && code <= 159);
+          }) ||
+          !/\.(md|txt)$/.test(path) ||
+          path
+            .split("/")
+            .some((part) => !part || part === "." || part === ".."),
+      )
+    ) {
+      message = "Use unique relative .md or .txt paths, one per line.";
+    }
+    if (message) context.addIssue({ code: "custom", path: ["paths"], message });
+  });
 export const skillSearchSchema = z.object({
   items: z
     .object({ id: z.string(), name: z.string(), description: z.string() })
@@ -61,6 +101,13 @@ export const authoredSkillPreviewSchema = z.object({
   version: z.string(),
   files: z.array(z.object({ path: z.string(), content: z.string() })),
   failure_code: z.string().nullish(),
+  failure_rules: z.array(z.string()).default([]),
+  failure_details_unavailable: z.boolean().default(false),
+  failure_stage: z.string().nullish(),
+  coverage: z.array(z.object({ id: z.string(), name: z.string(), expired: z.boolean(), unknown: z.boolean().default(false), reads: z.number(), percent: z.number(), lower_bound: z.boolean(), since_reset_percent: z.number().nullish() })).default([]),
+  coverage_omitted: z.number().default(0),
+  scope_unavailable: z.boolean().default(false),
+  scope: z.object({ status: z.enum(["complete", "reduced"]), omissions: z.array(z.string()) }).nullish(),
   published_version: z.string().nullish(),
   published_skill_id: z.string().nullish(),
   lease_live: z.boolean().nullish(),
@@ -80,10 +127,13 @@ export const learningProposalSchema = z.object({
   created_at: z.string(),
   updated_at: z.string(),
   failure_code: z.string().nullish(),
+  failure_rules: z.array(z.string()).default([]),
+  failure_stage: z.string().nullish(),
   published_skill_id: z.string().nullish(),
   published_version: z.string().nullish(),
   // Older servers omit it; their listed proposals always had current evidence.
   evidence_available: z.boolean().default(true),
+  auto_allowed: z.boolean().default(false),
   card_conversation_id: z.string().nullish(),
   acknowledgement_id: z.string().nullish(),
   card_status: z.string().nullish(),

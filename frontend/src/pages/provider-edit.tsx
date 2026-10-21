@@ -120,6 +120,8 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
       payload.revocation = {
         ...provider.revocation,
         url: patch.revocation_url,
+        // Endpoint edits require a new privileged review of effect semantics.
+        effect_scope: null,
       };
     }
     if (patch.revocation_url === "") {
@@ -469,6 +471,29 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     </FormItem>
                   )}
                 />
+                <FormField
+                  control={form.control}
+                  name="authorization_nonce_required"
+                  render={({ field }) => (
+                    <FormItem className="flex items-center justify-between rounded-lg border p-3">
+                      <div className="space-y-0.5">
+                        <FormLabel>Authorization nonce required</FormLabel>
+                        <p className="text-xs text-muted-foreground">
+                          Generate a fresh nonce for each hosted OAuth
+                          authorization attempt.
+                          Enable only when the provider requires it, after
+                          upgrading all backend replicas.
+                        </p>
+                      </div>
+                      <FormControl>
+                        <Switch
+                          checked={field.value ?? false}
+                          onCheckedChange={field.onChange}
+                        />
+                      </FormControl>
+                    </FormItem>
+                  )}
+                />
               </>
             )}
 
@@ -736,7 +761,8 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     Revocation: {provider.revocation.style},{" "}
                     {provider.revocation.url}; authentication:{" "}
                     {provider.revocation.auth}; revokes grant:{" "}
-                    {provider.revocation.revokes_grant ? "Yes" : "No"}
+                    {provider.revocation.revokes_grant ? "Yes" : "No"}; reviewed effect scope:{" "}
+                    {provider.revocation.effect_scope ?? "Unknown (remote token revocation withheld)"}
                   </p>
                 )}
               </div>

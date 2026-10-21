@@ -1,4 +1,5 @@
 import { ACCOUNT_PANEL_KEYS, parseAccountPanelSearch, type AccountPanel, type AccountPanelParams } from "./account-panel-search";
+import { parseRawChannelBotReturnTo } from "@/schemas/channel-bot-setup";
 import { isHostedConnectLink } from "@/lib/assistant/hosted-connect-link";
 
 export type AssistantModalLinkTarget =
@@ -26,6 +27,8 @@ function safeChannelSetupSearch(url: URL): string {
     const value = url.searchParams.get(key)?.trim();
     if (value) params.set(key, value.slice(0, MAX_SETUP_LABEL_LENGTH));
   }
+  const returnTo = parseRawChannelBotReturnTo(url.search);
+  if (returnTo) params.set("return_to", returnTo);
   const serialized = params.toString();
   return serialized ? `?${serialized}` : "";
 }

@@ -7,6 +7,7 @@ pub mod api_key_credential;
 pub mod approval_grant;
 pub mod approval_request;
 pub mod assistant_action_receipt;
+pub mod assistant_resource;
 pub mod assistant_wire_log;
 pub mod audit_log;
 pub mod auth_device_code;
@@ -14,6 +15,7 @@ pub mod authorization_code;
 pub mod billing_ledger;
 pub mod billing_rate_cache;
 pub mod billing_target;
+pub mod billing_tax_profile;
 pub mod billing_topup_session;
 pub mod billing_wallet;
 pub mod bson_bytes;
@@ -26,7 +28,9 @@ pub mod channel_connect_link;
 pub mod channel_conversation;
 pub mod channel_event_log;
 pub mod channel_message;
+pub mod channel_reply_delivery;
 pub mod channel_send_claim;
+pub mod channel_text_delivery;
 pub mod channel_thread;
 pub mod channel_thread_follow;
 pub mod cli_pairing;
@@ -44,14 +48,17 @@ pub mod device_pubkey_lockout;
 pub mod downstream_service;
 pub mod durable_operation_execution;
 pub mod durable_operation_grant;
+pub mod feature_flag_definition;
 pub mod feature_flag_metadata;
 pub mod feature_flag_override;
 pub mod group;
+pub(crate) mod hmac_keyset;
 pub mod invite_code;
 pub mod login_approval;
 pub mod login_client_context;
 pub mod login_code;
 pub mod login_grant;
+pub mod managed_execution;
 pub mod mcp_notification;
 pub mod mcp_session;
 pub mod mfa_factor;
@@ -77,9 +84,18 @@ pub mod org_invite;
 pub mod org_membership;
 pub mod org_role_scope;
 pub mod ownership_transfer;
+pub mod personal_erasure;
 pub mod platform_binding;
 pub mod platform_bot_config;
+pub mod platform_bot_runtime_controls;
 pub mod platform_credential;
+pub mod platform_link_intent;
+pub mod platform_manager_ingress;
+pub mod platform_manager_management;
+pub mod platform_personal_binding;
+pub mod platform_public_budget;
+pub mod platform_public_session;
+pub mod platform_public_turn;
 pub mod platform_settings;
 pub mod platform_setup;
 pub mod provider_config;
@@ -87,6 +103,7 @@ pub mod pushed_authorization_request;
 pub mod refresh_token;
 pub mod reply_token_use;
 pub mod role;
+pub mod security_replica;
 pub mod service_account;
 pub mod service_account_key_read_grant;
 pub mod service_account_token;
@@ -121,6 +138,7 @@ pub mod assistant_agent;
 pub mod assistant_agent_credential;
 pub mod assistant_agent_learning;
 pub mod assistant_attachment;
+pub mod assistant_channel_media;
 pub mod assistant_checkpoint;
 pub mod assistant_conversation;
 pub mod assistant_group;
@@ -128,10 +146,12 @@ pub mod assistant_message;
 pub mod assistant_message_feedback;
 pub mod assistant_profile_route;
 pub mod assistant_settings;
+pub mod assistant_skill_draft_attempt;
 pub mod catalog_skill_revision;
 pub mod channel_delivery;
 pub mod channel_email;
 pub mod nyxbot_channel;
+pub mod nyxbot_image_delivery;
 pub mod service_change_event;
 pub mod usage_rollup_daily;
 pub mod usage_rollup_hourly;
@@ -157,12 +177,19 @@ pub mod trigger_schedule;
 
 pub mod assistant_upload;
 pub mod assistant_upload_retention;
+pub mod lark_base_write;
+pub mod lark_base_write_photo;
 pub mod permission_policy;
 
 pub mod assistant_voice;
 
 pub mod assistant_voice_session;
 pub mod machine_access;
+pub mod machine_free_slot;
+pub mod remote_machine;
+pub mod remote_machine_bootstrap;
+pub mod remote_machine_operation;
+pub mod remote_machine_outbox;
 pub mod service_concurrency;
 pub mod service_preference;
 
@@ -170,4 +197,35 @@ pub mod async_service_operation;
 
 pub mod catalog_icon;
 
+pub mod machine_runtime_billing;
+
+pub mod machine_oauth_consent_request;
+
+pub mod machine_external_execution;
+pub mod machine_external_grant;
+
+pub mod remote_machine_event;
+
 pub mod platform_installation;
+pub mod platform_manager_delivery;
+pub mod remote_machine_storage;
+
+pub mod channel_adapter;
+pub mod platform_public_contract;
+
+pub(crate) mod platform_entry_discord_installation;
+
+pub(crate) mod platform_entry_gateway;
+
+pub(crate) mod platform_entry_identity;
+
+pub(crate) mod platform_entry_projection;
+
+pub mod assistant_invocation;
+pub(crate) mod platform_native_reply_handle;
+
+pub mod credit_allocation_request;
+pub mod credit_service_limit;
+pub mod oauth_delegation_authority;
+
+pub mod platform_help;

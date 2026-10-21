@@ -20,6 +20,13 @@ struct FakeLago {
 }
 #[async_trait::async_trait]
 impl LagoApi for FakeLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        Ok(crate::services::billing::taxes::zero_config())
+    }
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
         Ok(owner.external_customer_id.clone())
     }
@@ -1166,19 +1173,31 @@ async fn x_billing_each_operation_settles_at_its_own_price_and_unpriced_at_base(
         .mount(&server)
         .await;
     let billing = ChannelBilling::for_bot(&state.db, &state.billing, &bot, None).unwrap();
-    for response in [
-        billing
-            .verify_account(state.http_client.get(server.uri()))
-            .await,
-        billing
-            .send_post(state.http_client.post(server.uri()))
-            .await,
-        billing.send(state.http_client.post(server.uri())).await,
-    ] {
+    // This checks operation prices, not concurrent wallet settlement. Wait for
+    // each deferred settlement before starting the next: contention may defer
+    // a row to the production recovery worker, which this fixture does not run.
+    for operation in [Op::AccountVerify, Op::PostReply, Op::DmSend] {
+        let response = match operation {
+            Op::AccountVerify => {
+                billing
+                    .verify_account(state.http_client.get(server.uri()))
+                    .await
+            }
+            Op::PostReply => {
+                billing
+                    .send_post(state.http_client.post(server.uri()))
+                    .await
+            }
+            Op::DmSend => billing.send(state.http_client.post(server.uri())).await,
+            _ => unreachable!("outgoing operation fixture"),
+        };
         assert!(response.unwrap().status().is_success());
+        settled(&state).await;
     }
     billing.received("901").await.unwrap();
+    settled(&state).await;
     billing.received_chat("902").await.unwrap();
+    settled(&state).await;
     billing.received_post("903").await.unwrap();
 
     let rows = settled(&state).await;

@@ -24,6 +24,22 @@ pub(crate) struct Fixture {
     pub(crate) org: String,
 }
 
+async fn assigned_thread(
+    f: &Fixture,
+    actor: &str,
+    thread: &AssistantConversation,
+) -> AssistantConversation {
+    let nyxbot =
+        super::assistant_authority_tests::new_orchestrator(&f.state, actor, "Coordinate").await;
+    super::assistant_authority_tests::pin_assignment(
+        &f.state.db,
+        actor,
+        &thread.id,
+        Some(&nyxbot.id),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn org_agent_upload_drafts_keep_member_identity_privacy_and_live_access() {
     use super::assistant_upload_service::owner_scope;
@@ -135,6 +151,7 @@ impl Fixture {
         (Self::with_db(db).await, memberships, reads)
     }
     async fn with_db(db: mongodb::Database) -> Self {
+        super::security_readiness_service::ready_test_replica(&db).await;
         engine::ensure_indexes(&db).await.unwrap();
         let ids: Vec<_> = (0..5).map(|_| Uuid::new_v4().to_string()).collect();
         for (i, id) in ids.iter().enumerate() {
@@ -155,9 +172,9 @@ impl Fixture {
                 .await
                 .unwrap();
         }
-        // These tests exercise the legacy permission-card contract explicitly:
-        // Autopilot keeps card assertions independent of access-mode prompts, and
-        // routed mode keeps the specialist request cards (production defaults to denied).
+        // Full access isolates organization ACL tests from owner confirmations.
+        // Tests of owner cards select Auto explicitly; routed mode preserves
+        // specialist request cards (production defaults to denied).
         for (i, id) in ids.iter().enumerate() {
             db.collection(crate::models::assistant_settings::COLLECTION_NAME)
                 .insert_one(crate::models::assistant_settings::AssistantSettings {
@@ -228,7 +245,7 @@ impl Fixture {
         .unwrap()
         .unwrap()
     }
-    async fn service(&self, owner: &str, slug: &str) -> String {
+    pub(crate) async fn service(&self, owner: &str, slug: &str) -> String {
         let endpoint = Uuid::new_v4().to_string();
         let id = Uuid::new_v4().to_string();
         self.state
@@ -252,7 +269,7 @@ impl Fixture {
             .unwrap();
         id
     }
-    async fn key(&self, row: &AssistantConversation) -> ApiKey {
+    pub(crate) async fn key(&self, row: &AssistantConversation) -> ApiKey {
         self.state
             .db
             .collection(crate::models::api_key::COLLECTION_NAME)
@@ -289,10 +306,11 @@ async fn org_agent_auth_resolves_access_once_and_reuses_only_within_request() {
     )
     .await
     .unwrap();
-    engine::begin_turn(
+    let private = engine::begin_turn(
         &f.state.db,
         &f.admin,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: vec![upload.id.clone()],
             conversation_id: Some(row.id.clone()),
@@ -305,6 +323,11 @@ async fn org_agent_auth_resolves_access_once_and_reuses_only_within_request() {
     )
     .await
     .unwrap();
+    // A member's private thread of an organization agent: the member's own
+    // message never reports to NyxBot and no group membership applies.
+    assert_eq!(private.agent_owner_id.as_deref(), Some(f.org.as_str()));
+    assert_eq!(private.active_turn.as_ref().unwrap().report_to, None);
+    assert!(!private.active_turn.as_ref().unwrap().with_nyxbot);
     let service = f.service(&f.org, "allowed").await;
     team::set_grants(
         &f.state.db,
@@ -611,6 +634,7 @@ async fn org_agent_revocation_refuses_key_tool_turn_and_queued_work() {
             &f.state.db,
             &f.member,
             &engine::TurnRequest {
+                acknowledgement_id: None,
                 retry_of: None,
                 attachment_ids: Vec::new(),
                 conversation_id: Some(row.id.clone()),
@@ -629,6 +653,7 @@ async fn org_agent_revocation_refuses_key_tool_turn_and_queued_work() {
             &f.state.db,
             &f.member,
             &engine::TurnRequest {
+                acknowledgement_id: None,
                 retry_of: None,
                 attachment_ids: Vec::new(),
                 conversation_id: None,
@@ -971,6 +996,7 @@ async fn nyxbot_delegates_to_usable_org_agents_with_qualified_names() {
         Some(f.org.as_str())
     );
     assert_eq!(f.key(&member_thread).await.user_id, f.member);
+    let member_thread = assigned_thread(&f, &f.member, &member_thread).await;
     let access = org_agents::resolve_key_access(&f.state.db, &f.member, Some(&f.org))
         .await
         .unwrap();
@@ -1203,6 +1229,7 @@ async fn org_agent_maintainer_requests_keep_cards_and_sync_every_member_key() {
             .await
             .unwrap();
     let service = f.service(&f.org, "requested-service").await;
+    let admin_thread = assigned_thread(&f, &f.admin, &admin_thread).await;
     let chat = acks::for_key(
         &f.state.db,
         &f.admin,
@@ -1357,6 +1384,7 @@ async fn org_agent_member_keeps_maintenance_cards_but_revocation_blocks_new_and_
     let thread = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
         .await
         .unwrap();
+    let thread = assigned_thread(&f, &f.member, &thread).await;
     // The shipped agent-maintenance ACL includes Members, independently of
     // write authority on other org resources. Keep that behavior unchanged.
     // Internal callers without an auth snapshot must resolve live authority.
@@ -1796,8 +1824,9 @@ async fn org_agent_machine_gateway_checks_member_and_node_owner_live() {
     let row = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
         .await
         .unwrap();
-    let (_, token, _) = super::node_service::create_registration_token(
+    let (_, token, _) = super::node_service::create_registration_token_for_actor(
         &f.state.db,
+        &f.admin,
         &f.org,
         "org-machine",
         100,
@@ -1837,6 +1866,23 @@ async fn org_agent_machine_gateway_checks_member_and_node_owner_live() {
     .unwrap();
     // This fixture represents an existing shared v1 assignment after cutover.
     f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME).update_one(doc! {"_id": &agent.id},doc! {"$set": {format!("machine_access.assignments.{}",node.id): bson::to_bson(&crate::models::machine_access::Assignment { capabilities: nyxid_machine::authority::Capabilities {shell:true,..Default::default()},legacy:true,..Default::default()}).unwrap()}}).await.unwrap();
+    let row = engine::begin_turn(
+        &f.state.db,
+        &f.member,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            conversation_id: Some(row.id.clone()),
+            agent_id: None,
+            text: "Use the organization machine".into(),
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
     let chat = acks::for_key(&f.state.db, &f.member, Some(&row.credential_api_key_id))
         .await
         .unwrap()
@@ -1938,7 +1984,7 @@ async fn org_agent_nyxbot_widening_card_belongs_to_requesting_member() {
         &f.state.db,
         &f.member,
         super::assistant_settings_service::Update {
-            skip_destructive_confirmation: Some(true),
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
             ..Default::default()
         },
     )
@@ -2038,6 +2084,22 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
         .insert_one(&catalog)
         .await
         .unwrap();
+    // Isolate skill pinning/organization authority from the separate generic
+    // service-approval policy. Native Ornn reads still traverse the real proxy.
+    for actor in [&f.member, &f.admin] {
+        super::approval_service::set_service_approval_config(
+            &f.state.db,
+            actor,
+            &catalog.id,
+            &catalog.name,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     zip.start_file("SKILL.md", zip::write::SimpleFileOptions::default())
         .unwrap();
@@ -2077,7 +2139,7 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
         &f.state.db,
         &f.member,
         super::assistant_settings_service::Update {
-            skip_destructive_confirmation: Some(true),
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
             ..Default::default()
         },
     )
@@ -2264,6 +2326,7 @@ async fn voice_confirmation_refuses_revoked_org_access_without_a_continuation() 
             db,
             &f.member,
             &engine::TurnRequest {
+                acknowledgement_id: None,
                 retry_of: None,
                 conversation_id: Some(thread.id.clone()),
                 text: "Delete the selected object".into(),
@@ -2277,10 +2340,21 @@ async fn voice_confirmation_refuses_revoked_org_access_without_a_continuation() 
         ))
         .await
         .unwrap();
+        // A voice turn on the member's private org-agent thread is the
+        // member's own work: no report target, no NyxBot group involvement.
+        let voice_turn = active.active_turn.as_ref().unwrap();
+        assert_eq!(
+            voice_turn.voice_request_id.as_deref(),
+            Some(request.id.as_str())
+        );
+        assert_eq!(voice_turn.report_to, None);
+        assert!(!voice_turn.with_nyxbot);
+        assert_eq!(active.agent_owner_id.as_deref(), Some(f.org.as_str()));
         let chat = acks::for_key(db, &f.member, Some(&active.credential_api_key_id))
             .await
             .unwrap()
             .unwrap();
+        assert!(!chat.involved());
         let card = Box::pin(acks::request(
             db,
             &chat,
@@ -2355,6 +2429,17 @@ async fn org_specialist_access_request_is_denied_by_default_and_routed_when_allo
     let thread = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
         .await
         .unwrap();
+    // The member's NyxBot assigned this work (issue #1883): only then is a
+    // missing grant a NyxBot-routed request rather than a plain report.
+    let nyxbot =
+        super::assistant_authority_tests::new_orchestrator(&f.state, &f.member, "Coordinate").await;
+    let thread = super::assistant_authority_tests::pin_assignment(
+        &f.state.db,
+        &f.member,
+        &thread.id,
+        Some(&nyxbot.id),
+    )
+    .await;
     let access = org_agents::resolve_key_access(&f.state.db, &f.member, Some(&f.org))
         .await
         .unwrap();
@@ -2367,6 +2452,7 @@ async fn org_specialist_access_request_is_denied_by_default_and_routed_when_allo
     .await
     .unwrap()
     .unwrap();
+    assert!(chat.involved());
     let service = f.service(&f.org, "org-wiki").await;
     let (value, card) = acks::service_gate(&f.state.db, &chat, &service, "org-wiki", "Wiki", false)
         .await
@@ -2384,6 +2470,19 @@ async fn org_specialist_access_request_is_denied_by_default_and_routed_when_allo
             .await
             .unwrap(),
         0
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {
+                "event_type": "mcp_tool_call",
+                "event_data.service_id": &service,
+            })
+            .await
+            .unwrap(),
+        0,
+        "a service-gate refusal must not reach upstream execution or MCP audit"
     );
     let audit = f
         .state

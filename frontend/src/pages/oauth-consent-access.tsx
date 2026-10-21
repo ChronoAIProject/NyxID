@@ -10,8 +10,7 @@ import { cn } from "@/lib/utils";
 
 const LEVEL_OPTIONS: readonly { value: AccessLevel; label: string }[] = [
   { value: "off", label: "Off" },
-  { value: "read", label: "Read" },
-  { value: "write", label: "Read & write" },
+  { value: "allow", label: "Allow" },
 ];
 
 function LevelControl({
@@ -30,6 +29,36 @@ function LevelControl({
       role="radiogroup"
       aria-label={label}
       className="flex shrink-0 gap-0.5 rounded-lg border border-hairline p-0.5"
+      onKeyDown={(event) => {
+        const forward = event.key === "ArrowRight" || event.key === "ArrowDown";
+        const backward = event.key === "ArrowLeft" || event.key === "ArrowUp";
+        if (
+          !forward &&
+          !backward &&
+          event.key !== "Home" &&
+          event.key !== "End"
+        )
+          return;
+        event.preventDefault();
+        const options = LEVEL_OPTIONS.filter(
+          (option) => !offDisabled || option.value !== "off",
+        );
+        const current = options.findIndex((option) => option.value === value);
+        const next =
+          event.key === "Home"
+            ? 0
+            : event.key === "End"
+              ? options.length - 1
+              : (current + (forward ? 1 : -1) + options.length) %
+                options.length;
+        const option = options[next];
+        if (!option) return;
+        onChange(option.value);
+        const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>(
+          "button:not(:disabled)",
+        );
+        buttons[next]?.focus();
+      }}
     >
       {LEVEL_OPTIONS.map((option) => {
         const disabled = offDisabled && option.value === "off";
@@ -39,14 +68,13 @@ function LevelControl({
             type="button"
             role="radio"
             aria-checked={value === option.value}
+            tabIndex={value === option.value ? 0 : -1}
             disabled={disabled}
             onClick={() => onChange(option.value)}
             className={cn(
-              "h-6 whitespace-nowrap rounded-md px-2 text-11 transition-colors",
+              "h-6 whitespace-nowrap rounded-md px-2 text-11 transition-colors focus-visible:outline-2 focus-visible:outline-ring",
               value === option.value
-                ? option.value === "write"
-                  ? "bg-warning/15 font-medium text-foreground"
-                  : "bg-overlay-strong font-medium text-foreground"
+                ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:text-foreground",
               disabled &&
                 "cursor-not-allowed opacity-40 hover:text-muted-foreground",
@@ -71,11 +99,7 @@ export interface ServiceAccessTableProps {
   readonly className?: string;
 }
 
-/**
- * Service access for agent apps (Claude, Codex and other MCP clients) in one
- * table: every service is readable by default, and writing is only ever
- * enabled by an explicit choice.
- */
+/** Service choices map to the OAuth grant enforced by the server. */
 export function ServiceAccessTable({
   clientName,
   rows,
@@ -87,6 +111,9 @@ export function ServiceAccessTable({
   className,
 }: ServiceAccessTableProps) {
   const [query, setQuery] = useState("");
+  const allowsFutureServices =
+    defaultLevel === "allow" &&
+    rows.every((row) => rowLevel(row, defaultLevel, overrides) === "allow");
   const needle = query.trim().toLowerCase();
   const visibleRows = needle
     ? rows.filter((row) =>
@@ -110,8 +137,9 @@ export function ServiceAccessTable({
         <code className="text-11 text-muted-foreground">proxy</code>
       </div>
       <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
-        Read lets {clientName} look things up. Write also lets it create, update
-        or delete, and you are still asked before risky actions.
+        Allow lets {clientName} read data and take actions, including creating,
+        updating or deleting data, using that service. Approval prompts depend
+        on your configured policies.
       </p>
 
       {rows.length > 0 && (
@@ -132,11 +160,13 @@ export function ServiceAccessTable({
       )}
 
       <div className="mt-2 overflow-hidden rounded-lg border border-border/60">
-        <div className="flex items-center justify-between gap-3 bg-overlay px-3 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-3 bg-overlay px-3 py-2">
           <div className="min-w-0">
             <p className="text-13 font-medium text-foreground">All services</p>
             <p className="text-11 text-text-tertiary">
-              Also applies to services you connect later
+              {allowsFutureServices
+                ? "Also applies to services you connect later"
+                : "New services stay off unless all services are allowed"}
             </p>
           </div>
           <LevelControl
@@ -145,7 +175,12 @@ export function ServiceAccessTable({
             onChange={onDefaultLevelChange}
           />
         </div>
-        <div className="max-h-72 divide-y divide-border/60 overflow-y-auto border-t border-border/60 lg:max-h-[26rem]">
+        <div
+          role="region"
+          aria-label="Service permissions"
+          tabIndex={0}
+          className="h-75 max-h-[20dvh] min-h-25 divide-y divide-border/60 overflow-y-auto overscroll-contain border-t border-border/60 focus-visible:outline-2 focus-visible:outline-ring"
+        >
           {loading ? (
             <p className="px-3 py-2.5 text-12 text-muted-foreground">
               Loading services...
@@ -195,8 +230,8 @@ export function ServiceAccessTable({
       </div>
 
       <p className="mt-2 text-11 leading-relaxed text-text-tertiary">
-        {clientName} can see the names of all your connected services so it can
-        tell you what to share. Credentials never leave NyxID.
+        {clientName} can discover the services you allow. NyxID supplies
+        credentials to those services without sharing them with {clientName}.
       </p>
     </section>
   );

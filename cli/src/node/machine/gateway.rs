@@ -17,7 +17,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Weak},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
@@ -37,9 +40,11 @@ pub struct Gateway {
 }
 struct Binding {
     job_id: String,
-    conversation_id: String,
+    conversation_id: Option<String>,
+    external_services: Option<Vec<nyxid_machine::authority::DeclaredService>>,
     report: Option<(String, Instant)>,
     authority_binding: Value,
+    cancelled: Arc<AtomicBool>,
 }
 struct Pending {
     job_id: String,
@@ -99,17 +104,20 @@ impl Gateway {
         };
         let mut tokens = self.tokens.lock().await;
         for binding in tokens.values_mut() {
-            if !jobs.finished(&binding.job_id).await
-                || binding
-                    .report
-                    .as_ref()
-                    .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(1))
+            let Some(terminal) = jobs.terminal_metadata(&binding.job_id).await else {
+                continue;
+            };
+            if binding
+                .report
+                .as_ref()
+                .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(1))
             {
                 continue;
             }
             let mut request = nyxid_machine::Request {
                 version: 1,
                 authority: None,
+                external_authority: None,
                 // Retain the correlation ID until acknowledged. A slow server
                 // may acknowledge an earlier attempt after this retry is sent.
                 request_id: binding
@@ -119,11 +127,19 @@ impl Gateway {
                     .unwrap_or_else(|| Uuid::new_v4().to_string()),
                 node_id: self.node_id.clone(),
                 operation: Operation::JobFinished,
-                parameters: json!({"job_id":binding.job_id,"conversation_id":binding.conversation_id,"runtime_id":self.runtime_id}),
+                parameters: json!({"job_id":binding.job_id,"runtime_id":self.runtime_id,"authority_binding":binding.authority_binding}),
                 timestamp: chrono::Utc::now().timestamp(),
                 nonce: Uuid::new_v4().to_string(),
                 signature: String::new(),
             };
+            if let Some(conversation) = &binding.conversation_id {
+                request.parameters["conversation_id"] = json!(conversation);
+            }
+            request
+                .parameters
+                .as_object_mut()
+                .expect("parameters object")
+                .extend(terminal.as_object().expect("terminal object").clone());
             request.signature = nyxid_machine::signing::sign(&request, &self.signing);
             let request_id = request.request_id.clone();
             if let Ok(mut message) = serde_json::to_value(request) {
@@ -152,10 +168,17 @@ impl Gateway {
             .retain(|_, binding| binding.job_id != job_id);
     }
     pub async fn cancel_jobs(&self, jobs: &[String]) {
-        self.tokens
+        // Revoke the gateway capability now, but retain only its safe report
+        // binding until terminal metadata is acknowledged by the backend.
+        for binding in self
+            .tokens
             .lock()
             .await
-            .retain(|_, binding| !jobs.contains(&binding.job_id));
+            .values()
+            .filter(|b| jobs.contains(&b.job_id))
+        {
+            binding.cancelled.store(true, Ordering::Release);
+        }
         let cancelled = {
             let mut pending = self.pending.lock().await;
             let ids: Vec<_> = pending
@@ -207,6 +230,22 @@ impl Gateway {
         conversation_id: &str,
         spec: &nyxid_machine::gateway::Environment,
     ) -> Result<BTreeMap<String, String>> {
+        self.environment_for(job_id, Some(conversation_id), spec)
+            .await
+    }
+    pub async fn environment_external(
+        &self,
+        job_id: &str,
+        spec: &nyxid_machine::gateway::Environment,
+    ) -> Result<BTreeMap<String, String>> {
+        self.environment_for(job_id, None, spec).await
+    }
+    async fn environment_for(
+        &self,
+        job_id: &str,
+        conversation_id: Option<&str>,
+        spec: &nyxid_machine::gateway::Environment,
+    ) -> Result<BTreeMap<String, String>> {
         let token = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
         self.jobs
             .upgrade()
@@ -222,9 +261,11 @@ impl Gateway {
             hash,
             Binding {
                 job_id: job_id.into(),
-                conversation_id: conversation_id.into(),
+                conversation_id: conversation_id.map(str::to_owned),
+                external_services: None,
                 report: None,
                 authority_binding: Value::Null,
+                cancelled: Arc::new(AtomicBool::new(false)),
             },
         );
         let mut env = BTreeMap::from([
@@ -296,6 +337,22 @@ impl Gateway {
             } else {
                 Value::Null
             };
+        }
+    }
+    pub async fn bind_external_authority(
+        &self,
+        job_id: &str,
+        authority: &nyxid_machine::authority::ExternalAuthority,
+    ) {
+        for binding in self
+            .tokens
+            .lock()
+            .await
+            .values_mut()
+            .filter(|binding| binding.job_id == job_id)
+        {
+            binding.authority_binding = json!({"kind":"external","context_id":authority.context_id,"grant_id":authority.grant_id,"grant_revision":authority.grant_revision,"assignment_revision":authority.assignment_revision,"lease_id":authority.lease_id});
+            binding.external_services = Some(authority.services.clone());
         }
     }
     pub async fn response(&self, id: &str, metadata: Value) {
@@ -391,7 +448,7 @@ async fn forward_inner(
         })
         .unwrap_or_default();
     let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    let (job_id, conversation_id, authority_binding) = {
+    let (job_id, conversation_id, authority_binding, external_services, cancelled) = {
         let tokens = gateway.tokens.lock().await;
         let Some(binding) = tokens.get(&hash) else {
             return Ok((StatusCode::UNAUTHORIZED, axum::Json(json!({"error":{"code":12401,"message":"A live job gateway token is required"}}))).into_response());
@@ -400,10 +457,12 @@ async fn forward_inner(
             binding.job_id.clone(),
             binding.conversation_id.clone(),
             binding.authority_binding.clone(),
+            binding.external_services.clone(),
+            binding.cancelled.clone(),
         )
     };
     let jobs = gateway.jobs.upgrade().context("machine stopped")?;
-    if !jobs.running(&job_id).await {
+    if cancelled.load(Ordering::Acquire) || !jobs.running(&job_id).await {
         return Ok((
             StatusCode::UNAUTHORIZED,
             axum::Json(json!({"error":{"code":12403,"message":"job_ended"}})),
@@ -417,6 +476,18 @@ async fn forward_inner(
         .unwrap_or("/");
     if !path.starts_with("/s/") && !path.starts_with("/git/") {
         return Ok(StatusCode::NOT_FOUND.into_response());
+    }
+    if let Some(services) = &external_services {
+        let slug = path.split('/').nth(2).unwrap_or_default();
+        if !services.iter().any(|service| service.slug == slug) {
+            return Ok((
+                StatusCode::FORBIDDEN,
+                axum::Json(
+                    json!({"error":{"code":12420,"message":"service_not_declared_for_job"}}),
+                ),
+            )
+                .into_response());
+        }
     }
     let header_timeout = if path.starts_with("/git/") {
         nyxid_machine::GIT_UPLOAD_TIMEOUT_SECS
@@ -454,14 +525,18 @@ async fn forward_inner(
     let mut signed = nyxid_machine::Request {
         version: 1,
         authority: None,
+        external_authority: None,
         request_id: id.to_string(),
         node_id: gateway.node_id.clone(),
         operation: Operation::ServiceCall,
-        parameters: json!({"job_id":job_id,"conversation_id":conversation_id,"authority_binding":authority_binding,"runtime_id":gateway.runtime_id,"path":path,"method":request.method().as_str(),"headers":headers}),
+        parameters: json!({"job_id":job_id,"authority_binding":authority_binding,"runtime_id":gateway.runtime_id,"path":path,"method":request.method().as_str(),"headers":headers}),
         timestamp: chrono::Utc::now().timestamp(),
         nonce: Uuid::new_v4().to_string(),
         signature: String::new(),
     };
+    if let Some(conversation) = conversation_id {
+        signed.parameters["conversation_id"] = json!(conversation);
+    }
     signed.signature = nyxid_machine::signing::sign(&signed, &gateway.signing);
     let mut metadata = serde_json::to_value(signed)?;
     metadata["type"] = json!("machine_service_call");
@@ -475,9 +550,9 @@ async fn forward_inner(
     let (body_tx, body_rx) = mpsc::channel(16);
     {
         let mut pending = gateway.pending.lock().await;
-        // Cancellation removes tokens before locking pending. Revalidate
+        // Cancellation marks tokens before locking pending. Revalidate
         // admission under this lock so it cannot miss a newly inserted call.
-        if !jobs.running(&job_id).await {
+        if cancelled.load(Ordering::Acquire) || !jobs.running(&job_id).await {
             return Ok((
                 StatusCode::UNAUTHORIZED,
                 axum::Json(json!({"error":{"code":12403,"message":"job_ended"}})),
@@ -751,6 +826,18 @@ mod tests {
         gateway.remove_job("different-job").await;
         let (tx, mut rx) = mpsc::channel(16);
         gateway.connect(tx).await;
+        gateway.cancel_jobs(std::slice::from_ref(&id)).await;
+        assert_eq!(
+            client
+                .get(format!("{}/s/llm-openai/models", gateway.url))
+                .bearer_auth(&env["NYXID_GATEWAY_TOKEN"])
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401,
+            "revoked gateway cannot serve a still-running job"
+        );
         jobs.cancel(&id).await.unwrap();
         jobs.result(&id, 5, 0, 0).await.unwrap();
         gateway.report_finished().await;
@@ -760,6 +847,12 @@ mod tests {
         let first: nyxid_machine::Request = serde_json::from_str(&first).unwrap();
         assert_eq!(first.operation, Operation::JobFinished);
         assert_eq!(first.parameters["runtime_id"], gateway.runtime_id);
+        assert_eq!(first.parameters["stop_reason"], "cancelled");
+        assert_eq!(first.parameters["timed_out"], false);
+        assert!(first.parameters["duration_ms"].is_u64());
+        assert!(
+            first.parameters.get("stdout").is_none() && first.parameters.get("stderr").is_none()
+        );
         assert_eq!(
             gateway.tokens.lock().await.len(),
             1,

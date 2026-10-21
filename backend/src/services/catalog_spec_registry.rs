@@ -655,6 +655,62 @@ mod tests {
     use crate::services::openapi_parser;
 
     #[test]
+    fn lark_base_write_registry_exposes_readonly_field_pages_and_closed_trusted_composite_for_all_four_slugs()
+     {
+        for slug in ["api-lark", "api-lark-bot", "api-feishu", "api-feishu-bot"] {
+            let spec = spec_for_slug(slug).unwrap();
+            let endpoints = openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let fields = endpoints
+                .iter()
+                .find(|ep| ep.name == "bitable_fields_list")
+                .unwrap();
+            assert_eq!(fields.method, "GET");
+            assert_eq!(
+                fields.path,
+                "/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+            );
+            assert_eq!(
+                fields.risk,
+                Some(crate::models::service_endpoint::EndpointRisk::Read)
+            );
+            let parameters = fields.parameters.as_ref().unwrap().as_array().unwrap();
+            for name in ["page_size", "page_token"] {
+                assert!(
+                    parameters
+                        .iter()
+                        .any(|p| p["name"] == name && p["in"] == "query" && p["required"] == false)
+                );
+            }
+            let composite = endpoints
+                .iter()
+                .find(|ep| ep.name == "bitable_record_create_with_attachments")
+                .unwrap();
+            assert_eq!(composite.method, "POST");
+            assert_eq!(
+                composite.path,
+                crate::services::lark_attachment_tool::COMPOSITE_PATH
+            );
+            assert_eq!(
+                composite.request_content_type.as_deref(),
+                Some("application/json")
+            );
+            let body = composite.request_body_schema.as_ref().unwrap();
+            assert_eq!(
+                body["required"],
+                serde_json::json!(["fields", "attachments"])
+            );
+            assert_eq!(body["additionalProperties"], false);
+            let mark = &spec["paths"][crate::services::lark_attachment_tool::COMPOSITE_PATH]["post"]
+                ["x-nyxid-managed-operation"];
+            assert_eq!(
+                mark,
+                &serde_json::json!({"kind":"lark_bitable_record_with_attachments","version":1,
+                "fields_operation":"bitable_fields_list","upload_operation":"bitable_media_upload","create_operation":"bitable_record_create"})
+            );
+        }
+    }
+
+    #[test]
     fn lark_approval_forwarding_uses_user_routes_and_mutation_marks() {
         for slug in ["api-lark", "api-feishu"] {
             let spec = spec_for_slug(slug).unwrap();
@@ -716,6 +772,64 @@ mod tests {
                 .unwrap_or_else(|error| panic!("spec '{key}' failed to parse: {error:?}"));
             assert!(!endpoints.is_empty(), "spec '{key}' has no operations");
         }
+    }
+
+    #[test]
+    fn firecrawl_overlay_exposes_render_cache_sitemap_and_provenance() {
+        let spec = spec_for_slug("api-firecrawl").unwrap();
+        let endpoints = openapi_parser::parse_hosted_openapi_spec_value(&spec).unwrap();
+        let scrape = endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "scrape")
+            .unwrap();
+        let map = endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "map_site")
+            .unwrap();
+        let scrape_request = scrape.request_body_schema.as_ref().unwrap();
+        let map_request = map.request_body_schema.as_ref().unwrap();
+        assert_eq!(scrape_request["additionalProperties"], true);
+        for control in ["formats", "waitFor", "timeout", "maxAge", "storeInCache"] {
+            assert!(
+                scrape_request["properties"].get(control).is_some(),
+                "scrape {control}"
+            );
+        }
+        for control in [
+            "sitemap",
+            "ignoreQueryParameters",
+            "ignoreCache",
+            "limit",
+            "timeout",
+        ] {
+            assert!(
+                map_request["properties"].get(control).is_some(),
+                "map {control}"
+            );
+        }
+        assert_eq!(
+            map_request["properties"]["sitemap"]["enum"],
+            serde_json::json!(["include", "only", "skip"])
+        );
+        let scrape_response = &spec["paths"]["/v2/scrape"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["properties"]["data"];
+        assert_eq!(scrape_response["properties"]["markdown"]["type"], "string");
+        for field in ["sourceURL", "url", "statusCode", "provider"] {
+            assert!(
+                scrape_response["properties"]["metadata"]["properties"]
+                    .get(field)
+                    .is_some(),
+                "scrape metadata {field}"
+            );
+        }
+        assert_eq!(
+            scrape_response["properties"]["metadata"]["properties"]["provider"]["properties"]["id"]
+                ["type"],
+            "string"
+        );
+        let map_response = &spec["paths"]["/v2/map"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["properties"]["links"];
+        assert_eq!(map_response["type"], "array");
     }
 
     #[test]

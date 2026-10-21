@@ -198,6 +198,11 @@ pub async fn commit_settlement(
                             Some(&key)
                         },
                     );
+                    let gross = fields
+                        .get("funding.wallet_charge_credits")
+                        .map(|v| Credits::from_bson(v.clone(), 1))
+                        .transpose()?
+                        .unwrap_or(wallet);
                     let result = rows
                         .update_one(
                             doc! {
@@ -219,7 +224,7 @@ pub async fn commit_settlement(
                         return Err(AppError::Internal("carry settlement lost its claim".into()));
                     }
                     Ok(FundingSettlement {
-                        wallet_charge_credits: wallet,
+                        wallet_charge_credits: gross,
                         lago_billable_quantity_micros: q,
                     })
                 }

@@ -1,3 +1,4 @@
+import { CREDIT_SCALE, parseCredits } from "@/lib/credits";
 import { creditsSchema } from "./credits";
 import { z } from "zod";
 import { billingMetricSchema } from "@/schemas/billing";
@@ -40,7 +41,19 @@ export const billingServiceScopeSchema = z.object({
   service_slugs: z.array(z.string()),
 });
 
+export const serviceLimitSchema = z.object({
+  key: z.string(),
+  label: z.string().nullable().optional(),
+  service_ids: z.array(z.string()),
+  service_slugs: z.array(z.string()),
+  limit: creditsSchema,
+  consumed: creditsSchema,
+  reserved: creditsSchema,
+  held: creditsSchema.optional(),
+});
+
 export const creditGrantSchema = z.object({
+  service_limits: z.array(serviceLimitSchema).optional(),
   id: z.string(),
   batch_id: z.string(),
   schedule_id: z.string().nullable().optional(),
@@ -53,7 +66,11 @@ export const creditGrantSchema = z.object({
   target_kind: billingTargetKindSchema,
   target_org_ids: z.array(z.string()).optional(),
   target_group_ids: z.array(z.string()).optional(),
-  amount_credits: z.number().int().positive(),
+  reclaimed: creditsSchema.optional(),
+  terminal_amount: creditsSchema.optional(),
+  held: creditsSchema.optional(),
+  revoke_requested_at: z.string().nullable().optional(),
+  amount_credits: z.number().int().nonnegative(),
   amount: creditsSchema.optional(),
   amount_micros: z.number().int().nonnegative(),
   remaining: creditsSchema.optional(),
@@ -88,6 +105,7 @@ export const adminCreditGrantListSchema = creditGrantListSchema.extend({
 });
 
 export const creditSchedulePeriodSchema = z.object({
+  service_limits: z.array(serviceLimitSchema).optional(),
   target_user_ids: z.array(z.string()).optional(),
   target_kind: billingTargetKindSchema.optional(),
   target_org_ids: z.array(z.string()).optional(),
@@ -110,8 +128,9 @@ export const creditScheduleRecipientSchema = z.object({
 });
 
 export const creditScheduleSchema = z.object({
+  service_limits: z.array(serviceLimitSchema).optional(),
   id: z.string(),
-  amount_credits: z.number().int().positive(),
+  amount_credits: z.number().int().nonnegative(),
   amount: creditsSchema.optional(),
   amount_micros: z.number().int().nonnegative(),
   recurrence: scheduleRecurrenceSchema,
@@ -146,9 +165,22 @@ const scheduleFormExpiryPolicySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("never") }),
 ]);
 
+export const serviceLimitInputSchema = z.object({
+  label: z.string().trim().max(120),
+  service_refs: z
+    .array(z.string())
+    .min(1, "Select at least one service")
+    .max(100),
+  amount: creditsSchema.refine(
+    (v) => creditsSchema.safeParse(v).success && parseCredits(v) > 0n,
+    "Enter a positive credit limit",
+  ),
+});
 export const scheduleFormSchema = z
   .object({
-    amount_credits: z.number().int().min(1).max(1_000_000),
+    amount: creditsSchema.optional(),
+    service_limits: z.array(serviceLimitInputSchema).optional(),
+    amount_credits: z.number().int().min(0).max(1_000_000),
     recurrence: scheduleRecurrenceSchema,
     expiry: scheduleFormExpiryPolicySchema,
     target_kind: billingTargetKindSchema,
@@ -161,6 +193,27 @@ export const scheduleFormSchema = z
   })
   .superRefine((value, ctx) => {
     refineBillingTargets(value, ctx);
+    if (
+      value.amount === undefined
+        ? value.amount_credits < 1
+        : !creditsSchema.safeParse(value.amount).success ||
+          parseCredits(value.amount) <= 0n ||
+          parseCredits(value.amount) > 1_000_000n * CREDIT_SCALE
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: [value.amount === undefined ? "amount_credits" : "amount"],
+        message: "Enter a positive amount up to 1,000,000 credits",
+      });
+    if (value.service_limits && value.amount)
+      refineServiceLimits(
+        {
+          ...value,
+          amount: value.amount,
+          service_limits: value.service_limits,
+        },
+        ctx,
+      );
     if (
       value.expiry.kind === "after_days" &&
       (!Number.isInteger(value.expiry.days) ||
@@ -381,3 +434,111 @@ export const allowanceBundleResponseSchema = z.object({
   allowances: z.array(usageAllowanceSchema),
 });
 export type AllowanceBundleForm = z.infer<typeof allowanceBundleFormSchema>;
+
+export const allocationFormSchema = z
+  .object({
+    amount: creditsSchema.refine(
+      (v) =>
+        creditsSchema.safeParse(v).success &&
+        parseCredits(v) > 0n &&
+        parseCredits(v) <= 1_000_000n * CREDIT_SCALE,
+      "Enter more than zero and at most 1,000,000 credits",
+    ),
+    recurrence: z.enum(["one_time", "daily", "weekly", "monthly"]),
+    expires_at: z.string(),
+    expiry: scheduleFormExpiryPolicySchema,
+    target_kind: billingTargetKindSchema,
+    target_user_ids: z.array(z.string()).max(500),
+    target_org_ids: z.array(z.string()).max(500),
+    target_group_ids: z.array(z.string()).max(500),
+    all_services: z.boolean(),
+    service_refs: z.array(z.string()).max(100),
+    service_limits: z.array(serviceLimitInputSchema).max(20),
+    reason: z.string().trim().max(2_000),
+  })
+  .superRefine((value, ctx) => {
+    refineBillingTargets(value, ctx);
+    if (!value.all_services && !value.service_refs.length)
+      ctx.addIssue({
+        code: "custom",
+        path: ["service_refs"],
+        message: "Select eligible services",
+      });
+    if (
+      value.recurrence === "one_time" &&
+      value.expires_at &&
+      (!Number.isFinite(Date.parse(value.expires_at)) ||
+        Date.parse(value.expires_at) <= Date.now())
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["expires_at"],
+        message: "Choose a future expiry",
+      });
+    if (
+      value.recurrence !== "one_time" &&
+      value.expiry.kind === "after_days" &&
+      (!Number.isInteger(value.expiry.days) ||
+        value.expiry.days < 1 ||
+        value.expiry.days > 3650)
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["expiry", "days"],
+        message: "Enter 1 to 3,650 days",
+      });
+    refineServiceLimits(value, ctx);
+  });
+export type AllocationForm = z.infer<typeof allocationFormSchema>;
+
+function refineServiceLimits(
+  value: {
+    amount: string;
+    all_services: boolean;
+    service_refs: string[];
+    service_limits: z.infer<typeof serviceLimitInputSchema>[];
+  },
+  ctx: z.RefinementCtx,
+) {
+  const seen = new Set<string>();
+  value.service_limits.forEach((rule, index) => {
+    if (
+      creditsSchema.safeParse(rule.amount).success &&
+      creditsSchema.safeParse(value.amount).success &&
+      parseCredits(rule.amount) > parseCredits(value.amount)
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["service_limits", index, "amount"],
+        message: "A limit cannot exceed the shared total",
+      });
+    rule.service_refs.forEach((id) => {
+      if (seen.has(id))
+        ctx.addIssue({
+          code: "custom",
+          path: ["service_limits", index, "service_refs"],
+          message: "Each service can belong to only one limit",
+        });
+      if (!value.all_services && !value.service_refs.includes(id))
+        ctx.addIssue({
+          code: "custom",
+          path: ["service_limits", index, "service_refs"],
+          message: "Limits must select eligible services",
+        });
+      seen.add(id);
+    });
+  });
+}
+export const allocationSummarySchema = z.object({
+  allocations_v1: z.boolean(),
+  summary: z.object({
+    remaining: creditsSchema,
+    unreserved: creditsSchema,
+    held: creditsSchema,
+    pending_activation: creditsSchema,
+    pending_reclaim: creditsSchema,
+    expired_awaiting_cleanup: creditsSchema,
+    restricted: creditsSchema,
+    generated_at: z.string(),
+  }),
+});

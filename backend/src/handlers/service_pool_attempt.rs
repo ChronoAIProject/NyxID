@@ -1,5 +1,6 @@
 use super::*;
 use crate::models::usage_meter::{PoolAttemptAccounting, PoolAttemptOutcome, PoolCompletionCause};
+use tokio_stream::wrappers::ReceiverStream;
 
 #[derive(Clone)]
 pub(super) struct AttemptContext {
@@ -394,12 +395,7 @@ impl Completion {
                 });
             // Await real settlement, not just the deferred-intent spawn: the
             // backup may need these exact same wallet/grant/allowance funds.
-            let model = self
-                .observability
-                .usage
-                .as_ref()
-                .and_then(|usage| usage.model.clone());
-            Box::pin(self.billing.settle(&self.metered, platform, resale, model)).await?;
+            Box::pin(self.billing.settle(&self.metered, platform, resale, None)).await?;
         } else {
             Box::pin(crate::services::billing::pool_attempt::finish(
                 &self.db,
@@ -877,6 +873,13 @@ mod tests {
         let db = crate::test_utils::connect_transaction_test_database(label).await;
         let state = crate::test_utils::test_app_state(db.clone());
         let auth = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &auth.user_id.to_string(),
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let request_id = uuid::Uuid::new_v4().to_string();
         let metadata = PoolAttemptAccounting {
             pool_id: "pool".into(),
@@ -975,17 +978,7 @@ mod tests {
     async fn pool_reported_sse_usage_survives_cancellation_before_settlement_acknowledgment() {
         let (db, mut completion, finalization) = completion_fixture("pool_cancel_settlement").await;
         let request_id = completion.context.request_id.clone();
-        completion.observability.usage = Some(llm_usage_service::UsageAuditContext {
-            db: db.clone(),
-            user_id: completion.auth.user_id.to_string(),
-            provider_slug: None,
-            service_id: None,
-            model: Some("pool-model".into()),
-            path: "chat/completions".into(),
-            api_key_id: None,
-            api_key_name: None,
-        });
-        completion.observe(b"data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n");
+        completion.observe(b"data: {\"model\":\"gpt-5.5\",\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n");
         {
             let finish = completion.finish_inner(PoolCompletionCause::Complete);
             tokio::pin!(finish);
@@ -1009,7 +1002,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.quantity, Some(3));
-        assert_eq!(row.model.as_deref(), Some("pool-model"));
+        // Recorded for reporting only; the pricing model stays unset.
+        assert_eq!(
+            (row.model.as_deref(), row.reported_model.as_deref()),
+            (None, Some("gpt-5.5"))
+        );
         assert_eq!(row.status, UsageStatus::Finalized);
         assert_eq!(
             row.pool_attempt.unwrap().outcome,

@@ -164,10 +164,10 @@ fn base<'a>(adapter: &'a XAdapter, credentials: &'a BotCredentials<'_>) -> &'a s
     X_API_BASE
 }
 
+const PROTOCOL_ERROR_MESSAGE: &str = "X API request failed; retry or check the connected account";
+
 fn protocol_error() -> AppError {
-    AppError::ChannelPlatformError(
-        "X API request failed; retry or check the connected account".to_string(),
-    )
+    AppError::ChannelPlatformError(PROTOCOL_ERROR_MESSAGE.to_string())
 }
 
 fn numeric_id(id: &str) -> bool {
@@ -279,6 +279,7 @@ fn response_error_with(
 }
 
 async fn send(request: reqwest::RequestBuilder) -> AppResult<reqwest::Response> {
+    crate::services::channel_platform::mark_provider_attempt();
     request
         .timeout(Duration::from_secs(20))
         .send()
@@ -315,6 +316,37 @@ async fn send_response_json(response: reqwest::Response) -> AppResult<Value> {
         ));
     }
     response_json(response).await
+}
+
+/// Media uploads/status may return a refusal in a successful HTTP response.
+/// Partial errors alongside usable data do not invalidate the result.
+async fn media_response_json(response: reqwest::Response) -> AppResult<Value> {
+    let body = send_response_json(response).await.map_err(media_error)?;
+    if body.get("data").is_none_or(Value::is_null)
+        && (body.get("error").is_some() || body.get("errors").is_some())
+    {
+        return Err(
+            crate::services::channel_platform::classify_upstream_refusal(
+                "X",
+                "provider refusal",
+                &[],
+            ),
+        );
+    }
+    Ok(body)
+}
+
+// Keep transport/malformed-response uncertainty local to media calls. Polling,
+// identity checks and ordinary text sends retain their diagnostic errors.
+fn media_error(error: AppError) -> AppError {
+    if matches!(&error, AppError::ChannelPlatformError(message)
+        if message == PROTOCOL_ERROR_MESSAGE
+            || message == crate::services::channel_billing_service::BILLED_SEND_UNKNOWN_MESSAGE)
+    {
+        media::upload_failed()
+    } else {
+        error
+    }
 }
 
 async fn response_json(response: reqwest::Response) -> AppResult<Value> {
@@ -389,6 +421,8 @@ fn normalize(event: &Value, includes: &Value, own_id: &str) -> AppResult<Option<
         .split_once('-')
         .is_some_and(|(a, b)| numeric_id(a) && numeric_id(b));
     Ok(Some(InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: id.to_string(),
         conversation_id: conversation.to_string(),
         conversation_type: if private { "private" } else { "group" }.to_string(),
@@ -810,7 +844,7 @@ impl PlatformAdapter for XAdapter {
                     (MediaKind::Video, _) => "dm_video",
                     _ => return Err(AppError::ChannelMediaUnsupported),
                 };
-                let upload = response_json(
+                let upload = media_response_json(
                     send(
                         http.post(format!("{}/2/media/upload", base(self, credentials)))
                             .bearer_auth(credentials.token)
@@ -820,12 +854,15 @@ impl PlatformAdapter for XAdapter {
                                     .part("media", media::multipart_part(attachment)?),
                             ),
                     )
-                    .await?,
+                    .await
+                    .map_err(media_error)?,
                 )
                 .await?;
-                let media_id = upload["data"]["id"].as_str().ok_or_else(protocol_error)?;
+                let media_id = upload["data"]["id"]
+                    .as_str()
+                    .ok_or_else(media::upload_failed)?;
                 if !numeric_id(media_id) {
-                    return Err(protocol_error());
+                    return Err(media::upload_failed());
                 }
                 // Video/GIF uploads may finish asynchronously. Never dispatch a
                 // DM before processing succeeds, and bound the entire wait.
@@ -840,7 +877,7 @@ impl PlatformAdapter for XAdapter {
                                     .unwrap_or(1)
                                     .clamp(1, 10);
                                 tokio::time::sleep(Duration::from_secs(delay)).await;
-                                let status = response_json(
+                                let status = media_response_json(
                                     send(
                                         http.get(format!(
                                             "{}/2/media/upload",
@@ -849,20 +886,21 @@ impl PlatformAdapter for XAdapter {
                                         .bearer_auth(credentials.token)
                                         .query(&[("media_id", media_id), ("command", "STATUS")]),
                                     )
-                                    .await?,
+                                    .await
+                                    .map_err(media_error)?,
                                 )
                                 .await?;
                                 processing = status["data"]["processing_info"].clone();
                                 if processing.is_null() {
-                                    return Err(protocol_error());
+                                    return Err(media::upload_failed());
                                 }
                             }
-                            _ => return Err(protocol_error()),
+                            _ => return Err(media::upload_failed()),
                         }
                     }
                 })
                 .await
-                .map_err(|_| protocol_error())??;
+                .map_err(|_| media::upload_failed())??;
                 let message = OutboundReply {
                     attachments: vec![],
                     text: attachment.caption.clone(),
@@ -871,7 +909,8 @@ impl PlatformAdapter for XAdapter {
                 };
                 last = self
                     .send_reply(http, credentials, conversation_id, &message)
-                    .await?;
+                    .await
+                    .map_err(media_error)?;
             }
             return Ok(last);
         }
@@ -1158,6 +1197,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::services::channel_platform::MaterializedAttachment;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path, query_param},
@@ -1419,6 +1459,90 @@ mod tests {
         );
         assert!(bodies[0].get("attachments").is_some());
         assert!(bodies[1].get("attachments").is_none());
+    }
+
+    #[test]
+    fn x_media_errors_map_only_unknown_outcomes_to_uncertain_delivery() {
+        use crate::services::channel_billing_service::BILLED_SEND_UNKNOWN_MESSAGE;
+        for message in [PROTOCOL_ERROR_MESSAGE, BILLED_SEND_UNKNOWN_MESSAGE] {
+            let error = AppError::ChannelPlatformError(message.into());
+            assert!(
+                media::is_delivery_uncertain(&media_error(error)),
+                "{message}"
+            );
+        }
+        // Shared text-send diagnostics keep their wording.
+        assert!(
+            protocol_error()
+                .to_string()
+                .contains(PROTOCOL_ERROR_MESSAGE)
+        );
+        let refusal = AppError::ChannelConversationNotReachable("X: blocked".into());
+        assert!(!media::is_delivery_uncertain(&media_error(refusal)));
+    }
+
+    #[tokio::test]
+    async fn x_text_and_media_success_keep_partial_errors() {
+        let server = MockServer::start().await;
+        Mock::given(path("/2/dm_conversations/10-20/messages"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"dm_event_id":"110"},
+                "errors": [{"message":"An optional expansion was unavailable"}],
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/2/media/upload"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id":"123", "processing_info":{"state":"pending", "check_after_secs":1}},
+                "errors": [{"message":"An optional expansion was unavailable"}],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/2/media/upload"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"processing_info":{"state":"succeeded"}},
+                "errors": [{"message":"An optional expansion was unavailable"}],
+            })))
+            .expect(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let mut reply = OutboundReply {
+            attachments: vec![],
+            text: Some("reply".into()),
+            metadata: None,
+            reply_to_platform_message_id: None,
+        };
+        let http = reqwest::Client::new();
+        assert_eq!(
+            adapter(&server)
+                .send_reply(&http, &credentials(), "10-20", &reply)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("110")
+        );
+        reply.text = None;
+        reply.attachments.push(MaterializedAttachment {
+            kind: MediaKind::Image,
+            bytes: bytes::Bytes::from_static(b"image"),
+            filename: Some("image.png".into()),
+            mime_type: Some("image/png".into()),
+            caption: None,
+        });
+        assert_eq!(
+            adapter(&server)
+                .send_reply(&http, &credentials(), "10-20", &reply)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("110")
+        );
+        server.verify().await;
     }
 
     #[tokio::test]

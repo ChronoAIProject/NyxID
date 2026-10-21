@@ -25,6 +25,8 @@ pub struct PlatformBindingRequest {
     pub telegram_sender_id: String,
     pub telegram_chat_id: String,
     pub code_hmac: String,
+    #[serde(default)]
+    pub confirmation_hmac: Option<String>,
     pub initiation_ref: i64,
     pub state: BindingRequestState,
     pub approved_user_id: Option<String>,

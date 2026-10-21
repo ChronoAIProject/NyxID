@@ -1,4 +1,6 @@
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
+import { AssistantErrorNotice } from "./assistant-error-notice";
+import { assistantErrorSummary } from "@/lib/assistant/request-error";
 import { MachineToolCard } from "./machine-tool-card";
 import { ThumbsDown, ThumbsUp } from "lucide-react";
 import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
@@ -19,6 +21,8 @@ import { UploadComposer } from "@/components/assistant/upload-composer";
 import { ToolImage } from "@/components/assistant/blocks/tool-image";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
+import { MessageCopyAction } from "./message-copy-action";
+import { MessageTime } from "@/components/assistant/message-time";
 import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { GroupSettingsDialog } from "@/components/assistant/nyxbot-group-forms";
 import { NyxBotSettingsButton } from "@/components/assistant/nyxbot-settings-button";
@@ -51,7 +55,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { cn, formatClockTime } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import type {
   AssistantGroup,
   AssistantGroupMember,
@@ -100,7 +104,7 @@ function UserText({
 }
 
 /** "to Luna, researcher": the agents a sent message was addressed to. */
-export function recipientLine(
+function recipientLine(
   ids: readonly string[],
   members: readonly AssistantGroupMember[],
 ): string {
@@ -152,7 +156,7 @@ export function GroupMessageRow({
   }
   if (message.role === "user") {
     return (
-      <div className="ml-[30px] flex justify-end">
+      <div className="group/message ml-[30px] flex flex-col items-end gap-1">
         <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground">
           {message.author ? <p className="mb-1 text-11 font-medium text-muted-foreground">{message.author.display_name}</p> : null}
           {message.recipient_agent_ids?.length ? (
@@ -176,6 +180,7 @@ export function GroupMessageRow({
             />
           ))}
         </div>
+        <div className="flex items-center gap-1"><MessageCopyAction text={message.text} /><MessageTime value={message.created_at} reveal /></div>
       </div>
     );
   }
@@ -186,7 +191,6 @@ export function GroupMessageRow({
   };
   const title = agentTitle(agent);
   const handle = agentHandle(agent);
-  const time = formatClockTime(message.created_at);
   return (
     <article
       aria-label={`Message from ${title}`}
@@ -202,7 +206,7 @@ export function GroupMessageRow({
         <AgentAvatar agent={agent} size="md" />
       </button>
       <div className="min-w-0">
-        <div className="mb-0.5 flex items-baseline gap-2">
+        <div className="mb-0.5 flex flex-wrap items-baseline gap-x-2">
           <span className="text-12 font-medium text-foreground">{title}</span>
           {handle ? (
             <span className="text-11 text-text-tertiary">{handle}</span>
@@ -210,23 +214,31 @@ export function GroupMessageRow({
           {agent.kind === "nyxbot" ? (
             <span className="text-10 text-text-tertiary">Personal agent</span>
           ) : null}
-          {time ? (
-            <time
-              dateTime={message.created_at}
-              className="font-mono text-11 text-text-tertiary"
-            >
-              {time}
-            </time>
-          ) : null}
+          <MessageTime value={message.created_at} />
         </div>
         <div className="px-px text-foreground">
           {message.activities
             ?.filter((activity) => activity.machine)
             .map((activity) => (
-            <MachineToolCard key={activity.id} receipt={activity.machine!} />
+              <MachineToolCard key={activity.id} receipt={activity.machine!} />
+            ))}
+          {message.attachments?.map((item) => (
+            <ToolImage
+              key={item.id}
+              image={{
+                id: item.id,
+                label: item.label,
+                contentType: item.content_type,
+                origin: item.origin || undefined,
+                imageInput: item.image_input ?? undefined,
+                expired: item.expired,
+                endpoint: `/assistant/nyxagent/groups/${groupId}/attachments/${item.id}`,
+              }}
+            />
           ))}
           <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
           <div className="mt-2 flex gap-1">
+            <MessageCopyAction text={sanitizeAssistantMessageContent(message.text)} />
             {(["up", "down"] as const).map((next) => (
               <button
                 key={next}
@@ -731,6 +743,12 @@ export function NyxAgentGroupPage({
   const agents = useNyxBotAgents();
   const transcript = useNyxBotGroupMessages(groupId);
   const [deciding, setDeciding] = useState(false);
+  const [requestError, setRequestError] = useState<{ owner: string | undefined; message: string }>();
+  function reportError(error: unknown, fallback: string) {
+    const message = error instanceof Error ? error.message : fallback;
+    setRequestError({ owner: user?.id, message });
+    toast.error(assistantErrorSummary(message));
+  }
   const decideApproval = useDecideApproval();
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerHeight, setComposerHeight] = useState(0);
@@ -796,7 +814,7 @@ export function NyxAgentGroupPage({
   return (
     <AssistantShell
       title={group?.name ?? "Group"}
-      headerActions={<div className="flex items-center gap-2"><AccessModeSwitcher /><NyxBotSettingsButton /></div>}
+      headerActions={<NyxBotSettingsButton />}
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"
@@ -809,6 +827,7 @@ export function NyxAgentGroupPage({
       }
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
+        <AssistantErrorNotice message={transcript.error ? `Could not open this group. ${transcript.error.message}` : requestError?.owner === user?.id ? requestError?.message : undefined} />
         {group ? (
           <>
             <GroupHeader
@@ -841,9 +860,6 @@ export function NyxAgentGroupPage({
           </>
         ) : transcript.error ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-            <p className="text-12 text-muted-foreground">
-              Could not open this group. {transcript.error.message}
-            </p>
             <Button variant="outline" size="sm" onClick={() => goTo()}>
               Back to home
             </Button>
@@ -870,6 +886,7 @@ export function NyxAgentGroupPage({
             members={group?.members ?? []}
             sending={transcript.post.isPending || deciding}
             onDecide={async (action, decision) => {
+              setRequestError(undefined);
               setDeciding(true);
               try {
                 if (action.approval_request_id) {
@@ -886,28 +903,22 @@ export function NyxAgentGroupPage({
                 }
                 await transcript.refetch();
               } catch (error) {
-                toast.error(
-                  error instanceof Error
-                    ? error.message
-                    : "Could not decide this action.",
-                );
+                reportError(error, "Could not decide this action.");
               } finally {
                 setDeciding(false);
               }
             }}
             onAnswer={async (text) => {
+              setRequestError(undefined);
               try {
                 await transcript.post.mutateAsync(text);
               } catch (error) {
-                toast.error(
-                  error instanceof Error
-                    ? error.message
-                    : "The answer was not delivered.",
-                );
+                reportError(error, "The answer was not delivered.");
               }
             }}
           />
           <UploadComposer
+            footerControls={<AccessModeSwitcher disabled={transcript.post.isPending} />}
             key={`${user?.id}:${groupId}`}
             scope={{ kind: "groups", id: groupId }}
             active={false}
@@ -921,6 +932,7 @@ export function NyxAgentGroupPage({
             placeholder={GROUP_COMPOSER_PLACEHOLDER}
             mentions={mentions}
             onSend={async (text, uploads) => {
+              setRequestError(undefined);
               if (recipients.edited && !recipients.ids.length) {
                 const error = new Error("Choose at least one recipient.");
                 toast.error(error.message);
@@ -936,11 +948,7 @@ export function NyxAgentGroupPage({
                 });
                 setRecipientSelection(NO_RECIPIENT_EDITS);
               } catch (error) {
-                toast.error(
-                  error instanceof Error
-                    ? error.message
-                    : "The message was not delivered.",
-                );
+                reportError(error, "The message was not delivered.");
                 throw error;
               }
             }}

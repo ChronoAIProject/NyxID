@@ -419,6 +419,7 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
                     "name",
                     "scopes",
                     "expires_at",
+                    "never_expires",
                     "allowed_service_ids",
                     "allowed_node_ids",
                     "allow_all_services",
@@ -1968,6 +1969,9 @@ fn prefill_to_json(prefill: &PrefillData) -> serde_json::Value {
             put_opt(&mut obj, "platform", &p.platform);
             put_opt(&mut obj, "scopes", &p.scopes);
             if let Some(d) = p.expires_in_days {
+                if d == 0 {
+                    obj.insert("never_expires".into(), Value::Bool(true));
+                }
                 obj.insert(
                     "expires_in_days".to_string(),
                     Value::Number(serde_json::Number::from(d)),
@@ -2827,9 +2831,10 @@ mod tests {
 
     #[test]
     fn base_security_headers_with_nonce_includes_csp() {
-        let h = base_security_headers_with_nonce("test-nonce");
+        let nonce = mint_nonce();
+        let h = base_security_headers_with_nonce(&nonce);
         let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
-        assert!(csp.contains("test-nonce"));
+        assert!(csp.contains(&format!("'nonce-{nonce}'")));
         assert_eq!(h.get("x-frame-options").unwrap(), "DENY");
     }
 
@@ -3111,6 +3116,21 @@ mod tests {
         let json = prefill_to_json(&prefill);
         assert_eq!(json["resource_id"], "r1");
         assert_eq!(json["display_name"], "key1");
+    }
+
+    #[test]
+    fn explicit_no_expiry_survives_local_prefill_and_body_allowlist() {
+        let value = prefill_to_json(&PrefillData::ApiKeyCreate(ApiKeyCreatePrefill {
+            expires_in_days: Some(0),
+            ..Default::default()
+        }));
+        assert_eq!(value["never_expires"], true);
+        let routes = allowlist_for(FlowKind::ApiKeyCreate);
+        let route = routes
+            .iter()
+            .find(|route| route.method == Method::POST && route.path_template == "/api/v1/api-keys")
+            .unwrap();
+        assert!(route.body_fields.contains(&"never_expires"));
     }
 
     #[test]

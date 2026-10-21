@@ -1,3 +1,7 @@
+import { useRef, useState } from "react";
+import { scheduleFormSchema } from "@/schemas/billing-credits";
+import { ServiceLimitsEditor } from "./service-limits-editor";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import type { UseFormReturn } from "react-hook-form";
 import type { CreditSchedule, ScheduleForm } from "@/schemas/billing-credits";
 import type { DownstreamService } from "@/types/api";
@@ -19,6 +23,7 @@ import {
   FormItem,
   FormLabel,
   FormMessage,
+  FormSubmitErrors,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import {
@@ -42,7 +47,15 @@ export function ScheduleDialog({
   pending,
   editingSchedule,
   onSubmit,
+  allocationPolicies = false,
+  servicesError = false,
+  servicesLoading = false,
+  retryServices,
 }: {
+  readonly allocationPolicies?: boolean;
+  readonly servicesError?: boolean;
+  readonly servicesLoading?: boolean;
+  readonly retryServices?: () => void;
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly form: ScheduleFormApi;
@@ -51,11 +64,25 @@ export function ScheduleDialog({
   readonly editingSchedule: CreditSchedule | null;
   readonly onSubmit: (value: ScheduleForm) => Promise<void>;
 }) {
+  const [lookupBlocked, setLookupBlocked] = useState(false);
+  const submitting = useRef(false);
+  const values = form.watch();
+  const exactAmount = allocationPolicies || values.amount !== undefined;
+  const valid = scheduleFormSchema.safeParse(values).success;
+  const blocked =
+    lookupBlocked ||
+    ((servicesError || servicesLoading) &&
+      (!values.all_services || Boolean(values.service_limits?.length)));
   const expiry = form.watch("expiry");
   const allServices = form.watch("all_services");
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!pending && !submitting.current) onOpenChange(next);
+      }}
+    >
       <DialogContent scrollMode="body" className="md:max-w-2xl">
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>
@@ -64,40 +91,85 @@ export function ScheduleDialog({
               : "Create credit schedule"}
           </DialogTitle>
           <DialogDescription>
-            Disburse wallet credits on a UTC cycle. Credits are wallet currency,
-            not service units such as tokens, requests, or bytes.
+            Issue a fresh shared credit total on a UTC cycle. Each issuance has
+            its own service ceilings. Changes affect future periods only.
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)}>
+          <form
+            onSubmit={form.handleSubmit(async (data) => {
+              if (
+                pending ||
+                submitting.current ||
+                blocked ||
+                !form.formState.isDirty ||
+                !valid
+              )
+                return;
+              submitting.current = true;
+              try {
+                await onSubmit(data);
+              } finally {
+                submitting.current = false;
+              }
+            })}
+          >
             <DialogBody className="-mx-1 px-1">
               <div className="space-y-5 pb-1">
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <FormField
-                    control={form.control}
-                    name="amount_credits"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Wallet credits per owner</FormLabel>
-                        <FormControl>
-                          <Input
-                            type="number"
-                            min={1}
-                            max={1_000_000}
-                            {...field}
-                            onChange={(event) =>
-                              field.onChange(event.target.valueAsNumber)
-                            }
-                          />
-                        </FormControl>
-                        <FormDescription className="text-11">
-                          Minted as an ordinary promotional credit grant each
-                          period.
-                        </FormDescription>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
+                  {exactAmount ? (
+                    <FormField
+                      control={form.control}
+                      name="amount"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Credits per recipient</FormLabel>
+                          <FormControl>
+                            <Input
+                              inputMode="decimal"
+                              {...field}
+                              value={field.value ?? ""}
+                              disabled={!allocationPolicies}
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  ) : (
+                    <>
+                      <FormField
+                        control={form.control}
+                        name="amount_credits"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Credits per recipient</FormLabel>
+                            <FormControl>
+                              <Input
+                                type="number"
+                                min={1}
+                                max={1_000_000}
+                                {...field}
+                                value={
+                                  Number.isFinite(field.value)
+                                    ? field.value
+                                    : ""
+                                }
+                                onChange={(event) =>
+                                  field.onChange(event.target.valueAsNumber)
+                                }
+                              />
+                            </FormControl>
+                            <FormDescription className="text-11">
+                              Issued as a separate credit allocation each
+                              period.
+                            </FormDescription>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    </>
+                  )}
                   <FormField
                     control={form.control}
                     name="recurrence"
@@ -183,10 +255,13 @@ export function ScheduleDialog({
                             min={1}
                             max={3_650}
                             {...field}
-                            value={Number.isNaN(field.value) ? "" : field.value}
-                            onChange={(event) =>
-                              field.onChange(event.target.valueAsNumber)
+                            value={
+                              Number.isFinite(field.value) ? field.value : ""
                             }
+                            onChange={(event) => {
+                              field.onChange(event.target.valueAsNumber);
+                              void form.trigger("expiry.days");
+                            }}
                           />
                         </FormControl>
                         <FormMessage />
@@ -195,7 +270,10 @@ export function ScheduleDialog({
                   />
                 ) : null}
 
-                <RecipientTargetFields description="Recipient policy is captured when each period opens. Later signups and organization joins wait until the next period." />
+                <RecipientTargetFields
+                  onLookupBlocked={setLookupBlocked}
+                  description="Recipient policy is captured when each period opens. Later signups and organization joins wait until the next period."
+                />
 
                 <FormField
                   control={form.control}
@@ -220,7 +298,17 @@ export function ScheduleDialog({
                     </FormItem>
                   )}
                 />
-                {!allServices ? (
+                {servicesError ? (
+                  <ErrorBanner
+                    message="Services could not be loaded. Retry to verify restrictions."
+                    onRetry={retryServices}
+                  />
+                ) : null}
+                {servicesLoading &&
+                (!allServices || Boolean(values.service_limits?.length)) ? (
+                  <p role="status">Loading services…</p>
+                ) : null}
+                {!allServices && !servicesError && !servicesLoading ? (
                   <FormField
                     control={form.control}
                     name="service_refs"
@@ -245,6 +333,24 @@ export function ScheduleDialog({
                   />
                 ) : null}
 
+                {allocationPolicies ||
+                Boolean(editingSchedule?.service_limits?.length) ? (
+                  <ServiceLimitsEditor
+                    services={
+                      allServices
+                        ? services
+                        : services.filter((service) =>
+                            values.service_refs.includes(service.id),
+                          )
+                    }
+                    disabled={
+                      !allocationPolicies ||
+                      pending ||
+                      servicesError ||
+                      servicesLoading
+                    }
+                  />
+                ) : null}
                 <FormField
                   control={form.control}
                   name="reason"
@@ -269,11 +375,20 @@ export function ScheduleDialog({
               <Button
                 type="button"
                 variant="ghost"
-                onClick={() => onOpenChange(false)}
+                disabled={pending}
+                onClick={() => {
+                  if (!pending && !submitting.current) onOpenChange(false);
+                }}
               >
                 Cancel
               </Button>
-              <Button type="submit" variant="primary" isLoading={pending}>
+              <FormSubmitErrors />
+              <Button
+                type="submit"
+                variant="primary"
+                isLoading={pending}
+                disabled={!form.formState.isDirty || !valid || blocked}
+              >
                 {editingSchedule ? "Save changes" : "Create schedule"}
               </Button>
             </DialogFooter>

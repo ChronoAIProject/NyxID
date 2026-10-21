@@ -42,13 +42,94 @@ pub(crate) async fn ungranted_node(f: &Fixture, owner: &str) -> Node {
     Box::pin(ungranted_node_named(f, owner, "test-machine")).await
 }
 pub(crate) async fn ungranted_node_named(f: &Fixture, owner: &str, name: &str) -> Node {
-    let (_, token, _) = node_service::create_registration_token(&f.state.db, owner, name, 100, 300)
-        .await
-        .unwrap();
+    // Resource ownership and the human issuer are distinct. A dedicated
+    // fixture admin provisions org nodes without changing the tested actor's
+    // membership or granting that actor additional execution authority.
+    let users = f
+        .state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME);
+    let target = match users.find_one(doc! {"_id":owner}).await.unwrap() {
+        Some(target) => target,
+        None => {
+            let target = test_user(owner, UserType::Person);
+            users.insert_one(&target).await.unwrap();
+            target
+        }
+    };
+    let mut temporary_issuer = None;
+    let issuer = if target.user_type == UserType::Org {
+        let memberships = f
+            .state
+            .db
+            .collection::<crate::models::org_membership::OrgMembership>(
+                crate::models::org_membership::COLLECTION_NAME,
+            );
+        let mut candidates = memberships
+            .find(doc! {"org_user_id":owner,"role":"admin","revoked_at":bson::Bson::Null})
+            .await
+            .unwrap();
+        use futures::TryStreamExt;
+        let mut existing = None;
+        while let Some(membership) = candidates.try_next().await.unwrap() {
+            if users
+                .find_one(
+                    doc! {"_id":&membership.member_user_id,"is_active":true,"user_type":"person"},
+                )
+                .await
+                .unwrap()
+                .is_some()
+            {
+                existing = Some(membership.member_user_id);
+                break;
+            }
+        }
+        if let Some(issuer) = existing {
+            issuer
+        } else {
+            let issuer = Uuid::new_v4().to_string();
+            users
+                .insert_one(test_user(&issuer, UserType::Person))
+                .await
+                .unwrap();
+            let membership = test_membership(
+                owner,
+                &issuer,
+                crate::models::org_membership::OrgRole::Admin,
+                None,
+            );
+            memberships.insert_one(&membership).await.unwrap();
+            temporary_issuer = Some((issuer.clone(), membership.id));
+            issuer
+        }
+    } else {
+        owner.to_owned()
+    };
+    let (_, token, _) = node_service::create_registration_token_for_actor(
+        &f.state.db,
+        &issuer,
+        owner,
+        name,
+        100,
+        300,
+    )
+    .await
+    .unwrap();
     let (mut node, _, _) =
         node_service::register_node(&f.state.db, &f.state.encryption_keys, &token, None)
             .await
             .unwrap();
+    if let Some((issuer, membership)) = temporary_issuer {
+        // Redemption consumed the capability. Restore exactly the membership
+        // population this fixture had before temporary provisioning.
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+            .delete_one(doc! {"_id":membership,"member_user_id":&issuer})
+            .await
+            .unwrap();
+        users.delete_one(doc! {"_id":issuer}).await.unwrap();
+    }
     node.status = NodeStatus::Online;
     node.machine = Some(MachineProfile {
         version: 1,
@@ -509,12 +590,11 @@ async fn machine_lookups_are_batched_and_gateway_binding_is_one_indexed_read() {
             recorded.lock().unwrap().push(event.command);
         }
     });
-    let db = crate::test_utils::connect_test_database_with_command_handler(
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
         "machine_query_budget",
         handler,
     )
-    .await
-    .unwrap();
+    .await;
     let nodes: Vec<_> = (0..64)
         .map(|_| {
             let mut row = node.clone();
@@ -537,6 +617,17 @@ async fn machine_lookups_are_batched_and_gateway_binding_is_one_indexed_read() {
         2,
         "one membership read and one node read, independent of node count"
     );
+    // Publication fences the persisted node runtime and the issuing live turn.
+    db.collection::<Node>(crate::models::node::COLLECTION_NAME)
+        .insert_one(&node)
+        .await
+        .unwrap();
+    db.collection::<crate::models::assistant_conversation::AssistantConversation>(
+        crate::models::assistant_conversation::COLLECTION_NAME,
+    )
+    .insert_one(&f.row)
+    .await
+    .unwrap();
     let job = machines::issue_job(&db, &f.chat, &node, 120, Vec::new())
         .await
         .unwrap();
@@ -903,9 +994,24 @@ async fn machine_setup_pairing_races_delivery_hashes_and_expiry() {
         setup::poll(&f.state.db, key, &pair.device, 100).await,
         Err(AppError::AuthDeviceCodeSlowDown)
     ));
+    let chat_provenance = super::nyxbot_watch_service::ReportProvenance::from_chat(&f.chat);
     let (approve, deny) = tokio::join!(
-        setup::decide(&f.state.db, &f.owner, &row.id, true, Some(&f.row.id)),
-        setup::decide(&f.state.db, &f.owner, &row.id, false, Some(&f.row.id))
+        setup::decide(
+            &f.state.db,
+            &f.owner,
+            &row.id,
+            true,
+            Some(&f.row.id),
+            &chat_provenance
+        ),
+        setup::decide(
+            &f.state.db,
+            &f.owner,
+            &row.id,
+            false,
+            Some(&f.row.id),
+            &chat_provenance
+        )
     );
     assert_ne!(approve.is_ok(), deny.is_ok());
     let final_row = setup::get(&f.state.db, &f.owner, &row.id).await.unwrap();
@@ -915,6 +1021,8 @@ async fn machine_setup_pairing_races_delivery_hashes_and_expiry() {
         &f.owner,
         Some(&f.row.id),
         Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
             automatic_updates: None,
             owner_id: None,
             name: "test-machine".into(),
@@ -922,6 +1030,7 @@ async fn machine_setup_pairing_races_delivery_hashes_and_expiry() {
             capabilities: vec!["shell".into(), "files".into()],
             grant_to: None,
         },
+        &super::nyxbot_watch_service::ReportProvenance::from_chat(&f.chat),
     )
     .await
     .unwrap();
@@ -960,12 +1069,17 @@ async fn machine_setup_pairing_races_delivery_hashes_and_expiry() {
 async fn machine_page_setup_grant_is_atomic_and_never_restored_on_reconnect() {
     use super::{assistant_team_service as team, machine_setup_service as setup};
     let f = fixture("machine_page_setup_grant").await;
-    let machine = node(&f, &f.owner).await;
+    let mut machine = node(&f, &f.owner).await;
+    machine.machine.as_mut().unwrap().separation_choice =
+        Some(nyxid_machine::context::Choice::SharedLegacy);
+    save_node(&f, &machine).await;
     let mut intent = setup::create_link(
         &f.state.db,
         &f.owner,
         None,
         crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
             automatic_updates: None,
             owner_id: None,
             name: "setup-machine".into(),
@@ -973,6 +1087,7 @@ async fn machine_page_setup_grant_is_atomic_and_never_restored_on_reconnect() {
             capabilities: vec!["shell".into(), "files".into()],
             grant_to: Some(f.chat.agent_id.clone()),
         },
+        &super::nyxbot_watch_service::ReportProvenance::LEGACY,
     )
     .await
     .unwrap();
@@ -1031,6 +1146,8 @@ async fn machine_watch_settlement_queues_exactly_one_durable_secret_free_event()
         &f.owner,
         Some(&f.row.id),
         crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
             automatic_updates: None,
             owner_id: None,
             name: "watched".into(),
@@ -1038,6 +1155,7 @@ async fn machine_watch_settlement_queues_exactly_one_durable_secret_free_event()
             capabilities: vec!["shell".into()],
             grant_to: None,
         },
+        &super::nyxbot_watch_service::ReportProvenance::from_chat(&f.chat),
     )
     .await
     .unwrap();
@@ -1163,9 +1281,13 @@ async fn machine_owner_takeover_blocks_tools_and_handback_wakes_with_note() {
     let row = desktop::controlled(&f.state.db, &row, "owner-tab")
         .await
         .unwrap();
-    crate::handlers::machine_desktop::watch(&f.state, &row)
-        .await
-        .unwrap();
+    crate::handlers::machine_desktop::watch(
+        &f.state,
+        &row,
+        &super::nyxbot_watch_service::ReportProvenance::LEGACY,
+    )
+    .await
+    .unwrap();
     for (tool, arguments) in [
         (
             "nyx__machine_exec",
@@ -1261,6 +1383,8 @@ async fn machine_setup_change_stream_wakes_thread_without_sweep() {
         &f.owner,
         Some(&f.row.id),
         crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
             automatic_updates: None,
             owner_id: None,
             name: "live-machine".into(),
@@ -1268,6 +1392,7 @@ async fn machine_setup_change_stream_wakes_thread_without_sweep() {
             capabilities: vec!["shell".into()],
             grant_to: None,
         },
+        &super::nyxbot_watch_service::ReportProvenance::from_chat(&f.chat),
     )
     .await
     .unwrap();
@@ -1601,6 +1726,7 @@ async fn stop_fences_issued_machine_turns_cancels_signed_jobs_and_allows_a_new_t
         &f.state.db,
         &f.owner,
         &super::assistant_nyxagent::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1664,5 +1790,432 @@ async fn legacy_machine_browser_offers_the_guided_update_without_dispatch_timeou
             .unwrap()
             .contains("nyxid__machine_update")
     );
+    f.state.db.drop().await.unwrap();
+}
+
+/// Plan v7 §2.2 carriers: machine watches wake their thread with an event
+/// bound from validated provenance only, and issued jobs record the issuing
+/// turn's snapshot only while that turn is live.
+#[tokio::test]
+async fn machine_watches_and_jobs_carry_validated_report_provenance() {
+    use crate::models::{
+        assistant_conversation::REPORT_PROVENANCE_V1,
+        nyxbot_channel::{NyxbotWatch, WATCHES_COLLECTION_NAME},
+    };
+    let f = orchestrator_fixture("machine_report_provenance").await;
+    let now = chrono::Utc::now();
+    for (provenance, report_to, bound, expected) in [
+        (
+            REPORT_PROVENANCE_V1,
+            Some("nyxa-assigning"),
+            true,
+            Some("nyxa-assigning"),
+        ),
+        (REPORT_PROVENANCE_V1, None, true, None),
+        (0, Some("nyxa-assigning"), false, None),
+        (7, Some("nyxa-assigning"), false, None),
+    ] {
+        let watch = NyxbotWatch {
+            invocation_id: None,
+            trigger_prefill: None,
+            trigger_id: None,
+            id: Uuid::new_v4().to_string(),
+            user_id: f.owner.clone(),
+            kind: "machine_setup".into(),
+            conversation_id: f.row.id.clone(),
+            status: "pending".into(),
+            platform: None,
+            agent_id: None,
+            channel_bot_id: None,
+            connect_link_id: Some(Uuid::new_v4().to_string()),
+            last_error: None,
+            report_to: report_to.map(str::to_owned),
+            report_provenance: provenance,
+            checked_at: None,
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+        };
+        f.state
+            .db
+            .collection::<NyxbotWatch>(WATCHES_COLLECTION_NAME)
+            .insert_one(&watch)
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &f.row.id},
+                doc! {"$set": {"pending_events": []}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            machines::settle_watch(
+                &f.state.db,
+                &watch,
+                "machine_setup_finished",
+                "Machine connected".into(),
+                None,
+            )
+            .await
+            .unwrap()
+        );
+        let row = super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap();
+        assert_eq!(row.pending_events.len(), 1, "{provenance}");
+        let event = &row.pending_events[0];
+        assert_eq!(event.bound, bound, "{provenance}");
+        assert_eq!(event.report_to.as_deref(), expected, "{provenance}");
+    }
+    // Jobs: the live, unstopped chat's snapshot with validated provenance;
+    // a stopped or replaced chat proves nothing (legacy, unproven).
+    let machine = node(&f, &f.owner).await;
+    let mut chat = f.chat.clone();
+    chat.report_to = Some("nyxa-assigning".into());
+    chat.turn_live = true;
+    chat.turn_stopped = false;
+    let job = machines::issue_job(&f.state.db, &chat, &machine, 30, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(job.report_to.as_deref(), Some("nyxa-assigning"));
+    assert_eq!(job.report_provenance, REPORT_PROVENANCE_V1);
+    chat.turn_stopped = true;
+    let job = machines::issue_job(&f.state.db, &chat, &machine, 30, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(job.report_to, None);
+    assert_eq!(job.report_provenance, 0);
+    chat.turn_stopped = false;
+    chat.turn_live = false;
+    let job = machines::issue_job(&f.state.db, &chat, &machine, 30, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(job.report_to, None);
+    assert_eq!(job.report_provenance, 0);
+    // Setup and update watches store the exact chat snapshot they were
+    // created from; the first creation wins for a setup, and an owner page
+    // action (no chat) stores legacy provenance.
+    use super::nyxbot_watch_service::ReportProvenance;
+    let assigned = ReportProvenance {
+        invocation_id: None,
+        report_to: Some("nyxa-assigning".into()),
+        version: REPORT_PROVENANCE_V1,
+    };
+    let intent = super::machine_setup_service::create_link(
+        &f.state.db,
+        &f.owner,
+        Some(&f.row.id),
+        crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
+            automatic_updates: None,
+            owner_id: None,
+            name: "provenance".into(),
+            location: "docker".into(),
+            capabilities: vec!["shell".into()],
+            grant_to: None,
+        },
+        &assigned,
+    )
+    .await
+    .unwrap();
+    super::machine_setup_service::watch(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        &intent.id,
+        intent.expires_at,
+        &ReportProvenance::LEGACY,
+    )
+    .await
+    .unwrap();
+    let watch = f
+        .state
+        .db
+        .collection::<NyxbotWatch>(WATCHES_COLLECTION_NAME)
+        .find_one(doc! {"connect_link_id": &intent.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(watch.report_to.as_deref(), Some("nyxa-assigning"));
+    assert_eq!(watch.report_provenance, REPORT_PROVENANCE_V1);
+    let page = super::machine_setup_service::create_link(
+        &f.state.db,
+        &f.owner,
+        Some(&f.row.id),
+        crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
+            automatic_updates: None,
+            owner_id: None,
+            name: "page".into(),
+            location: "docker".into(),
+            capabilities: vec!["shell".into()],
+            grant_to: None,
+        },
+        &ReportProvenance::LEGACY,
+    )
+    .await
+    .unwrap();
+    let watch = f
+        .state
+        .db
+        .collection::<NyxbotWatch>(WATCHES_COLLECTION_NAME)
+        .find_one(doc! {"connect_link_id": &page.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(watch.report_provenance, 0);
+    assert_eq!(watch.report_to, None);
+    let mut updatable = machine.clone();
+    updatable.machine.as_mut().unwrap().updater_ready = true;
+    let update = super::machine_update_service::begin(
+        &f.state.db,
+        &updatable,
+        &f.owner,
+        Some(&f.row.id),
+        false,
+        true,
+        &assigned,
+    )
+    .await
+    .unwrap();
+    let watch = f
+        .state
+        .db
+        .collection::<NyxbotWatch>(WATCHES_COLLECTION_NAME)
+        .find_one(doc! {"kind": "machine_update", "connect_link_id": update.attempt_id.as_deref().unwrap_or_default()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(watch.report_to.as_deref(), Some("nyxa-assigning"));
+    assert_eq!(watch.report_provenance, REPORT_PROVENANCE_V1);
+    // The exact chat snapshot: a chat whose turn is stopped proves nothing.
+    let mut stopped = f.chat.clone();
+    stopped.report_to = Some("nyxa-assigning".into());
+    stopped.turn_stopped = true;
+    assert_eq!(
+        ReportProvenance::from_chat(&stopped),
+        ReportProvenance::LEGACY
+    );
+    let mut live = f.chat.clone();
+    live.report_to = Some("nyxa-assigning".into());
+    assert_eq!(ReportProvenance::from_chat(&live), assigned);
+    f.state.db.drop().await.unwrap();
+}
+
+/// Job issuance combines the hosted runtime fence and assistant binding with
+/// the upstream report snapshot, without widening report authority after Stop.
+#[tokio::test]
+async fn hosted_machine_jobs_keep_runtime_binding_and_live_report_provenance() {
+    use crate::models::{
+        assistant_conversation::REPORT_PROVENANCE_V1,
+        machine_job::{COLLECTION_NAME as JOBS, MachineJob, MachineJobBinding},
+        remote_machine::{COLLECTION_NAME as MACHINES, ManagedMachine},
+    };
+    let f = orchestrator_fixture("hosted_machine_job_provenance").await;
+    let mut machine = node(&f, &f.owner).await;
+    machine.metadata =
+        Some(serde_json::from_value(json!({"provisioning_source":"managed_machine"})).unwrap());
+    let mut managed = super::remote_machine_service::CreateMachineInput::fixed(
+        &f.owner,
+        true,
+        "sha256:job-provenance-fixture",
+    )
+    .preview(&machine.id, chrono::Utc::now());
+    managed.runtime_generation = 7;
+    f.state
+        .db
+        .collection::<ManagedMachine>(MACHINES)
+        .insert_one(&managed)
+        .await
+        .unwrap();
+    let mut chat = f.chat.clone();
+    chat.report_to = Some("nyxa-assigning".into());
+    for (turn_live, turn_stopped) in [(true, false), (true, true), (false, false)] {
+        chat.turn_live = turn_live;
+        chat.turn_stopped = turn_stopped;
+        let issued = machines::issue_job(&f.state.db, &chat, &machine, 30, Vec::new())
+            .await
+            .unwrap();
+        let stored = machines::job(&f.state.db, &chat, &machine.id, &issued.id)
+            .await
+            .unwrap();
+        assert_eq!(stored.runtime_generation, Some(7));
+        assert_eq!(
+            stored.runtime_id,
+            machine.machine.as_ref().unwrap().runtime_id,
+        );
+        if turn_live && !turn_stopped {
+            assert_eq!(stored.report_to.as_deref(), Some("nyxa-assigning"));
+            assert_eq!(stored.report_provenance, REPORT_PROVENANCE_V1);
+            assert!(matches!(
+                &stored.binding,
+                Some(MachineJobBinding::Assistant {
+                    version: 1,
+                    conversation_id,
+                    turn_id,
+                    api_key_id,
+                    agent_id,
+                }) if conversation_id == &chat.conversation_id
+                    && Some(turn_id) == chat.turn_id.as_ref()
+                    && api_key_id == &chat.api_key_id
+                    && agent_id == &chat.agent_id
+            ));
+        } else {
+            assert_eq!(stored.report_to, None);
+            assert_eq!(stored.report_provenance, 0);
+        }
+        if turn_stopped {
+            assert!(stored.binding.is_none());
+        }
+        assert!(stored.retain_until.is_none());
+    }
+    for timeout in [0, 3601] {
+        assert!(matches!(
+            machines::issue_job(&f.state.db, &chat, &machine, timeout, Vec::new()).await,
+            Err(AppError::ValidationError(_))
+        ));
+    }
+    // Each admitted issuance inserts once; invalid hosted timeouts insert none.
+    assert_eq!(
+        f.state
+            .db
+            .collection::<MachineJob>(JOBS)
+            .count_documents(doc! {"node_id": &machine.id})
+            .await
+            .unwrap(),
+        3,
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_setup_missing_selection_is_actionable_and_grants_nothing() {
+    use super::machine_setup_service as setup;
+    let f = fixture("machine_setup_selection_required").await;
+    let machine = ungranted_node(&f, &f.owner).await;
+    let mut intent = setup::create_link(
+        &f.state.db,
+        &f.owner,
+        None,
+        crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
+            automatic_updates: None,
+            owner_id: None,
+            name: "new-machine".into(),
+            location: "vm".into(),
+            capabilities: vec!["shell".into()],
+            grant_to: Some(f.chat.agent_id.clone()),
+        },
+        &super::nyxbot_watch_service::ReportProvenance::LEGACY,
+    )
+    .await
+    .unwrap();
+    let setups = f
+        .state
+        .db
+        .collection::<crate::models::machine_setup::MachineSetup>(
+            crate::models::machine_setup::COLLECTION_NAME,
+        );
+    setups.delete_one(doc! {"_id":&intent.id}).await.unwrap();
+    intent.id = machine.id.clone();
+    intent.status = "waiting".into();
+    setups.insert_one(&intent).await.unwrap();
+    setup::complete_page_setup(&f.state.db, &machine.id)
+        .await
+        .unwrap();
+    let row = setup::get(&f.state.db, &f.owner, &machine.id)
+        .await
+        .unwrap();
+    assert_eq!(row.status, "selection_required");
+    let agent = super::assistant_team_service::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert!(!agent.machine_node_ids.contains(&machine.id));
+    let response = crate::handlers::machine_setup::get(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.owner),
+        axum::extract::Path(machine.id.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    let value = serde_json::to_value(response).unwrap();
+    assert_eq!(value["status"], "selection_required");
+    assert!(
+        value["selection_reason"]
+            .as_str()
+            .unwrap()
+            .contains("Assistant → Machines")
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_setup_chat_watch_settles_selection_required_once() {
+    use super::machine_setup_service as setup;
+    let f = orchestrator_fixture("machine_setup_selection_watch").await;
+    let intent = setup::create_link(
+        &f.state.db,
+        &f.owner,
+        Some(&f.row.id),
+        crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
+            automatic_updates: None,
+            owner_id: None,
+            name: "watched-machine".into(),
+            location: "vm".into(),
+            capabilities: vec!["shell".into()],
+            grant_to: None,
+        },
+        &super::nyxbot_watch_service::ReportProvenance::from_chat(&f.chat),
+    )
+    .await
+    .unwrap();
+    let token = setup::mint(&f.state.db, &f.owner, &intent.id, None, 100, "review")
+        .await
+        .unwrap();
+    let (mut node, _, _) =
+        node_service::register_node(&f.state.db, &f.state.encryption_keys, &token, None)
+            .await
+            .unwrap();
+    node.status = NodeStatus::Online;
+    node.machine = Some(MachineProfile {
+        version: nyxid_machine::PROTOCOL_VERSION,
+        runtime_id: Uuid::new_v4().to_string(),
+        shell: true,
+        ..Default::default()
+    });
+    save_node(&f, &node).await;
+    crate::handlers::nyxbot::process_watches(&f.state)
+        .await
+        .unwrap();
+    assert_eq!(
+        setup::get(&f.state.db, &f.owner, &intent.id)
+            .await
+            .unwrap()
+            .status,
+        "selection_required"
+    );
+    let first = super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(first.pending_events.len(), 1);
+    let event = serde_json::to_string(&first.pending_events).unwrap();
+    assert!(event.contains("selection_required"));
+    assert!(event.contains("Owner settings:"));
+    assert!(!event.contains(token.as_str()));
+    crate::handlers::nyxbot::process_watches(&f.state)
+        .await
+        .unwrap();
+    let second = super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(second.pending_events.len(), 1);
     f.state.db.drop().await.unwrap();
 }

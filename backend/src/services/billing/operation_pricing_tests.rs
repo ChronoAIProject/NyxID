@@ -266,6 +266,13 @@ struct RecordingLago {
 
 #[async_trait]
 impl LagoApi for RecordingLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        Ok(crate::services::billing::taxes::zero_config())
+    }
     async fn sync_standard_charge(&self, _plan: &str, input: &ServicePriceSync) -> AppResult<()> {
         self.synced.lock().unwrap().push(input.clone());
         Ok(())

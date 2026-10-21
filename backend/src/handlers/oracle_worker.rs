@@ -382,10 +382,13 @@ pub async fn pin_conv_url(
     oracle_task_service::pin_conversation_url_fenced(
         &state.db,
         &pool,
-        &body.worker,
-        &body.task_id,
-        &body.chatgpt_url,
-        body.dispatch_attempt_id.as_deref(),
+        oracle_task_service::PinConversationInput {
+            worker_label: &body.worker,
+            task_id: &body.task_id,
+            chatgpt_url: &body.chatgpt_url,
+            dispatch_attempt_id: body.dispatch_attempt_id.as_deref(),
+            authorized_worker: worker_auth.installation.as_ref(),
+        },
     )
     .await?;
     Ok(Json(serde_json::json!({ "status": "pinned" })))
@@ -488,6 +491,7 @@ pub async fn heartbeat(
     let capabilities = &presence.capabilities;
     oracle_worker_service::apply_command_reports_for_worker(
         &state.db,
+        &pool,
         &presence,
         body.command_reports
             .into_iter()
@@ -499,12 +503,17 @@ pub async fn heartbeat(
             .collect(),
     )
     .await?;
-    let command =
-        oracle_worker_service::deliver_next_command_for_worker(&state.db, &presence, capabilities)
-            .await?
-            .map(WorkerCommandDto::from);
+    let command = oracle_worker_service::deliver_next_command_for_worker(
+        &state.db,
+        &pool,
+        &presence,
+        capabilities,
+    )
+    .await?
+    .map(WorkerCommandDto::from);
     let cancelled_command_ids = if capabilities.iter().any(|value| value == "commands_v1") {
-        oracle_worker_service::recently_cancelled_delivered_for_worker(&state.db, &presence).await?
+        oracle_worker_service::recently_cancelled_delivered_for_worker(&state.db, &pool, &presence)
+            .await?
     } else {
         Vec::new()
     };

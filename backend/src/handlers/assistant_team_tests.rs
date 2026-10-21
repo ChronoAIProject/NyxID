@@ -175,6 +175,7 @@ async fn server_started_turn_preserves_picocredits_and_obeys_cutover() {
                 .unwrap();
         }
         let start = TurnStart::from(&engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -244,6 +245,7 @@ async fn user_turn(
         state,
         test_auth_user(OWNER),
         &TurnStart::from(&engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: agent_id.map(str::to_owned),
@@ -273,6 +275,7 @@ async fn orchestrator(state: &AppState) -> (AssistantConversation, ChatAuthority
         state,
         test_auth_user(OWNER),
         &TurnStart::from(&engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -457,10 +460,20 @@ async fn specialist_work_reports_to_the_nyxbot_thread_that_assigned_it() {
     assert!(!key.allow_all_services && key.allowed_service_ids.is_empty());
     assert_eq!(key.scopes, "proxy");
     drop(calls);
-    // A direct chat keeps the assigning thread, so assigned work resumed
-    // later (after a permission decision) still reports there.
+    // A new direct owner message is the owner's own work: the thread's
+    // assignment is cleared and that turn's snapshot names no NyxBot thread
+    // (issue #1883), so nothing from it reports to the assigning thread.
     let home = user_turn(&state, Some(&home.id), None, "Also add a summary line").await;
-    assert_eq!(home.report_to.as_deref(), Some(orchestrator.id.as_str()));
+    assert!(home.report_to.is_none());
+    assert!(
+        transcript(&state, &orchestrator.id)
+            .await
+            .iter()
+            .filter(|message| message.role == "event")
+            .count()
+            == 1,
+        "the direct reply did not wake the assigning thread"
+    );
     server.abort();
 }
 
@@ -470,6 +483,8 @@ async fn org_agent_delegation_runs_with_org_authority_and_reports_to_assigning_n
     use crate::services::{feature_flag_service as flags, org_agent_service as org_agents};
     let (state, calls, server) = setup("team_org_delegation_report").await;
     let db = &state.db;
+    crate::services::security_readiness_service::ready_test_replica(db).await;
+
     let org = Uuid::new_v4().to_string();
     let mut org_user = test_user(&org, UserType::Org);
     org_user.slug = Some("delegation-team".into());
@@ -653,7 +668,8 @@ async fn org_agent_delegation_runs_with_org_authority_and_reports_to_assigning_n
             OWNER,
             &agent,
             "Must not start",
-            Some(&nyxbot.id)
+            Some(&nyxbot.id),
+            None
         ))
         .await
         .is_err()
@@ -730,6 +746,7 @@ async fn specialists_keep_memory_but_not_team_tools_and_destroyed_agents_are_rea
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1082,7 +1099,16 @@ async fn specialist_access_request_denied_by_default_and_allowed_when_routed() {
     )
     .await;
     let home = specialist_home(&state, "coder").await;
+    // NyxBot assigned this work: its gates stay NyxBot-routed (issue #1883).
+    let home = crate::services::assistant_authority_tests::pin_assignment(
+        &state.db,
+        OWNER,
+        &home.id,
+        Some(&orchestrator.id),
+    )
+    .await;
     let specialist = chat_for(&state, &home).await;
+    assert!(specialist.involved());
     let (denied, no_request) =
         acks::service_gate(&state.db, &specialist, &github, "github", "GitHub", false)
             .await
@@ -1161,6 +1187,14 @@ async fn granted_specialist_account_read_succeeds_under_strict_default() {
         .delete_one(doc! {"_id": OWNER})
         .await
         .unwrap();
+    // The strict default applies to work NyxBot assigned (issue #1883).
+    let home = crate::services::assistant_authority_tests::pin_assignment(
+        &state.db,
+        OWNER,
+        &home.id,
+        Some(&chat.conversation_id),
+    )
+    .await;
     let specialist = chat_for(&state, &home).await;
     assert!(
         acks::account_gate(&state.db, &specialist)
@@ -1199,6 +1233,14 @@ async fn specialist_denial_notice_is_one_event_per_hour_in_nyxbot_home_thread() 
     )
     .await;
     let home = specialist_home(&state, "noticer").await;
+    // Notices reach the NyxBot thread that assigned the work (issue #1883).
+    let home = crate::services::assistant_authority_tests::pin_assignment(
+        &state.db,
+        OWNER,
+        &home.id,
+        Some(&chat.conversation_id),
+    )
+    .await;
     let specialist = chat_for(&state, &home).await;
     acks::audit_access_request_denied(&state.db, &specialist, Some("svc"), "service").await;
     let messages = transcript(&state, &chat.conversation_id).await;
@@ -1263,11 +1305,14 @@ async fn permission_requests_reach_nyxbot_and_its_decision_resumes_the_specialis
     )
     .await;
     let home = specialist_home(&state, "coder").await;
-    // The user talks to the specialist directly; keep that turn live.
+    // The owner's message starts the turn; NyxBot's assignment of this work
+    // is pinned onto its live snapshot (issue #1883), so the request goes to
+    // the assigning NyxBot thread.
     let sub = engine::begin_turn(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             retry_of: None,
             attachment_ids: Vec::new(),
             agent_id: None,
@@ -1280,6 +1325,13 @@ async fn permission_requests_reach_nyxbot_and_its_decision_resumes_the_specialis
     )
     .await
     .unwrap();
+    let sub = crate::services::assistant_authority_tests::pin_assignment(
+        &state.db,
+        OWNER,
+        &sub.id,
+        Some(&orchestrator.id),
+    )
+    .await;
     let sub_chat = chat_for(&state, &sub).await;
     let (refusal, request) =
         acks::service_gate(&state.db, &sub_chat, &github, "github", "GitHub", false)
@@ -1296,7 +1348,7 @@ async fn permission_requests_reach_nyxbot_and_its_decision_resumes_the_specialis
             .contains("Please review my open GitHub PRs")
     );
     permission_requested(&state, &sub_chat, &request).await;
-    // A direct chat's request goes to NyxBot's home thread (the first one).
+    // The request goes to the exact assigning NyxBot thread.
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             if transcript(&state, &orchestrator.id)
@@ -1549,6 +1601,14 @@ async fn grants_decisions_and_destroy_reach_every_live_thread_key() {
     let home = specialist_home(&state, "coder").await;
     let second = user_turn(&state, None, Some(&agent.id), "Second thread").await;
     let second_key = second.credential_api_key_id.clone();
+    // Routed requests exist only for work NyxBot assigned (issue #1883).
+    let home = crate::services::assistant_authority_tests::pin_assignment(
+        &state.db,
+        OWNER,
+        &home.id,
+        Some(&orchestrator.id),
+    )
+    .await;
     let home_chat = chat_for(&state, &home).await;
     let (_, slack_request) =
         acks::service_gate(&state.db, &home_chat, &slack, "slack", "Slack", false)
@@ -1627,6 +1687,20 @@ async fn grants_decisions_and_destroy_reach_every_live_thread_key() {
     let value = serde_json::to_value(&renamed).unwrap();
     assert_eq!(value["agent"]["name"], "coder");
     assert_eq!(value["pending_acknowledgements"], 1);
+    engine::finish_turn(
+        &state.db,
+        &home,
+        &home.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "Requested access".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
     // A full pool neither runs a turn nor spends the owner's event budget.
     let limit = team_pool_limit(&state, OWNER).await + 1;
     let mut held = Vec::new();
@@ -1809,6 +1883,7 @@ async fn nyxbot_adds_services_to_a_specialist_holding_an_org_service() {
 // path. Captured prompts contain a private marker: never print request bodies.
 fn refresh_start(id: Option<&str>, agent_id: Option<&str>, text: &str) -> TurnStart {
     TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
         retry_of: None,
         attachment_ids: Vec::new(),
         agent_id: agent_id.map(str::to_owned),
@@ -2358,7 +2433,7 @@ async fn skill_allow_routes_attachment_to_nyxbot_and_deduplicates_requests() {
         let note = skill_request_allowed_note(&agent, &roots);
         assert!(note.chars().count() <= 3200);
         assert!(note.contains(&roots.summary));
-        assert!(note.ends_with("Do not ask for another permission decision."));
+        assert!(note.ends_with(acks::DECISION_NARRATION));
         let note = acks::decisions_note(std::slice::from_ref(&card));
         assert!(note.contains("do not request it again"));
         assert!(!note.contains("retry"));
@@ -2526,7 +2601,7 @@ async fn skill_allow_outbox_recovers_eviction_and_consumes_once() {
         .collection::<bson::Document>(CONVERSATIONS)
         .update_one(
             doc! {"_id":&f.row.id},
-            doc! {"$set":{"report_to":&other.id}},
+            doc! {"$set":{"active_turn.report_to":&other.id}},
         )
         .await
         .unwrap();
@@ -2582,6 +2657,7 @@ async fn skill_allow_outbox_recovers_eviction_and_consumes_once() {
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             attachment_ids: vec![],
             agent_id: None,
             conversation_id: Some(f.nyxbot_thread.clone()),
@@ -2740,7 +2816,7 @@ async fn skill_outbox_authority_defer_restores_sticky_target_and_fences_stale_fa
     threads
         .update_one(
             doc! {"_id": &f.row.id},
-            doc! {"$set": {"report_to": &other.id}},
+            doc! {"$set": {"active_turn.report_to": &other.id}},
         )
         .await
         .unwrap();
@@ -2944,6 +3020,7 @@ async fn skill_outbox_rechecks_revoked_org_source_and_retains_decision_until_res
         &f.state.db,
         &f.admin,
         &engine::TurnRequest {
+            acknowledgement_id: None,
             conversation_id: Some(thread.id.clone()),
             text: "Need review skill".into(),
             attachment_ids: vec![],
@@ -2964,7 +3041,7 @@ async fn skill_outbox_rechecks_revoked_org_source_and_retains_decision_until_res
         .collection::<bson::Document>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &source.id},
-            doc! {"$set": {"report_to": &destination.id}},
+            doc! {"$set": {"active_turn.report_to": &destination.id}},
         )
         .await
         .unwrap();
@@ -3094,8 +3171,8 @@ async fn set_access_mode(state: &AppState, mode: crate::models::assistant_settin
 }
 
 /// Team tools go through the owner's access mode at their real call site:
-/// grants are sensitive (NyxMode asks), memory is an ordinary change (only
-/// Ask Every Time asks), listings never ask, and one approved card runs once.
+/// grants are sensitive (Auto asks), memory is an ordinary change (only
+/// Ask every time asks), listings never ask, and one approved card runs once.
 #[tokio::test]
 async fn team_tools_follow_the_access_mode_and_one_card_runs_once() {
     use crate::models::assistant_settings::AccessMode;
@@ -3139,7 +3216,7 @@ async fn team_tools_follow_the_access_mode_and_one_card_runs_once() {
     );
     assert!(row.summary.contains("subagent coder"), "{}", row.summary);
     let (_, error) = execute_tool(&state, &chat, "nyxid__remember", &remember).await;
-    assert!(!error, "an ordinary change runs in NyxMode");
+    assert!(!error, "an ordinary change runs in Auto");
     let (listed, error) = execute_tool(&state, &chat, "nyxid__list_subagents", &json!({})).await;
     assert!(!error, "{listed}");
     acks::decide(
@@ -3184,7 +3261,7 @@ async fn team_tools_follow_the_access_mode_and_one_card_runs_once() {
     .await;
     assert!(
         !error,
-        "Autopilot runs destructive team tools without a card: {value}"
+        "Full access runs destructive team tools without a card: {value}"
     );
     server.abort();
 }
@@ -3204,6 +3281,14 @@ async fn access_request_decision_and_grant_audits_name_requester_and_approver() 
     )
     .await;
     let home = specialist_home(&state, "coder").await;
+    // Routed requests exist only for work NyxBot assigned (issue #1883).
+    let home = crate::services::assistant_authority_tests::pin_assignment(
+        &state.db,
+        OWNER,
+        &home.id,
+        Some(&chat.conversation_id),
+    )
+    .await;
     let specialist = chat_for(&state, &home).await;
     let (_, request) =
         acks::service_gate(&state.db, &specialist, &github, "github", "GitHub", false)
@@ -3229,7 +3314,7 @@ async fn access_request_decision_and_grant_audits_name_requester_and_approver() 
     assert_eq!(requested.get_str("scope").unwrap(), "service");
     assert_eq!(requested.get_str("decider").unwrap(), "orchestrator");
     assert_eq!(requested.get_str("decision").unwrap(), "pending");
-    // NyxBot decides it (Autopilot: no owner card for NyxBot's decision).
+    // NyxBot decides it (Full access: no owner card for NyxBot's decision).
     let (value, error) = execute_tool(
         &state,
         &chat,
@@ -3391,7 +3476,7 @@ async fn agent_model_and_access_mode_override_round_trip_through_patch() {
 }
 
 /// NyxBot can change an agent's model only through the owner's access mode:
-/// NyxMode asks first; the approved card applies the exact model once.
+/// Auto asks first; the approved card applies the exact model once.
 #[tokio::test]
 async fn nyxbot_model_change_follows_the_access_mode() {
     use crate::models::assistant_settings::AccessMode;
@@ -3415,7 +3500,7 @@ async fn nyxbot_model_change_follows_the_access_mode() {
             .model,
         "nyxagent/research"
     );
-    // A profile edit without a model is an ordinary change in NyxMode.
+    // A profile edit without a model is an ordinary change in Auto.
     let (_, error) = execute_tool(
         &state,
         &chat,
@@ -3481,8 +3566,258 @@ async fn owner_settings_put_audits_access_mode_changes() {
     assert_eq!(rows[0].get_str("user_id").unwrap(), OWNER);
     let data = rows[0].get_document("event_data").unwrap();
     assert_eq!(data.get_str("scope").unwrap(), "workspace");
-    // The team fixture starts in Autopilot.
+    // The team fixture starts in Full access.
     assert_eq!(data.get_str("old").unwrap(), "autopilot");
     assert_eq!(data.get_str("new").unwrap(), "ask_every_time");
+    server.abort();
+}
+
+/// Issue #1883 §4: owner-allowed skill requests reach NyxBot only when their
+/// card's routing (or pre-cutover legacy status) says so, on every path: the
+/// sweep terminalizes a card stripped of its routing after the cutover, the
+/// enqueue transaction refuses a card whose routing changed under the
+/// handler, and an assigned card is delivered exactly once across immediate
+/// delivery and sweep replay.
+#[tokio::test]
+async fn skill_outbox_sweep_and_enqueue_enforce_cutover_eligibility() {
+    let f = crate::services::assistant_authority_tests::fixture("skill_outbox_cutover").await;
+    crate::services::assistant_access_policy::ensure_cutover(&f.state.db)
+        .await
+        .unwrap();
+    let markers = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+    let request = |skill: &str| {
+        let state = f.state.clone();
+        let chat = f.chat.clone();
+        let args = json!({"agent": f.chat.agent_id, "skill": skill});
+        async move {
+            let (value, _) =
+                super::super::agent_skills::dispatch(&state, &chat, "request_agent_skills", &args)
+                    .await
+                    .unwrap();
+            value["acknowledgement_id"].as_str().unwrap().to_owned()
+        }
+    };
+    let nyxbot_has = |id: String| {
+        let state = f.state.clone();
+        let owner = f.owner.clone();
+        let thread = f.nyxbot_thread.clone();
+        async move {
+            engine::get(&state.db, &owner, &thread)
+                .await
+                .unwrap()
+                .pending_events
+                .iter()
+                .filter(|event| event.id == id)
+                .count()
+        }
+    };
+    // Sweep replay: a saved allow whose card lost its routing after the
+    // cutover is terminalized, never queued, and never retried.
+    let stripped = request("stripped").await;
+    markers
+        .update_one(doc! {"_id": &stripped}, doc! {"$unset": {"routing": ""}})
+        .await
+        .unwrap();
+    acks::decide(&f.state.db, &f.owner, &f.row.id, &stripped, true)
+        .await
+        .unwrap();
+    assert!(
+        acks::skill_notifications::pending(&f.state.db)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.id == stripped)
+    );
+    deliver_pending_skill_notifications(&f.state).await.unwrap();
+    let row = markers
+        .find_one(doc! {"_id": &stripped})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.get_bool("skill_notification_pending").is_err());
+    assert_eq!(
+        row.get_document("skill_notification_terminal")
+            .unwrap()
+            .get_str("reason")
+            .unwrap(),
+        "unbound_after_cutover"
+    );
+    assert_eq!(nyxbot_has(stripped.clone()).await, 0);
+    assert!(
+        acks::skill_notifications::pending(&f.state.db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Enqueue: the handler authorized a destination from its snapshot, but
+    // the card's routing changed before the transaction ran.
+    let raced = request("raced").await;
+    let card = acks::decide(&f.state.db, &f.owner, &f.row.id, &raced, true)
+        .await
+        .unwrap();
+    let attempt = acks::skill_notifications::attempt(&f.state.db, &card)
+        .await
+        .unwrap()
+        .expect("pending attempt");
+    markers
+        .update_one(
+            doc! {"_id": &raced},
+            doc! {"$set": {"routing": {"kind": "not_involved"}}},
+        )
+        .await
+        .unwrap();
+    let mut event = team::event(
+        "skill_request_allowed",
+        "allowed".into(),
+        Some(&f.chat.agent_id),
+    );
+    event.id = raced.clone();
+    let queued =
+        acks::skill_notifications::enqueue(&f.state.db, &card, &f.nyxbot_thread, &attempt, event)
+            .await
+            .unwrap();
+    assert!(queued.is_none());
+    let row = markers
+        .find_one(doc! {"_id": &raced})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.get_bool("skill_notification_pending").is_err());
+    assert_eq!(
+        row.get_document("skill_notification_terminal")
+            .unwrap()
+            .get_str("reason")
+            .unwrap(),
+        "not_involved"
+    );
+    assert_eq!(nyxbot_has(raced.clone()).await, 0);
+    // Immediate delivery of an assigned card, then sweep replay: one event.
+    let assigned = request("assigned").await;
+    let card = acks::decide(&f.state.db, &f.owner, &f.row.id, &assigned, true)
+        .await
+        .unwrap();
+    deliver_skill_notification(&f.state, &card).await.unwrap();
+    deliver_pending_skill_notifications(&f.state).await.unwrap();
+    assert_eq!(nyxbot_has(assigned.clone()).await, 1);
+    let row = markers
+        .find_one(doc! {"_id": &assigned})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.get_str("skill_notification_target").unwrap(),
+        f.nyxbot_thread
+    );
+    assert!(row.get_document("skill_notification_terminal").is_err());
+    f.state.db.drop().await.unwrap();
+}
+
+/// Issue #1883 §2.3: NyxBot's notice for a routed request is queued only under
+/// the request's own fence. A specialist turn that was stopped or replaced
+/// after the request was created wakes nobody; the restored turn does.
+#[tokio::test]
+async fn routed_request_notice_is_not_sent_after_stop_or_replacement() {
+    let (state, _, server) = setup("team_routed_notice_fence").await;
+    enable_routed_requests(&state).await;
+    let (orchestrator, chat) = orchestrator(&state).await;
+    let github = connected(&state.db, OWNER, "github", "https://api.github.com").await;
+    spawn(
+        &state,
+        &chat,
+        json!({"name": "coder", "description": "Review PRs"}),
+    )
+    .await;
+    let home = specialist_home(&state, "coder").await;
+    let sub = engine::begin_turn(
+        &state.db,
+        OWNER,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: Some(home.id.clone()),
+            text: "Please review my open GitHub PRs".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let sub = crate::services::assistant_authority_tests::pin_assignment(
+        &state.db,
+        OWNER,
+        &sub.id,
+        Some(&orchestrator.id),
+    )
+    .await;
+    let turn_id = sub.active_turn.as_ref().unwrap().turn_id.clone();
+    let sub_chat = chat_for(&state, &sub).await;
+    let (_, request) = acks::service_gate(&state.db, &sub_chat, &github, "github", "GitHub", false)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = request.expect("a new request");
+    let event_id = acks::permission_requested_event_id(&request.id);
+    let conversations = state.db.collection::<bson::Document>(CONVERSATIONS);
+    let queued = || {
+        let state = state.clone();
+        let id = orchestrator.id.clone();
+        let event_id = event_id.clone();
+        async move {
+            engine::get(&state.db, OWNER, &id)
+                .await
+                .unwrap()
+                .pending_events
+                .iter()
+                .any(|e| e.id == event_id)
+        }
+    };
+    for change in [
+        doc! {"active_turn.stop_requested": true},
+        doc! {"active_turn.stop_requested": false, "active_turn.turn_id": Uuid::new_v4().to_string()},
+    ] {
+        conversations
+            .update_one(doc! {"_id": &sub.id}, doc! {"$set": change})
+            .await
+            .unwrap();
+        permission_requested(&state, &sub_chat, &request).await;
+        assert!(!queued().await);
+        assert!(
+            transcript(&state, &orchestrator.id)
+                .await
+                .iter()
+                .all(|message| message.role != "event"),
+            "a stopped or replaced turn woke NyxBot"
+        );
+    }
+    // The original turn again: queued under the fence, then woken.
+    conversations
+        .update_one(
+            doc! {"_id": &sub.id},
+            doc! {"$set": {"active_turn.turn_id": &turn_id}},
+        )
+        .await
+        .unwrap();
+    permission_requested(&state, &sub_chat, &request).await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if transcript(&state, &orchestrator.id)
+                .await
+                .iter()
+                .any(|message| message.role == "event" && message.text.contains(&request.id))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("NyxBot woken with the fenced request");
+    idle_row(&state, &orchestrator.id).await;
     server.abort();
 }

@@ -56,7 +56,7 @@ async fn resolve_api_key_write_owner(
     let key = state
         .db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id })
+        .find_one(doc! { "_id": key_id, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
@@ -83,7 +83,7 @@ async fn resolve_api_key_read_owner(
     let key = state
         .db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id })
+        .find_one(doc! { "_id": key_id, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
@@ -100,6 +100,9 @@ pub struct CreateApiKeyRequest {
     pub scopes: Option<String>,
     /// Accepts RFC 3339 ("2026-04-01T00:00:00Z") or date-only ("2026-04-01").
     pub expires_at: Option<String>,
+    /// Explicitly create a nonexpiring key; conflicts with expires_at. Omission defaults to 90 days.
+    #[serde(default)]
+    pub never_expires: bool,
     pub description: Option<String>,
     /// UserService IDs this key can access via proxy.
     /// A non-empty list implies `allow_all_services: false` when that gate is
@@ -112,12 +115,12 @@ pub struct CreateApiKeyRequest {
     #[serde(default)]
     pub allowed_node_ids: Vec<String>,
     /// If true, key can access ALL of the user's external services.
-    /// When omitted, defaults to `true` only if `allowed_service_ids` is empty.
+    /// When omitted, defaults to `false`, including when `allowed_service_ids` is empty.
     /// An explicit `true` conflicts with a non-empty restriction list.
     pub allow_all_services: Option<bool>,
     pub allow_auto_connected_services: Option<bool>,
     /// If true, key can route through ALL of the user's nodes.
-    /// When omitted, defaults to `true` only if `allowed_node_ids` is empty.
+    /// When omitted, defaults to `false`, including when `allowed_node_ids` is empty.
     /// An explicit `true` conflicts with a non-empty restriction list.
     pub allow_all_nodes: Option<bool>,
     pub rate_limit_per_second: Option<u32>,
@@ -203,6 +206,8 @@ pub struct CreateApiKeyResponse {
     pub full_key: String,
     pub scopes: String,
     pub created_at: String,
+    /// Authoritative stored expiry, including the resolved default.
+    pub expires_at: Option<String>,
     pub rotation_predecessor_id: Option<String>,
     pub state_version: i64,
     pub updated_at: String,
@@ -1448,20 +1453,10 @@ pub async fn create_key(
         body.scopes.as_deref().unwrap_or("read")
     };
 
-    let expires_at = body
-        .expires_at
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(parse_expires_at)
-        .transpose()?;
-
-    if let Some(exp) = expires_at
-        && exp <= Utc::now()
-    {
-        return Err(AppError::ValidationError(
-            "expires_at must be in the future".to_string(),
-        ));
-    }
+    let expiry = crate::services::api_key_validation::NewKeyExpiry::from_request(
+        body.expires_at.as_deref(),
+        body.never_expires,
+    )?;
 
     let allow_all_services = resolve_create_allow_all(
         &body.allowed_service_ids,
@@ -1497,11 +1492,12 @@ pub async fn create_key(
                 "scheduled_invocation keys require exact service and node scopes".to_string(),
             ));
         }
-        let expires_at = expires_at.ok_or_else(|| {
-            AppError::ValidationError(
-                "scheduled_invocation keys require a finite expires_at".to_string(),
-            )
-        })?;
+        let crate::services::api_key_validation::NewKeyExpiry::At(expires_at) = expiry else {
+            return Err(AppError::ValidationError(
+                "scheduled_invocation keys require an explicit finite expires_at".into(),
+            ));
+        };
+        expiry.resolve(Utc::now())?;
         let expected_digest = body.scope_plan_digest.as_deref().ok_or_else(|| {
             AppError::ValidationError(
                 "scheduled_invocation provisioning requires scope_plan_digest".to_string(),
@@ -1537,7 +1533,7 @@ pub async fn create_key(
             Some(&actor),
             &body.name,
             scopes,
-            expires_at,
+            expiry,
             body.description.as_deref(),
             Some(&body.allowed_service_ids),
             Some(&body.allowed_node_ids),
@@ -1572,7 +1568,8 @@ pub async fn create_key(
             scope_mode: scope_mode.to_string(),
             rate_limit_per_second: created.rate_limit_per_second,
         },
-    );
+    )
+    .await;
 
     if scheduled {
         audit_service::log_for_user(
@@ -1597,6 +1594,7 @@ pub async fn create_key(
         full_key: created.full_key,
         scopes: created.scopes,
         created_at: created.created_at.to_rfc3339(),
+        expires_at: created.expires_at.map(|value| value.to_rfc3339()),
         rotation_predecessor_id: created.rotation_predecessor_id,
         state_version: created.state_version,
         updated_at: created.updated_at.to_rfc3339(),
@@ -1709,7 +1707,8 @@ pub async fn delete_key(
         TelemetryEvent::ApiKeyDeleted {
             platform: pre_delete_platform,
         },
-    );
+    )
+    .await;
 
     Ok(Json(DeleteApiKeyResponse {
         message: "API key deleted".to_string(),
@@ -1758,7 +1757,8 @@ pub async fn rotate_key(
         TelemetryEvent::ApiKeyRotated {
             platform: created.platform.clone(),
         },
-    );
+    )
+    .await;
 
     Ok(Json(CreateApiKeyResponse {
         id: created.id,
@@ -1768,6 +1768,7 @@ pub async fn rotate_key(
         full_key: created.full_key,
         scopes: created.scopes,
         created_at: created.created_at.to_rfc3339(),
+        expires_at: created.expires_at.map(|value| value.to_rfc3339()),
         rotation_predecessor_id: created.rotation_predecessor_id,
         state_version: created.state_version,
         updated_at: created.updated_at.to_rfc3339(),
@@ -2207,6 +2208,7 @@ mod tests {
                 is_active: true,
                 created_at: now,
                 rotation_predecessor_id: None,
+                machine_external_grants_present: false,
                 state_version: 1,
                 updated_at: Some(now),
                 description: None,
@@ -2385,6 +2387,7 @@ mod tests {
                 status: NodeStatus::Online,
                 auth_token_hash: "auth-hash".to_string(),
                 signing_secret_encrypted: None,
+                signing_secret_context_version: None,
                 signing_secret_hash: "signing-hash".to_string(),
                 last_heartbeat_at: Some(now),
                 connected_at: Some(now),
@@ -2395,6 +2398,110 @@ mod tests {
                 created_at: now,
                 updated_at: now,
             }
+        }
+
+        #[tokio::test]
+        async fn create_expiry_response_matches_stored_defaults_explicit_precision_and_rotation() {
+            let db =
+                crate::test_utils::connect_transaction_test_database("w9_expiry_response").await;
+            let actor = Uuid::new_v4().to_string();
+            db.collection::<User>(USERS)
+                .insert_one(test_user(&actor, UserType::Person))
+                .await
+                .unwrap();
+            let state = test_app_state(db.clone());
+            for extra in [
+                json!({}),
+                json!({"expires_at": null}),
+                json!({"expires_at": ""}),
+                json!({"allow_all_services": false, "allow_all_nodes": false}),
+                json!({"expires_at": "2099-01-01T01:02:03.123456789Z"}),
+                json!({"never_expires": true, "allow_all_services": true, "allow_all_nodes": true}),
+            ] {
+                let mut body = json!({"name": "lifetime", "scopes": "read"});
+                body.as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                let (status, response) = post_create(&state, &actor, body).await;
+                assert_eq!(status, StatusCode::OK, "{response}");
+                let stored = db
+                    .collection::<ApiKey>(API_KEYS)
+                    .find_one(doc! {"_id": response["id"].as_str().unwrap()})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    response["expires_at"],
+                    json!(stored.expires_at.map(|value| value.to_rfc3339()))
+                );
+                if extra["never_expires"] == true {
+                    assert!(stored.expires_at.is_none());
+                    assert!(stored.allow_all_services && stored.allow_all_nodes);
+                } else if extra["expires_at"]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    assert_eq!(response["expires_at"], "2099-01-01T01:02:03.123+00:00");
+                } else {
+                    assert_eq!(
+                        stored.expires_at.unwrap(),
+                        mongodb::bson::DateTime::from_chrono(
+                            stored.created_at + chrono::Duration::days(90)
+                        )
+                        .to_chrono()
+                    );
+                }
+                if extra["never_expires"] != true {
+                    assert!(!stored.allow_all_services && !stored.allow_all_nodes);
+                }
+                let rotated = super::super::rotate_key(
+                    axum::extract::State(state.clone()),
+                    crate::test_utils::test_auth_user(&actor),
+                    crate::telemetry::TelemetryContext::default(),
+                    axum::extract::Path(stored.id.clone()),
+                )
+                .await
+                .unwrap()
+                .0;
+                assert_eq!(
+                    rotated.expires_at,
+                    response["expires_at"].as_str().map(str::to_owned)
+                );
+                let successor = db
+                    .collection::<ApiKey>(API_KEYS)
+                    .find_one(doc! {"_id": rotated.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(successor.expires_at, stored.expires_at);
+                assert_eq!(successor.allow_all_services, stored.allow_all_services);
+                assert_eq!(successor.allow_all_nodes, stored.allow_all_nodes);
+            }
+            let before = db
+                .collection::<ApiKey>(API_KEYS)
+                .count_documents(doc! {})
+                .await
+                .unwrap();
+            for extra in [
+                json!({"never_expires": true, "expires_at": "2099-01-01"}),
+                json!({"expires_at": "2000-01-01"}),
+            ] {
+                let mut body = json!({"name": "invalid"});
+                body.as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                assert_eq!(
+                    post_create(&state, &actor, body).await.0,
+                    StatusCode::BAD_REQUEST
+                );
+            }
+            assert_eq!(
+                db.collection::<ApiKey>(API_KEYS)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                before
+            );
         }
 
         #[tokio::test]
@@ -2464,8 +2571,8 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::OK, "unexpected response: {unscoped}");
-            assert_eq!(unscoped["allow_all_services"], true);
-            assert_eq!(unscoped["allow_all_nodes"], true);
+            assert_eq!(unscoped["allow_all_services"], false);
+            assert_eq!(unscoped["allow_all_nodes"], false);
 
             let (status, service_conflict) = post_create(
                 &state,
@@ -2529,6 +2636,7 @@ mod tests {
                 is_active: true,
                 created_at: Utc::now(),
                 rotation_predecessor_id: None,
+                machine_external_grants_present: false,
                 state_version: 1,
                 updated_at: Some(Utc::now()),
                 last_used_at: None,
@@ -2931,6 +3039,7 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(Utc::now()),
             description: None,

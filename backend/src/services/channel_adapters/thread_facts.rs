@@ -74,6 +74,10 @@ pub(super) fn telegram(message: &InboundMessage, bot: &ChannelBot) -> Option<Cha
     } else {
         human(native["from"]["is_bot"].as_bool())
     };
+    facts.telegram_topic = Some(match super::telegram::topic_of(native) {
+        Some(id) => crate::models::channel_thread::TelegramTopic::Topic { id },
+        None => crate::models::channel_thread::TelegramTopic::Chat,
+    });
     facts.native_thread_id = topic.clone();
     facts.root_id = topic.or_else(|| {
         facts
@@ -83,12 +87,12 @@ pub(super) fn telegram(message: &InboundMessage, bot: &ChannelBot) -> Option<Cha
     });
     let mentions = telegram_mentions(native, bot);
     facts.mentions_others = mentions.mentions_others();
-    facts.address = if numeric_id(&native["reply_to_message"]["from"]["id"]).as_deref()
+    facts.address = if mentions.bot {
+        ThreadAddress::Mention
+    } else if numeric_id(&native["reply_to_message"]["from"]["id"]).as_deref()
         == Some(bot.platform_bot_id.as_str())
     {
         ThreadAddress::ReplyToBot
-    } else if mentions.bot {
-        ThreadAddress::Mention
     } else {
         ThreadAddress::NotAddressed
     };
@@ -96,63 +100,12 @@ pub(super) fn telegram(message: &InboundMessage, bot: &ChannelBot) -> Option<Cha
 }
 
 fn telegram_mentions(message: &Value, bot: &ChannelBot) -> MentionState {
-    let mut state = MentionState::default();
-    let text = message["text"]
-        .as_str()
-        .or_else(|| message["caption"].as_str())
-        .unwrap_or_default();
-    let Some(entities) = message["entities"]
-        .as_array()
-        .or_else(|| message["caption_entities"].as_array())
-    else {
-        return state;
-    };
-    for entity in entities {
-        if entity["type"] == "text_mention" {
-            match numeric_id(&entity["user"]["id"]) {
-                Some(id) if id == bot.platform_bot_id => state.bot = true,
-                Some(_) => state.other = true,
-                None => {}
-            }
-            continue;
-        }
-        if entity["type"] != "mention" || bot.platform_bot_username.is_empty() {
-            continue;
-        }
-        let Some(offset) = entity["offset"]
-            .as_u64()
-            .and_then(|n| usize::try_from(n).ok())
-        else {
-            continue;
-        };
-        let Some(length) = entity["length"]
-            .as_u64()
-            .and_then(|n| usize::try_from(n).ok())
-        else {
-            continue;
-        };
-        // Telegram entity offsets count UTF-16 code units, not UTF-8 bytes.
-        let units: Vec<_> = text
-            .encode_utf16()
-            .skip(offset)
-            .take(length.min(256))
-            .collect();
-        if length > 256 || units.len() != length {
-            continue;
-        }
-        let Ok(mention) = String::from_utf16(&units) else {
-            continue;
-        };
-        if mention.eq_ignore_ascii_case(&format!(
-            "@{}",
-            bot.platform_bot_username.trim_start_matches('@')
-        )) {
-            state.bot = true;
-        } else {
-            state.other = true;
-        }
+    let native = crate::services::channel_native_mentions::telegram(message, bot);
+    MentionState {
+        bot: native.bot && !native.invalid,
+        other: native.other,
+        everyone: native.everyone,
     }
-    state
 }
 
 pub(super) fn slack(
@@ -389,38 +342,12 @@ pub(super) fn lark(message: &InboundMessage, own_id: Option<&str>) -> Option<Cha
 }
 
 fn lark_mentions(message: &Value, own_id: Option<&str>) -> MentionState {
-    let mut state = MentionState::default();
-    let Some(mentions) = message["mentions"].as_array() else {
-        return state;
-    };
-    for mention in mentions {
-        let key = mention["key"].as_str().unwrap_or_default();
-        if matches!(key, "@_all" | "_all") {
-            state.everyone = true;
-            continue;
-        }
-        let ids: Vec<&str> = [
-            mention["id"]["open_id"].as_str(),
-            mention["id"]["user_id"].as_str(),
-            mention["id"].as_str(),
-            mention["open_id"].as_str(),
-            mention["user_id"].as_str(),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|id| !id.is_empty())
-        .collect();
-        let user_key = key.starts_with("@_user_");
-        if !user_key && ids.is_empty() {
-            continue;
-        }
-        if own_id.is_some_and(|own| ids.contains(&own)) {
-            state.bot = true;
-        } else {
-            state.other = true;
-        }
+    let native = crate::services::channel_native_mentions::lark(message, own_id);
+    MentionState {
+        bot: native.bot && !native.invalid,
+        other: native.other,
+        everyone: native.everyone,
     }
-    state
 }
 
 /// Aurinko is private-classified by the legacy router, but its provider
@@ -456,4 +383,83 @@ pub(super) fn aurinko(message: &InboundMessage) -> Option<ChannelThreadFacts> {
         ThreadAddress::NotAddressed
     };
     Some(facts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn bot() -> ChannelBot {
+        let now = bson::DateTime::now();
+        bson::from_document(bson::doc! {
+            "_id": "bot", "user_id": "owner", "platform": "telegram", "label": "Home bot",
+            "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
+            "platform_bot_id": "100", "platform_bot_username": "home_bot",
+            "webhook_registered": true, "webhook_secret_hash": "hash", "status": "active",
+            "is_active": true, "created_at": now, "updated_at": now,
+        })
+        .unwrap()
+    }
+
+    fn inbound(native: Value) -> InboundMessage {
+        InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
+            platform_message_id: native["message_id"].to_string(),
+            conversation_id: "-100999".into(),
+            conversation_type: "group".into(),
+            sender_platform_id: "111".into(),
+            sender_display_name: None,
+            content_type: "text".into(),
+            text: Some("hi".into()),
+            attachments: vec![],
+            reply_to_platform_message_id: native["reply_to_message"]["message_id"]
+                .as_i64()
+                .map(|id| id.to_string()),
+            thread_id: None,
+            raw_data: json!({ "update_id": 1, "message": native }),
+        }
+    }
+
+    fn reply(topic: bool, forum: bool) -> Value {
+        let mut native = json!({
+            "message_id": 91, "message_thread_id": 16,
+            "from": { "id": 111, "is_bot": false, "first_name": "Thread" },
+            "chat": { "id": -100999, "type": "supergroup" },
+            "date": 1700000050, "text": "Reply",
+            "reply_to_message": { "message_id": 16, "from": { "id": 222, "is_bot": false }, "date": 1700000040, "text": "Root" }
+        });
+        if topic {
+            native["is_topic_message"] = json!(true);
+        }
+        if forum {
+            native["chat"]["is_forum"] = json!(true);
+        }
+        native
+    }
+
+    #[test]
+    fn telegram_outbound_topic_evidence_preserves_existing_follow_scope() {
+        use crate::models::channel_thread::TelegramTopic;
+        let bot = bot();
+        for forum in [false, true] {
+            let facts = telegram(&inbound(reply(false, forum)), &bot).unwrap();
+            assert_eq!(facts.telegram_topic, Some(TelegramTopic::Chat));
+            assert_eq!(
+                facts.kind,
+                if forum {
+                    ThreadKind::Topic
+                } else {
+                    ThreadKind::ReplyChain
+                },
+            );
+        }
+        let topic = telegram(&inbound(reply(true, true)), &bot).unwrap();
+        assert_eq!(topic.kind, ThreadKind::Topic);
+        assert_eq!(
+            topic.telegram_topic,
+            Some(TelegramTopic::Topic { id: "16".into() })
+        );
+    }
 }

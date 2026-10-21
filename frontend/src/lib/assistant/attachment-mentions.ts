@@ -1,6 +1,6 @@
 /**
  * Composer attachments get short handles (`@image-1`, `@file-1`,
- * `@pasted-text-1`) the writer can mention. Handles are a composer-only
+ * `@text-1`) the writer can mention. Handles are a composer-only
  * convenience: before a message is sent each one becomes a plain description of
  * the file, so the server (which routes `@name` to agents in group chats) never
  * sees them.
@@ -53,7 +53,7 @@ function escapeHandle(handle: string): string {
 /**
  * One pass over `text`: each `@handle` of a known attachment (same word rule as
  * agent mentions) becomes `replacement(mention)`. Inserted text is never
- * rescanned, so a pasted document that itself contains `@pasted-text-2` stays
+ * rescanned, so a pasted document that itself contains `@text-2` stays
  * verbatim. Output stops at `limit` UTF-16 units without building what it drops.
  */
 function replaceHandles<T extends AttachmentMention>(

@@ -24,11 +24,20 @@ pub struct MachineOption {
     ceiling: nyxid_machine::authority::Capabilities,
     legacy: bool,
     mode: String,
+    selection_required: bool,
+    selection_reason: Option<String>,
+    separation_choice: Option<nyxid_machine::context::Choice>,
     execution_note: &'static str,
     separated_setup_note: Option<&'static str>,
     separated: Option<nyxid_machine::context::Support>,
     saved_login_ids: Option<Vec<String>>,
     revocation_pending: bool,
+    delivery_pending: bool,
+    quarantine_pending: bool,
+    execution_revocation_pending: bool,
+    revocation_initialization_pending: bool,
+    revocation_expires_at: Option<String>,
+    revocation_diagnostic: Option<&'static str>,
 }
 pub async fn options(
     state: &AppState,
@@ -37,6 +46,12 @@ pub async fn options(
 ) -> AppResult<Vec<MachineOption>> {
     let agent = team::maintained_agent(&state.db, actor, agent_id).await?;
     let policy = Box::pin(access::policy(&state.db, &agent.id)).await?;
+    let contexts = crate::services::feature_flag_service::personal_flag_enabled(
+        &state.db,
+        actor,
+        access::CONTEXT_FLAG,
+    )
+    .await?;
     let writable = crate::services::machine_service::usable_owners(&state.db, actor).await?;
     let owners = if agent.user_id != actor {
         vec![agent.user_id.clone()]
@@ -48,28 +63,60 @@ pub async fn options(
     let nodes:Vec<crate::models::node::Node>=state.db.collection(crate::models::node::COLLECTION_NAME)
         .find(doc!{"user_id":{"$in":owners},"is_active":true,"machine":{"$ne":mongodb::bson::Bson::Null}})
         .sort(doc!{"name":1,"_id":1}).limit(500).await?.try_collect().await?;
-    let pending: Vec<mongodb::bson::Document> = state
-        .db
-        .collection::<mongodb::bson::Document>(crate::models::machine_access::OUTBOX)
-        .find(doc! {"agent_id":&agent.id,"pending":true})
-        .projection(doc! {"node_id":1})
-        .limit(500)
-        .await?
-        .try_collect()
-        .await?;
+    let node_ids = nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
+    let pending = access::revocation_status(&state.db, &agent.id, &node_ids).await?;
     Ok(nodes
         .into_iter()
         .filter_map(|node| {
             let profile = node.machine?;
+            let separated = access::separated_support(&profile);
             let assignment = policy
                 .assignments
                 .get(&node.id)
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_else(|| access::unresolved_assignment(policy.revision));
+            let selection_required =
+                assignment.mode == crate::models::machine_access::SELECTION_REQUIRED;
+            let selection_reason = selection_required.then(|| {
+                access::selection_message(access::pending_selection_reason(&profile, contexts))
+            });
             Some(MachineOption {
-                revocation_pending: pending
-                    .iter()
-                    .any(|p| p.get_str("node_id").ok() == Some(node.id.as_str())),
+                revocation_pending: pending.get(&node.id).is_some_and(|p| {
+                    !profile.authority_timing_v1
+                        || p.get_bool("execution_pending").unwrap_or(true)
+                        || p.get_bool("quarantine_pending").unwrap_or(false)
+                }),
+                delivery_pending: pending.contains_key(&node.id),
+                quarantine_pending: pending
+                    .get(&node.id)
+                    .is_some_and(|p| p.get_bool("quarantine_pending").unwrap_or(false)),
+                execution_revocation_pending: pending.get(&node.id).is_some_and(|p| {
+                    !profile.authority_timing_v1 || p.get_bool("execution_pending").unwrap_or(true)
+                }),
+                revocation_initialization_pending: pending
+                    .get(&node.id)
+                    .is_some_and(|p| p.get_bool("initialization_pending").unwrap_or(true)),
+                revocation_expires_at: (profile.authority_timing_v1
+                    && pending.get(&node.id).is_some_and(|p| {
+                        !p.get_bool("invalid_deadline").unwrap_or(true)
+                            && !p.get_bool("initialization_pending").unwrap_or(true)
+                    }))
+                .then(|| {
+                    pending
+                        .get(&node.id)
+                        .and_then(|p| p.get_datetime("expires_at").ok())
+                        .map(|d| d.to_chrono().to_rfc3339())
+                })
+                .flatten(),
+                revocation_diagnostic: pending.get(&node.id).and_then(|p| {
+                    if p.get_bool("invalid_deadline").unwrap_or(true) {
+                        Some("revocation_deadline_invalid")
+                    } else if !profile.authority_timing_v1 {
+                        Some("authority_timing_upgrade_required")
+                    } else {
+                        None
+                    }
+                }),
                 node_id: node.id,
                 name: node.name,
                 revision: policy.revision,
@@ -80,15 +127,15 @@ pub async fn options(
                 legacy: assignment.legacy,
                 execution_note: crate::services::machine_tools::execution_note(
                     &assignment.mode,
-                    profile.separated.as_ref().is_some_and(|s| s.available),
+                    separated.available,
                 ),
-                separated_setup_note: profile
-                    .separated
-                    .as_ref()
-                    .is_none_or(|s| !s.available)
+                separated_setup_note: (!separated.available)
                     .then_some(crate::services::machine_tools::SEPARATED_SETUP_NOTE),
+                selection_required,
+                selection_reason,
+                separation_choice: profile.separation_choice,
                 mode: assignment.mode,
-                separated: profile.separated.clone(),
+                separated: Some(separated),
                 saved_login_ids: assignment.saved_login_ids,
             })
         })
@@ -160,17 +207,6 @@ pub async fn request_context(
 ) -> AppResult<Json<ContextRequestResponse>> {
     super::login_client_context::require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
-    if !crate::services::feature_flag_service::personal_flag_enabled(
-        &state.db,
-        &actor,
-        access::CONTEXT_FLAG,
-    )
-    .await?
-    {
-        return Err(AppError::ValidationError(
-            "Machine context setup is not enabled for this account".into(),
-        ));
-    }
     let agent = team::maintained_agent(&state.db, &actor, &agent_id).await?;
     let option = Box::pin(options(&state, &actor, &agent.id))
         .await?
@@ -180,25 +216,58 @@ pub async fn request_context(
     if !option.can_edit {
         return Err(AppError::MachineNotAllowed);
     }
-    if body.selection.mode.as_deref() != Some("separated") {
+    let requested = body.selection.mode.as_deref().unwrap_or("");
+    if !matches!(
+        requested,
+        "separated" | "automatic" | "require_separated" | "shared_legacy"
+    ) {
         return Err(AppError::ValidationError(
-            "Choose Separate workspace and browser for this agent".into(),
+            "Choose automatic, require_separated or shared_legacy".into(),
         ));
     }
-    if option
-        .separated
-        .as_ref()
-        .is_none_or(|support| !support.available)
-    {
-        return Err(AppError::MachineAuthorityUnsupported);
+    if requested != "shared_legacy" {
+        if !crate::services::feature_flag_service::personal_flag_enabled(
+            &state.db,
+            &actor,
+            access::CONTEXT_FLAG,
+        )
+        .await?
+        {
+            return Err(AppError::ValidationError("Machine context setup is not enabled for this account; no shared fallback is selected".into()));
+        }
+        if option
+            .separated
+            .as_ref()
+            .is_none_or(|support| !support.available)
+        {
+            return Err(AppError::ValidationError(access::selection_message(
+                option
+                    .separated
+                    .as_ref()
+                    .and_then(|support| support.reason.as_deref())
+                    .unwrap_or("separated_capabilities_not_reported"),
+            )));
+        }
     }
     // The graphical control changes only the mode. Snapshot the assignment
     // server-side so a forged request cannot widen capabilities or saved-login
     // access behind a generic owner card; the current revision fences approval.
     let selection = Selection {
-        mode: Some("separated".into()),
+        mode: Some(requested.into()),
         expected_revision: option.revision,
-        capabilities: option.capabilities,
+        capabilities: if !option.protocol_v2
+            || (option.selection_required
+                && !crate::services::feature_flag_service::personal_flag_enabled(
+                    &state.db,
+                    &actor,
+                    access::FLAG,
+                )
+                .await?)
+        {
+            option.ceiling
+        } else {
+            option.capabilities
+        },
         saved_login_ids: Some(option.saved_login_ids.unwrap_or_default()),
     };
     let bot = Box::pin(team::ensure_nyxbot(&state.db, &actor)).await?;
@@ -212,10 +281,19 @@ pub async fn request_context(
     else {
         return Err(AppError::MachineBrowserUnavailable);
     };
-    let summary = format!(
-        "Separate workspace and browser for {} on {}",
-        agent.name, option.name
-    );
+    let summary = if requested == "shared_legacy" {
+        format!(
+            "Approve shared legacy access for {} on {}. {}",
+            agent.name,
+            option.name,
+            nyxid_machine::context::SHARED_LEGACY_WARNING
+        )
+    } else {
+        format!(
+            "Separate workspace and browser for {} on {}. These contexts share the host kernel. Use a separate machine container or VM per agent for stronger isolation.",
+            agent.name, option.name
+        )
+    };
     let row = crate::services::assistant_acknowledgement_service::request_machine_context(
         &state.db,
         &chat,
@@ -243,9 +321,14 @@ pub async fn apply_human_context_action(
     actor: &str,
     action: &crate::models::machine_access::HumanContextAction,
 ) -> AppResult<()> {
-    if action.selection.mode.as_deref() != Some("separated") {
+    if !action.selection.mode.as_deref().is_some_and(|mode| {
+        matches!(
+            mode,
+            "separated" | "automatic" | "require_separated" | "shared_legacy"
+        )
+    }) {
         return Err(AppError::ValidationError(
-            "Only separated mode can be requested here".into(),
+            "An explicit machine separation choice is required".into(),
         ));
     }
     let policy = Box::pin(access::configure(
@@ -263,7 +346,7 @@ pub async fn apply_human_context_action(
         Some(serde_json::json!({
             "agent_id": action.agent_id,
             "node_id": action.node_id,
-            "mode": "separated",
+            "mode": action.selection.mode,
             "revision": policy.revision,
             "source": "human_action_card"
         })),
@@ -310,6 +393,12 @@ pub async fn native(
         .ok_or_else(|| AppError::ValidationError("machine ID required".into()))?;
     let selection: Selection = serde_json::from_value(args["selection"].clone())
         .map_err(|_| AppError::ValidationError("Invalid capability selection".into()))?;
+    if selection.mode.as_deref() == Some("shared_legacy") {
+        return Ok((
+            json!({"status":"selection_required", "message":"Only the owner can explicitly approve shared legacy access in Assistant → Machines after reviewing the warning.", "settings_path":crate::services::assistant_links::AssistantPage::MachineSettings {node}.path(), "warning":nyxid_machine::context::SHARED_LEGACY_WARNING}),
+            true,
+        ));
+    }
     if !crate::services::feature_flag_service::personal_flag_enabled(
         &state.db,
         &chat.user_id,
@@ -351,10 +440,40 @@ pub async fn native(
             "Machine context setup is not enabled; existing separation still applies".into(),
         ));
     }
-    if selection.mode.as_deref() == Some("separated")
-        && machine.separated.as_ref().is_none_or(|s| !s.available)
+    if selection
+        .mode
+        .as_deref()
+        .is_some_and(|mode| !matches!(mode, "separated" | "automatic" | "require_separated"))
     {
-        return Err(AppError::MachineAuthorityUnsupported);
+        return Err(AppError::ValidationError("Choose automatic or require_separated; shared legacy requires the human settings action card".into()));
+    }
+    let recorded_choice_usable = machine.separation_choice
+        == Some(nyxid_machine::context::Choice::SharedLegacy)
+        || (machine.separation_choice.is_some()
+            && machine
+                .separated
+                .as_ref()
+                .is_some_and(|support| support.available)
+            && crate::services::feature_flag_service::personal_flag_enabled(
+                &state.db,
+                &chat.user_id,
+                access::CONTEXT_FLAG,
+            )
+            .await?);
+    if selection.mode.is_none() && machine.selection_required && !recorded_choice_usable {
+        return Ok((
+            json!({"status":"selection_required", "message":machine.selection_reason, "settings_path":crate::services::assistant_links::AssistantPage::MachineSettings {node}.path(), "warning":nyxid_machine::context::SHARED_LEGACY_WARNING}),
+            true,
+        ));
+    }
+    if selection.mode.is_some() && machine.separated.as_ref().is_none_or(|s| !s.available) {
+        return Err(AppError::ValidationError(access::selection_message(
+            machine
+                .separated
+                .as_ref()
+                .and_then(|support| support.reason.as_deref())
+                .unwrap_or("separated_capabilities_not_reported"),
+        )));
     }
     let old = policy.assignments.get(node).cloned().unwrap_or_default();
     let changes_mode = selection
@@ -368,6 +487,8 @@ pub async fn native(
             (Some(_), None) => true,
             _ => false,
         };
+    let mut auto_allowed = None;
+    let mut receipt_summary = String::new();
     if widens || !chat.is_orchestrator() {
         let tool = "nyxid__machine_capabilities";
         let approved = if let Some(id) = args["acknowledgement_id"].as_str() {
@@ -376,23 +497,6 @@ pub async fn native(
             false
         };
         if !approved {
-            let routed = crate::services::assistant_settings_service::get(&state.db, &chat.user_id)
-                .await
-                .map(|s| chat.access_request_allowed_with_mode(s.specialist_access_requests))
-                .unwrap_or(false);
-            if !routed {
-                crate::services::assistant_acknowledgement_service::audit_access_request_denied(
-                    &state.db,
-                    chat,
-                    Some(node),
-                    "machine_capabilities",
-                )
-                .await;
-                return Ok((
-                    crate::services::assistant_acknowledgement_service::access_request_denied(),
-                    true,
-                ));
-            }
             let login_scope = selection.saved_login_ids.as_ref().map_or_else(
                 || "inherit the agent's saved-login grants".to_owned(),
                 |ids| format!("limit saved logins to {} selected", ids.len()),
@@ -402,9 +506,100 @@ pub async fn native(
             } else {
                 ""
             };
-            let card=acks::request(&state.db,chat,acks::Request{kind:"action",service:None,tool:Some(tool),arguments:Some(args),
-                summary:&format!("Change {} on machine {}: shell={}, files={}, browser={}, computer={}, developer browser={}; {}. Current work for this agent on this machine will stop.{mode_note}",agent.name,machine.name,selection.capabilities.shell,selection.capabilities.files,selection.capabilities.browser,selection.capabilities.computer,selection.capabilities.developer_browser,login_scope),platform:false}).await?;
-            return Ok((acks::refusal(&card), true));
+            receipt_summary = format!(
+                "Change {} on machine {}: shell={}, files={}, browser={}, computer={}, developer browser={}; {}. Current work for this agent on this machine will stop.{mode_note}",
+                agent.name,
+                machine.name,
+                selection.capabilities.shell,
+                selection.capabilities.files,
+                selection.capabilities.browser,
+                selection.capabilities.computer,
+                selection.capabilities.developer_browser,
+                login_scope
+            );
+            if chat.is_orchestrator() {
+                let gate = acks::confirmation_needed(
+                    &state.db,
+                    chat,
+                    acks::ActionFacts::of(acks::OwnerActionClass::Sensitive),
+                    false,
+                )
+                .await?;
+                auto_allowed = gate.auto_allowed();
+                if let Some(need) = gate.ask()
+                    && let Some(refusal) =
+                        acks::confirm_action(&state.db, chat, tool, args, &need, &receipt_summary)
+                            .await?
+                {
+                    return Ok((refusal, true));
+                }
+            } else {
+                if !chat.involved() {
+                    acks::audit_missing_access(
+                        &state.db,
+                        chat,
+                        Some(node),
+                        crate::services::assistant_access_policy::AccessArea::MachineCapabilities
+                            .scope(),
+                    )
+                    .await;
+                    return Ok((
+                        crate::services::assistant_access_policy::missing_access(
+                            crate::services::assistant_access_policy::AccessArea::MachineCapabilities,
+                            Some(&machine.name),
+                            &agent.id,
+                            None,
+                        ),
+                        true,
+                    ));
+                }
+                let routed =
+                    crate::services::assistant_settings_service::get(&state.db, &chat.user_id)
+                        .await
+                        .map(|s| {
+                            chat.access_request_allowed_with_mode(s.specialist_access_requests)
+                        })
+                        .unwrap_or(false);
+                if !routed {
+                    acks::audit_access_request_denied(
+                        &state.db,
+                        chat,
+                        Some(node),
+                        "machine_capabilities",
+                    )
+                    .await;
+                    return Ok((acks::access_request_denied(), true));
+                }
+                if acks::effective_access_mode(&state.db, chat).await?
+                    == crate::models::assistant_settings::AccessMode::Autopilot
+                {
+                    let (request, created) = acks::request_tracked(
+                        &state.db, chat, acks::Request {
+                            kind: "machine", service: Some((node, node, &machine.name)),
+                            tool: Some(tool), arguments: Some(args),
+                            summary: &format!("{receipt_summary} Desired selection: {}. After this request is decided, the current machine policy is inspected and these capabilities are applied with nyxid__machine_capabilities.", args["selection"]),
+                            platform: false,
+                        }).await?;
+                    if created {
+                        super::assistant_team::permission_requested(state, chat, &request).await;
+                    }
+                    return Ok((acks::refusal(&request), true));
+                }
+                let card = acks::request(
+                    &state.db,
+                    chat,
+                    acks::Request {
+                        kind: "action",
+                        service: None,
+                        tool: Some(tool),
+                        arguments: Some(args),
+                        summary: &receipt_summary,
+                        platform: false,
+                    },
+                )
+                .await?;
+                return Ok((acks::refusal(&card), true));
+            }
         }
     }
     let policy = Box::pin(access::configure(
@@ -415,6 +610,17 @@ pub async fn native(
         selection,
     ))
     .await?;
+    if let Some(auto) = auto_allowed {
+        acks::record_auto_allowed(
+            &state.db,
+            chat,
+            "nyxid__machine_capabilities",
+            args,
+            &auto,
+            &receipt_summary,
+        )
+        .await;
+    }
     crate::services::audit_service::log_async(
         state.db.clone(),
         Some(chat.user_id.clone()),
@@ -426,7 +632,7 @@ pub async fn native(
         None,
     );
     Ok((
-        json!({"revision":policy.revision,"machine":node,"revocation":"pending until node acknowledges or authority lease expires (at most 45 seconds)"}),
+        json!({"revision":policy.revision,"machine":node,"revocation":"Earlier commands stop after machine acknowledgement or the reported recovery time. Reconnect and refresh machine status; browser cleanup requires acknowledgement"}),
         false,
     ))
 }

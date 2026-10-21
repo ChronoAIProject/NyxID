@@ -74,6 +74,31 @@ describe("TextBlock", () => {
     );
   });
 
+  it("preserves the validated return target on server-generated setup links", () => {
+    const returnTo = `nyxa-${"a".repeat(32)}`;
+    render(
+      <TextBlock
+        text={`[Set up Telegram](${window.location.origin}/channel-bots/connect/telegram?label=Helper&return_to=${returnTo})`}
+      />,
+    );
+    expect(screen.getByRole("link", { name: "Set up Telegram" })).toHaveAttribute(
+      "href",
+      `${window.location.origin}/channel-bots/connect/telegram?label=Helper&return_to=${returnTo}`,
+    );
+  });
+
+  it.each([
+    `return_to=nyxa-${"a".repeat(32)}&return_to=nyxa-${"b".repeat(32)}`,
+    `return_to=nyxg-${"a".repeat(32)}&return_to=nyxg-${"b".repeat(32)}`,
+    `return_to=nyxa-${"a".repeat(32)}&%72eturn_to=nyxg-${"b".repeat(32)}`,
+    `%72eturn_to=nyxa-${"a".repeat(32)}`,
+    `return_to=%6eyxa-${"a".repeat(32)}`,
+    `return_to=%20nyxa-${"a".repeat(32)}%20`,
+  ])("drops noncanonical return targets from rendered links: %s", (query) => {
+    render(<TextBlock text={`[Set up Telegram](${window.location.origin}/channel-bots/connect/telegram?label=Helper&${query})`} />);
+    expect(screen.getByRole("link", { name: "Set up Telegram" })).toHaveAttribute("href", `${window.location.origin}/channel-bots/connect/telegram?label=Helper`);
+  });
+
   it("accepts allowed schemes case-insensitively and keeps fragments local", () => {
     render(
       <TextBlock

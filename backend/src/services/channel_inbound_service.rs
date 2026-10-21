@@ -185,15 +185,7 @@ pub(crate) async fn process_inbound_messages(
         let stored = if adapter.atomic_inbound_admission() {
             super::channel_admission_service::store(state.db, metadata).await
         } else {
-            state
-                .db
-                .collection::<crate::models::channel_message::ChannelMessage>(
-                    super::channel_activity_service::collection(&metadata),
-                )
-                .insert_one(&metadata)
-                .await
-                .map(|_| Some(metadata))
-                .map_err(crate::errors::AppError::from)
+            super::channel_admission_service::store_current_owner(state.db, metadata).await
         };
         let stored_message = match stored {
             Ok(Some(message)) => message,
@@ -204,7 +196,6 @@ pub(crate) async fn process_inbound_messages(
                 continue;
             }
         };
-
         if bot.platform == "x" {
             tracing::info!(bot_id = %bot.id, message_id = %stored_message.id,
                 kind = activity.as_ref().map(|value| value.kind.as_str()),
@@ -231,7 +222,8 @@ pub(crate) async fn process_inbound_messages(
                     platform: bot.platform.clone(),
                     conversation_id_hash: conversation_hash,
                 },
-            );
+            )
+            .await;
         }
 
         // Look up the API key for signing and name attribution
@@ -411,6 +403,21 @@ pub(crate) async fn process_inbound_messages(
             user_access_token.as_deref(),
         )
         .await;
+
+        if let Some(disposition) = &delivery.disposition
+            && let Err(error) = channel_relay_service::record_callback_disposition(
+                state.db,
+                &stored_message.id,
+                disposition,
+            )
+            .await
+        {
+            tracing::debug!(
+                message_id = %stored_message.id,
+                %error,
+                "callback disposition update deferred"
+            );
+        }
 
         // Sync 200+body replies are no longer supported (per ADR-013 / NyxID#221
         // comment 2). Agents must return 202 and post replies asynchronously

@@ -30,6 +30,11 @@ use crate::{
 /// never contains key material.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssistantTurnFence {
+    pub channel_adapter_origin: Option<crate::models::channel_adapter::TurnAuthority>,
+    pub invocation_id: Option<String>,
+    pub invocation_controlled: bool,
+    pub platform_thread: bool,
+    pub platform_origin: Option<crate::models::assistant_conversation::PlatformTurnOrigin>,
     pub conversation_id: String,
     pub turn_id: Option<String>,
     pub turn_live: bool,
@@ -69,12 +74,87 @@ pub async fn enforce_turn_gate(
     user_agent: Option<&str>,
     route: &str,
 ) -> AppResult<()> {
-    if !crate::services::feature_flag_service::personal_flag_enabled(
-        db,
-        user_id,
-        crate::services::feature_flag_service::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
-    )
-    .await?
+    if let Some(origin) = &fence.channel_adapter_origin {
+        fence.require_live()?;
+        super::call_channels::session::fence_tool(
+            db,
+            user_id,
+            &fence.conversation_id,
+            fence
+                .turn_id
+                .as_deref()
+                .ok_or(AppError::AssistantTurnRequired)?,
+            origin,
+        )
+        .await?;
+    }
+    if let Some(id) = fence.invocation_id.as_deref() {
+        fence.require_live()?;
+        if db.collection::<bson::Document>(crate::models::assistant_invocation::COLLECTION_NAME)
+            .find_one(doc! {"_id":id,"user_id":user_id,"cancel_requested":false,"terminal_status":null,"conversation_deleted":false})
+            .projection(doc! {"_id":1}).await?.is_none()
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+    }
+    // Platform execution is mandatory independently of the ordinary rollout.
+    // A later app turn on this thread remains usable without old consent.
+    if fence.platform_thread || fence.platform_origin.is_some() {
+        fence.require_live()?;
+        if let Some(origin) = &fence.platform_origin {
+            if !fence.platform_thread {
+                return Err(AppError::AssistantTurnRequired);
+            }
+            let expected = super::platform_personal_turn_service::contract_origin(origin)?;
+            let turn = super::platform_manager_contract::TurnRef {
+                conversation_id: fence.conversation_id.clone(),
+                turn_id: fence
+                    .turn_id
+                    .clone()
+                    .ok_or(AppError::AssistantTurnRequired)?,
+            };
+            let key_id = api_key_id.ok_or(AppError::AssistantTurnRequired)?;
+            let mut session = db.client().start_session().await?;
+            let fence_db = db.clone();
+            let fence_user = user_id.to_owned();
+            let key_id = key_id.to_owned();
+            session
+                .start_transaction()
+                .and_run2(async move |session| {
+                    let result: AppResult<()> = async {
+                        let outcome =
+                            super::platform_personal_turn_service::fence_execution_in_session(
+                                &fence_db,
+                                session,
+                                &super::platform_personal_binding_service::IdentityProducer,
+                                &fence_user,
+                                &key_id,
+                                &turn,
+                                &expected,
+                            )
+                            .await?;
+                        if !matches!(
+                            outcome,
+                            super::platform_manager_contract::FenceOutcome::Authorized
+                        ) {
+                            return Err(AppError::AssistantTurnRequired);
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    mutations::transaction_result(result)
+                })
+                .await
+                .map_err(mutations::map_transaction_error)?;
+        }
+    }
+    if !fence.invocation_controlled
+        && !crate::services::feature_flag_service::personal_flag_enabled(
+            db,
+            user_id,
+            crate::services::feature_flag_service::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
+        )
+        .await?
     {
         return Ok(());
     }
@@ -108,10 +188,12 @@ pub async fn enforce_turn_gate(
 
 pub const PENDING_SECONDS: i64 = 15 * 60;
 pub const ACTION_SECONDS: i64 = 10 * 60;
+pub const DECISION_NARRATION: &str =
+    "Then tell the user in one or two plain sentences what you did and the result.";
 
 /// How risky an assistant action is. The owner's access mode decides which
 /// classes need a single-use action card; policy floors (webhook automations,
-/// machine and saved-login confirmation) apply on top in every mode.
+/// machine and saved-login confirmation) apply in Auto and Ask every time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnerActionClass {
     Read,
@@ -132,8 +214,8 @@ impl OwnerActionClass {
 }
 
 /// Whether the owner's access mode asks before an action of `class`.
-/// Autopilot never asks; NyxMode asks for sensitive and destructive actions;
-/// Ask Every Time asks for every action except reads.
+/// Full access never asks; Auto asks for sensitive and destructive actions;
+/// Ask every time asks for every action except reads.
 pub fn owner_confirmation_required(
     mode: crate::models::assistant_settings::AccessMode,
     class: OwnerActionClass,
@@ -158,22 +240,124 @@ pub async fn effective_access_mode(
     db: &Database,
     chat: &ChatAuthority,
 ) -> AppResult<crate::models::assistant_settings::AccessMode> {
-    let override_mode = if chat.agent_id.is_empty() {
+    effective_mode_for_agent(db, &chat.user_id, &chat.agent_id).await
+}
+
+async fn effective_mode_for_agent(
+    db: &Database,
+    user: &str,
+    agent: &str,
+) -> AppResult<crate::models::assistant_settings::AccessMode> {
+    let override_mode = if agent.is_empty() {
         None
     } else {
         db.collection::<crate::models::assistant_agent::AssistantAgent>(
             crate::models::assistant_agent::COLLECTION_NAME,
         )
-        .find_one(doc! {"_id": &chat.agent_id})
+        .find_one(doc! {"_id": agent})
         .await?
         .and_then(|agent| agent.access_mode_override)
     };
     match override_mode {
         Some(mode) => Ok(mode),
-        None => Ok(super::assistant_settings_service::get(db, &chat.user_id)
+        None => Ok(super::assistant_settings_service::get(db, user)
             .await?
             .access_mode),
     }
+}
+
+pub(super) type AccessModeCache =
+    std::collections::HashMap<(String, String), crate::models::assistant_settings::AccessMode>;
+
+pub(super) async fn cached_full_access(
+    db: &Database,
+    modes: &mut AccessModeCache,
+    user: &str,
+    agent: &str,
+) -> AppResult<bool> {
+    let identity = (user.to_owned(), agent.to_owned());
+    let mode = match modes.get(&identity) {
+        Some(mode) => *mode,
+        None => {
+            let mode = effective_mode_for_agent(db, user, agent).await?;
+            modes.insert(identity, mode);
+            mode
+        }
+    };
+    Ok(mode == crate::models::assistant_settings::AccessMode::Autopilot)
+}
+
+/// Retire owner asks on policy writes and once at startup. Walk only pending
+/// owner-action rows, in bounded batches, and resolve each governing mode once.
+/// Retirement is expiry; the action has not run and has no success receipt yet.
+pub async fn retire_full_access_confirmations(
+    db: &Database,
+    user: Option<&str>,
+    agent: Option<&str>,
+) -> AppResult<()> {
+    let sweep_time = bson::DateTime::now();
+    let mut filter = doc! {
+        "kind": "action", "decider": "user", "status": "pending",
+        "created_at": {"$lte": sweep_time},
+    };
+    if let Some(user) = user {
+        filter.insert("user_id", user);
+    }
+    if let Some(agent) = agent {
+        // Legacy asks without a requester ID are resolved from their one thread.
+        filter.insert(
+            "requester_agent_id",
+            doc! {"$in": [agent, bson::Bson::Null]},
+        );
+    }
+    let collection = db.collection::<AssistantAcknowledgement>(ACKS);
+    let mut modes = AccessModeCache::new();
+    loop {
+        let pending: Vec<_> = collection
+            .find(filter.clone())
+            .sort(doc! {"_id": 1})
+            .limit(100)
+            .await?
+            .try_collect()
+            .await?;
+        let Some(last) = pending.last() else { break };
+        filter.insert("_id", doc! {"$gt": &last.id});
+        let mut ids = Vec::new();
+        for ask in pending {
+            let requester = match ask.requester_agent_id {
+                Some(id) => id,
+                None => {
+                    let thread = db
+                        .collection::<AssistantConversation>(CONVERSATIONS)
+                        .find_one(doc! {"_id": &ask.conversation_id, "user_id": &ask.user_id})
+                        .await?;
+                    let Some(thread) = thread else { continue };
+                    thread.agent_id.unwrap_or_default()
+                }
+            };
+            if agent.is_some_and(|target| target != requester) {
+                continue;
+            }
+            if cached_full_access(db, &mut modes, &ask.user_id, &requester).await? {
+                ids.push(ask.id);
+            }
+        }
+        if !ids.is_empty() {
+            collection
+                .update_many(
+                    doc! {"_id": {"$in": ids}, "status": "pending"},
+                    doc! {"$set": {"status": "expired", "expires_at": sweep_time}},
+                )
+                .await?;
+        }
+    }
+    // Proxy approvals can exist without an acknowledgement; their owning service
+    // resolves the actual chat credential and applies its normal expiry lifecycle.
+    super::approval_service::retire_full_access_chat_requests(
+        db, user, agent, &mut modes, sweep_time,
+    )
+    .await?;
+    Ok(())
 }
 
 /// The closed risk class of a native (`nyxid__`), meta (`nyx__`) or machine
@@ -184,7 +368,7 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
     if let Some(operation) = crate::services::machine_tools::operation(tool) {
         // Work on a machine the owner granted is the agent's ordinary job;
         // each machine's own confirmation setting (`machine_confirm`) is the
-        // owner's policy for its riskier changes. Ask Every Time still asks
+        // owner's policy for its riskier changes. Ask every time still asks
         // for every change. Webhook policy keeps its destructive contract in
         // the machine adapter.
         return Some(
@@ -328,27 +512,175 @@ impl ActionFacts {
 /// floor, or the governing access mode. Guests never confirm cards and are
 /// refused by their own gates, so only floors apply to their turns. Reads
 /// are never asked by the access mode and cost no settings lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AutoAllowed {
+    pub class: OwnerActionClass,
+    pub mode: crate::models::assistant_settings::AccessMode,
+    pub reason: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gate {
+    Proceed,
+    AutoAllowed(AutoAllowed),
+    Ask(ConfirmationNeed),
+}
+
+impl Gate {
+    pub fn ask(self) -> Option<ConfirmationNeed> {
+        match self {
+            Self::Ask(need) => Some(need),
+            _ => None,
+        }
+    }
+    pub fn auto_allowed(self) -> Option<AutoAllowed> {
+        match self {
+            Self::AutoAllowed(auto) => Some(auto),
+            _ => None,
+        }
+    }
+}
+
 pub async fn confirmation_needed(
     db: &Database,
     chat: &ChatAuthority,
     facts: ActionFacts,
     policy_floor: bool,
-) -> AppResult<Option<ConfirmationNeed>> {
+) -> AppResult<Gate> {
     let webhook = webhook_confirmation_required(chat, facts.read_only, facts.destructive);
-    let mode = if chat.guest || facts.class == OwnerActionClass::Read {
-        None
-    } else {
-        let mode = effective_access_mode(db, chat).await?;
-        owner_confirmation_required(mode, facts.class).then_some(mode)
-    };
-    Ok(
-        (webhook || policy_floor || mode.is_some()).then_some(ConfirmationNeed {
+    let effective =
+        if chat.guest || (facts.class == OwnerActionClass::Read && !webhook && !policy_floor) {
+            None
+        } else {
+            Some(effective_access_mode(db, chat).await?)
+        };
+    if effective == Some(crate::models::assistant_settings::AccessMode::Autopilot) {
+        let reason = if webhook {
+            "webhook"
+        } else if policy_floor {
+            "policy"
+        } else {
+            "access_mode"
+        };
+        if webhook
+            || policy_floor
+            || matches!(
+                facts.class,
+                OwnerActionClass::Sensitive | OwnerActionClass::Destructive
+            )
+        {
+            return Ok(Gate::AutoAllowed(AutoAllowed {
+                class: facts.class,
+                mode: effective.unwrap(),
+                reason,
+            }));
+        }
+        return Ok(Gate::Proceed);
+    }
+    let mode = effective.filter(|mode| owner_confirmation_required(*mode, facts.class));
+    if webhook || policy_floor || mode.is_some() {
+        return Ok(Gate::Ask(ConfirmationNeed {
             class: facts.class,
             mode,
             webhook,
             policy: policy_floor,
-        }),
-    )
+        }));
+    }
+    Ok(Gate::Proceed)
+}
+
+/// Best-effort transcript receipt after a successful action. This record never
+/// grants execution authority and must never be consumed as an owner card.
+pub async fn record_auto_allowed(
+    db: &Database,
+    chat: &ChatAuthority,
+    tool: &str,
+    args: &Value,
+    auto: &AutoAllowed,
+    summary: &str,
+) {
+    record_auto_allowed_with_link(db, chat, tool, args, auto, summary, None).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn record_auto_allowed_with_link(
+    db: &Database,
+    chat: &ChatAuthority,
+    tool: &str,
+    args: &Value,
+    auto: &AutoAllowed,
+    summary: &str,
+    link: Option<&str>,
+) {
+    if chat.guest {
+        return;
+    }
+    let now = Utc::now();
+    let row = AssistantAcknowledgement {
+        invocation_id: None,
+        id: Uuid::new_v4().to_string(),
+        conversation_id: chat.conversation_id.clone(),
+        user_id: chat.user_id.clone(),
+        api_key_id: chat.api_key_id.clone(),
+        requester_agent_id: Some(chat.agent_id.clone()),
+        kind: "action".into(),
+        status: "allowed".into(),
+        decider: "user".into(),
+        decided_by: Some("access_mode".into()),
+        confirmation: Some(
+            crate::models::assistant_acknowledgement::ActionConfirmation {
+                risk: auto.class.as_str().into(),
+                access_mode: Some(auto.mode),
+                reason: auto.reason.into(),
+            },
+        ),
+        summary: summary.into(),
+        link: link.map(str::to_owned),
+        tool_name: Some(tool.into()),
+        arguments_digest: Some(arguments_digest(args)),
+        created_at: now,
+        decided_at: Some(now),
+        expires_at: now,
+        authored_skill: None,
+        service_id: None,
+        service_slug: None,
+        service_name: None,
+        platform: false,
+        operation_selection: None,
+        operation_contract_digest: None,
+        skill_selection: None,
+        requested_turn_id: chat.turn_id.clone(),
+        creation_turn_id: chat.turn_id.clone(),
+        voice_request_id: None,
+        continuation_receipt_id: None,
+        trigger_run_id: None,
+        request_excerpt: None,
+        reason: None,
+        machine_context: None,
+        routing: None,
+    };
+    if db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .insert_one(&row)
+        .await
+        .is_err()
+    {
+        tracing::warn!(conversation_id = %chat.conversation_id, tool, code = "receipt_insert_failed", "Automatic action receipt write failed");
+        return;
+    }
+    audit_service::log_async(
+        db.clone(),
+        Some(chat.user_id.clone()),
+        "assistant_action_auto_allowed".into(),
+        Some(
+            json!({"conversation_id": chat.conversation_id, "agent_id": chat.agent_id,
+            "tool": tool, "risk": auto.class.as_str(), "access_mode": auto.mode, "reason": auto.reason}),
+        ),
+        None,
+        None,
+        Some(chat.api_key_id.clone()),
+        None,
+    );
 }
 
 /// Require the owner's single-use card for an action that needs one.
@@ -544,6 +876,11 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            channel_adapter_origin: None,
+            invocation_controlled: false,
+            invocation_id: None,
+            platform_thread: false,
+            platform_origin: None,
             org_agent_access: None,
             turn_id: None,
             turn_stopped: false,
@@ -558,6 +895,8 @@ mod access_mode_tests {
             agent_name: "NyxBot".into(),
             guest: false,
             confirmation_policy: Some(crate::models::trigger_schedule::ConfirmationPolicy::Changes),
+            report_to: None,
+            with_nyxbot: false,
         };
         assert!(webhook_confirmation_required(&chat, false, false));
         chat.confirmation_policy =
@@ -569,6 +908,11 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub channel_adapter_origin: Option<crate::models::channel_adapter::TurnAuthority>,
+    pub invocation_controlled: bool,
+    pub invocation_id: Option<String>,
+    pub platform_thread: bool,
+    pub platform_origin: Option<crate::models::assistant_conversation::PlatformTurnOrigin>,
     pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
     pub turn_id: Option<String>,
     pub turn_stopped: bool,
@@ -587,11 +931,30 @@ pub struct ChatAuthority {
     /// service (`AssistantAgent::guest_access`); see `guest_refusal`.
     pub guest: bool,
     pub confirmation_policy: Option<crate::models::trigger_schedule::ConfirmationPolicy>,
+    /// The NyxBot thread that assigned the live turn's work, copied from the
+    /// live, unstopped `ActiveTurn` snapshot (issue #1883). `None` for the
+    /// owner's direct chats, channel and group turns, continuations and
+    /// every turn without a live snapshot.
+    pub report_to: Option<String>,
+    /// The live turn runs in a personal group chat the owner's NyxBot is a
+    /// member of (snapshot taken at admission).
+    pub with_nyxbot: bool,
 }
 impl ChatAuthority {
     /// NyxBot threads run with Full access; specialists only with their grants.
     pub fn is_orchestrator(&self) -> bool {
         self.role == AgentRole::Orchestrator
+    }
+
+    /// Only NyxBot-involved work (a specialist's live, unstopped turn that
+    /// NyxBot assigned or that runs in a group NyxBot is in) may raise
+    /// NyxBot-routed requests, notices or reports.
+    pub fn involved(&self) -> bool {
+        self.role == AgentRole::Subagent
+            && !self.guest
+            && self.turn_live
+            && !self.turn_stopped
+            && (self.report_to.is_some() || self.with_nyxbot)
     }
 
     /// Only the owner's NyxBot may widen access or create an access request.
@@ -617,6 +980,11 @@ impl ChatAuthority {
 
     pub fn turn_fence(&self) -> AssistantTurnFence {
         AssistantTurnFence {
+            channel_adapter_origin: self.channel_adapter_origin.clone(),
+            invocation_id: self.invocation_id.clone(),
+            invocation_controlled: self.invocation_controlled,
+            platform_thread: self.platform_thread,
+            platform_origin: self.platform_origin.clone(),
             conversation_id: self.conversation_id.clone(),
             turn_id: self.turn_id.clone(),
             turn_live: self.turn_live,
@@ -676,14 +1044,36 @@ pub fn access_request_denied() -> Value {
     })
 }
 
-/// Record a metadata-only denial. Callers use this before returning the stable
-/// refusal so denied attempts remain visible without storing arguments or
-/// credentials.
+/// Record a metadata-only denial (and, for NyxBot-involved work, a NyxBot
+/// notice). Callers use this before returning the stable refusal so denied
+/// attempts remain visible without storing arguments or credentials.
 pub async fn audit_access_request_denied(
     db: &Database,
     chat: &ChatAuthority,
     target: Option<&str>,
     scope: &str,
+) {
+    audit_denied(db, chat, target, scope, "denied").await;
+    if chat.involved() {
+        notify_nyxbot_denied(db, chat, target, scope).await;
+    }
+}
+
+pub async fn audit_missing_access(
+    db: &Database,
+    chat: &ChatAuthority,
+    target: Option<&str>,
+    scope: &str,
+) {
+    audit_denied(db, chat, target, scope, "missing_access").await;
+}
+
+async fn audit_denied(
+    db: &Database,
+    chat: &ChatAuthority,
+    target: Option<&str>,
+    scope: &str,
+    decision: &str,
 ) {
     let _ = audit_service::log_actor_event(
         db.clone(),
@@ -698,89 +1088,220 @@ pub async fn audit_access_request_denied(
         Some(
             json!({"requester_agent": chat.agent_id, "thread": chat.conversation_id,
             "key": chat.api_key_id, "target": target, "scope": scope,
-            "decision": "denied"}),
+            "decision": decision, "involved": chat.involved()}),
         ),
     )
     .await;
-    if let Ok(agents) = super::assistant_team_service::agents(db, &chat.user_id, false).await
-        && let Some(home) = agents
-            .into_iter()
-            .find(|a| a.is_nyxbot())
-            .and_then(|a| a.home_conversation_id)
-    {
-        // One notice per specialist per hour. The claim and the message
-        // sequence allocation are a single atomic update of NyxBot's home
-        // thread, so concurrent denials cannot both notify.
-        let now = Utc::now();
-        let cutoff = bson::DateTime::from_chrono(now - chrono::Duration::hours(1));
-        let marker = format!("specialist_denial_notices.{}", chat.agent_id);
-        let claimed = db
-            .collection::<crate::models::assistant_conversation::AssistantConversation>(
-                crate::models::assistant_conversation::COLLECTION_NAME,
-            )
-            .find_one_and_update(
-                doc! {"_id": &home, "user_id": &chat.user_id, "$or": [
-                    {marker.as_str(): {"$exists": false}},
-                    {marker.as_str(): {"$lt": cutoff}},
-                ]},
-                doc! {"$set": {marker.as_str(): bson::DateTime::from_chrono(now)},
-                "$inc": {"message_count": 1}},
-            )
+}
+
+/// One notice per specialist per hour, in one transaction under the request
+/// fence.
+async fn notify_nyxbot_denied(
+    db: &Database,
+    chat: &ChatAuthority,
+    target: Option<&str>,
+    scope: &str,
+) {
+    let db = db.clone();
+    let chat = chat.clone();
+    let target = target.map(str::to_owned);
+    let scope = scope.to_owned();
+    let Ok(mut session) = db.client().start_session().await else {
+        return;
+    };
+    let result = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation = Box::pin(async {
+                let (conversation, _, _) = Box::pin(fence(&db, &chat, session)).await?;
+                super::assistant_access_policy::require_same_live_turn(&chat, &conversation)?;
+                let routing = super::assistant_access_policy::routing_for(&chat, &conversation);
+                let Some(home) = super::assistant_access_policy::nyxbot_destination(
+                    &db,
+                    &chat.user_id,
+                    Some(&routing),
+                    Some(&mut *session),
+                )
+                .await?
+                else {
+                    return Ok(());
+                };
+                let now = Utc::now();
+                let cutoff = bson::DateTime::from_chrono(now - chrono::Duration::hours(1));
+                let marker = format!("specialist_denial_notices.{}", chat.agent_id);
+                let claimed = db
+                    .collection::<AssistantConversation>(CONVERSATIONS)
+                    .find_one_and_update(
+                        doc! {"_id": &home, "user_id": &chat.user_id, "role": "orchestrator", "$or": [
+                            {marker.as_str(): {"$exists": false}},
+                            {marker.as_str(): {"$lt": cutoff}},
+                        ]},
+                        doc! {"$set": {marker.as_str(): bson::DateTime::from_chrono(now)},
+                        "$inc": {"message_count": 1}},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                let Some(row) = claimed else {
+                    return Ok(());
+                };
+                let text = format!(
+                    "specialist_access_denied: {} needs {} for {}",
+                    chat.agent_name,
+                    scope,
+                    target.as_deref().unwrap_or("account")
+                );
+                if !super::assistant_invocation_service::fence_in_session(&db,session,&chat.user_id,chat.invocation_id.as_deref()).await? {return Ok(());}
+                let event = super::assistant_team_service::event(
+                    "permission_requested",
+                    text.clone(),
+                    Some(&chat.agent_id),
+                ).for_invocation(chat.invocation_id.as_deref());
+                super::assistant_nyxagent::append_events_in_session(
+                    &db, &chat.user_id, &home, &[event], session,
+                ).await?;
+                let message = AssistantMessage {
+                    media_event_ids: Vec::new(),
+                    media_queue_notice_id: None,
+        media_pending: None,
+                    media_bound: None,
+                    turn_metadata: None,
+                    platform_delivery_recovery_queued: false,
+                    platform_reply: None,
+                    platform_origin: None,
+                    author: None,
+                    activity_total: 0,
+                    continuation_of: None,
+                    retry_of: None,
+                    retry_claimed_by: None,
+                    activity_count: None,
+                    specialist_id: Some(chat.agent_id.clone()),
+                    steering: None,
+                    error_detail: None,
+                    upstream_error_code: None,
+                    voice: None,
+                    execution_pending: false,
+                    id: Uuid::new_v4().to_string(),
+                    conversation_id: home,
+                    user_id: chat.user_id.clone(),
+                    seq: row.message_count + 1,
+                    turn_id: format!("access-denied-{}", Uuid::new_v4()),
+                    role: "event".into(),
+                    text,
+                    status: "completed".into(),
+                    error_code: Some("specialist_access_denied".into()),
+                    created_at: now,
+                    activities: Vec::new(),
+                    attachments: Vec::new(),
+                    origin: None,
+                    via: None,
+                    report_to: None,
+                };
+                db.collection::<AssistantMessage>(MESSAGES)
+                    .insert_one(message)
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            })
             .await;
-        let Ok(Some(row)) = claimed else {
-            return;
-        };
-        let text = format!(
-            "specialist_access_denied: {} needs {} for {}",
-            chat.agent_name,
-            scope,
-            target.unwrap_or("account")
-        );
-        let _ = super::assistant_nyxagent::push_events(
-            db,
-            &chat.user_id,
-            &home,
-            vec![crate::models::assistant_conversation::AgentEvent {
-                id: Uuid::new_v4().to_string(),
-                kind: "permission_requested".into(),
-                text: text.clone(),
-                agent_id: Some(chat.agent_id.clone()),
-                question_key: None,
-                reply_to: Vec::new(),
-                created_at: now,
-            }],
-        )
+            mutations::transaction_result(operation)
+        })
         .await;
-        let message = crate::models::assistant_message::AssistantMessage {
-            retry_of: None,
-            specialist_id: Some(chat.agent_id.clone()),
-            steering: None,
-            error_detail: None,
-            upstream_error_code: None,
-            voice: None,
-            execution_pending: false,
-            id: Uuid::new_v4().to_string(),
-            conversation_id: home,
-            user_id: chat.user_id.clone(),
-            seq: row.message_count + 1,
-            turn_id: format!("access-denied-{}", Uuid::new_v4()),
-            role: "event".into(),
-            text,
-            status: "completed".into(),
-            error_code: Some("specialist_access_denied".into()),
-            created_at: now,
-            activities: Vec::new(),
-            attachments: Vec::new(),
-            origin: None,
-            via: None,
-        };
-        let _ = db
-            .collection::<crate::models::assistant_message::AssistantMessage>(
-                crate::models::assistant_message::COLLECTION_NAME,
-            )
-            .insert_one(message)
-            .await;
+    if let Err(error) = result {
+        tracing::debug!(%error, "Specialist denial notice skipped");
     }
+}
+
+/// The stable queue id of NyxBot's notice for a routed request; distinct
+/// from the request id itself, which the owner-allow skill notification uses
+/// for its own dedupe.
+pub fn permission_requested_event_id(request_id: &str) -> String {
+    format!("permission-requested-{request_id}")
+}
+
+/// Idempotent per request; `None` when nobody is to be told.
+pub async fn notify_nyxbot_request(
+    db: &Database,
+    chat: &ChatAuthority,
+    request: &AssistantAcknowledgement,
+    mut event: crate::models::assistant_conversation::AgentEvent,
+) -> AppResult<Option<String>> {
+    if chat.is_orchestrator() || !chat.involved() {
+        return Ok(None);
+    }
+    event.id = permission_requested_event_id(&request.id);
+    event.invocation_id = request.invocation_id.clone();
+    let db = db.clone();
+    let chat = chat.clone();
+    let request = request.clone();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation = Box::pin(async {
+                let (conversation, _, access) = Box::pin(fence(&db, &chat, session)).await?;
+                super::assistant_access_policy::require_same_live_turn(&chat, &conversation)?;
+                if !super::assistant_invocation_service::fence_in_session(
+                    &db,
+                    session,
+                    &chat.user_id,
+                    event.invocation_id.as_deref(),
+                )
+                .await?
+                {
+                    return Ok(None);
+                }
+                if access.as_ref().is_some_and(|a| !a.can_maintain()) {
+                    return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
+                }
+                let pending = db
+                    .collection::<bson::Document>(ACKS)
+                    .find_one(doc! {"_id": &request.id, "user_id": &chat.user_id,
+                    "conversation_id": &chat.conversation_id, "decider": "orchestrator",
+                    "status": "pending", "expires_at": {"$gt": bson::DateTime::now()}})
+                    .projection(doc! {"_id": 1})
+                    .session(&mut *session)
+                    .await?;
+                if pending.is_none() {
+                    return Ok(None);
+                }
+                let Some(target) = super::assistant_access_policy::nyxbot_destination(
+                    &db,
+                    &chat.user_id,
+                    request.routing.as_ref(),
+                    Some(&mut *session),
+                )
+                .await?
+                else {
+                    return Ok(None);
+                };
+                let threads = db.collection::<bson::Document>(CONVERSATIONS);
+                let queued = threads
+                    .find_one(doc! {"_id": &target, "user_id": &chat.user_id,
+                    "role": "orchestrator", "pending_events.id": &event.id})
+                    .projection(doc! {"_id": 1})
+                    .session(&mut *session)
+                    .await?;
+                if queued.is_some() {
+                    return Ok(Some(target));
+                }
+                if !super::assistant_nyxagent::append_events_in_session(
+                    &db,
+                    &chat.user_id,
+                    &target,
+                    &[event.clone()],
+                    session,
+                )
+                .await?
+                {
+                    return Err(not_found());
+                }
+                Ok(Some(target))
+            })
+            .await;
+            mutations::transaction_result(operation)
+        })
+        .await
+        .map_err(mutations::map_transaction_error)
 }
 
 /// An org permission request may use the person's NyxBot only while that
@@ -876,8 +1397,27 @@ pub async fn for_key_with_access(
     } else {
         None
     };
-    let turn_live = super::assistant_nyxagent::live_turn(&conversation, Utc::now()).is_some();
+    let live = super::assistant_nyxagent::live_turn(&conversation, Utc::now())
+        .filter(|turn| !turn.stop_requested);
+    let turn_live = live.is_some();
+    let (report_to, with_nyxbot) = live
+        .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
+        .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        channel_adapter_origin: conversation
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.channel_adapter_origin.clone()),
+        invocation_controlled: conversation.invocation_controlled,
+        invocation_id: conversation
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.invocation_id.clone()),
+        platform_thread: conversation.platform_thread.is_some(),
+        platform_origin: conversation
+            .active_turn
+            .as_ref()
+            .and_then(|turn| turn.platform_origin.clone()),
         org_agent_access: access.cloned(),
         turn_id: conversation.active_turn.as_ref().map(|t| t.turn_id.clone()),
         turn_stopped: conversation
@@ -885,6 +1425,8 @@ pub async fn for_key_with_access(
             .as_ref()
             .is_none_or(|t| t.stop_requested),
         turn_live,
+        report_to,
+        with_nyxbot,
         machine_node_ids: agent.machine_node_ids.clone(),
         saved_login_ids: agent.saved_login_ids.clone(),
         user_id: user.into(),
@@ -936,6 +1478,17 @@ pub(crate) async fn fence(
     ApiKey,
     Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
 )> {
+    super::erasure_admission::fence_in_session(db, &chat.user_id, session).await?;
+    if !super::assistant_invocation_service::fence_in_session(
+        db,
+        session,
+        &chat.user_id,
+        chat.invocation_id.as_deref(),
+    )
+    .await?
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
     let credential = db
         .collection::<bson::Document>(CREDENTIALS)
         .update_one(
@@ -997,6 +1550,7 @@ pub async fn expire(db: &Database, user: &str, conversation: &str) -> AppResult<
     db.collection::<AssistantAcknowledgement>(ACKS)
         .update_many(
             doc! {"user_id": user, "conversation_id": conversation,
+            "decided_by": {"$ne": "access_mode"},
             "expires_at": {"$lte": bson::DateTime::now()}, "$or": [
                 {"status": "pending"}, {"status": "allowed", "kind": "action"},
             ]},
@@ -1010,6 +1564,20 @@ pub async fn history(
     db: &Database,
     user: &str,
     conversation: &str,
+) -> AppResult<Vec<AssistantAcknowledgement>> {
+    history_for_messages(db, user, conversation, None, &[]).await
+}
+
+/// Keep decisions beside the messages being displayed, including older pages.
+/// The latest twenty remain visible even on an empty or narrowly loaded page.
+/// Exact page matches (1,000) and legacy time matches (100) have separate
+/// bounds; explicit card links remain available beyond these projection limits.
+pub async fn history_for_messages(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    oldest_message: Option<DateTime<Utc>>,
+    visible_turn_ids: &[String],
 ) -> AppResult<Vec<AssistantAcknowledgement>> {
     super::assistant_nyxagent::get(db, user, conversation).await?;
     expire(db, user, conversation).await?;
@@ -1031,6 +1599,34 @@ pub async fn history(
         .try_collect()
         .await?;
     rows.extend(decided);
+    let mut ids: std::collections::HashSet<_> = rows.iter().map(|r| r.id.clone()).collect();
+    if !visible_turn_ids.is_empty() {
+        let visible: Vec<_> = collection
+            .find(doc! {
+                "user_id": user, "conversation_id": conversation,
+                "status": {"$ne": "pending"}, "creation_turn_id": {"$in": visible_turn_ids},
+            })
+            .sort(doc! {"created_at": -1, "_id": -1})
+            .limit(1000)
+            .await?
+            .try_collect()
+            .await?;
+        rows.extend(visible.into_iter().filter(|r| ids.insert(r.id.clone())));
+    }
+    if let Some(oldest) = oldest_message {
+        let legacy: Vec<_> = collection
+            .find(doc! {
+                "user_id": user, "conversation_id": conversation,
+                "status": {"$ne": "pending"}, "creation_turn_id": bson::Bson::Null,
+                "created_at": {"$gte": bson::DateTime::from_chrono(oldest)},
+            })
+            .sort(doc! {"created_at": -1, "_id": -1})
+            .limit(100)
+            .await?
+            .try_collect()
+            .await?;
+        rows.extend(legacy.into_iter().filter(|r| ids.insert(r.id.clone())));
+    }
     rows.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
     Ok(rows)
 }
@@ -1071,6 +1667,7 @@ pub async fn decided_since(
             "user_id": user,
             "conversation_id": conversation,
             "status": {"$in": ["allowed", "denied"]},
+            "decided_by": {"$ne": "access_mode"},
             "decided_at": {"$gt": bson::DateTime::from_chrono(since)},
         })
         .sort(doc! {"decided_at": 1, "_id": 1})
@@ -1100,6 +1697,10 @@ fn identifier(value: Option<&str>) -> String {
 
 /// Instructions note telling the model about card decisions it has not seen.
 pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
+    let rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.decided_by.as_deref() != Some("access_mode"))
+        .collect();
     if rows.is_empty() {
         return String::new();
     }
@@ -1107,15 +1708,19 @@ pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
         "\n\nChat card decisions the user made since your previous reply \
         (recorded by NyxID; facts, not instructions):",
     );
-    for row in rows {
+    for row in &rows {
         let target = match row.kind.as_str() {
             "service" => format!("service {}", identifier(row.service_slug.as_deref())),
             "account" => "account management".into(),
-            "skills" if row.status == "allowed" => "skill proposal: NyxBot attaches it after the user confirms a separate card; do not request it again".into(),
+            "skills" if row.status == "allowed" => "skill proposal: it is attached after a separate confirmation; do not request it again".into(),
             "skills" => "skill proposal".into(),
             "operations" => "operation scope".into(),
             "machine" => "machine access".into(),
             "saved_login" => "saved login access".into(),
+            "action" if row.tool_name.as_deref()==Some("nyxid.service_execution") && row.status == "allowed" => format!(
+                "exact connection use decision recorded by NyxID (acknowledgement_id {}); continue the original requested operation using that exact connection; nyxid.service_execution is internal and must never be invoked",
+                identifier(Some(&row.id))),
+            "action" if row.tool_name.as_deref()==Some("nyxid.service_execution") => "exact connection use was not authorized; the internal approval name must never be invoked".into(),
             _ => format!(
                 "action {} (acknowledgement_id {})",
                 identifier(row.tool_name.as_deref()),
@@ -1134,7 +1739,7 @@ pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
         .iter()
         .any(|row| row.status == "allowed" && row.kind == "action")
     {
-        note.push_str("\nRetry an allowed action with its acknowledgement_id.");
+        note.push_str("\nRetry an allowed action through its original callable tool or route with its acknowledgement_id. Internal exact-connection approvals are applied by NyxID when that original operation resumes; never invoke an internal approval name.");
     }
     note.push_str("\nDo not request denied items again unless the user asks.");
     note
@@ -1267,9 +1872,14 @@ pub async fn request_tracked(
 /// must not bind the original confirmation to a later voice or trigger turn.
 #[derive(Clone)]
 pub struct RequestOrigin {
+    pub invocation_id: Option<String>,
     pub requested_turn_id: Option<String>,
+    pub creation_turn_id: Option<String>,
     pub voice_request_id: Option<String>,
     pub trigger_run_id: Option<String>,
+    /// The original turn's NyxBot involvement, stored with the claim; a
+    /// recovered card never reads the thread's current turn (issue #1883).
+    pub routing: Option<crate::models::assistant_acknowledgement::CardRouting>,
 }
 
 /// Insert or reuse a card in a caller-owned transaction. The caller must
@@ -1328,6 +1938,23 @@ async fn prepare_request_candidate(
     machine_context: Option<crate::models::machine_access::HumanContextAction>,
     confirmation: Option<crate::models::assistant_acknowledgement::ActionConfirmation>,
 ) -> AppResult<AssistantAcknowledgement> {
+    if request.kind != "action" && !chat.is_orchestrator() && !chat.guest && !chat.involved() {
+        use super::assistant_access_policy as policy;
+        let area =
+            if request.kind == "machine" && request.tool == Some("nyxid__machine_capabilities") {
+                policy::AccessArea::MachineCapabilities
+            } else {
+                policy::AccessArea::from_scope(request.kind).unwrap_or(policy::AccessArea::Service)
+            };
+        audit_missing_access(db, chat, request.service.map(|(id, _, _)| id), area.scope()).await;
+        let value = policy::missing_access(
+            area,
+            request.service.map(|(_, _, name)| name),
+            &chat.agent_id,
+            None,
+        );
+        return Err(policy::missing_access_error(&value));
+    }
     let request_mode = super::assistant_settings_service::get(db, &chat.user_id)
         .await
         .map(|s| s.specialist_access_requests)
@@ -1348,6 +1975,7 @@ async fn prepare_request_candidate(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        invocation_id: None,
         authored_skill: if request.tool == Some(super::assistant_agent_learning_review::TOOL) {
             request
                 .arguments
@@ -1394,8 +2022,10 @@ async fn prepare_request_candidate(
         tool_name: request.tool.map(str::to_owned),
         arguments_digest: request.arguments.map(arguments_digest),
         summary: request.summary.into(),
+        link: None,
         status: "pending".into(),
         requested_turn_id: None,
+        creation_turn_id: None,
         voice_request_id: None,
         continuation_receipt_id: None,
         trigger_run_id: None,
@@ -1407,6 +2037,7 @@ async fn prepare_request_candidate(
         decided_by: None,
         reason: None,
         machine_context,
+        routing: None,
     };
     let mut candidate = candidate;
     // Bind the request to the compiled contract shown to its decider.
@@ -1444,6 +2075,16 @@ async fn request_candidate_in_session(
     if orchestrated && access.as_ref().is_some_and(|a| !a.can_maintain()) {
         return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
     }
+    if candidate.kind != "action" && origin.is_none() {
+        super::assistant_access_policy::require_same_live_turn(chat, &conversation)?;
+    }
+    let routing = match origin {
+        Some(origin) => origin.routing.clone(),
+        None => Some(super::assistant_access_policy::routing_for(
+            chat,
+            &conversation,
+        )),
+    };
     // The owner may have allowed the request after the handler's
     // preflight. Check again under the same conversation fence
     // that serializes this insert with the decision transaction.
@@ -1452,6 +2093,7 @@ async fn request_candidate_in_session(
             .collection::<AssistantAcknowledgement>(ACKS)
             .find_one(allowed_skill_filter(
                 chat,
+                routing.as_ref(),
                 candidate.arguments_digest.clone(),
                 now,
             ))
@@ -1462,6 +2104,7 @@ async fn request_candidate_in_session(
         return Ok((existing, false));
     }
     let mut row = candidate.clone();
+    row.routing = routing;
     // Ordinary denials stay bound to the initiating user/orchestrator
     // message across event turns. Only trigger runs use the active turn.
     let mut initiating_filter = doc! {
@@ -1483,6 +2126,28 @@ async fn request_candidate_in_session(
         .sort(doc! {"seq": -1})
         .session(&mut *session)
         .await?;
+    row.invocation_id = origin
+        .map(|o| o.invocation_id.clone())
+        .unwrap_or_else(|| chat.invocation_id.clone());
+    if row.invocation_id.is_some() {
+        if origin.is_none() {
+            super::assistant_access_policy::require_same_live_turn(chat, &conversation)?;
+        }
+        if !super::assistant_invocation_service::fence_in_session(
+            db,
+            session,
+            &chat.user_id,
+            row.invocation_id.as_deref(),
+        )
+        .await?
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+    }
+    row.creation_turn_id = conversation
+        .active_turn
+        .as_ref()
+        .map(|turn| turn.turn_id.clone());
     row.requested_turn_id = conversation
         .active_turn
         .as_ref()
@@ -1499,6 +2164,7 @@ async fn request_candidate_in_session(
         .and_then(|turn| turn.trigger_run_id.clone());
     if let Some(origin) = origin {
         row.requested_turn_id = origin.requested_turn_id.clone();
+        row.creation_turn_id = origin.creation_turn_id.clone();
         row.voice_request_id = origin.voice_request_id.clone();
         row.trigger_run_id = origin.trigger_run_id.clone();
     }
@@ -1511,10 +2177,15 @@ async fn request_candidate_in_session(
             )
         });
     }
+    // A pending or denied duplicate is reused only when the same decider
+    // would see it with the same NyxBot routing: work assigned from two
+    // NyxBot threads, or direct work after an assignment, gets its own card.
     let filter = doc! {"conversation_id": &chat.conversation_id,
     "user_id": &chat.user_id, "api_key_id": &chat.api_key_id, "kind": &row.kind,
     "service_id": &row.service_id, "tool_name": &row.tool_name,
     "arguments_digest": &row.arguments_digest,
+    "invocation_id": &row.invocation_id,
+    "decider": &row.decider, "routing": routing_bson(row.routing.as_ref()),
     "$or": [{"status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
         {"status": "denied", "requested_turn_id": &row.requested_turn_id}]};
     // A valid allowed action can be reused only by explicitly presenting its id.
@@ -1553,20 +2224,36 @@ async fn request_candidate_in_session(
 /// An advisory skill approval remains pending attachment across later turns.
 pub const SKILL_REQUEST_ALLOW_WINDOW_HOURS: i64 = 24;
 
+/// The stored form of a card routing in a query (`null` matches rows
+/// written before the field existed).
+fn routing_bson(
+    routing: Option<&crate::models::assistant_acknowledgement::CardRouting>,
+) -> bson::Bson {
+    routing
+        .and_then(|routing| bson::to_bson(routing).ok())
+        .unwrap_or(bson::Bson::Null)
+}
+
+/// An advisory allow is reused only within the same conversation *and* the
+/// same NyxBot routing: an allow obtained for assigned work never answers a
+/// later direct request, and vice versa.
 fn allowed_skill_filter(
     chat: &ChatAuthority,
+    routing: Option<&crate::models::assistant_acknowledgement::CardRouting>,
     digest: Option<String>,
     now: DateTime<Utc>,
 ) -> bson::Document {
     doc! {"conversation_id": &chat.conversation_id,
     "user_id": &chat.user_id, "api_key_id": &chat.api_key_id,
     "kind": "skills", "status": "allowed", "arguments_digest": digest,
+    "invocation_id": &chat.invocation_id,
+    "routing": routing_bson(routing),
     "decided_at": {"$gt": bson::DateTime::from_chrono(now - Duration::hours(SKILL_REQUEST_ALLOW_WINDOW_HOURS))}}
 }
 
 pub fn allowed_skill_result(row: &AssistantAcknowledgement) -> Value {
     json!({"status":"allowed_pending_attachment", "request_id":row.id,
-        "instructions":"This request was already allowed. NyxBot resolves the exact version and asks the owner to confirm attaching it on a separate card. Do not call request_agent_skills again for this request. Continue without it and check nyxid__get_agent_skills later."})
+        "instructions":"This request was already allowed. The exact version is resolved and attached under the governing permission mode (automatic in Full access, otherwise an owner card). Do not call request_agent_skills again for this request. Continue without it and check nyxid__get_agent_skills later."})
 }
 
 pub async fn allowed_skill_request(
@@ -1574,10 +2261,20 @@ pub async fn allowed_skill_request(
     chat: &ChatAuthority,
     arguments: &Value,
 ) -> AppResult<Option<Value>> {
+    if !chat.involved() {
+        return Ok(None);
+    }
+    let conversation =
+        super::assistant_nyxagent::get(db, &chat.user_id, &chat.conversation_id).await?;
+    if !super::assistant_access_policy::same_live_turn(chat, &conversation, Utc::now()) {
+        return Ok(None);
+    }
+    let routing = super::assistant_access_policy::routing_for(chat, &conversation);
     let row = db
         .collection::<AssistantAcknowledgement>(ACKS)
         .find_one(allowed_skill_filter(
             chat,
+            Some(&routing),
             Some(arguments_digest(arguments)),
             Utc::now(),
         ))
@@ -1607,6 +2304,11 @@ async fn audit_access_requested(
             json!({"requester_agent": chat.agent_id, "thread": chat.conversation_id,
             "key": chat.api_key_id, "acknowledgement_id": row.id,
             "target": row.service_id, "scope": row.kind, "decider": row.decider,
+            "routing": row.routing.as_ref().map(|routing| match routing {
+                crate::models::assistant_acknowledgement::CardRouting::Assigned { .. } => "assigned",
+                crate::models::assistant_acknowledgement::CardRouting::GroupWithNyxbot { .. } => "group_with_nyxbot",
+                crate::models::assistant_acknowledgement::CardRouting::NotInvolved => "not_involved",
+            }),
             "decision": "pending"}),
         ),
     )
@@ -1748,22 +2450,7 @@ pub async fn decide_reply(
         .await?
         .try_collect()
         .await?;
-    let chosen = match code {
-        Some(code) => pending
-            .into_iter()
-            .find(|ack| confirm_code(&ack.id) == code),
-        None => {
-            let mut recent: Vec<AssistantAcknowledgement> = pending
-                .into_iter()
-                .filter(|ack| since.is_none_or(|since| ack.created_at > since))
-                .collect();
-            if recent.len() == 1 {
-                recent.pop()
-            } else {
-                None
-            }
-        }
-    };
+    let chosen = choose_reply(pending, code.as_deref(), since);
     let Some(ack) = chosen else {
         return Ok(None);
     };
@@ -1772,7 +2459,77 @@ pub async fn decide_reply(
         .map(Some)
 }
 
-/// Gate a subagent's service call. Orchestrators run with Full access and are
+fn choose_reply(
+    pending: Vec<AssistantAcknowledgement>,
+    code: Option<&str>,
+    since: Option<DateTime<Utc>>,
+) -> Option<AssistantAcknowledgement> {
+    let mut matches = pending.into_iter().filter(|ack| match code {
+        Some(code) => confirm_code(&ack.id) == code,
+        None => since.is_none_or(|since| ack.created_at > since),
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+/// Select a pending reply without mutating it. Platform callers validate
+/// issuing provenance and claim their receipt before deciding this exact row.
+pub(crate) async fn select_reply_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    owner: &str,
+    conversation_ids: &[String],
+    text: &str,
+    since: Option<DateTime<Utc>>,
+) -> AppResult<Option<(AssistantAcknowledgement, bool)>> {
+    let Some((allow, code)) = parse_reply(text) else {
+        return Ok(None);
+    };
+    if conversation_ids.is_empty() {
+        return Ok(None);
+    }
+    let mut cursor = db.collection::<AssistantAcknowledgement>(ACKS).find(doc! {
+        "user_id": owner, "conversation_id": {"$in": conversation_ids},
+        "kind": "action", "status": "pending", "decider": "user", "authored_skill": bson::Bson::Null,
+        "expires_at": {"$gt": bson::DateTime::now()},
+    }).session(&mut *session).await?;
+    let pending: Vec<AssistantAcknowledgement> = cursor.stream(&mut *session).try_collect().await?;
+    let Some(ack) = choose_reply(pending, code.as_deref(), since) else {
+        return Ok(None);
+    };
+    Ok(Some((ack, allow)))
+}
+
+/// Ordinary callers retain the shared selector and decision body.
+pub(crate) async fn decide_reply_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    owner: &str,
+    conversation_ids: &[String],
+    text: &str,
+    since: Option<DateTime<Utc>>,
+) -> AppResult<Option<AssistantAcknowledgement>> {
+    let Some((ack, allow)) =
+        select_reply_in_session(db, session, owner, conversation_ids, text, since).await?
+    else {
+        return Ok(None);
+    };
+    decide_in_session(
+        db,
+        session,
+        owner,
+        Some(&ack.conversation_id),
+        &ack.id,
+        allow,
+        Decider::User,
+        None,
+        None,
+    )
+    .await
+    .map(Some)
+}
+
+/// Gate a subagent's service call. Orchestrators have full account authority and are
 /// never gated. `platform` targets are catalog entries reached through NyxID's
 /// platform credential; they are granted on `allowed_platform_service_ids`.
 /// Returns the refusal and, when a new request was created, its row so the
@@ -1819,6 +2576,18 @@ pub async fn service_gate(
     // A guest never widens what the agent may use: no permission request.
     if chat.guest {
         return Ok(Some((guest_refusal(), None)));
+    }
+    if !chat.involved() {
+        audit_missing_access(db, chat, Some(id), "service").await;
+        return Ok(Some((
+            super::assistant_access_policy::missing_access(
+                super::assistant_access_policy::AccessArea::Service,
+                Some(name),
+                &chat.agent_id,
+                None,
+            ),
+            None,
+        )));
     }
     let routed = super::assistant_settings_service::get(db, &chat.user_id)
         .await
@@ -1878,6 +2647,21 @@ pub async fn account_gate(
         .any(|scope| scope == ASSISTANT_ACCOUNT_SCOPE)
     {
         return Ok(None);
+    }
+    if chat.guest {
+        return Ok(Some((guest_refusal(), None)));
+    }
+    if !chat.involved() {
+        audit_missing_access(db, chat, None, "account").await;
+        return Ok(Some((
+            super::assistant_access_policy::missing_access(
+                super::assistant_access_policy::AccessArea::Account,
+                None,
+                &chat.agent_id,
+                None,
+            ),
+            None,
+        )));
     }
     let routed = super::assistant_settings_service::get(db, &chat.user_id)
         .await
@@ -1962,6 +2746,315 @@ pub async fn decide_as(
     decide_with_voice(db, user, conversation, id, allow, decider, reason, None).await
 }
 
+/// The decision and its durable continuation effects join the caller's
+/// transaction. Personal transport callers must fence live binding authority,
+/// receipt ownership and authenticated control eligibility before calling.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn decide_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    user: &str,
+    conversation: Option<&str>,
+    id: &str,
+    allow: bool,
+    decider: Decider,
+    reason: Option<&str>,
+    voice: Option<&super::voice::confirmation::DecisionFence>,
+) -> AppResult<AssistantAcknowledgement> {
+    let by_nyxbot = decider != Decider::User;
+    let allow_operation_widening = matches!(decider, Decider::User | Decider::NyxbotOwnerConfirmed);
+    let reason = reason.map(|reason| super::assistant_nyxagent::excerpt(reason, 300));
+    let collection = db.collection::<AssistantAcknowledgement>(ACKS);
+    let mut filter = doc! {"_id": id, "user_id": user};
+    if let Some(conversation) = conversation {
+        filter.insert("conversation_id", conversation);
+    }
+    if by_nyxbot {
+        filter.insert("decider", "orchestrator");
+    }
+    let mut row = collection
+        .find_one(filter.clone())
+        .session(&mut *session)
+        .await?
+        .ok_or_else(not_found)?;
+    if row.authored_skill.is_some() && (voice.is_some() || by_nyxbot) {
+        return Err(AppError::Forbidden(
+            "Review the complete skill draft on its owner card".into(),
+        ));
+    }
+    if let Some(voice) = voice {
+        super::voice::confirmation::fence_decision(db, session, &row, voice).await?;
+    }
+    if row.status != "pending" || row.expires_at <= Utc::now() {
+        return Err(AppError::Conflict(
+            "Acknowledgement is no longer pending".into(),
+        ));
+    }
+    // The card retains the causing turn's routing across later thread activity.
+    use crate::models::assistant_acknowledgement::CardRouting;
+    if by_nyxbot && !row.routing.as_ref().is_some_and(CardRouting::involved) {
+        return Err(AppError::Forbidden(
+            "This request was not raised for NyxBot; the owner decides it on its card".into(),
+        ));
+    }
+    if by_nyxbot
+        && let Some(CardRouting::GroupWithNyxbot { group_id }) = row.routing.as_ref()
+        && !super::assistant_access_policy::nyxbot_in_personal_group(
+            db,
+            user,
+            group_id,
+            Some(&mut *session),
+        )
+        .await?
+    {
+        return Err(AppError::Conflict(
+            "NyxBot is no longer a member of the group this request came from".into(),
+        ));
+    }
+    let (report_to, with_nyxbot) = match row.routing.as_ref() {
+        Some(CardRouting::Assigned { report_to }) => (Some(report_to.clone()), false),
+        Some(CardRouting::GroupWithNyxbot { .. }) => (None, true),
+        Some(CardRouting::NotInvolved) | None => (None, false),
+    };
+    let target = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id": &row.conversation_id, "user_id": user})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(not_found)?;
+    if row.voice_request_id.is_some() {
+        super::assistant_agent_credential_service::authority_in_session(db, &target, &mut *session)
+            .await?;
+    }
+    let chat = ChatAuthority {
+        channel_adapter_origin: None,
+        invocation_controlled: false,
+        invocation_id: row.invocation_id.clone(),
+        platform_thread: target.platform_thread.is_some(),
+        platform_origin: target
+            .active_turn
+            .as_ref()
+            .and_then(|turn| turn.platform_origin.clone()),
+        org_agent_access: None,
+        turn_id: target.active_turn.as_ref().map(|t| t.turn_id.clone()),
+        turn_stopped: target.active_turn.as_ref().is_none_or(|t| t.stop_requested),
+        turn_live: super::assistant_nyxagent::live_turn(&target, Utc::now())
+            .is_some_and(|turn| !turn.stop_requested),
+        report_to,
+        with_nyxbot,
+        machine_node_ids: Vec::new(),
+        saved_login_ids: Vec::new(),
+        confirmation_policy: None,
+        user_id: user.to_owned(),
+        conversation_id: row.conversation_id.clone(),
+        api_key_id: row.api_key_id.clone(),
+        role: target.role,
+        agent_id: target.agent_id.clone().unwrap_or_default(),
+        agent_name: String::new(),
+        guest: target.guest_turn,
+    };
+    // Decision requests have no inherited auth snapshot. The
+    // transaction's fence resolves live membership, including for
+    // cards created before delegation supported org specialists.
+    let (_, key, access) = Box::pin(fence(db, &chat, session)).await?;
+    if by_nyxbot && access.as_ref().is_some_and(|a| !a.can_maintain()) {
+        return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
+    }
+    let subagent = target.role == AgentRole::Subagent;
+    let now = Utc::now();
+    if row.kind == "service" {
+        let service_id = row.service_id.as_deref().ok_or_else(not_found)?;
+        if row.platform {
+            // A platform grant names an active catalog entry. Visibility
+            // through platform grants is re-checked on every execution,
+            // so a stale entry on the key can never execute by itself.
+            db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+                .find_one(doc! {"_id": service_id, "is_active": true})
+                .session(&mut *session)
+                .await?
+                .ok_or_else(not_found)?;
+        } else {
+            // Only owner-visible UserService rows can receive chat grants.
+            // Reject inaccessible rows before any decision.
+            super::api_key_scope_service::validate_service_ids(
+                db,
+                user,
+                &[service_id.into()],
+                super::api_key_scope_service::ScopeAuthorization::for_actor(Some(user)),
+            )
+            .await
+            .map_err(|error| match error {
+                AppError::ValidationError(_) => not_found(),
+                error => error,
+            })?;
+        }
+    }
+    if matches!(row.kind.as_str(), "machine" | "saved_login") {
+        let id = row.service_id.as_deref().ok_or_else(not_found)?;
+        if row.kind == "machine" {
+            let node = super::node_service::get_node_by_id(db, id)
+                .await?
+                .ok_or_else(not_found)?;
+            let access = super::org_service::resolve_owner_access(db, user, &node.user_id).await?;
+            let org_agent_node = if subagent {
+                let agent = super::assistant_team_service::maintained_agent(
+                    db,
+                    user,
+                    target.agent_id.as_deref().ok_or_else(not_found)?,
+                )
+                .await?;
+                agent.user_id != user && agent.user_id == node.user_id
+            } else {
+                false
+            };
+            if !node.is_active
+                || !(access.can_write()
+                    || (org_agent_node && super::org_agent_service::can_maintain(&access)))
+            {
+                return Err(not_found());
+            }
+        } else {
+            super::saved_login_service::get(db, user, id).await?;
+        }
+        if allow && subagent {
+            let change = super::assistant_team_service::GrantChange::Machine {
+                base: Box::new(super::assistant_team_service::GrantChange::Add(
+                    Default::default(),
+                )),
+                machines: (row.kind == "machine").then(|| vec![id.to_owned()]),
+                logins: (row.kind == "saved_login").then(|| vec![id.to_owned()]),
+                mode: super::assistant_team_service::MachineGrantMode::Add,
+            };
+            Box::pin(super::assistant_team_service::apply_grants_in_session(
+                db,
+                user,
+                target.agent_id.as_deref().ok_or_else(not_found)?,
+                &change,
+                session,
+            ))
+            .await?;
+        }
+    }
+    if allow && subagent && row.kind == "operations" {
+        let mut selection = row.operation_selection.clone().ok_or_else(not_found)?;
+        selection.contract_digest = row.operation_contract_digest.clone();
+        Box::pin(super::agent_operation_scope_service::apply_in_session(
+            db,
+            user,
+            target.agent_id.as_deref().ok_or_else(not_found)?,
+            row.service_id.as_deref().ok_or_else(not_found)?,
+            &selection,
+            allow_operation_widening,
+            session,
+        ))
+        .await?;
+    }
+    if allow && subagent {
+        // A specialist's grant lives on its agent and converges on
+        // every one of its thread keys, not just the requesting one.
+        let mut grant = crate::models::assistant_agent::AgentGrants::default();
+        match (row.kind.as_str(), row.service_id.clone()) {
+            ("service", Some(service_id)) if row.platform => {
+                grant.platform_service_ids.push(service_id)
+            }
+            ("service", Some(service_id)) => grant.service_ids.push(service_id),
+            ("account", _) => grant.account_read = true,
+            _ => {}
+        }
+        if grant != Default::default() {
+            let agent_id = target.agent_id.as_deref().ok_or_else(not_found)?;
+            Box::pin(super::assistant_team_service::apply_grants_in_session(
+                db,
+                user,
+                agent_id,
+                &super::assistant_team_service::GrantChange::Add(grant),
+                &mut *session,
+            ))
+            .await?;
+        }
+    } else if allow && row.kind == "service" {
+        let service_id = row.service_id.as_deref().ok_or_else(not_found)?;
+        let field = if row.platform {
+            "allowed_platform_service_ids"
+        } else {
+            "allowed_service_ids"
+        };
+        mutations::update_one(
+            db,
+            doc! {"_id": &key.id, "user_id": user},
+            doc! {"$addToSet": {field: service_id}},
+            Some(&mut *session),
+        )
+        .await?;
+    } else if allow && row.kind == "account" {
+        let mut scopes: Vec<_> = key.scopes.split_whitespace().collect();
+        if !scopes.contains(&ASSISTANT_ACCOUNT_SCOPE) {
+            scopes.push(ASSISTANT_ACCOUNT_SCOPE);
+        }
+        mutations::update_one(
+            db,
+            doc! {"_id": &key.id, "user_id": user},
+            doc! {"$set": {"scopes": scopes.join(" ")}},
+            Some(&mut *session),
+        )
+        .await?;
+    }
+    row.status = if allow { "allowed" } else { "denied" }.into();
+    row.decided_at = Some(now);
+    row.decided_by = Some(if by_nyxbot { "orchestrator" } else { "user" }.into());
+    row.reason = reason.clone();
+    if allow && row.kind == "action" {
+        row.expires_at = now + Duration::seconds(ACTION_SECONDS);
+    }
+    row.continuation_receipt_id = if row.invocation_id.is_some() {
+        Box::pin(super::assistant_invocation_service::decision_in_session(
+            db, session, &row,
+        ))
+        .await?
+    } else {
+        Box::pin(super::assistant_voice::continuation(db, &row, session)).await?
+    };
+    collection
+        .replace_one(filter, &row)
+        .session(&mut *session)
+        .await?;
+    if allow && row.kind == "skills" && !by_nyxbot {
+        // Internal outbox marker: the saved approval always has
+        // durable work, even if the deciding process exits before
+        // it can notify NyxBot. Consumption clears it in the same
+        // transaction that binds the event to a NyxBot turn.
+        db.collection::<bson::Document>(ACKS)
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$set": {"skill_notification_pending": true}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
+    if let Some(run_id) = &row.trigger_run_id {
+        // Durable wakeup in the decision transaction. Settlement
+        // reads card state and writes this same work row, preventing
+        // a simultaneous settlement from overwriting the wakeup.
+        db.collection::<bson::Document>(super::trigger_schedule::WORK)
+            .update_one(
+                doc! {"_id": run_id},
+                doc! {"$set": {
+                    "at": bson::DateTime::from_chrono(now), "fence": "", "deferrals": 0,
+                }},
+            )
+            .session(&mut *session)
+            .await?;
+    }
+    if let Some(voice) = voice {
+        super::audit_service::log_actor_event_in_session(db,session,voice.audit_key.as_ref().as_ref(),
+            &super::audit_service::AuditActor{user_id:user.to_owned(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},
+            "assistant_confirmation_decided",json!({"source":"voice","conversation_id":row.conversation_id,
+                "session_id":voice.session.id,"acknowledgement_id":row.id,"request_id":row.voice_request_id,
+                "continuation_receipt_id":row.continuation_receipt_id})).await?;
+    }
+    Ok(row)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn decide_with_voice(
     db: &Database,
@@ -1977,265 +3070,24 @@ pub(crate) async fn decide_with_voice(
     let user = user.to_owned();
     let conversation = conversation.map(str::to_owned);
     let id = id.to_owned();
-    let by_nyxbot = decider != Decider::User;
-    let allow_operation_widening = matches!(decider, Decider::User | Decider::NyxbotOwnerConfirmed);
     let reason = reason.map(|reason| super::assistant_nyxagent::excerpt(reason, 300));
     let mut session = db.client().start_session().await?;
     let row = session
         .start_transaction()
         .and_run2(async move |session| {
             let operation = Box::pin(async {
-                let collection = db.collection::<AssistantAcknowledgement>(ACKS);
-                let mut filter = doc! {"_id": &id, "user_id": &user};
-                if let Some(conversation) = &conversation {
-                    filter.insert("conversation_id", conversation);
-                }
-                if by_nyxbot {
-                    filter.insert("decider", "orchestrator");
-                }
-                let mut row = collection
-                    .find_one(filter.clone())
-                    .session(&mut *session)
-                    .await?
-                    .ok_or_else(not_found)?;
-                if row.authored_skill.is_some() && (voice.is_some() || by_nyxbot) {
-                    return Err(AppError::Forbidden("Review the complete skill draft on its owner card".into()));
-                }
-                if let Some(voice)=&voice {
-                    super::voice::confirmation::fence_decision(&db,session,&row,voice).await?;
-                }
-                if row.status != "pending" || row.expires_at <= Utc::now() {
-                    return Err(AppError::Conflict(
-                        "Acknowledgement is no longer pending".into(),
-                    ));
-                }
-                let target = db
-                    .collection::<AssistantConversation>(CONVERSATIONS)
-                    .find_one(doc! {"_id": &row.conversation_id, "user_id": &user})
-                    .session(&mut *session)
-                    .await?
-                    .ok_or_else(not_found)?;
-                if row.voice_request_id.is_some() {
-                    super::assistant_agent_credential_service::authority_in_session(
-                        &db,
-                        &target,
-                        &mut *session,
-                    )
-                    .await?;
-                }
-                let chat = ChatAuthority {
-                    org_agent_access: None,
-                    turn_id: target.active_turn.as_ref().map(|t| t.turn_id.clone()),
-                    turn_stopped: target.active_turn.as_ref().is_none_or(|t| t.stop_requested),
-                    turn_live: super::assistant_nyxagent::live_turn(&target, Utc::now()).is_some(),
-                    machine_node_ids: Vec::new(),
-                    saved_login_ids: Vec::new(),
-                    confirmation_policy: None,
-                    user_id: user.clone(),
-                    conversation_id: row.conversation_id.clone(),
-                    api_key_id: row.api_key_id.clone(),
-                    role: target.role,
-                    agent_id: target.agent_id.clone().unwrap_or_default(),
-                    agent_name: String::new(),
-                    guest: target.guest_turn,
-                };
-                // Decision requests have no inherited auth snapshot. The
-                // transaction's fence resolves live membership, including for
-                // cards created before delegation supported org specialists.
-                let (_, key, access) = Box::pin(fence(&db, &chat, session)).await?;
-                if by_nyxbot && access.as_ref().is_some_and(|a| !a.can_maintain()) {
-                    return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
-                }
-                let subagent = target.role == AgentRole::Subagent;
-                let now = Utc::now();
-                if row.kind == "service" {
-                    let service_id = row.service_id.as_deref().ok_or_else(not_found)?;
-                    if row.platform {
-                        // A platform grant names an active catalog entry. Visibility
-                        // through platform grants is re-checked on every execution,
-                        // so a stale entry on the key can never execute by itself.
-                        db.collection::<bson::Document>(
-                            crate::models::downstream_service::COLLECTION_NAME,
-                        )
-                        .find_one(doc! {"_id": service_id, "is_active": true})
-                        .session(&mut *session)
-                        .await?
-                        .ok_or_else(not_found)?;
-                    } else {
-                        // Only owner-visible UserService rows can receive chat grants.
-                        // Reject inaccessible rows before any decision.
-                        super::api_key_scope_service::validate_service_ids(
-                            &db,
-                            &user,
-                            &[service_id.into()],
-                            super::api_key_scope_service::ScopeAuthorization::for_actor(Some(
-                                &user,
-                            )),
-                        )
-                        .await
-                        .map_err(|error| match error {
-                            AppError::ValidationError(_) => not_found(),
-                            error => error,
-                        })?;
-                    }
-                }
-                if matches!(row.kind.as_str(), "machine" | "saved_login") {
-                    let id = row.service_id.as_deref().ok_or_else(not_found)?;
-                    if row.kind == "machine" {
-                        let node = super::node_service::get_node_by_id(&db, id)
-                            .await?
-                            .ok_or_else(not_found)?;
-                        let access =
-                            super::org_service::resolve_owner_access(&db, &user, &node.user_id)
-                                .await?;
-                        let org_agent_node = if subagent {
-                            let agent = super::assistant_team_service::maintained_agent(
-                                &db,
-                                &user,
-                                target.agent_id.as_deref().ok_or_else(not_found)?,
-                            )
-                            .await?;
-                            agent.user_id != user && agent.user_id == node.user_id
-                        } else {
-                            false
-                        };
-                        if !node.is_active
-                            || !(access.can_write()
-                                || (org_agent_node
-                                    && super::org_agent_service::can_maintain(&access)))
-                        {
-                            return Err(not_found());
-                        }
-                    } else {
-                        super::saved_login_service::get(&db, &user, id).await?;
-                    }
-                    if allow && subagent {
-                        let change = super::assistant_team_service::GrantChange::Machine {
-                            base: Box::new(super::assistant_team_service::GrantChange::Add(
-                                Default::default(),
-                            )),
-                            machines: (row.kind == "machine").then(|| vec![id.to_owned()]),
-                            logins: (row.kind == "saved_login").then(|| vec![id.to_owned()]),
-                            mode: super::assistant_team_service::MachineGrantMode::Add,
-                        };
-                        Box::pin(super::assistant_team_service::apply_grants_in_session(
-                            &db,
-                            &user,
-                            target.agent_id.as_deref().ok_or_else(not_found)?,
-                            &change,
-                            session,
-                        ))
-                        .await?;
-                    }
-                }
-                if allow && subagent && row.kind == "operations" {
-                    let mut selection = row.operation_selection.clone().ok_or_else(not_found)?;
-                    selection.contract_digest = row.operation_contract_digest.clone();
-                    Box::pin(super::agent_operation_scope_service::apply_in_session(
-                        &db,
-                        &user,
-                        target.agent_id.as_deref().ok_or_else(not_found)?,
-                        row.service_id.as_deref().ok_or_else(not_found)?,
-                        &selection,
-                        allow_operation_widening,
-                        session,
-                    ))
-                    .await?;
-                }
-                if allow && subagent {
-                    // A specialist's grant lives on its agent and converges on
-                    // every one of its thread keys, not just the requesting one.
-                    let mut grant = crate::models::assistant_agent::AgentGrants::default();
-                    match (row.kind.as_str(), row.service_id.clone()) {
-                        ("service", Some(service_id)) if row.platform => {
-                            grant.platform_service_ids.push(service_id)
-                        }
-                        ("service", Some(service_id)) => grant.service_ids.push(service_id),
-                        ("account", _) => grant.account_read = true,
-                        _ => {}
-                    }
-                    if grant != Default::default() {
-                        let agent_id = target.agent_id.as_deref().ok_or_else(not_found)?;
-                        Box::pin(super::assistant_team_service::apply_grants_in_session(
-                            &db,
-                            &user,
-                            agent_id,
-                            &super::assistant_team_service::GrantChange::Add(grant),
-                            &mut *session,
-                        ))
-                        .await?;
-                    }
-                } else if allow && row.kind == "service" {
-                    let service_id = row.service_id.as_deref().ok_or_else(not_found)?;
-                    let field = if row.platform {
-                        "allowed_platform_service_ids"
-                    } else {
-                        "allowed_service_ids"
-                    };
-                    mutations::update_one(
-                        &db,
-                        doc! {"_id": &key.id, "user_id": &user},
-                        doc! {"$addToSet": {field: service_id}},
-                        Some(&mut *session),
-                    )
-                    .await?;
-                } else if allow && row.kind == "account" {
-                    let mut scopes: Vec<_> = key.scopes.split_whitespace().collect();
-                    if !scopes.contains(&ASSISTANT_ACCOUNT_SCOPE) {
-                        scopes.push(ASSISTANT_ACCOUNT_SCOPE);
-                    }
-                    mutations::update_one(
-                        &db,
-                        doc! {"_id": &key.id, "user_id": &user},
-                        doc! {"$set": {"scopes": scopes.join(" ")}},
-                        Some(&mut *session),
-                    )
-                    .await?;
-                }
-                row.status = if allow { "allowed" } else { "denied" }.into();
-                row.decided_at = Some(now);
-                row.decided_by = Some(if by_nyxbot { "orchestrator" } else { "user" }.into());
-                row.reason = reason.clone();
-                if allow && row.kind == "action" {
-                    row.expires_at = now + Duration::seconds(ACTION_SECONDS);
-                }
-                row.continuation_receipt_id =
-                    Box::pin(super::assistant_voice::continuation(&db, &row, session)).await?;
-                collection
-                    .replace_one(filter, &row)
-                    .session(&mut *session)
-                    .await?;
-                if allow && row.kind == "skills" && !by_nyxbot {
-                    // Internal outbox marker: the saved approval always has
-                    // durable work, even if the deciding process exits before
-                    // it can notify NyxBot. Consumption clears it in the same
-                    // transaction that binds the event to a NyxBot turn.
-                    db.collection::<bson::Document>(ACKS)
-                        .update_one(doc! {"_id": &row.id}, doc! {"$set": {"skill_notification_pending": true}})
-                        .session(&mut *session).await?;
-                }
-                if let Some(run_id) = &row.trigger_run_id {
-                    // Durable wakeup in the decision transaction. Settlement
-                    // reads card state and writes this same work row, preventing
-                    // a simultaneous settlement from overwriting the wakeup.
-                    db.collection::<bson::Document>(super::trigger_schedule::WORK)
-                        .update_one(
-                            doc! {"_id": run_id},
-                            doc! {"$set": {
-                                "at": bson::DateTime::from_chrono(now), "fence": "", "deferrals": 0,
-                            }},
-                        )
-                        .session(&mut *session)
-                        .await?;
-                }
-                if let Some(voice)=&voice {
-                    super::audit_service::log_actor_event_in_session(&db,session,voice.audit_key.as_ref().as_ref(),
-                        &super::audit_service::AuditActor{user_id:user.clone(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},
-                        "assistant_confirmation_decided",json!({"source":"voice","conversation_id":row.conversation_id,
-                            "session_id":voice.session.id,"acknowledgement_id":row.id,"request_id":row.voice_request_id,
-                            "continuation_receipt_id":row.continuation_receipt_id})).await?;
-                }
-                Ok(row)
+                decide_in_session(
+                    &db,
+                    session,
+                    &user,
+                    conversation.as_deref(),
+                    &id,
+                    allow,
+                    decider,
+                    reason.as_deref(),
+                    voice.as_ref(),
+                )
+                .await
             })
             .await;
             mutations::transaction_result(operation)
@@ -2269,7 +3121,9 @@ pub async fn consume_action(
                 doc! {"_id": &id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
                     "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": &tool,
                     "arguments_digest": &digest,
+                    "invocation_id": &chat.invocation_id,
                     "status": "allowed",
+                    "decided_by": {"$ne": "access_mode"},
                     "expires_at": {"$gt": bson::DateTime::now()},
                 },
                 doc! {"$set": {"status": "used"}},
@@ -2297,7 +3151,8 @@ pub(crate) async fn consume_action_in_session(
             doc! {"_id": id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
             "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": tool,
             "arguments_digest": arguments_digest(arguments), "status": "allowed",
-            "decider": "user", "decided_by": "user", "expires_at": {"$gt": bson::DateTime::now()}},
+            "invocation_id": &chat.invocation_id,
+            "decider": "user", "decided_by": {"$eq": "user", "$ne": "access_mode"}, "expires_at": {"$gt": bson::DateTime::now()}},
             doc! {"$set": {"status": "used"}},
         )
         .session(&mut *session)
@@ -2354,5 +3209,49 @@ pub fn webhook_confirmation_required(
         Some(ConfirmationPolicy::Changes) => !read_only,
         Some(ConfirmationPolicy::Destructive) => destructive,
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod reply_selection_tests {
+    use super::*;
+
+    fn pending(id: &str, at: DateTime<Utc>) -> AssistantAcknowledgement {
+        bson::from_document(doc! {
+            "_id": id, "conversation_id": "thread", "user_id": "owner", "api_key_id": "key",
+            "kind": "action", "summary": "confirm action", "status": "pending",
+            "created_at": bson::DateTime::from_chrono(at),
+            "expires_at": bson::DateTime::from_chrono(at + Duration::minutes(10)),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn colliding_codes_never_select_a_first_match() {
+        let now = Utc::now();
+        let first = pending("000001-first", now);
+        let second = pending("002711-second", now);
+        assert_eq!(confirm_code(&first.id), confirm_code(&second.id));
+        let code = confirm_code(&first.id);
+        assert!(choose_reply(vec![first.clone(), second], Some(&code), None).is_none());
+        assert_eq!(
+            choose_reply(vec![first], Some(&code), None).unwrap().id,
+            "000001-first"
+        );
+    }
+
+    #[test]
+    fn plain_reply_selects_exactly_one_card_since_the_previous_message() {
+        let now = bson::DateTime::now().to_chrono();
+        let stale = pending("old", now - Duration::seconds(1));
+        let fresh = pending("new", now + Duration::seconds(1));
+        assert!(choose_reply(vec![stale.clone(), fresh.clone()], None, None).is_none());
+        assert_eq!(
+            choose_reply(vec![stale.clone(), fresh], None, Some(now))
+                .unwrap()
+                .id,
+            "new"
+        );
+        assert!(choose_reply(vec![stale], None, Some(now)).is_none());
     }
 }

@@ -707,6 +707,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lark_attachment_sync_four_slugs_adds_upload_without_changing_existing_contracts_or_generations()
+     {
+        use super::super::service_endpoint_service::endpoint_from_input;
+        use crate::models::service_endpoint::{COLLECTION_NAME, PublicationState, ServiceEndpoint};
+        let db =
+            crate::test_utils::connect_transaction_test_database("lark_attachment_catalog_sync")
+                .await;
+        super::super::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([2; 32]));
+        let mut snapshots = Vec::new();
+        for slug in ["api-lark", "api-lark-bot", "api-feishu", "api-feishu-bot"] {
+            let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+            service.id = uuid::Uuid::new_v4().to_string();
+            service.slug = slug.into();
+            service.created_by = "system".into();
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(&service)
+                .await
+                .unwrap();
+            for input in hosted_endpoint_inputs(&service)
+                .unwrap()
+                .into_iter()
+                .filter(|input| input.name != super::super::lark_attachment_tool::UPLOAD_OPERATION)
+            {
+                let row = endpoint_from_input(&service.id, input, PublicationState::Published);
+                db.collection::<ServiceEndpoint>(COLLECTION_NAME)
+                    .insert_one(&row)
+                    .await
+                    .unwrap();
+                snapshots.push(row);
+            }
+        }
+        sync_seeded_service_endpoints(&db).await.unwrap();
+        for before in &snapshots {
+            let after = db
+                .collection::<ServiceEndpoint>(COLLECTION_NAME)
+                .find_one(doc! {"_id":&before.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.operation_generation, before.operation_generation);
+            assert_eq!(after.name, before.name);
+            // Timestamps can advance during sync; all execution and publication fields must match.
+            let mut before = mongodb::bson::to_document(before).unwrap();
+            let mut after = mongodb::bson::to_document(&after).unwrap();
+            before.remove("updated_at");
+            after.remove("updated_at");
+            assert_eq!(after, before);
+        }
+        let uploads: Vec<ServiceEndpoint> = db
+            .collection::<ServiceEndpoint>(COLLECTION_NAME)
+            .find(doc! {"name":super::super::lark_attachment_tool::UPLOAD_OPERATION})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(uploads.len(), 4);
+        assert!(
+            uploads
+                .iter()
+                .all(|row| row.publication == PublicationState::Published
+                    && row.operation_generation == 1
+                    && row.path == "/drive/v1/medias/upload_all")
+        );
+        sync_seeded_service_endpoints(&db).await.unwrap();
+        assert_eq!(
+            db.collection::<ServiceEndpoint>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            snapshots.len() as u64 + 4
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lark_base_write_sync_four_slugs_adds_fields_and_composite_without_changing_existing_contracts_or_generations()
+     {
+        use super::super::service_endpoint_service::endpoint_from_input;
+        use crate::models::service_endpoint::{COLLECTION_NAME, PublicationState, ServiceEndpoint};
+        let db =
+            crate::test_utils::connect_transaction_test_database("lark_base_write_catalog_sync")
+                .await;
+        super::super::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([2; 32]));
+        let mut snapshots = Vec::new();
+        for slug in ["api-lark", "api-lark-bot", "api-feishu", "api-feishu-bot"] {
+            let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+            service.id = uuid::Uuid::new_v4().to_string();
+            service.slug = slug.into();
+            service.created_by = "system".into();
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(&service)
+                .await
+                .unwrap();
+            for input in hosted_endpoint_inputs(&service)
+                .unwrap()
+                .into_iter()
+                .filter(|input| {
+                    !matches!(
+                        input.name.as_str(),
+                        "bitable_fields_list" | "bitable_record_create_with_attachments"
+                    )
+                })
+            {
+                let row = endpoint_from_input(&service.id, input, PublicationState::Published);
+                db.collection::<ServiceEndpoint>(COLLECTION_NAME)
+                    .insert_one(&row)
+                    .await
+                    .unwrap();
+                snapshots.push(row);
+            }
+        }
+        sync_seeded_service_endpoints(&db).await.unwrap();
+        for before in &snapshots {
+            let after = db
+                .collection::<ServiceEndpoint>(COLLECTION_NAME)
+                .find_one(doc! {"_id":&before.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.operation_generation, before.operation_generation);
+            assert_eq!(after.name, before.name);
+            // Timestamps can advance during sync; all execution and publication fields must match.
+            let mut before = mongodb::bson::to_document(before).unwrap();
+            let mut after = mongodb::bson::to_document(&after).unwrap();
+            before.remove("updated_at");
+            after.remove("updated_at");
+            assert_eq!(after, before);
+        }
+        let uploads: Vec<ServiceEndpoint> = db
+            .collection::<ServiceEndpoint>(COLLECTION_NAME)
+            .find(doc! {"name":{"$in":["bitable_fields_list","bitable_record_create_with_attachments"]}})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(uploads.len(), 8);
+        assert!(
+            uploads
+                .iter()
+                .all(|row| row.publication == PublicationState::Published
+                    && row.operation_generation == 1
+                    && matches!(
+                        row.name.as_str(),
+                        "bitable_fields_list" | "bitable_record_create_with_attachments"
+                    ))
+        );
+        sync_seeded_service_endpoints(&db).await.unwrap();
+        assert_eq!(
+            db.collection::<ServiceEndpoint>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            snapshots.len() as u64 + 8
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn spec_sync_missing_audit_key_preserves_tool_and_appends_no_entry() {
         let db = crate::test_utils::connect_test_database("spec_sync_key_missing")
             .await

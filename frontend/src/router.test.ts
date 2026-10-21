@@ -206,3 +206,75 @@ describe("Tools management direct URL guard", () => {
       await expect(result).rejects.toMatchObject({ options: { to: "/tools" } });
   });
 });
+
+
+describe("NyxBot usage tab", () => {
+  const route = Object.values(router.routesById).find((entry) => entry.fullPath === "/admin/usage")!;
+  it("preserves the URL tab before authentication has loaded", () => {
+    useAuthStore.setState({ user: null, isLoading: true });
+    const validate = route.options.validateSearch;
+    if (typeof validate !== "function") throw new Error("Expected a search validator");
+    expect(validate({ tab: "nyxbot" })).toMatchObject({ tab: "nyxbot" });
+    expect(validate({ tab: "unknown" })).toMatchObject({ tab: "dashboard" });
+  });
+  it.each(["admin", "operator", "user"] as const)("gates NyxBot for %s", async (role) => {
+    useAuthStore.setState({ isLoading: false, user: { ...catalogUser, role, is_admin: role === "admin", is_operator: role === "operator", capabilities: { read_admin_usage: true } } });
+    const guard = route.options.beforeLoad!;
+    const context = { search: { tab: "nyxbot" }, location: { searchStr: "?tab=nyxbot" } } as never;
+    const result = Promise.resolve().then(() => guard(context));
+    if (role === "user") await expect(result).rejects.toMatchObject({ options: { to: "/admin/usage", search: { tab: "dashboard" }, replace: true } });
+    else await expect(result).resolves.toBeUndefined();
+  });
+});
+
+describe("Feature flag admin route boundary", () => {
+  const admin = Object.values(router.routesById).find(
+    (route) => route.fullPath === "/admin",
+  )!;
+  const guard = admin.options.beforeLoad!;
+  const flagUser: User = {
+    ...catalogUser,
+    is_operator: false,
+    role: "user",
+    capabilities: { read_feature_flags: true, create_feature_flags: true },
+  };
+  it("allows regular feature flag role holders to open their page", async () => {
+    useAuthStore.setState({
+      user: flagUser,
+      isAuthenticated: true,
+      isLoading: false,
+    });
+    await expect(
+      Promise.resolve().then(() =>
+        guard({ location: { pathname: "/admin/feature-flags" } } as never),
+      ),
+    ).resolves.toBeUndefined();
+  });
+  it.each(["/admin/users", "/admin/roles", "/admin/billing", "/admin/usage"])(
+    "redirects flag-only users away from %s",
+    async (pathname) => {
+      useAuthStore.setState({
+        user: flagUser,
+        isAuthenticated: true,
+        isLoading: false,
+      });
+      await expect(
+        Promise.resolve().then(() =>
+          guard({ location: { pathname } } as never),
+        ),
+      ).rejects.toMatchObject({ options: { to: "/admin/feature-flags" } });
+    },
+  );
+  it("rejects a plain user from feature flag administration", async () => {
+    useAuthStore.setState({
+      user: { ...flagUser, capabilities: undefined },
+      isAuthenticated: true,
+      isLoading: false,
+    });
+    await expect(
+      Promise.resolve().then(() =>
+        guard({ location: { pathname: "/admin/feature-flags" } } as never),
+      ),
+    ).rejects.toMatchObject({ options: { to: "/dashboard" } });
+  });
+});

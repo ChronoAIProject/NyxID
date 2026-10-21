@@ -17,11 +17,14 @@ mod telemetry;
 #[cfg(test)]
 mod test_support;
 mod tls;
+#[cfg(unix)]
+#[path = "commands/update_attestation/trusted_directory.rs"]
+mod trusted_directory;
 mod update_check;
 mod wizard;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 
 use crate::cli::{Cli, Commands};
 
@@ -58,52 +61,25 @@ async fn run_main() {
     // Wrap all work so we can emit one telemetry event with exit code
     // and duration after dispatch returns, regardless of success.
     let start = std::time::Instant::now();
-    let cli = Cli::parse();
-    let profile = extract_profile(&cli.command);
-
-    // Telemetry is hard-off by default: if no DSN is configured and
-    // share-back is not opted into, don't resolve consent and don't
-    // prompt. This keeps default-off CLI behavior byte-identical to
-    // the pre-telemetry build (no new prompts, no new files written).
-    let telemetry_dsn_configured = std::env::var("NYXID_TELEMETRY_DSN")
-        .ok()
-        .is_some_and(|s| !s.is_empty())
-        || std::env::var("NYXID_SHARE_ANALYTICS")
-            .ok()
-            .is_some_and(|v| {
-                matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
-            });
-
-    let mut tele_client: Option<telemetry::TelemetryClient> = if telemetry_dsn_configured {
-        // DSN is present. Resolve consent, prompt if first-run TTY,
-        // then init. Prompt refusal never bails the command.
-        //
-        // Consent resolution honors any explicit per-profile choice
-        // persisted by older releases (via `_preferring_profile`) but
-        // otherwise defaults to the user-global (default profile)
-        // config. That keeps migration safe: upgrading will not
-        // silently override a historical opt-out on a named profile.
-        // Going forward, only the default profile is written to — the
-        // prompt and the `nyxid telemetry` editor both use `None`.
-        //
-        // `TelemetryClient::init` receives `profile` so the anon
-        // distinct_id file is isolated per profile (identity, not
-        // consent — different concern).
-        let mut consent =
-            telemetry::consent::resolve_consent_preferring_profile(profile.as_deref());
-        let machine_login = matches!(&cli.command, Commands::Login(args)
-            if args.no_wait || matches!(args.output, cli::OutputFormat::Json))
-            || matches!(&cli.command, Commands::Update(args) if args.command.is_some());
-        if !machine_login {
-            let _ = telemetry::consent::prompt_if_needed_interactive(None, &mut consent);
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    // Local observation must precede telemetry, update checks and skill repair.
+    if matches!(
+        cli.command,
+        Commands::Node {
+            command: cli::NodeCommands::CustodyProbe
         }
-        if consent.enabled {
-            telemetry::TelemetryClient::init(profile.as_deref())
-        } else {
-            None
-        }
-    } else {
+    ) {
+        node::custody::worker();
+    }
+    let profile = selected_profile(&matches);
+
+    // Only an explicit choice for this saved account/deployment can admit an
+    // event. Account permission is fetched afresh after the command finishes.
+    let mut tele_client = if matches!(cli.command, Commands::Telemetry { .. }) {
         None
+    } else {
+        telemetry::TelemetryClient::init(profile.as_deref())
     };
 
     let (group, sub) = command_names(&cli.command);
@@ -121,9 +97,14 @@ async fn run_main() {
             .track(telemetry::CliEvent::CommandInvoked {
                 command_group: group,
                 subcommand: sub,
-                exit_code: if result.is_ok() { 0 } else { 1 },
+                exit_code: match &result {
+                    Ok(()) => 0,
+                    Err(error) => error
+                        .downcast_ref::<commands::nyxbot::OutcomeExit>()
+                        .map(|outcome| outcome.0)
+                        .unwrap_or(1),
+                },
                 duration_ms: start.elapsed().as_millis() as u64,
-                profile: profile.clone(),
                 os: std::env::consts::OS,
                 arch: std::env::consts::ARCH,
             })
@@ -135,6 +116,9 @@ async fn run_main() {
     }
 
     if let Err(e) = result {
+        if let Some(outcome) = e.downcast_ref::<commands::nyxbot::OutcomeExit>() {
+            std::process::exit(outcome.0);
+        }
         if let Some(error) = e.downcast_ref::<auth::login_exchange::LoginFailure>() {
             if json_output_from_argv {
                 println!("{}", error.json());
@@ -181,21 +165,22 @@ fn install_rustls_crypto_provider() {
     }
 }
 
-fn extract_profile(command: &Commands) -> Option<String> {
-    // `AuthArgs` (profile-bearing struct) is flattened into many
-    // subcommands; rather than enumerate all of them we peek at the
-    // login and diagnostic paths where profile selection matters here.
-    // This is best-effort; telemetry tags
-    // without profile are acceptable.
-    match command {
-        Commands::Login(args) => args.profile.clone(),
-        Commands::Doctor(args) => args.profile.clone(),
-        _ => None,
-    }
+fn selected_profile(matches: &clap::ArgMatches) -> Option<String> {
+    matches
+        .try_get_one::<String>("profile")
+        .ok()
+        .flatten()
+        .cloned()
+        .or_else(|| {
+            matches
+                .subcommand()
+                .and_then(|(_, child)| selected_profile(child))
+        })
 }
 
 fn command_names(command: &Commands) -> (&'static str, &'static str) {
     match command {
+        Commands::Nyxbot { .. } => ("nyxbot", "subcommand"),
         Commands::Login(_) => ("auth", "login"),
         Commands::Logout(_) => ("auth", "logout"),
         Commands::Register(_) => ("auth", "register"),
@@ -285,6 +270,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Keys(auth) => commands::service::run(cli::ServiceCommands::List { auth }).await,
         Commands::Service { command } => commands::service::run(command).await,
         Commands::Pool { command } => commands::pool::run(command).await,
+        Commands::Nyxbot { command } => commands::nyxbot::run(command).await,
         Commands::Trigger { command } => commands::trigger::run(command).await,
         Commands::Billing { command } => commands::billing::run(command).await,
         Commands::Provider { command } => commands::provider::run(command).await,
@@ -338,7 +324,9 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Admin { command } => commands::admin::run(command).await,
 
         // Telemetry (consent editor; also docs/TELEMETRY.md §3)
-        Commands::Telemetry { command } => commands::telemetry::run(command, None).await,
+        Commands::Telemetry { command, profile } => {
+            commands::telemetry::run(command, profile.as_deref()).await
+        }
 
         Commands::Oracle { command } => commands::oracle::run(command).await,
 
@@ -379,12 +367,52 @@ mod tests {
     }
 
     #[test]
-    fn extract_profile_returns_none_for_non_login_commands() {
-        let whoami = Cli::parse_from(["nyxid", "whoami"]);
-        assert!(extract_profile(&whoami.command).is_none());
-
-        let info = Cli::parse_from(["nyxid", "info"]);
-        assert!(extract_profile(&info.command).is_none());
+    fn selected_profile_uses_real_nested_command_matches() {
+        let _guard = crate::test_support::env_lock().lock().unwrap();
+        let previous = std::env::var_os("NYXID_PROFILE");
+        // SAFETY: all environment-mutating tests hold the shared mutex.
+        unsafe {
+            std::env::remove_var("NYXID_PROFILE");
+        }
+        for args in [
+            vec!["nyxid", "whoami", "--profile", "work"],
+            vec!["nyxid", "service", "list", "--profile", "work"],
+            vec!["nyxid", "mfa", "status", "--profile", "work"],
+            vec!["nyxid", "telemetry", "--profile", "work", "status"],
+            vec!["nyxid", "telemetry", "status", "--profile", "work"],
+        ] {
+            let matches = Cli::command().try_get_matches_from(args.clone()).unwrap();
+            assert_eq!(
+                selected_profile(&matches).as_deref(),
+                Some("work"),
+                "{args:?}"
+            );
+        }
+        let matches = Cli::command()
+            .try_get_matches_from(["nyxid", "whoami"])
+            .unwrap();
+        assert_eq!(selected_profile(&matches), None);
+        unsafe {
+            std::env::set_var("NYXID_PROFILE", "environment");
+        }
+        for args in [
+            vec!["nyxid", "whoami"],
+            vec!["nyxid", "service", "list"],
+            vec!["nyxid", "telemetry", "status"],
+        ] {
+            let matches = Cli::command().try_get_matches_from(args).unwrap();
+            assert_eq!(selected_profile(&matches).as_deref(), Some("environment"));
+        }
+        let matches = Cli::command()
+            .try_get_matches_from(["nyxid", "telemetry", "status", "--profile", "explicit"])
+            .unwrap();
+        assert_eq!(selected_profile(&matches).as_deref(), Some("explicit"));
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("NYXID_PROFILE", value),
+                None => std::env::remove_var("NYXID_PROFILE"),
+            }
+        }
     }
 
     #[test]

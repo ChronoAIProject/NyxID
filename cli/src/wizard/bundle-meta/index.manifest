@@ -90,6 +90,7 @@ frontend/src/components/service-icons/api-twilio.tsx
 frontend/src/components/service-icons/api-twitch.tsx
 frontend/src/components/service-icons/api-twitter.tsx
 frontend/src/components/service-icons/api-whatsapp-business.tsx
+frontend/src/components/service-icons/api-zoho-mail.tsx
 frontend/src/components/service-icons/api-zoom.tsx
 frontend/src/components/service-icons/aws-cost-explorer.tsx
 frontend/src/components/service-icons/chrono-llm-public.tsx
@@ -145,6 +146,7 @@ frontend/src/lib/assistant/identity.ts
 frontend/src/lib/assistant/shell-routes.ts
 frontend/src/lib/credits-denial.ts
 frontend/src/lib/form-errors.ts
+frontend/src/lib/http-origin.ts
 frontend/src/lib/navigation.ts
 frontend/src/lib/overlay-layer.ts
 frontend/src/lib/parse-additional-scopes.ts
@@ -152,6 +154,7 @@ frontend/src/lib/public-paths.ts
 frontend/src/lib/telemetry.ts
 frontend/src/lib/theme-colors.ts
 frontend/src/lib/utils.ts
+frontend/src/lib/zod-csp.ts
 frontend/src/pages/cli-pair/reserve-action.ts
 frontend/src/schemas/api-keys.ts
 frontend/src/schemas/assistant-wire-log.ts
@@ -166,6 +169,7 @@ frontend/src/stores/assistant-context-store.ts
 frontend/src/stores/assistant-draft-store.ts
 frontend/src/stores/assistant-wire-log-store.ts
 frontend/src/stores/auth-store.ts
+frontend/src/stores/consent-store.ts
 frontend/src/stores/credits-denial-store.ts
 frontend/src/stores/service-card-view-store.ts
 frontend/src/stores/theme-store.ts

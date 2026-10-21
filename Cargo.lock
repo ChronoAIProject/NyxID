@@ -27,6 +27,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -41,6 +42,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -2438,6 +2440,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "getopts"
+version = "0.2.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
+dependencies = [
+ "unicode-width",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2497,6 +2508,7 @@ checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
  "polyval",
+ "zeroize",
 ]
 
 [[package]]
@@ -4276,7 +4288,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid"
-version = "0.70.1"
+version = "0.73.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4326,6 +4338,7 @@ dependencies = [
  "nyxid-service-adapters",
  "open",
  "p256",
+ "pulldown-cmark",
  "quick-xml 0.41.0",
  "rand 0.8.5",
  "rcgen",
@@ -4338,6 +4351,8 @@ dependencies = [
  "serde-saphyr",
  "serde_bytes",
  "serde_json",
+ "serde_urlencoded",
+ "sha1 0.10.6",
  "sha2 0.10.9",
  "siphasher",
  "ssh-key",
@@ -4367,7 +4382,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid-cli"
-version = "0.70.1"
+version = "0.73.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4459,6 +4474,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -4481,9 +4497,15 @@ dependencies = [
 name = "nyxid-machine"
 version = "0.1.0"
 dependencies = [
+ "aes",
+ "aes-gcm",
  "base64 0.22.1",
+ "ghash",
  "hex",
  "hmac",
+ "polyval",
+ "rand 0.8.5",
+ "rsa 0.9.10",
  "semver",
  "serde",
  "serde_json",
@@ -4499,9 +4521,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "chrono",
  "const-oid 0.9.6",
  "futures",
  "hex",
+ "jsonwebtoken 10.3.0",
  "libc",
  "nyxid-machine",
  "rcgen",
@@ -4523,6 +4547,7 @@ dependencies = [
  "tracing",
  "url",
  "urlencoding",
+ "uuid",
  "webpki-roots 1.0.6",
  "wiremock",
  "x509-cert",
@@ -5146,6 +5171,7 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -5369,6 +5395,25 @@ checksum = "8991c4cbdb8bc5b11f0b074ffe286c30e523de90fee5ba8132f1399f23cb3dd7"
 dependencies = [
  "prost 0.14.3",
 ]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags",
+ "getopts",
+ "memchr",
+ "pulldown-cmark-escape",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark-escape"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "pxfm"
@@ -7377,6 +7422,7 @@ dependencies = [
  "sha2 0.10.9",
  "url",
  "urlencoding",
+ "zeroize",
 ]
 
 [[package]]

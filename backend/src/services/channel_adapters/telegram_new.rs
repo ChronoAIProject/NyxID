@@ -186,6 +186,42 @@ impl PlatformAdapter for TelegramNewAdapter {
             .await
     }
 
+    async fn send_reply_outcome(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        conversation: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+        self.transport
+            .send_reply_outcome(http, credentials, conversation, reply)
+            .await
+    }
+
+    async fn send_bound_reply_outcome(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        bot: &ChannelBot,
+        original: &crate::models::channel_message::ChannelMessage,
+        credentials: &BotCredentials<'_>,
+        conversation: &str,
+        reply: &OutboundReply,
+        target: Option<&crate::services::channel_thread_service::ThreadReplyTarget>,
+    ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+        if let Some(target) = target {
+            if self.platform_id() != bot.platform || !target.matches(bot, original, conversation) {
+                return Err(crate::services::channel_thread_service::unavailable());
+            }
+            return self
+                .transport
+                .thread_reply_outcome(http, credentials, target, reply)
+                .await;
+        }
+        self.send_reply_outcome(http, credentials, conversation, reply)
+            .await
+    }
+
     async fn send_reply(
         &self,
         http: &reqwest::Client,

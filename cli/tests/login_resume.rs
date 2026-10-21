@@ -233,6 +233,10 @@ async fn begin(server: &MockServer, home: &Path, mode: &str) -> String {
     );
     let challenge = output_json(&out);
     assert_eq!(challenge["user_code"], "ABCD-EFGH");
+    assert_eq!(
+        challenge["verification_uri_complete"],
+        challenge["verification_uri"]
+    );
     assert!(
         !challenge["verification_uri"]
             .as_str()
@@ -800,7 +804,65 @@ async fn failed_destination_save_clears_partial_credentials_and_revokes_either_g
 }
 
 #[tokio::test]
-async fn login_scope_flags_return_complete_approval_link_without_login_or_polling() {
+async fn all_cli_login_links_require_manual_code_entry() {
+    for mode in [None, Some("--device"), Some("--agent-key")] {
+        for json_output in [false, true] {
+            let server = MockServer::start().await;
+            let home = tempfile::tempdir().unwrap();
+            let flow = if mode == Some("--agent-key") {
+                "agent-key"
+            } else {
+                "device/v2"
+            };
+            let route = if mode == Some("--agent-key") {
+                "agent-key"
+            } else {
+                "device"
+            };
+            let bare = format!("{}/login/{route}", server.uri());
+            Mock::given(method("POST"))
+                .and(path(format!("/api/v1/auth/{flow}/request")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "device_code": POLL_SECRET, "user_code": "ABCD-EFGH",
+                    "verification_uri": format!("{bare}?user_code=ABCD-EFGH&device_code={POLL_SECRET}#ABCD-EFGH"),
+                    "verification_uri_complete": format!("{bare}?user_code=ABCD-EFGH"),
+                    "expires_in": 300, "interval": 5
+                })))
+                .expect(1).mount(&server).await;
+            let base = server.uri();
+            let mut args = vec!["login", "--base-url", &base, "--no-wait"];
+            if let Some(mode) = mode {
+                args.push(mode);
+            }
+            if json_output {
+                args.extend(["--output", "json"]);
+            }
+            let output = run(home.path(), &args).await;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if json_output {
+                let result = output_json(&output);
+                assert_eq!(result["user_code"], "ABCD-EFGH");
+                assert_eq!(result["verification_uri"], bare);
+                assert_eq!(result["verification_uri_complete"], bare);
+            } else {
+                let printed = String::from_utf8_lossy(&output.stderr);
+                assert!(printed.contains("One-time code: ABCD-EFGH"));
+                assert!(printed.contains(&format!("Open {bare} and enter the code above")));
+                assert!(!printed.contains("user_code="));
+            }
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(POLL_SECRET));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(POLL_SECRET));
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn login_scope_flags_return_code_free_approval_link_without_login_or_polling() {
     for (mode, flow, approval_path) in [
         ("--device", "device/v2", "/login/device"),
         ("--agent-key", "agent-key", "/login/agent-key"),
@@ -860,7 +922,10 @@ async fn login_scope_flags_return_complete_approval_link_without_login_or_pollin
         let pairs: std::collections::HashMap<_, _> = complete.query_pairs().collect();
         assert_eq!(complete.path(), approval_path);
         assert!(complete.fragment().is_none());
-        assert_eq!(pairs["user_code"], "ABCD-EFGH");
+        assert!(!pairs.contains_key("user_code"));
+        assert!(!pairs.contains_key("device_code"));
+        assert!(!complete.as_str().contains("ABCD-EFGH"));
+        assert_eq!(result["user_code"], "ABCD-EFGH");
         assert_eq!(pairs["login_type"], "agent");
         assert_eq!(pairs["key_source"], "new");
         assert_eq!(pairs["key_name"], "Mail + code & tools");

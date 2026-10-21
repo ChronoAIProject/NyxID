@@ -27,10 +27,12 @@ pub struct SetupInfo {
     conversation_id: Option<String>,
     expires_at: String,
     machine: Option<nyxid_machine::MachineProfile>,
+    selection_reason: Option<String>,
 }
 impl SetupInfo {
     fn new(row: MachineSetup, machine: Option<nyxid_machine::MachineProfile>) -> Self {
         Self {
+            selection_reason: None,
             id: row.id,
             choices: row.choices,
             status: row.status,
@@ -52,7 +54,14 @@ pub async fn create(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     rate_owner(&state, &owner).await?;
-    let row = setup::create_link(&state.db, &owner, None, choices).await?;
+    let row = setup::create_link(
+        &state.db,
+        &owner,
+        None,
+        choices,
+        &crate::services::nyxbot_watch_service::ReportProvenance::LEGACY,
+    )
+    .await?;
     Ok(Json(SetupInfo::new(row, None)))
 }
 
@@ -64,6 +73,7 @@ pub async fn get(
     super::login_client_context::require_first_party_human(&auth)?;
     let mut row = setup::get(&state.db, &auth.user_id.to_string(), &id).await?;
     let node = crate::services::node_service::get_node_by_id(&state.db, &id).await?;
+    let mut selection_reason = None;
     if let Some(node) = &node {
         if node.user_id != row.choices.owner_id.as_deref().unwrap_or(&row.user_id)
             || !crate::services::org_service::resolve_owner_access(
@@ -76,11 +86,14 @@ pub async fn get(
         {
             return Err(AppError::MachineNotAllowed);
         }
+        selection_reason = Box::pin(setup::setup_selection_reason(&state.db, &row, node)).await?;
         if let Some(profile) = &node.machine {
             row.status = if node.status != crate::models::node::NodeStatus::Online {
                 "offline"
             } else if profile.computer && !profile.computer_ready {
                 "permissions_missing"
+            } else if selection_reason.is_some() {
+                "selection_required"
             } else {
                 "connected"
             }
@@ -91,7 +104,10 @@ pub async fn get(
     {
         row.status = "expired".into();
     }
-    Ok(Json(SetupInfo::new(row, node.and_then(|n| n.machine))))
+    let mut info = SetupInfo::new(row, node.and_then(|n| n.machine));
+    info.selection_reason =
+        selection_reason.map(crate::services::machine_access_service::selection_message);
+    Ok(Json(info))
 }
 
 #[derive(Serialize)]
@@ -254,6 +270,7 @@ pub async fn decide(
         body.approve,
         None,
         body.automatic_updates,
+        &crate::services::nyxbot_watch_service::ReportProvenance::LEGACY,
     )
     .await?;
     crate::services::audit_service::log_for_user(
@@ -284,6 +301,8 @@ pub async fn link_tool(
     crate::services::machine_service::caller(chat)?;
     rate_owner(state, &chat.user_id).await?;
     let choices = Choices {
+        separation: None,
+        legacy_warning_acknowledged: false,
         automatic_updates: None,
         owner_id: None,
         name: args["name"].as_str().unwrap_or("my-machine").into(),
@@ -301,6 +320,7 @@ pub async fn link_tool(
         &chat.user_id,
         Some(&chat.conversation_id),
         choices,
+        &crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
     )
     .await?;
     Ok((
@@ -329,9 +349,29 @@ pub async fn pair_tool(
     canonical["code"] = json!(setup::normalize_code(code)?);
     canonical["pairing_id"] = json!(row.id);
     canonical["automatic_updates"] = json!(true);
-    if let Some(id) = args["acknowledgement_id"].as_str()
-        && acks::consume_action(&state.db, chat, id, "nyxid__machine_pair", &canonical).await?
-    {
+    let details = format!(
+        "Pair machine {} ({}, IP {}) with capabilities {}. Pair only a setup the owner started. Commands have the machine user's full access; prefer a VM or container. Enable automatic updates when idle (recommended); they wait for work and desktop sessions to end and notify you. Change this in Machines settings.",
+        row.hostname.as_deref().unwrap_or_default(),
+        row.os.as_deref().unwrap_or_default(),
+        row.ip.as_deref().unwrap_or_default(),
+        row.choices.capabilities.join(", ")
+    );
+    let gate = acks::confirmation_needed(
+        &state.db,
+        chat,
+        acks::ActionFacts::of(acks::OwnerActionClass::Sensitive),
+        false,
+    )
+    .await?;
+    let automatic = gate.auto_allowed();
+    let confirmed = if automatic.is_some() {
+        true
+    } else if let Some(id) = args["acknowledgement_id"].as_str() {
+        acks::consume_action(&state.db, chat, id, "nyxid__machine_pair", &canonical).await?
+    } else {
+        false
+    };
+    if confirmed {
         setup::decide_with_updates(
             &state.db,
             &chat.user_id,
@@ -339,20 +379,25 @@ pub async fn pair_tool(
             true,
             Some(&chat.conversation_id),
             Some(true),
+            &crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
         )
         .await?;
+        if let Some(auto) = automatic {
+            acks::record_auto_allowed(
+                &state.db,
+                chat,
+                "nyxid__machine_pair",
+                &canonical,
+                &auto,
+                &details,
+            )
+            .await;
+        }
         return Ok((
             json!({"status":"approved","note":"Pairing approved. End your turn; NyxID wakes this thread when connected. Verify with machine_list and a harmless command."}),
             false,
         ));
     }
-    let details = format!(
-        "Pair machine {} ({}, IP {}) with capabilities {}. Confirm only if you started this setup. Commands have the machine user's full access; prefer a VM or container. Enable automatic updates when idle (recommended); they wait for work and desktop sessions to end and notify you. Change this in Machines settings.",
-        row.hostname.as_deref().unwrap_or_default(),
-        row.os.as_deref().unwrap_or_default(),
-        row.ip.as_deref().unwrap_or_default(),
-        row.choices.capabilities.join(", ")
-    );
     let card = acks::request(
         &state.db,
         chat,
@@ -373,6 +418,7 @@ pub async fn pair_tool(
         &chat.conversation_id,
         &row.id,
         row.expires_at,
+        &crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
     )
     .await?;
     state

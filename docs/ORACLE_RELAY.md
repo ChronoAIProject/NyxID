@@ -1001,3 +1001,131 @@ the same extraction rules but adds durable recovery, supervised Chrome, health
 presence, commands, upgrades, and login import. Existing local pipelines can
 migrate by pointing their consumer at `/api/v1/oracle` instead of the local
 server. The submit and poll shapes remain close to the local servers.
+
+## Pool ownership and deletion (unreleased: #1527, #1542)
+
+These endpoints become available in the first tagged release containing these
+changes. They are not features of an already published release. Deploy every
+backend replica with the Oracle transaction fences, then drain all old
+replicas and in-flight old requests **before enabling lifecycle operations**.
+Old binaries ignore tombstones and cannot enforce these fences. Do not roll
+back to an old binary against pools which have been transferred or deleted.
+MongoDB must support transactions (replica set or sharded deployment).
+
+`POST /api/v1/oracle/pools/{id_or_slug}/transfer` requires the current pool's
+manager and management of the destination. The body is at most 4096 bytes:
+
+```json
+{"owner_user_id":"<person-or-org-UUID>","rotate_worker_token":false}
+```
+
+A personal destination must be the caller's own active person account. An org
+destination must be active and the caller must have active org-admin access;
+org-owned API keys retain their existing direct owner authority. Platform is
+visibility, never an owner type. Visibility is preserved. Moving an org-visible
+pool to a person requires `"visibility":"private"`; other audience changes use
+PATCH separately. The destination's limit of ten nondeleted pools is enforced
+with the same owner inventory fence as creation.
+
+The 200 response contains `pool` (the full updated pool DTO with transactionally
+computed management/enrollment permissions and online count) and, only on explicit
+rotation, `worker_token`. The response is `Cache-Control: no-store`. Pool ID,
+slug, settings, workers, tasks, sessions, saved profiles and history are retained.
+The shared pool token is preserved by default; anyone holding it continues to
+have pool-wide worker authority. Rotate explicitly to revoke those holders.
+A constant-size installation epoch on the pool invalidates credentials without
+rewriting its unbounded worker inventory. All installation credentials must be
+renewed after an owner change, even when
+the shared token is preserved: destination eligibility alone cannot revive a
+source credential. Contributed workers must enroll with a fresh credential
+under their destination membership. Worker identity and task/session affinity
+remain. Rotation also makes old-token sealed login material unavailable until
+human re-save; NyxID cannot re-encrypt its end-to-end envelope.
+
+A same-owner request without rotation is a no-op. Explicit rotation is a fresh
+rotation per successful request; a lost response cannot recover its raw token.
+To retry an uncertain transfer, read the current pool first. Repeating the same
+owner transfer with rotation disabled preserves the current token.
+
+`DELETE /api/v1/oracle/pools/{id_or_slug}` requires the pool's current manager,
+including for personal, org-owned and platform-visible pools. Platform consumers
+cannot delete someone else's pool. A successful 200 response is self-contained:
+
+```json
+{"id":"<pool-UUID>","slug":"chatgpt-pro","status":"deleted","cleanup":"asynchronous","deleted_at":"<UTC timestamp>"}
+```
+
+Authorized repeated deletes return the identical acknowledgement, including the
+BSON millisecond timestamp. Unknown pools return 404; unauthorized managers return
+403. Queued/dispatched tasks or queued/delivered worker commands return typed 409
+`oracle_pool_active_work`. Settle/cancel executable work and retry. DELETE itself
+settles commands whose deadline has already passed, including orphaned commands
+from older worker generations. It drains at most sixteen batches of 256 ID-only rows per request,
+committing each batch under current manager/pool fences before checking deletion.
+Exhausting this budget returns the same 11017 conflict; retry DELETE to continue
+from the remaining rows, even if no executable work remains. Interrupted requests
+also resume on retry. Expiry progress remains committed even if
+unexpired work then returns 409 or lifecycle audit fails; logical deletion and
+its audit still commit together. Expired commands retain the existing seven-day
+terminal TTL. Unexpired queued/delivered commands always block deletion; there is
+no force-delete or implicit abandonment. Idle online workers do not block deletion; all worker credentials
+are invalidated immediately. Physical worker removal and idle-session closure
+continue asynchronously.
+
+Deletion stores a permanent tombstone which reserves the slug and owner history.
+Normal pool GET/list, submission, worker authentication and management omit or
+reject it. Existing terminal tasks, prompts/results/artifacts keep their existing
+retention TTL; deletion does not extend it. Sessions and their metadata remain
+for existing history access by the original submitter and the tombstone's current
+manager. Terminal worker commands keep their existing seven-day TTL. Worker
+presence/enrollment rows and encrypted login snapshots/profiles/bindings are
+removed by durable bounded cleanup. `status:"deleted"` acknowledges logical
+deletion, not completion of physical cleanup; `cleanup:"asynchronous"` is a
+constant acknowledgement contract and stays identical on retries. Open sessions
+may retain a null `closed_at` until cleanup reaches them; they cannot accept new
+work after the tombstone commits. Already imported browser logins on remote
+machines are not upstream logout sessions and cannot be revoked by NyxID.
+
+The tombstone, credential invalidation, durable pending-cleanup marker and
+mandatory hash-chained lifecycle audit append commit in one transaction. An error
+before that commit rolls them all back. Each DELETE attempts a bounded cleanup
+pass after commit; cleanup errors defer work without changing its acknowledgement.
+Every five seconds, each replica processes up to sixteen pending pools, up to
+sixteen small transactions per pool. Each transaction removes at most one worker,
+one profile, one snapshot and closes one session. Remaining rows are the durable
+cursor; the pending marker clears only after an empty chunk. Restart and partial
+failure resume safely. A last-attempt scheduling index rotates work so a large or
+failing tombstone cannot starve later pools; open-session cleanup uses its own
+pool/closed-at index. Terminal tasks/commands and history remain as above. Oracle
+writers contend on the existing pool enrollment epoch, with expected lifecycle,
+owner and token fences for snapshots captured before authentication/management.
+Installation operations recheck membership identity and active accounts in that
+transaction. Status-driven lease recovery, command expiry, saved-login cleanup,
+enrollment and session/transcript writes use the same database boundary. Concurrent
+submission/deletion has two outcomes: submission commits and deletion conflicts,
+or deletion commits and submission fails. A stale heartbeat cannot recreate rows.
+Audit includes actor, pool ID/slug and owner IDs only, plus token-rotation boolean.
+It excludes tokens, hashes, browser material and task content.
+
+```bash
+nyxid oracle pool transfer chatgpt-pro --org research
+nyxid oracle pool transfer chatgpt-pro --personal --visibility private
+nyxid oracle pool transfer chatgpt-pro --org research --rotate-worker-token --output json
+nyxid oracle pool delete chatgpt-pro
+```
+
+Lifecycle serialization also bounds ordinary lazy maintenance. A heartbeat or
+worker command-list request settles at most 256 overdue/exhausted commands for
+its worker generation; repeated calls drain the backlog and delivery always
+excludes commands past deadline or delivery budget. Queued-task affinity release
+and capacity-failure settlement write at most sixteen task IDs per invocation.
+Capacity checks scan compact routing/failure metadata past still-routable rows,
+so an earlier routable task cannot starve later unroutable tasks.
+
+Login snapshot fanout retains its partial-success contract: snapshot creation
+commits first, then the server streams worker inventory and enqueues each eligible
+worker command in a separate transaction. Every write revalidates the captured
+pool lifecycle and current manager/worker authority. A later worker/database or
+authority failure returns an error while earlier commands and the snapshot remain
+committed under their normal retention. Retry can create a new snapshot/fanout;
+it does not roll back earlier imports. No worker-inventory cap is introduced.

@@ -36,6 +36,13 @@ class CoverageIdentityTests(unittest.TestCase):
                 self.assertNotEqual(original, self.identity())
                 (self.root / name).write_text(name)
 
+    def test_nextest_profile_changes_invalidate_reports(self):
+        original = self.identity()
+        config = self.root / ".config/nextest.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text("[profile.ci]\ntest-threads = 1\n")
+        self.assertNotEqual(original, self.identity())
+
     def test_missing_runner_identity_disables_reuse(self):
         for image_os, image_version, reusable in [("ubuntu24", "v1", "true"),
                                                    ("", "v1", "false"),

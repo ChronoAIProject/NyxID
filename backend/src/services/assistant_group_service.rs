@@ -88,15 +88,18 @@ use crate::{
         assistant_agent::AssistantAgent,
         assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
         assistant_group::{
-            AssistantGroup, COLLECTION_NAME as GROUPS, GroupFollower, GroupMessage, MAX_FOLLOWERS,
-            MAX_MEMBERS, MAX_NAME_CHARS, MESSAGES_COLLECTION_NAME as MESSAGES,
+            AssistantGroup, COLLECTION_NAME as GROUPS, FOLLOWER_TTL_HOURS, GroupFollower,
+            GroupMessage, MAX_FOLLOWERS, MAX_MEMBERS, MAX_NAME_CHARS,
+            MESSAGES_COLLECTION_NAME as MESSAGES,
         },
     },
     services::{
+        api_key_mutation_service as transactions,
         assistant_nyxagent::{self as engine, excerpt, identifier, live_turn},
         assistant_team_service as team,
     },
 };
+use mongodb::ClientSession;
 
 /// Transcript budget handed to a member per turn.
 const TRANSCRIPT_CHARS: usize = 12_000;
@@ -207,9 +210,22 @@ pub async fn create(
         created_at: now,
         updated_at: now,
     };
-    db.collection::<AssistantGroup>(GROUPS)
-        .insert_one(&group)
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
+    let result: AppResult<()> = async {
+        super::erasure_admission::fence_in_session(db, owner, &mut session).await?;
+        db.collection::<AssistantGroup>(GROUPS)
+            .insert_one(&group)
+            .session(&mut session)
+            .await?;
+        Ok(())
+    }
+    .await;
+    super::org_membership_authority::finish(session, result).await?;
     append(
         db,
         owner,
@@ -217,6 +233,7 @@ pub async fn create(
         "notice",
         None,
         &format!("Group created with {}.", names(&members)),
+        Vec::new(),
     )
     .await?;
     get(db, owner, &group.id).await
@@ -316,7 +333,7 @@ pub async fn update(
         .update_one(owner_filter(owner, id)?, doc! {"$set": set})
         .await?;
     if let Some(notice) = notice {
-        append(db, owner, id, "notice", None, &notice).await?;
+        append(db, owner, id, "notice", None, &notice, Vec::new()).await?;
     }
     get(db, owner, id).await
 }
@@ -350,6 +367,24 @@ pub async fn delete(db: &Database, owner: &str, id: &str) -> AppResult<()> {
         .delete_one(owner_filter(owner, id)?)
         .session(&mut session)
         .await?;
+    let mut attachment_cursor = db
+        .collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+        .find(doc! {"group_id": id, "user_id": owner})
+        .projection(doc! {"_id": 1})
+        .session(&mut session)
+        .await?;
+    let attachment_rows: Vec<bson::Document> =
+        attachment_cursor.stream(&mut session).try_collect().await?;
+    let attachment_ids: Vec<String> = attachment_rows
+        .iter()
+        .filter_map(|row| row.get_str("_id").ok().map(str::to_owned))
+        .collect();
+    if !attachment_ids.is_empty() {
+        db.collection::<bson::Document>(crate::models::nyxbot_image_delivery::COLLECTION_NAME)
+            .delete_many(doc! {"attachment_id": {"$in": &attachment_ids}, "user_id": owner})
+            .session(&mut session)
+            .await?;
+    }
     db.collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
         .delete_many(doc! {"group_id": id, "user_id": owner})
         .session(&mut session)
@@ -374,11 +409,23 @@ pub async fn append(
     role: &str,
     agent: Option<&AssistantAgent>,
     text: &str,
+    extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
 ) -> AppResult<GroupMessage> {
-    append_addressed(db, owner, group_id, role, agent, text, &[]).await
+    append_addressed(
+        db,
+        owner,
+        group_id,
+        role,
+        agent,
+        text,
+        &[],
+        extra_attachments,
+    )
+    .await
 }
 
 /// Append a message that records the members it was addressed to.
+#[allow(clippy::too_many_arguments)]
 async fn append_addressed(
     db: &Database,
     owner: &str,
@@ -387,41 +434,107 @@ async fn append_addressed(
     agent: Option<&AssistantAgent>,
     text: &str,
     recipients: &[String],
+    extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
 ) -> AppResult<GroupMessage> {
-    let now = Utc::now();
-    let group = db
-        .collection::<AssistantGroup>(GROUPS)
-        .find_one_and_update(
-            owner_filter(owner, group_id)?,
-            doc! {"$inc": {"message_count": 1},
-            "$set": {"last_message_at": bson::DateTime::from_chrono(now),
-            "updated_at": bson::DateTime::from_chrono(now)}},
-        )
-        .return_document(ReturnDocument::After)
-        .await?
-        .ok_or_else(not_found)?;
-    let message = GroupMessage {
-        activities: Vec::new(),
-        org_group: false,
-        author_user_id: None,
-        author_display_name: None,
-        request_id: None,
-        attachments: Vec::new(),
-        id: Uuid::new_v4().to_string(),
-        group_id: group_id.into(),
-        user_id: owner.into(),
-        seq: group.message_count,
-        role: role.into(),
-        agent_id: agent.map(|agent| agent.id.clone()),
-        agent_name: agent.map(|agent| agent.name.clone()),
-        text: text.into(),
-        recipient_agent_ids: recipients.to_vec(),
-        created_at: now,
-    };
-    db.collection::<GroupMessage>(MESSAGES)
-        .insert_one(&message)
-        .await?;
-    Ok(message)
+    append_following(
+        db,
+        owner,
+        group_id,
+        role,
+        agent,
+        text,
+        recipients,
+        extra_attachments,
+        None,
+    )
+    .await
+}
+
+/// Sequence allocation, message insert and follower registration commit
+/// together, so every sequence number at or below `message_count` is visible
+/// once a follower bound is taken.
+#[allow(clippy::too_many_arguments)]
+pub async fn append_following(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+    role: &str,
+    agent: Option<&AssistantAgent>,
+    text: &str,
+    recipients: &[String],
+    extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
+    follower: Option<&str>,
+) -> AppResult<GroupMessage> {
+    let filter = owner_filter(owner, group_id)?;
+    let db = db.clone();
+    let owner = owner.to_owned();
+    let group_id = group_id.to_owned();
+    let role = role.to_owned();
+    let agent_id = agent.map(|agent| agent.id.clone());
+    let agent_name = agent.map(|agent| agent.name.clone());
+    let text = text.to_owned();
+    let recipients = recipients.to_vec();
+    let follower = follower.map(str::to_owned);
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<GroupMessage> = Box::pin(async {
+                super::erasure_admission::fence_in_session(&db, &owner, session).await?;
+                let now = Utc::now();
+                let group = db
+                    .collection::<AssistantGroup>(GROUPS)
+                    .find_one_and_update(
+                        filter.clone(),
+                        doc! {"$inc": {"message_count": 1},
+                        "$set": {"last_message_at": bson::DateTime::from_chrono(now),
+                        "updated_at": bson::DateTime::from_chrono(now)}},
+                    )
+                    .return_document(ReturnDocument::After)
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(not_found)?;
+                let message = GroupMessage {
+                    activities: Vec::new(),
+                    org_group: false,
+                    author_user_id: None,
+                    author_display_name: None,
+                    request_id: None,
+                    attachments: extra_attachments.clone(),
+                    id: Uuid::new_v4().to_string(),
+                    group_id: group_id.clone(),
+                    user_id: owner.clone(),
+                    seq: group.message_count,
+                    role: role.clone(),
+                    agent_id: agent_id.clone(),
+                    agent_name: agent_name.clone(),
+                    text: text.clone(),
+                    recipient_agent_ids: recipients.clone(),
+                    created_at: now,
+                };
+                db.collection::<GroupMessage>(MESSAGES)
+                    .insert_one(&message)
+                    .session(&mut *session)
+                    .await?;
+                if let Some(conversation_id) = follower.as_deref() {
+                    follow_in_session(
+                        &db,
+                        &owner,
+                        &group_id,
+                        conversation_id,
+                        message.seq,
+                        now,
+                        session,
+                    )
+                    .await?;
+                }
+                Ok(message)
+            })
+            .await;
+            transactions::transaction_result(result)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
 }
 
 /// Test helper: an unaddressed message with uploads.
@@ -452,7 +565,17 @@ pub async fn append_with_recipients(
     recipients: &[String],
 ) -> AppResult<GroupMessage> {
     if ids.is_empty() {
-        return append_addressed(db, owner, group_id, role, agent, text, recipients).await;
+        return append_addressed(
+            db,
+            owner,
+            group_id,
+            role,
+            agent,
+            text,
+            recipients,
+            Vec::new(),
+        )
+        .await;
     }
     if role != "user" {
         return Err(AppError::Forbidden("Only the owner uploads files".into()));
@@ -612,9 +735,11 @@ pub async fn reset_hops(db: &Database, owner: &str, group_id: &str) -> AppResult
     Ok(())
 }
 
-/// A NyxBot thread posted work into the group: it is woken with a summary of
-/// what follows once the group goes quiet. Its newest post replaces an older
-/// one; bounded.
+/// Test helper for follower semantics on their own: a newer post replaces the
+/// thread's follower; replaying the same post (an equal or older sequence
+/// number) never renews it. Production registers followers with the post
+/// (`append_following`).
+#[cfg(test)]
 pub async fn follow(
     db: &Database,
     owner: &str,
@@ -622,74 +747,169 @@ pub async fn follow(
     conversation_id: &str,
     since_seq: i64,
 ) -> AppResult<()> {
+    let db = db.clone();
+    let owner = owner.to_owned();
+    let group_id = group_id.to_owned();
+    let conversation_id = conversation_id.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<()> = Box::pin(follow_in_session(
+                &db,
+                &owner,
+                &group_id,
+                &conversation_id,
+                since_seq,
+                Utc::now(),
+                session,
+            ))
+            .await;
+            transactions::transaction_result(result)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+async fn follow_in_session(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+    conversation_id: &str,
+    since_seq: i64,
+    now: chrono::DateTime<Utc>,
+    session: &mut ClientSession,
+) -> AppResult<()> {
     let mut filter = owner_filter(owner, group_id)?;
     filter.insert("created_by_user_id", bson::Bson::Null);
     let groups = db.collection::<AssistantGroup>(GROUPS);
+    // Only an older follower of this thread is replaced: a replay of the same
+    // (or an older) post keeps the existing window and deadline.
     groups
         .update_one(
             filter.clone(),
-            doc! {"$pull": {"followers": {"conversation_id": conversation_id}}},
+            doc! {"$pull": {"followers": {"conversation_id": conversation_id,
+            "since_seq": {"$lt": since_seq}}}},
         )
+        .session(&mut *session)
         .await?;
     let follower = bson::to_bson(&GroupFollower {
         conversation_id: conversation_id.into(),
         since_seq,
-        created_at: Utc::now(),
+        created_at: now,
+        expires_at: Some(now + chrono::Duration::hours(FOLLOWER_TTL_HOURS)),
     })
     .map_err(|_| AppError::Internal("Follower encoding failed".into()))?;
+    filter.insert(
+        "followers",
+        doc! {"$not": {"$elemMatch": {"conversation_id": conversation_id}}},
+    );
     groups
         .update_one(
             filter,
             doc! {"$push": {"followers": {"$each": [follower],
             "$slice": -(MAX_FOLLOWERS as i64)}}},
         )
+        .session(&mut *session)
         .await?;
     Ok(())
 }
 
-/// Take the group's followers once it is quiet (nobody working or waiting to
-/// answer). Atomic: only the caller that clears them notifies.
+/// Expiry is classified at the acknowledged take, not at a clock sampled
+/// before the quiet checks' awaits; the result is frozen afterwards.
+pub(crate) fn followers_live_at(
+    followers: Vec<GroupFollower>,
+    at: chrono::DateTime<Utc>,
+) -> Vec<GroupFollower> {
+    followers
+        .into_iter()
+        .filter(|follower| follower.expiry() > at)
+        .collect()
+}
+
+/// The upper bound comes from the same update as the take, so later messages
+/// never enter a summary.
 pub async fn take_followers_if_quiet(
     db: &Database,
     owner: &str,
     group_id: &str,
-) -> AppResult<Vec<GroupFollower>> {
+) -> AppResult<(Vec<GroupFollower>, i64)> {
+    let now = Utc::now();
+    let groups = db.collection::<AssistantGroup>(GROUPS);
+    // `{"expires_at": null}` matches rows storing null and legacy rows that
+    // have no such field.
+    let legacy_cutoff = now - chrono::Duration::hours(FOLLOWER_TTL_HOURS);
+    for condition in [
+        doc! {"expires_at": {"$lte": bson::DateTime::from_chrono(now)}},
+        doc! {"expires_at": null,
+        "created_at": {"$lte": bson::DateTime::from_chrono(legacy_cutoff)}},
+    ] {
+        groups
+            .update_one(
+                owner_filter(owner, group_id)?,
+                doc! {"$pull": {"followers": condition}},
+            )
+            .await?;
+    }
     let group = get(db, owner, group_id).await?;
-    if group.followers.is_empty()
+    let live: Vec<GroupFollower> = group
+        .followers
+        .into_iter()
+        .filter(|follower| follower.expiry() > now)
+        .collect();
+    if live.is_empty()
         || !group.pending_agent_ids.is_empty()
         || !working(db, owner, group_id).await?.is_empty()
     {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
+    // Identity and length, not whole-array equality: legacy rows have no
+    // `expires_at` and would never compare equal to a re-serialized document.
+    let identities: Vec<bson::Document> = live
+        .iter()
+        .map(|follower| {
+            doc! {"$elemMatch": {"conversation_id": &follower.conversation_id,
+            "since_seq": follower.since_seq}}
+        })
+        .collect();
     let mut filter = owner_filter(owner, group_id)?;
-    filter.insert(
-        "followers",
-        bson::to_bson(&group.followers)
-            .map_err(|_| AppError::Internal("Follower encoding failed".into()))?,
-    );
     filter.insert("pending_agent_ids", doc! {"$size": 0});
-    let taken = db
-        .collection::<AssistantGroup>(GROUPS)
-        .update_one(filter, doc! {"$set": {"followers": []}})
-        .await?
-        .modified_count
-        == 1;
-    Ok(if taken { group.followers } else { Vec::new() })
+    filter.insert(
+        "$and",
+        vec![
+            doc! {"followers": {"$size": live.len() as i64}},
+            doc! {"followers": {"$all": identities}},
+        ],
+    );
+    let before = groups
+        .find_one_and_update(filter, doc! {"$set": {"followers": []}})
+        .return_document(ReturnDocument::Before)
+        .await?;
+    // Sampled after the acknowledgement: a follower that expired during the
+    // quiet checks is dropped without a summary.
+    let taken_at = Utc::now();
+    Ok(match before {
+        Some(before) => (
+            followers_live_at(before.followers, taken_at),
+            before.message_count,
+        ),
+        None => (Vec::new(), 0),
+    })
 }
 
-/// What the members said after `since_seq`, for a follower's summary.
+/// What the members said in `(since_seq, upper_seq]`, for a follower's summary.
 pub async fn replies_since(
     db: &Database,
     owner: &str,
     group_id: &str,
     since_seq: i64,
+    upper_seq: i64,
 ) -> AppResult<String> {
     let rows: Vec<GroupMessage> = db
         .collection::<GroupMessage>(MESSAGES)
-        .find(
-            doc! {"group_id": group_id, "user_id": owner, "seq": {"$gt": since_seq},
-            "role": {"$ne": "user"}},
-        )
+        .find(doc! {"group_id": group_id, "user_id": owner,
+        "seq": {"$gt": since_seq, "$lte": upper_seq},
+        "role": {"$ne": "user"}})
         .sort(doc! {"seq": -1})
         .limit(12)
         .await?
@@ -813,11 +1033,13 @@ pub async fn set_seen(db: &Database, owner: &str, thread_id: &str, seq: i64) -> 
     Ok(())
 }
 
-/// Groups with members waiting to answer, for the retry sweep.
+/// Groups with members waiting to answer, or with followers still waiting
+/// for a quiet group (so their summaries and expiry never depend on another
+/// member turn), for the retry sweep.
 pub async fn with_pending(db: &Database) -> AppResult<Vec<AssistantGroup>> {
     let rows: Vec<AssistantGroup> = db
         .collection::<AssistantGroup>(GROUPS)
-        .find(doc! {"$or": [{"pending_agent_ids.0": {"$exists": true}}, {"created_by_user_id": {"$type": "string"}}]})
+        .find(doc! {"$or": [{"pending_agent_ids.0": {"$exists": true}}, {"followers.0": {"$exists": true}}, {"created_by_user_id": {"$type": "string"}}]})
         .sort(doc! {"pending_checked_at": 1})
         .limit(50)
         .await?

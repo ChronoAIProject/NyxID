@@ -305,6 +305,7 @@ pub async fn upgrade(
 
 fn signed(node: &str, operation: Operation, parameters: Value, secret: &[u8]) -> Request {
     let mut request = Request {
+        external_authority: None,
         version: 1,
         authority: None,
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -579,7 +580,13 @@ async fn relay(
                                     )
                                     .await?;
                                     row = desktop::controlled(&state.db, &row, &viewer).await?;
-                                    watch(&state, &row).await?;
+                                    // The owner took control: no causing agent turn.
+                                    watch(
+                                        &state,
+                                        &row,
+                                        &crate::services::nyxbot_watch_service::ReportProvenance::LEGACY,
+                                    )
+                                    .await?;
                                     controls = true;
                                     audit(&state, &row, "owner_control");
                                 }
@@ -671,29 +678,26 @@ fn audit(state: &AppState, row: &MachineDesktop, outcome: &str) {
     );
 }
 
-pub async fn watch(state: &AppState, row: &MachineDesktop) -> AppResult<()> {
+pub async fn watch(
+    state: &AppState,
+    row: &MachineDesktop,
+    provenance: &crate::services::nyxbot_watch_service::ReportProvenance,
+) -> AppResult<()> {
     use mongodb::bson::{self, doc};
     if let Some(conversation) = &row.conversation_id {
-        state.db.collection::<bson::Document>(crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME).update_one(
-            doc!{
-                "kind":"machine_control",
-                "connect_link_id":&row.id,
-                "conversation_id":conversation,
-                "status":"pending"
-            },
-            doc!{
-                "$setOnInsert":{
-                    "_id":uuid::Uuid::new_v4().to_string(),
-                    "user_id":&row.user_id,
-                    "kind":"machine_control",
-                    "connect_link_id":&row.id,
-                    "conversation_id":conversation,
-                    "status":"pending",
-                    "created_at":bson::DateTime::now(),
-                    "expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::days(1))
-                }
-            }
-        ).upsert(true).await?;
+        let mut insert = doc! {
+            "_id":uuid::Uuid::new_v4().to_string(),
+            "user_id":&row.user_id,
+            "kind":"machine_control",
+            "connect_link_id":&row.id,
+            "conversation_id":conversation,
+            "status":"pending",
+            "created_at":bson::DateTime::now(),
+            "expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::days(1))
+        };
+        insert.extend(provenance.fields());
+        crate::services::nyxbot_watch_service::upsert(&state.db,&row.user_id,provenance.invocation_id.as_deref(),
+            doc!{"user_id":&row.user_id,"kind":"machine_control","connect_link_id":&row.id,"conversation_id":conversation,"status":"pending"},doc!{"$setOnInsert":insert}).await?;
     }
     Ok(())
 }
@@ -743,7 +747,12 @@ pub async fn request_control(
         &secret,
     )
     .await?;
-    watch(state, &row).await?;
+    watch(
+        state,
+        &row,
+        &crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
+    )
+    .await?;
     let link = AssistantPage::MachineDesktop {
         node: &node.id,
         conversation: Some(&chat.conversation_id),
@@ -756,7 +765,7 @@ pub async fn request_control(
         node.name
     );
     let conversation = engine::get(&state.db, &chat.user_id, &chat.conversation_id).await?;
-    super::nyxbot::deliver_update(state, &conversation, &message).await;
+    super::nyxbot::deliver_update(state, &conversation, &message, None).await;
     let _ = crate::services::notification_service::machine_control_requested(
         state,
         &chat.user_id,

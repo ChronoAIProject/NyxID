@@ -1,8 +1,9 @@
+import { DecisionReceipt } from "./decision-receipt";
 import { AuthoredSkillCard } from "./authored-skill-card";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ACTION_RISK_LABEL, confirmationReason } from "@/lib/assistant/nyxbot-labels";
-import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
+import type { NyxAgentAcknowledgement, NyxAgentAccessMode } from "@/schemas/assistant-nyxagent";
 
 function title(row: NyxAgentAcknowledgement): string {
   // A specialist's request that NyxBot decides.
@@ -24,42 +25,25 @@ function title(row: NyxAgentAcknowledgement): string {
   return `Confirm: ${row.summary}`;
 }
 
-const statusLabel = {
-  pending: "Pending",
-  allowed: "Allowed",
-  denied: "Denied",
-  expired: "Expired",
-  used: "Used",
-};
-
-/** "Allowed by NyxBot: <reason>" for decisions whose decider is recorded. */
-function decisionLabel(row: NyxAgentAcknowledgement): string {
-  const status = statusLabel[row.status];
-  if ((row.status !== "allowed" && row.status !== "denied") || !row.decided_by) return status;
-  const by = row.decided_by === "orchestrator" ? "NyxBot" : "you";
-  const reason = row.reason?.trim();
-  return reason ? `${status} by ${by}: ${reason}` : `${status} by ${by}`;
-}
-
 export function NyxAgentAcknowledgementCard({
   acknowledgement,
+  accessMode,
   deciding,
   onDecision,
 }: {
   readonly acknowledgement: NyxAgentAcknowledgement;
+  readonly accessMode?: NyxAgentAccessMode;
   readonly deciding: boolean;
-  readonly onDecision: (choice: "allow" | "deny") => Promise<unknown>;
+  readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
 }) {
   const [error, setError] = useState<string>();
-  if (acknowledgement.authored_skill) return <AuthoredSkillCard acknowledgement={acknowledgement} deciding={deciding} onDecision={onDecision} />;
+  const confirmationsBypassed = accessMode === "autopilot" && acknowledgement.decider === "user";
+  if (acknowledgement.authored_skill) return <AuthoredSkillCard acknowledgement={acknowledgement} confirmationsBypassed={confirmationsBypassed} deciding={deciding} onDecision={onDecision} />;
   const label = title(acknowledgement);
   const routed = acknowledgement.decider === "orchestrator";
-  if (acknowledgement.status !== "pending") {
-    return (
-      <p role="status" className="ml-[30px] px-[7px] text-11 text-muted-foreground">
-        {decisionLabel(acknowledgement)} · {label}
-      </p>
-    );
+  if (acknowledgement.status !== "pending" || confirmationsBypassed) {
+    return <DecisionReceipt acknowledgement={acknowledgement}
+      retired={confirmationsBypassed && acknowledgement.status === "pending"} />;
   }
 
   async function decide(choice: "allow" | "deny") {
@@ -99,11 +83,23 @@ export function NyxAgentAcknowledgementCard({
           {confirmationReason(acknowledgement.confirmation)}
         </p>
       ) : null}
+      {/*
+        Help is selected by kind first and by `routed` (NyxBot decides) after.
+        The `skills` and `operations` kinds exist only for a specialist's
+        routed request: a specialist you talk to directly raises no card and
+        gets a plain missing-access result instead, so naming NyxBot on a routed
+        card is accurate. A `skills` card without that routing (an unrouted row
+        from an older replica) must not promise that NyxBot resolves it:
+        allowing it attaches nothing and wakes nobody. Orchestrator-card help
+        (the `routed` branch) is unchanged.
+      */}
       <p className="text-12 text-muted-foreground">
         {acknowledgement.kind === "skills"
-          ? "Allowing this proposal asks NyxBot to resolve the exact version. You will get a separate card to confirm adding or re-pinning the skill."
+          ? routed
+            ? "Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode."
+            : "Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor."
           : acknowledgement.kind === "operations"
-          ? "This changes the specialist's operations on every thread. Widening requires your confirmation."
+          ? "This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode."
           : routed
           ? "NyxBot decides this specialist's request against what you asked for. " +
             "You can decide it here instead; the agent resumes on its own."

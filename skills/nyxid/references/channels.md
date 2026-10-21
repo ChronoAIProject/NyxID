@@ -219,7 +219,7 @@ nyxid channel-bot verify <ID>                   # re-verify token and webhook
 nyxid channel-bot delete <ID> --yes             # deregister bot
 ```
 
-Existing Lark/Feishu bots must grant `im:resource` in the developer console before attachment downloads work; until then downloads return `channel_media_fetch_failed`.
+For inbound attachment downloads, the channel bot app needs any one of `im:message`, `im:message:readonly`, or `im:message.history:readonly`, configured in the Lark/Feishu developer console, as listed by the official [Obtain resource files in messages](https://open.larksuite.com/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-resource/get) API (`/reference/im-v1/message-resource/get`). Missing permission causes `channel_media_fetch_failed`. Outbound image/file uploads separately accept `im:resource` or `im:resource:upload`.
 
 ### Fix a stuck Lark / Feishu bot
 
@@ -235,28 +235,28 @@ If the bot is also missing required scopes (a common parallel symptom), surface 
 
 ### Configure conversation routing
 
-Each conversation route maps a platform chat to an AI agent (via API key with `callback_url`):
+Each conversation route maps a platform chat to an AI agent (via API key with `callback_url`). Use the key UUID returned by creation or `nyxid api-key list`; route commands do not resolve key names:
 
 ```bash
 # Set up an API key with a callback URL first
 nyxid api-key create --name "my-agent" --platform claude-code --callback-url "https://my-agent.example.com/webhook"
 
 # Route all messages from a bot to this agent (default/catch-all)
-nyxid channel-bot route create --bot <BOT_ID> --agent <API_KEY_ID_OR_NAME>
+nyxid channel-bot route create --bot-id <BOT_ID> --agent-key-id <API_KEY_ID>
 
 # Route a specific DM or group chat to a specific agent
-nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<chat_id>" --agent <API_KEY_ID_OR_NAME>
+nyxid channel-bot route create --bot-id <BOT_ID> --conversation-id "<chat_id>" --agent-key-id <API_KEY_ID>
 
 # Route a specific group chat with conversation type hint
-nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<group_chat_id>" --conversation-type group --agent <API_KEY_ID_OR_NAME>
+nyxid channel-bot route create --bot-id <BOT_ID> --conversation-id "<group_chat_id>" --conversation-type group --agent-key-id <API_KEY_ID>
 
 # Per-user routing in a group (different agents for different users)
-nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<group_chat_id>" --sender-id "<user_id>" --agent <AGENT_A>
-nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<group_chat_id>" --sender-id "<user_id_2>" --agent <AGENT_B>
+nyxid channel-bot route create --bot-id <BOT_ID> --conversation-id "<group_chat_id>" --sender-id "<user_id>" --agent-key-id <AGENT_A_KEY_ID>
+nyxid channel-bot route create --bot-id <BOT_ID> --conversation-id "<group_chat_id>" --sender-id "<user_id_2>" --agent-key-id <AGENT_B_KEY_ID>
 
 # List and manage routes
 nyxid channel-bot route list --bot-id <BOT_ID>
-nyxid channel-bot route update <ROUTE_ID> --agent <NEW_KEY>
+nyxid channel-bot route update <ROUTE_ID> --agent-key-id <NEW_KEY_ID>
 nyxid channel-bot route delete <ROUTE_ID> --yes
 ```
 

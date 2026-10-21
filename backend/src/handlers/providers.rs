@@ -31,6 +31,7 @@ pub struct CreateProviderRequest {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub supports_pkce: Option<bool>,
+    pub authorization_nonce_required: Option<bool>,
     // Device code flow fields
     pub device_code_url: Option<String>,
     pub device_token_url: Option<String>,
@@ -85,6 +86,7 @@ pub struct UpdateProviderRequest {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub supports_pkce: Option<bool>,
+    pub authorization_nonce_required: Option<bool>,
     pub device_code_url: Option<String>,
     pub device_token_url: Option<String>,
     pub device_verification_url: Option<String>,
@@ -108,6 +110,8 @@ pub struct UpdateProviderRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct RevocationConfigRequest {
+    #[serde(default)]
+    pub effect_scope: Option<crate::models::provider_config::RevocationEffectScope>,
     #[serde(default = "crate::models::provider_config::default_request_encoding")]
     pub request_encoding: String,
     pub style: String,
@@ -120,6 +124,7 @@ pub struct RevocationConfigRequest {
 impl From<RevocationConfigRequest> for crate::models::provider_config::RevocationConfig {
     fn from(value: RevocationConfigRequest) -> Self {
         Self {
+            effect_scope: value.effect_scope,
             request_encoding: value.request_encoding,
             style: value.style,
             url: value.url,
@@ -182,6 +187,7 @@ pub struct ProviderResponse {
     pub has_client_secret: bool,
     pub default_scopes: Option<Vec<String>>,
     pub supports_pkce: bool,
+    pub authorization_nonce_required: bool,
     pub device_code_url: Option<String>,
     pub device_token_url: Option<String>,
     pub device_verification_url: Option<String>,
@@ -206,6 +212,7 @@ pub struct ProviderResponse {
 
 #[derive(Debug, Serialize)]
 pub struct RevocationConfigResponse {
+    pub effect_scope: Option<crate::models::provider_config::RevocationEffectScope>,
     pub request_encoding: String,
     pub style: String,
     pub url: String,
@@ -234,6 +241,7 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         description: p.description,
         provider_type: p.provider_type,
         revocation: revocation.map(|revocation| RevocationConfigResponse {
+            effect_scope: revocation.effect_scope,
             request_encoding: revocation.request_encoding,
             style: revocation.style,
             url: revocation.url,
@@ -248,6 +256,7 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         has_client_secret: p.client_secret_encrypted.is_some(),
         default_scopes: p.default_scopes,
         supports_pkce: p.supports_pkce,
+        authorization_nonce_required: p.authorization_nonce_required,
         device_code_url: p.device_code_url,
         device_token_url: p.device_token_url,
         device_verification_url: p.device_verification_url,
@@ -379,6 +388,7 @@ pub async fn create_provider(
         body.revocation_url
             .as_ref()
             .map(|url| crate::models::provider_config::RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: url.clone(),
@@ -615,6 +625,7 @@ pub async fn create_provider(
         body.token_request_encoding,
         body.oauth_request_headers.unwrap_or_default(),
         body.supports_oauth_scopes.unwrap_or(true),
+        body.authorization_nonce_required.unwrap_or(false),
     )
     .await?;
 
@@ -733,6 +744,7 @@ pub async fn update_provider(
         client_id: body.client_id,
         client_secret: body.client_secret,
         supports_pkce: body.supports_pkce,
+        authorization_nonce_required: body.authorization_nonce_required,
         device_code_url: body.device_code_url,
         device_token_url: body.device_token_url,
         device_verification_url: body.device_verification_url,
@@ -886,13 +898,13 @@ pub async fn link_service(
         admin_required: authority == CatalogAuthority::Admin,
         catalog_base_url: state.config.base_url.clone(),
     };
-    crate::services::provider_link_service::link_with_authority(
+    Box::pin(crate::services::provider_link_service::link_with_authority(
         &state.db,
         &provider_id,
         &service_id,
         None,
         Some((&target, &mutation_authority)),
-    )
+    ))
     .await?;
     audit_service::log_for_user(
         state.db.clone(),
@@ -925,6 +937,7 @@ mod tests {
 
     fn make_provider(provider_type: &str) -> ProviderConfig {
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: "provider-1".to_string(),
             slug: "provider-1".to_string(),
             name: "Provider".to_string(),
@@ -955,6 +968,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1163,6 +1177,7 @@ mod tests {
     fn provider_response_exposes_dedicated_revocation_shape() {
         let mut provider = make_provider("oauth2");
         provider.revocation = Some(RevocationConfig {
+            effect_scope: None,
             request_encoding: "form".to_string(),
             style: "github".to_string(),
             url: "https://api.github.com/applications".to_string(),
@@ -1179,6 +1194,7 @@ mod tests {
                 "style": "github",
                 "url": "https://api.github.com/applications",
                 "auth": "inherit",
+                "effect_scope": null,
                 "revokes_grant": true
             }))
         );
@@ -1198,6 +1214,7 @@ mod tests {
                 "style": "rfc7009",
                 "url": "https://example.com/revoke",
                 "auth": "inherit",
+                "effect_scope": null,
                 "revokes_grant": false
             }))
         );

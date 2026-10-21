@@ -246,6 +246,8 @@ export const runSchema = z.object({
   reason: z.string().nullable(),
   thread_id: z.string().nullable(),
   duration_ms: z.number().nullable(),
+  attempts: z.number().int().nonnegative().nullish(),
+  capacity_wait_ms: z.number().nonnegative().nullish(),
 });
 export const runsSchema = z.object({
   next_cursor: z.object({ before: instant, before_id: z.string() }).nullish(),

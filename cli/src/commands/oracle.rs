@@ -511,6 +511,60 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
             }
             Ok(())
         }
+        OraclePoolCommands::Transfer {
+            pool,
+            org,
+            personal: _,
+            rotate_worker_token,
+            visibility,
+            auth,
+        } => {
+            let output = auth.output;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let owner = if let Some(org) = org {
+                resolve_org_id(&mut api, &org).await?
+            } else {
+                let me: Value = api.get("/auth/me").await?;
+                me["id"]
+                    .as_str()
+                    .or_else(|| me["user"]["id"].as_str())
+                    .context("server did not return your user id")?
+                    .to_string()
+            };
+            let mut body = serde_json::json!({"owner_user_id":owner,"rotate_worker_token":rotate_worker_token});
+            insert_opt_str(&mut body, "visibility", visibility.as_deref());
+            let response: Value = api
+                .post(&format!("/oracle/pools/{pool}/transfer"), &body)
+                .await?;
+            match output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                OutputFormat::Table => {
+                    eprintln!(
+                        "Pool '{}' transferred to {}.",
+                        response["pool"]["slug"].as_str().unwrap_or(&pool),
+                        owner
+                    );
+                    if let Some(token) = response["worker_token"].as_str() {
+                        eprintln!("Replacement worker token (shown once):");
+                        println!("{token}");
+                    }
+                }
+            }
+            Ok(())
+        }
+        OraclePoolCommands::Delete { pool, auth } => {
+            let output = auth.output;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let response: Value = api.delete(&format!("/oracle/pools/{pool}")).await?;
+            match output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                OutputFormat::Table => eprintln!(
+                    "Pool '{}' deleted; physical cleanup continues asynchronously.",
+                    response["slug"].as_str().unwrap_or(&pool)
+                ),
+            }
+            Ok(())
+        }
         OraclePoolCommands::RotateToken { pool, auth } => {
             let output = auth.output;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
@@ -3459,5 +3513,126 @@ mod tests {
         })
         .await
         .expect("pool create should post and parse the token response");
+    }
+    #[tokio::test]
+    async fn oracle_pool_lifecycle_cli_requests_both_output_modes_and_conflicts() {
+        for output in [OutputFormat::Table, OutputFormat::Json] {
+            let server = MockServer::start().await;
+            let owner = "11111111-1111-4111-8111-111111111111";
+            Mock::given(method("GET"))
+                .and(path("/api/v1/auth/me"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":owner})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST")).and(path("/api/v1/oracle/pools/test/transfer"))
+                .and(body_json(serde_json::json!({"owner_user_id":owner,"rotate_worker_token":true,"visibility":"private"})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"pool":{"id":"pool","slug":"test","owner_user_id":owner},"worker_token":"one-time"}))).expect(1).mount(&server).await;
+            run_pool(OraclePoolCommands::Transfer {
+                pool: "test".into(),
+                org: None,
+                personal: true,
+                rotate_worker_token: true,
+                visibility: Some("private".into()),
+                auth: mock_auth_with_output(server.uri(), output),
+            })
+            .await
+            .unwrap();
+            Mock::given(method("DELETE")).and(path("/api/v1/oracle/pools/test"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"pool","slug":"test","status":"deleted","cleanup":"asynchronous","deleted_at":"2026-01-01T00:00:00Z"}))).expect(1).mount(&server).await;
+            run_pool(OraclePoolCommands::Delete {
+                pool: "test".into(),
+                auth: mock_auth_with_output(server.uri(), output),
+            })
+            .await
+            .unwrap();
+            Mock::given(method("DELETE")).and(path("/api/v1/oracle/pools/busy"))
+                .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({"error":"oracle_pool_active_work","error_code":11017,"message":"active work"}))).expect(1).mount(&server).await;
+            assert!(
+                run_pool(OraclePoolCommands::Delete {
+                    pool: "busy".into(),
+                    auth: mock_auth_with_output(server.uri(), output)
+                })
+                .await
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn oracle_pool_lifecycle_cli_requires_explicit_destination() {
+        use clap::Parser;
+        for args in [
+            vec!["nyxid", "oracle", "pool", "transfer", "test", "--personal"],
+            vec![
+                "nyxid", "oracle", "pool", "transfer", "test", "--org", "team",
+            ],
+            vec!["nyxid", "oracle", "pool", "delete", "test"],
+        ] {
+            assert!(crate::cli::Cli::try_parse_from(args).is_ok());
+        }
+        for args in [
+            vec!["nyxid", "oracle", "pool", "transfer", "test"],
+            vec![
+                "nyxid",
+                "oracle",
+                "pool",
+                "transfer",
+                "test",
+                "--org",
+                "team",
+                "--personal",
+            ],
+            vec![
+                "nyxid",
+                "oracle",
+                "pool",
+                "transfer",
+                "test",
+                "--personal",
+                "--visibility",
+                "platform",
+            ],
+        ] {
+            assert!(crate::cli::Cli::try_parse_from(args).is_err());
+        }
+    }
+    #[tokio::test]
+    async fn oracle_pool_transfer_cli_resolves_org_and_preserves_token_by_default() {
+        let server = MockServer::start().await;
+        let org = "22222222-2222-4222-8222-222222222222";
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orgs/team"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"id":org,"slug":"team","display_name":"Team"}),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/oracle/pools/test/transfer"))
+            .and(body_json(
+                serde_json::json!({"owner_user_id":org,"rotate_worker_token":false}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"pool":{"id":"pool","slug":"test","owner_user_id":org}}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run_pool(OraclePoolCommands::Transfer {
+            pool: "test".into(),
+            org: Some("team".into()),
+            personal: false,
+            rotate_worker_token: false,
+            visibility: None,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .unwrap();
     }
 }

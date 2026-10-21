@@ -850,3 +850,19 @@ describe("AssistantSidebar account menu", () => {
     },
   );
 });
+
+
+it.each([['discord', 'Discord'], ['slack', 'Slack'], ['whatsapp', 'WhatsApp'], ['lark', 'Lark'], ['feishu', 'Feishu'], ['x', 'X']] as const)(
+  'opens the saved %s personal conversation using its actual platform label', async (platform, name) => {
+    const user = userEvent.setup();
+    const saved: Conversation = { ...CONVERSATION, title: 'Saved native conversation', platform_thread: {
+      platform, manager_id: 'profile-id', binding_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', binding_generation: 1,
+    }};
+    const { onSelect } = renderSidebar(vi.fn(), [saved], saved.id);
+    const row = screen.getByRole('button', { name: 'Saved native conversation' });
+    expect(row).toHaveTextContent(name);
+    expect(row).not.toHaveTextContent('Telegram');
+    await user.click(row);
+    expect(onSelect).toHaveBeenCalledWith(saved.id);
+  },
+);

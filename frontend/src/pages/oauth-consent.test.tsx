@@ -270,7 +270,7 @@ describe("OAuthConsentPage", () => {
     expect(within(services).getByText("proxy")).toBeVisible();
   });
 
-  it("grants agent apps read access to every service by default", () => {
+  it("defaults agent apps to no service access and describes full access truthfully", () => {
     setSearch({
       ...VALID,
       scope: "openid profile email offline_access proxy",
@@ -284,17 +284,21 @@ describe("OAuthConsentPage", () => {
     expect(
       within(
         screen.getByRole("radiogroup", { name: "All services" }),
-      ).getByRole("radio", { name: "Read" }),
+      ).getByRole("radio", { name: "Off" }),
     ).toHaveAttribute("aria-checked", "true");
     expect(
       container.querySelector('input[name="allow_all_services"]'),
-    ).toHaveValue("true");
-    expect(container.querySelector('input[name="write_access"]')).toHaveValue(
-      "none",
-    );
+    ).toHaveValue("false");
+    expect(container.querySelector('input[name="write_access"]')).toBeNull();
+    expect(
+      screen.queryByRole("radio", { name: "Read" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/including creating, updating or deleting data/),
+    ).toBeVisible();
   });
 
-  it("only grants write access when the user chooses it", async () => {
+  it("submits the supported all-services grant only after the user allows it", async () => {
     setSearch({
       ...VALID,
       scope: "openid profile email offline_access proxy",
@@ -304,12 +308,51 @@ describe("OAuthConsentPage", () => {
     await userEvent.click(
       within(
         screen.getByRole("radiogroup", { name: "All services" }),
-      ).getByRole("radio", { name: "Read & write" }),
+      ).getByRole("radio", { name: "Allow" }),
     );
 
-    expect(container.querySelector('input[name="write_access"]')).toHaveValue(
-      "all",
+    expect(
+      container.querySelector('input[name="allow_all_services"]'),
+    ).toHaveValue("true");
+    expect(container.querySelector('input[name="write_access"]')).toBeNull();
+    expect(
+      container.querySelector('input[name="write_service_ids"]'),
+    ).toBeNull();
+  });
+
+  it("submits only the allowed service and supports keyboard selection", async () => {
+    setSearch({ ...VALID, scope: "openid proxy" });
+    render(<OAuthConsentPage />);
+    const group = screen.getByRole("radiogroup", { name: "My OpenAI" });
+    within(group).getByRole("radio", { name: "Off" }).focus();
+    await userEvent.keyboard("{ArrowRight}");
+    expect(within(group).getByRole("radio", { name: "Allow" })).toHaveFocus();
+    expect(hiddenInput("allow_all_services")).toHaveValue("false");
+    expect(
+      hiddenInputs("allowed_service_ids").map((input) => input.value),
+    ).toEqual(["svc-openai"]);
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(hiddenInputs("allowed_service_ids")).toHaveLength(0);
+  });
+
+  it("lets agent users turn off app-preselected services", async () => {
+    setSearch({
+      ...VALID,
+      scope: "openid proxy",
+      preselect_service_ids: ["svc-openai"],
+    });
+    render(<OAuthConsentPage />);
+    expect(
+      hiddenInputs("allowed_service_ids").map((input) => input.value),
+    ).toEqual(["svc-openai"]);
+    await userEvent.click(
+      within(screen.getByRole("radiogroup", { name: "My OpenAI" })).getByRole(
+        "radio",
+        { name: "Off" },
+      ),
     );
+    expect(hiddenInputs("allowed_service_ids")).toHaveLength(0);
+    expect(hiddenInput("allow_all_services")).toHaveValue("false");
   });
 
   it("shows the signed-in account in the connection card footer", () => {

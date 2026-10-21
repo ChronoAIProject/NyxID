@@ -179,6 +179,14 @@ pub struct AssistantAccountResponse {
     pub replayed: bool,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantAccountDeletionResponse {
+    pub resource: AssistantAccountResource,
+    pub replayed: bool,
+    pub erasure: super::users::DeleteAccountResponse,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RevokeAssistantConsentRequest {
@@ -197,6 +205,8 @@ pub struct DeleteAssistantAccountRequest {
     /// control: the effect route is mounted and reachable, so the server has
     /// to verify the confirmation itself for it to mean anything.
     pub confirm_email: String,
+    #[serde(default)]
+    pub deletion_policy_version: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema)]
@@ -206,24 +216,34 @@ pub enum AssistantMfaSetupStage {
     Confirm,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssistantMfaSetupRequest {
     pub action_request_id: String,
     pub stage: AssistantMfaSetupStage,
     pub factor_id: Option<String>,
-    pub code: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub code: Option<zeroize::Zeroizing<String>>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+impl std::fmt::Debug for AssistantMfaSetupRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AssistantMfaSetupRequest { [REDACTED] }")
+    }
+}
+
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantMfaSetupResponse {
     pub resource: AssistantAccountResource,
     pub stage: AssistantMfaSetupStage,
     pub factor_id: Option<String>,
-    pub setup_value: Option<String>,
-    pub qr_code_url: Option<String>,
-    pub recovery_values: Option<Vec<String>>,
+    #[schema(value_type = Option<String>)]
+    pub setup_value: Option<zeroize::Zeroizing<String>>,
+    #[schema(value_type = Option<String>)]
+    pub qr_code_url: Option<zeroize::Zeroizing<String>>,
+    #[schema(value_type = Option<Vec<String>>)]
+    pub recovery_values: Option<zeroize::Zeroizing<Vec<String>>>,
     pub replayed: bool,
     #[serde(default)]
     pub one_time_material: OneTimeMaterialAvailability,
@@ -323,7 +343,7 @@ pub struct AssistantTelegramLinkResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_in_secs: Option<u32>,
 }
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantServiceAccountResponse {
     pub resource: AssistantServiceAccountResource,
@@ -333,7 +353,7 @@ pub struct AssistantServiceAccountResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
 }
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantDeveloperAppResponse {
     pub resource: AssistantDeveloperAppResource,
@@ -499,6 +519,7 @@ pub struct AssistantNotificationsUpdateRequest {
     pub action_request_id: String,
     pub telegram_enabled: Option<bool>,
     pub approval_required: Option<bool>,
+    pub global_approval_mode: Option<crate::services::approval_policy::GlobalApprovalMode>,
     pub approval_timeout_secs: Option<u32>,
     pub grant_expiry_days: Option<u32>,
     pub push_enabled: Option<bool>,
@@ -519,7 +540,8 @@ pub struct AssistantConfirmedActionRequestId {
 pub struct AssistantGcpCreateRequest {
     pub action_request_id: String,
     pub label: Option<String>,
-    pub key_json: String,
+    #[schema(value_type = String)]
+    pub key_json: zeroize::Zeroizing<String>,
     pub scopes: Option<String>,
     pub service_slugs: Option<Vec<String>>,
     pub target_org_id: Option<String>,
@@ -578,6 +600,7 @@ struct ConfirmedAccountDeleteFingerprint<'a> {
     action: &'static str,
     user_id: &'a str,
     confirm_email: &'a str,
+    deletion_policy_version: &'a str,
 }
 
 #[derive(Serialize)]
@@ -932,7 +955,11 @@ async fn delete_account(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Json(body): Json<DeleteAssistantAccountRequest>,
-) -> AppResult<Json<AssistantAccountResponse>> {
+) -> AppResult<Json<AssistantAccountDeletionResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    crate::services::admin_user_service::validate_account_deletion_policy(
+        &body.deletion_policy_version,
+    )?;
     let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let user_id = auth_user.user_id.to_string();
     let user = require_user(&state, &user_id).await?;
@@ -950,6 +977,7 @@ async fn delete_account(
         action: ACCOUNT_DELETE_ACTION,
         user_id: &user_id,
         confirm_email: &confirm_email,
+        deletion_policy_version: &body.deletion_policy_version,
     })?;
     let receipt = reserve_or_replay(
         &state.db,
@@ -964,12 +992,9 @@ async fn delete_account(
     let replayed = match receipt {
         ReceiptOutcome::Replay(_) => true,
         ReceiptOutcome::InProgress(receipt) => {
-            if state
-                .db
-                .collection::<User>(USERS)
-                .find_one(doc! { "_id": &user_id })
+            if crate::services::personal_erasure_service::status(&state.db, &user_id)
                 .await?
-                .is_some()
+                .is_none()
             {
                 return Err(in_progress_conflict());
             }
@@ -977,14 +1002,24 @@ async fn delete_account(
             true
         }
         ReceiptOutcome::Reserved(receipt) => {
-            let _ =
-                users::delete_me(State(state.clone()), auth_user, tele, HeaderMap::new()).await?;
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_HEADER,
+                axum::http::HeaderValue::from_static(
+                    crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+                ),
+            );
+            let _ = users::delete_me(State(state.clone()), auth_user, tele, headers).await?;
             mark_completed(&state.db, &receipt).await?;
             false
         }
     };
 
-    Ok(Json(AssistantAccountResponse {
+    let erasure = crate::services::personal_erasure_service::status(&state.db, &user_id)
+        .await?
+        .ok_or_else(|| AppError::Conflict("Account deletion has not been accepted".into()))?;
+    Ok(Json(AssistantAccountDeletionResponse {
+        erasure: users::DeleteAccountResponse::from_job(&state.db, erasure).await?,
         resource: AssistantAccountResource { user_id },
         replayed,
     }))
@@ -996,6 +1031,7 @@ async fn setup_account_mfa(
     tele: TelemetryContext,
     Json(body): Json<AssistantMfaSetupRequest>,
 ) -> AppResult<Json<AssistantMfaSetupResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let user_id = auth_user.user_id.to_string();
     let user = require_user(&state, &user_id).await?;
@@ -1534,6 +1570,8 @@ enum Wave4Fingerprint<'a> {
     NotificationsUpdate {
         telegram_enabled: Option<bool>,
         approval_required: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        global_approval_mode: Option<crate::services::approval_policy::GlobalApprovalMode>,
         approval_timeout_secs: Option<u32>,
         grant_expiry_days: Option<u32>,
         push_enabled: Option<bool>,
@@ -3026,11 +3064,16 @@ async fn update_notifications_action(
     auth_user: AuthUser,
     Json(body): Json<AssistantNotificationsUpdateRequest>,
 ) -> AppResult<Json<AssistantNotificationResponse>> {
+    let requested_mode = crate::services::approval_policy::GlobalApprovalMode::from_update(
+        body.approval_required,
+        body.global_approval_mode,
+    )?;
     let actor = auth_user.user_id.to_string();
     let request_id = normalize_action_request_id(body.action_request_id)?;
     let fp = wave4_fingerprint(&Wave4Fingerprint::NotificationsUpdate {
         telegram_enabled: body.telegram_enabled,
         approval_required: body.approval_required,
+        global_approval_mode: body.global_approval_mode,
         approval_timeout_secs: body.approval_timeout_secs,
         grant_expiry_days: body.grant_expiry_days,
         push_enabled: body.push_enabled,
@@ -3058,9 +3101,7 @@ async fn update_notifications_action(
             let already_applied = body
                 .telegram_enabled
                 .is_none_or(|value| current.telegram_enabled == value)
-                && body
-                    .approval_required
-                    .is_none_or(|value| current.approval_required == value)
+                && requested_mode.is_none_or(|value| current.global_approval_mode == value)
                 && body
                     .approval_timeout_secs
                     .is_none_or(|value| current.approval_timeout_secs == value)
@@ -3089,6 +3130,7 @@ async fn update_notifications_action(
         Json(notifications::UpdateNotificationSettingsRequest {
             telegram_enabled: body.telegram_enabled,
             approval_required: body.approval_required,
+            global_approval_mode: body.global_approval_mode,
             approval_timeout_secs: body.approval_timeout_secs,
             grant_expiry_days: body.grant_expiry_days,
             push_enabled: body.push_enabled,
@@ -3420,6 +3462,199 @@ async fn connect_openclaw_action(
 mod wave4_effect_tests {
     use super::*;
     use chrono::Utc;
+
+    #[tokio::test]
+    async fn notification_interrupted_first_update_compares_modes_before_completing_receipt() {
+        use crate::models::assistant_action_receipt::{
+            AssistantActionReceipt, AssistantActionReceiptStatus, COLLECTION_NAME as RECEIPTS,
+        };
+        use crate::services::approval_policy::GlobalApprovalMode;
+        let db = crate::test_utils::connect_test_database("notification_first_update_receipt")
+            .await
+            .expect("real Mongo required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        for (legacy, mode) in [
+            (Some(true), None),
+            (None, Some(GlobalApprovalMode::All)),
+            (Some(false), None),
+        ] {
+            let actor = uuid::Uuid::new_v4().to_string();
+            let request = || AssistantNotificationsUpdateRequest {
+                action_request_id: "interrupted-first-update".to_string(),
+                telegram_enabled: None,
+                approval_required: legacy,
+                global_approval_mode: mode,
+                approval_timeout_secs: None,
+                grant_expiry_days: None,
+                push_enabled: None,
+            };
+            let fp = wave4_fingerprint(&Wave4Fingerprint::NotificationsUpdate {
+                telegram_enabled: None,
+                approval_required: legacy,
+                global_approval_mode: mode,
+                approval_timeout_secs: None,
+                grant_expiry_days: None,
+                push_enabled: None,
+            })
+            .unwrap();
+            let receipt = reserve_pending_wave4_receipt(
+                &db,
+                &actor,
+                NOTIFICATIONS_UPDATE_ACTION,
+                &request().action_request_id,
+                &fp,
+                actor.clone(),
+            )
+            .await;
+            // Crash after reservation, before a channel or settings update exists.
+            let result = update_notifications_action(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&actor),
+                Json(request()),
+            )
+            .await;
+            assert!(matches!(result, Err(AppError::Conflict(_))));
+            let persisted = db
+                .collection::<AssistantActionReceipt>(RECEIPTS)
+                .find_one(doc! {"_id": &receipt.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(persisted.status, AssistantActionReceiptStatus::Pending);
+            let Json(current) = notifications::get_settings(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&actor),
+            )
+            .await
+            .unwrap();
+            assert_eq!(current.global_approval_mode, GlobalApprovalMode::WritesOnly);
+            // Once the actual effect commits, the interrupted receipt can recover.
+            let Json(applied) = notifications::update_settings(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&actor),
+                Json(notifications::UpdateNotificationSettingsRequest {
+                    telegram_enabled: None,
+                    approval_required: legacy,
+                    global_approval_mode: mode,
+                    approval_timeout_secs: None,
+                    grant_expiry_days: None,
+                    push_enabled: None,
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                applied.global_approval_mode,
+                mode.unwrap_or_else(|| GlobalApprovalMode::from_stored(legacy))
+            );
+            let Json(replayed) = update_notifications_action(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&actor),
+                Json(request()),
+            )
+            .await
+            .unwrap();
+            assert!(replayed.replayed);
+            let persisted = db
+                .collection::<AssistantActionReceipt>(RECEIPTS)
+                .find_one(doc! {"_id": &receipt.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(persisted.status, AssistantActionReceiptStatus::Completed);
+            // Conflicting dual fields must fail even on a completed receipt.
+            let mut conflict = request();
+            conflict.approval_required = Some(true);
+            conflict.global_approval_mode = Some(GlobalApprovalMode::WritesOnly);
+            assert!(matches!(
+                update_notifications_action(
+                    State(state.clone()),
+                    crate::test_utils::test_auth_user(&actor),
+                    Json(conflict)
+                )
+                .await,
+                Err(AppError::ValidationError(_))
+            ));
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mfa_nyxbot_social_setup_and_confirmation_work_with_email_auth_disabled() {
+        let db = crate::test_utils::connect_transaction_test_database("assistant_social_mfa").await;
+        let mut state = crate::test_utils::test_app_state(db.clone());
+        state.config.email_auth_enabled = false;
+        let id = Uuid::new_v4().to_string();
+        let mut user = crate::test_utils::test_user(&id, crate::models::user::UserType::Person);
+        user.social_provider = Some("google".into());
+        db.collection::<User>(USERS).insert_one(user).await.unwrap();
+        let current = crate::services::token_service::create_session(&db, &id, None, None)
+            .await
+            .unwrap();
+        let mut auth = crate::test_utils::test_auth_user(&id);
+        auth.session_id = Some(Uuid::parse_str(&current.session_id).unwrap());
+        let request = || AssistantMfaSetupRequest {
+            action_request_id: "social-mfa-start".into(),
+            stage: AssistantMfaSetupStage::Start,
+            factor_id: None,
+            code: None,
+        };
+        let mut denied = auth.clone();
+        denied.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+        let error = setup_account_mfa(
+            State(state.clone()),
+            denied,
+            TelemetryContext::default(),
+            Json(request()),
+        )
+        .await
+        .expect_err("NyxBot MFA setup must reject API keys");
+        let body = error.response_body();
+        assert_eq!(
+            axum::response::IntoResponse::into_response(error).status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            body.details,
+            Some(serde_json::json!({
+                "reason": "credential_type_unsupported",
+                "credential_type": "api_key",
+                "accepted": ["user_session"],
+                "hint": crate::errors::access_denial::HUMAN_HINT,
+            }))
+        );
+        let setup = setup_account_mfa(
+            State(state.clone()),
+            auth.clone(),
+            TelemetryContext::default(),
+            Json(request()),
+        )
+        .await
+        .unwrap()
+        .0;
+        let totp = totp_rs::TOTP::from_url(setup.qr_code_url.unwrap()).unwrap();
+        let confirmed = setup_account_mfa(
+            State(state.clone()),
+            auth,
+            TelemetryContext::default(),
+            Json(AssistantMfaSetupRequest {
+                action_request_id: "social-mfa-confirm".into(),
+                stage: AssistantMfaSetupStage::Confirm,
+                factor_id: setup.factor_id,
+                code: Some(totp.generate_current().unwrap().into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(confirmed.recovery_values.is_some());
+        assert!(
+            crate::services::session_authority::mfa_assurance(&db, &id, Some(&current.session_id))
+                .await
+                .unwrap()
+        );
+        db.drop().await.unwrap();
+    }
 
     async fn reserve_pending_wave4_receipt(
         db: &mongodb::Database,
@@ -3778,7 +4013,8 @@ mod wave4_effect_tests {
             action_request_id: "gcp-create-reserved".to_string(),
             label: Some("Reserved GCP".to_string()),
             key_json: "{\"client_email\":\"svc@example.test\",\"private_key\":\"redacted\"}"
-                .to_string(),
+                .to_string()
+                .into(),
             scopes: None,
             service_slugs: None,
             target_org_id: None,
@@ -3794,7 +4030,7 @@ mod wave4_effect_tests {
         )
         .await;
         let state = crate::test_utils::test_app_state(db.clone());
-        crate::services::user_api_key_service::create_api_key_with_id(
+        crate::test_utils::create_api_key_with_id(
             &db,
             &state.encryption_keys,
             &actor_id,
@@ -4354,7 +4590,7 @@ mod wave4_effect_tests {
         // Wrong confirmation must be refused.
         let (status, _) = post(
             state.clone(),
-            json!({ "actionRequestId": "delete-wrong", "confirmEmail": "someone@else.test" }),
+            json!({ "actionRequestId": "delete-wrong", "deletionPolicyVersion":"machine-data-provider-revocation-v2", "confirmEmail": "someone@else.test" }),
         )
         .await;
         assert!(
@@ -4365,7 +4601,7 @@ mod wave4_effect_tests {
         // Empty confirmation must be refused too.
         let (status, _) = post(
             state.clone(),
-            json!({ "actionRequestId": "delete-empty", "confirmEmail": "   " }),
+            json!({ "actionRequestId": "delete-empty", "deletionPolicyVersion":"machine-data-provider-revocation-v2", "confirmEmail": "   " }),
         )
         .await;
         assert!(
@@ -4530,15 +4766,36 @@ mod wave4_effect_tests {
             action: ACCOUNT_DELETE_ACTION,
             user_id: "user-1",
             confirm_email: "owner@example.test",
+            deletion_policy_version:
+                crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
         })
         .unwrap();
         let second = fingerprint_canonical(&ConfirmedAccountDeleteFingerprint {
             action: ACCOUNT_DELETE_ACTION,
             user_id: "user-1",
             confirm_email: "someone@else.test",
+            deletion_policy_version:
+                crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
         })
         .unwrap();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn account_delete_fingerprint_binds_the_acknowledged_policy() {
+        let fingerprint = |policy| {
+            fingerprint_canonical(&ConfirmedAccountDeleteFingerprint {
+                action: ACCOUNT_DELETE_ACTION,
+                user_id: "user-1",
+                confirm_email: "owner@example.test",
+                deletion_policy_version: policy,
+            })
+            .unwrap()
+        };
+        assert_ne!(
+            fingerprint("machine-data-provider-revocation-v2"),
+            fingerprint("previous-policy")
+        );
     }
 
     #[tokio::test]
@@ -4573,7 +4830,9 @@ mod wave4_effect_tests {
                 user_id: user_id.clone(),
                 factor_type: "totp".to_string(),
                 secret_encrypted: None,
+                secret_context_version: None,
                 recovery_codes: None,
+                last_totp_counter: None,
                 is_verified: false,
                 is_active: true,
                 created_at: now,
@@ -4609,7 +4868,7 @@ mod wave4_effect_tests {
             action_request_id: action_request_id.to_string(),
             stage: AssistantMfaSetupStage::Confirm,
             factor_id: Some(factor_id.clone()),
-            code: Some("123456".to_string()),
+            code: Some("123456".to_string().into()),
         };
         let denied = setup_account_mfa(
             State(state.clone()),
@@ -5113,6 +5372,7 @@ mod wave4_effect_tests {
             action_request_id: "notifications-update-interrupted".to_string(),
             telegram_enabled: None,
             approval_required: None,
+            global_approval_mode: None,
             approval_timeout_secs: Some(75),
             grant_expiry_days: None,
             push_enabled: None,
@@ -5314,6 +5574,8 @@ mod wave4_effect_tests {
                 action: ACCOUNT_DELETE_ACTION,
                 user_id: id_a,
                 confirm_email: "owner@example.test",
+                deletion_policy_version:
+                    crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
             }
         );
         fingerprint_case!(
@@ -5523,6 +5785,7 @@ mod wave4_effect_tests {
             Wave4Fingerprint::NotificationsUpdate {
                 telegram_enabled: Some(true),
                 approval_required: Some(true),
+                global_approval_mode: None,
                 approval_timeout_secs: Some(60),
                 grant_expiry_days: Some(30),
                 push_enabled: Some(false),
@@ -5650,8 +5913,9 @@ mod wave4_effect_tests {
                 changed_field_count += 1;
             }
         }
+        // Account deletion now also binds the acknowledged policy version.
         assert_eq!(
-            changed_field_count, 93,
+            changed_field_count, 94,
             "adding or removing a bound semantic field requires reviewing this count"
         );
     }
@@ -5679,14 +5943,14 @@ mod wave4_effect_tests {
         let gcp = AssistantGcpCreateRequest {
             action_request_id: "request-gcp".to_string(),
             label: Some("gcp".to_string()),
-            key_json: "{\"private_key\":\"one\"}".to_string(),
+            key_json: "{\"private_key\":\"one\"}".to_string().into(),
             scopes: None,
             service_slugs: None,
             target_org_id: None,
         };
         let gcp_one = gcp_create_fingerprint(&gcp).unwrap();
         let gcp_two = gcp_create_fingerprint(&AssistantGcpCreateRequest {
-            key_json: "{\"private_key\":\"two\"}".to_string(),
+            key_json: "{\"private_key\":\"two\"}".to_string().into(),
             ..gcp
         })
         .unwrap();
@@ -5717,5 +5981,21 @@ mod wave4_effect_tests {
                 "clientSecret": "chat-supplied",
             }));
         assert!(openclaw.is_err());
+    }
+}
+
+crate::errors::redacted_debug!(AssistantMfaSetupResponse);
+
+impl std::fmt::Debug for AssistantServiceAccountResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AssistantServiceAccountResponse")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for AssistantDeveloperAppResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AssistantDeveloperAppResponse")
+            .finish_non_exhaustive()
     }
 }

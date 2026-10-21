@@ -10,13 +10,24 @@ describe("ServiceIcon", () => {
     ["api-supabase-management", "api-supabase-management"],
     ["railway", "api-railway"],
     ["api-railway", "api-railway"],
+    ["twilio", "api-twilio"],
+    ["twitch", "api-twitch"],
+    ["whatsapp-business", "api-whatsapp-business"],
+    ["zoom", "api-zoom"],
+    ["xai", "llm-xai"],
+    ["zoho-mail", "api-zoho-mail"],
+    ["api-zoho-mail", "api-zoho-mail"],
+    ["tools-elevenlabs", "api-elevenlabs"],
+    ["tools-firecrawl", "api-firecrawl"],
   ])("renders the brand SVG for %s", (slug, catalogSlug) => {
     const { container } = render(<ServiceIcon slug={slug} size="md" />);
-    const svg = container.querySelector(`svg[data-slug="${catalogSlug}"]`);
+    const svg = container.querySelector<SVGSVGElement>(`svg[data-slug="${catalogSlug}"]`);
     expect(svg).toBeInTheDocument();
     expect(svg).toHaveAttribute("fill", "currentColor");
     expect(svg).toHaveAttribute("aria-hidden", "true");
-    expect(svg).toHaveClass("!h-6", "!w-6");
+    const sizedIcon = container.querySelector('[class*="!h-6"]');
+    expect(sizedIcon).toHaveClass("!h-6", "!w-6");
+    expect(sizedIcon).toContainElement(svg);
     expect(container.querySelector('[data-fallback="true"]')).toBeNull();
   });
 
@@ -43,7 +54,7 @@ describe("ServiceIcon", () => {
 
   it("falls back to the generic glyph when an uploaded image fails for an unknown slug", () => {
     const { container } = render(
-      <ServiceIcon slug="api-zoho-mail" iconUrl="https://example.com/zoho.svg" />,
+      <ServiceIcon slug="custom-vendor" iconUrl="https://example.com/unknown.svg" />,
     );
     const image = container.querySelector("img");
     expect(image).not.toBeNull();
@@ -51,6 +62,15 @@ describe("ServiceIcon", () => {
     fireEvent.error(image);
     expect(container.querySelector("img")).toBeNull();
     expect(container.querySelector('[data-fallback="true"]')).toBeInTheDocument();
+  });
+
+  it("falls back to the Zoho glyph when its uploaded image fails", () => {
+    const { container } = render(
+      <ServiceIcon slug="api-zoho-mail" iconUrl="https://example.com/zoho-fallback.svg" />,
+    );
+    fireEvent.error(container.querySelector("img")!);
+    expect(container.querySelector('[data-slug="api-zoho-mail"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-fallback="true"]')).toBeNull();
   });
 
   describe("glyph-coloured mask upgrade", () => {

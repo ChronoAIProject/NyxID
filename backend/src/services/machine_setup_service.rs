@@ -1,10 +1,7 @@
 //! Owner-reviewed setup intents and device-style machine pairing.
 use crate::{
     errors::{AppError, AppResult},
-    models::{
-        machine_setup::{COLLECTION_NAME, Choices, MachineSetup},
-        nyxbot_channel::{NyxbotWatch, WATCHES_COLLECTION_NAME},
-    },
+    models::machine_setup::{COLLECTION_NAME, Choices, MachineSetup},
 };
 use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
@@ -47,21 +44,33 @@ pub fn normalize_code(code: &str) -> AppResult<String> {
     Ok(normalized)
 }
 
-pub async fn validate_choices(
-    db: &Database,
-    owner: &str,
-    mut choices: Choices,
-) -> AppResult<Choices> {
-    if choices.name.is_empty()
-        || choices.name.len() > 64
-        || !choices
-            .name
+pub fn validate_machine_name(name: &str) -> AppResult<()> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
             .bytes()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
     {
         return Err(AppError::ValidationError(
             "Machine name must contain 1–64 lowercase letters, numbers or hyphens".into(),
         ));
+    }
+    Ok(())
+}
+
+pub async fn validate_choices(
+    db: &Database,
+    owner: &str,
+    mut choices: Choices,
+) -> AppResult<Choices> {
+    validate_machine_name(&choices.name)?;
+    if choices.separation == Some(nyxid_machine::context::Choice::SharedLegacy)
+        && !choices.legacy_warning_acknowledged
+    {
+        return Err(AppError::ValidationError(format!(
+            "Explicit shared legacy acknowledgement is required. {}",
+            nyxid_machine::context::SHARED_LEGACY_WARNING
+        )));
     }
     if !matches!(choices.location.as_str(), "this_computer" | "vm" | "docker") {
         return Err(AppError::ValidationError(
@@ -104,6 +113,7 @@ pub async fn create_link(
     owner: &str,
     conversation: Option<&str>,
     choices: Choices,
+    provenance: &super::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<MachineSetup> {
     let choices = validate_choices(db, owner, choices).await?;
     let now = Utc::now();
@@ -127,7 +137,7 @@ pub async fn create_link(
         .insert_one(&row)
         .await?;
     if let Some(conversation) = conversation {
-        watch(db, owner, conversation, &row.id, row.expires_at).await?;
+        watch(db, owner, conversation, &row.id, row.expires_at, provenance).await?;
     }
     Ok(row)
 }
@@ -175,6 +185,8 @@ pub async fn initiate(
         db,
         "",
         Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
             automatic_updates: None,
             owner_id: None,
             name,
@@ -247,6 +259,47 @@ pub async fn get(db: &Database, owner: &str, id: &str) -> AppResult<MachineSetup
         .ok_or_else(|| AppError::NotFound("Machine setup not found".into()))
 }
 
+pub async fn setup_selection_reason(
+    db: &Database,
+    row: &MachineSetup,
+    node: &crate::models::node::Node,
+) -> AppResult<Option<&'static str>> {
+    if row.status == "connected" {
+        return Ok(None);
+    }
+    let mut assignment_pending = false;
+    if let Some(agent) = row.choices.grant_to.as_deref() {
+        let policy = Box::pin(super::machine_access_service::policy(db, agent)).await?;
+        if let Some(assignment) = policy.assignments.get(&node.id) {
+            if matches!(assignment.mode.as_str(), "shared_legacy" | "separated") {
+                // Existing authority and denials are retained by the grant path.
+                return Ok(None);
+            }
+            // Membership writes retain stored assignments. A usable new node
+            // intent alone cannot settle an assignment awaiting owner action.
+            assignment_pending = true;
+        }
+    }
+    let Some(profile) = node.machine.as_ref() else {
+        return Ok(Some("separated_capabilities_not_reported"));
+    };
+    match super::machine_access_service::select_profile(profile, profile.separation_choice) {
+        Err(reason) => Ok(Some(reason)),
+        Ok(nyxid_machine::context::Mode::Separated)
+            if !super::feature_flag_service::personal_flag_enabled(
+                db,
+                &row.user_id,
+                super::machine_access_service::CONTEXT_FLAG,
+            )
+            .await? =>
+        {
+            Ok(Some("machine_context_setup_not_enabled"))
+        }
+        Ok(_) if assignment_pending => Ok(Some("machine_selection_required")),
+        Ok(_) => Ok(None),
+    }
+}
+
 /// Page-only setups have no waiting NyxBot to apply the reviewed grant. Commit
 /// the grant and completion together so a reconnect cannot restore a later
 /// revoked grant. Chat-led setups leave verification and granting to NyxBot.
@@ -254,7 +307,7 @@ pub async fn complete_page_setup(db: &Database, id: &str) -> AppResult<()> {
     use super::{api_key_mutation_service as transactions, assistant_team_service as team};
     let Some(row) = db
         .collection::<MachineSetup>(COLLECTION_NAME)
-        .find_one(doc! {"_id":id,"conversation_id":null,"status":"waiting"})
+        .find_one(doc! {"_id":id,"conversation_id":null,"status":{"$in":["waiting","selection_required"]}})
         .await?
     else {
         return Ok(());
@@ -274,6 +327,14 @@ pub async fn complete_page_setup(db: &Database, id: &str) -> AppResult<()> {
     {
         return Ok(());
     }
+    if let Some(reason) = Box::pin(setup_selection_reason(db, &row, &node)).await? {
+        db.collection::<MachineSetup>(COLLECTION_NAME).update_one(
+            doc! {"_id":id,"status":{"$in":["waiting","selection_required"]},"conversation_id":null},
+            doc! {"$set":{"status":"selection_required"}},
+        ).await?;
+        tracing::debug!(reason, "Machine setup awaits owner separation selection");
+        return Ok(());
+    }
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let id = id.to_owned();
@@ -284,7 +345,7 @@ pub async fn complete_page_setup(db: &Database, id: &str) -> AppResult<()> {
                 let changed = db
                     .collection::<MachineSetup>(COLLECTION_NAME)
                     .update_one(
-                        doc! {"_id":&id,"status":"waiting","conversation_id":null},
+                        doc! {"_id":&id,"status":{"$in":["waiting","selection_required"]},"conversation_id":null},
                         doc! {"$set":{"status":"connected"}},
                     )
                     .session(&mut *session)
@@ -321,8 +382,9 @@ pub async fn decide(
     id: &str,
     approve: bool,
     conversation: Option<&str>,
+    provenance: &super::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<MachineSetup> {
-    decide_with_updates(db, owner, id, approve, conversation, None).await
+    decide_with_updates(db, owner, id, approve, conversation, None, provenance).await
 }
 
 pub async fn decide_with_updates(
@@ -332,13 +394,14 @@ pub async fn decide_with_updates(
     approve: bool,
     conversation: Option<&str>,
     automatic_updates: Option<bool>,
+    provenance: &super::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<MachineSetup> {
     let row = db.collection::<MachineSetup>(COLLECTION_NAME).find_one_and_update(
         doc! {"_id":id,"status":"pending","expires_at":{"$gt":bson::DateTime::now()}},
         doc! {"$set":{"user_id":owner,"status":if approve {"approved"} else {"declined"},"conversation_id":conversation,"choices.automatic_updates":automatic_updates}},
     ).return_document(ReturnDocument::After).await?.ok_or_else(|| AppError::Conflict("Pairing was already decided or expired".into()))?;
     if let Some(conversation) = conversation {
-        watch(db, owner, conversation, &row.id, row.expires_at).await?;
+        watch(db, owner, conversation, &row.id, row.expires_at, provenance).await?;
     }
     Ok(row)
 }
@@ -349,12 +412,19 @@ pub async fn watch(
     conversation: &str,
     id: &str,
     expires: chrono::DateTime<Utc>,
+    provenance: &super::nyxbot_watch_service::ReportProvenance,
 ) -> AppResult<()> {
     let now = Utc::now();
-    db.collection::<NyxbotWatch>(WATCHES_COLLECTION_NAME).update_one(
+    let mut insert = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":owner,"kind":"machine_setup","connect_link_id":id,"conversation_id":conversation,"status":"pending","created_at":bson::DateTime::from_chrono(now),"expires_at":bson::DateTime::from_chrono(expires+Duration::hours(1))};
+    insert.extend(provenance.fields());
+    super::nyxbot_watch_service::upsert(
+        db,
+        owner,
+        provenance.invocation_id.as_deref(),
         doc! {"kind":"machine_setup","connect_link_id":id,"user_id":owner},
-        doc! {"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),"user_id":owner,"kind":"machine_setup","connect_link_id":id,"conversation_id":conversation,"status":"pending","created_at":bson::DateTime::from_chrono(now),"expires_at":bson::DateTime::from_chrono(expires+Duration::hours(1))}},
-    ).upsert(true).await?;
+        doc! {"$setOnInsert":insert},
+    )
+    .await?;
     Ok(())
 }
 
@@ -382,8 +452,9 @@ pub async fn mint(
     let row = db.collection::<MachineSetup>(COLLECTION_NAME).find_one_and_update(
         doc! {"_id":id,"user_id":owner,"status":expected_status,"expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":set},
     ).return_document(ReturnDocument::After).await?.ok_or_else(|| AppError::Conflict("Setup expired or its command was already issued; create a new setup".into()))?;
-    let result = super::node_service::create_registration_token_with_id(
+    let result = super::node_service::create_registration_token_with_id_for_actor(
         db,
+        owner,
         row.choices.owner_id.as_deref().unwrap_or(owner),
         &row.choices.name,
         max_nodes,

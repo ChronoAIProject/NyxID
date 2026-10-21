@@ -3,6 +3,9 @@ FROM rust:1.93-bookworm AS builder
 
 WORKDIR /build
 
+# Bound simultaneous compiler work in both backend release builds.
+ENV CARGO_BUILD_JOBS=1
+
 # Commit hash baked into the binary for /health. `.git` is excluded from the
 # Docker context, so CI must pass this ARG explicitly; otherwise the build
 # script falls back to "unknown".
@@ -65,6 +68,7 @@ RUN rm -rf backend/src cloud-auth/src service-adapters/src machine/src machine-u
 COPY backend/src backend/src
 COPY backend/build.rs backend/build.rs
 COPY backend/prompts backend/prompts
+COPY backend/content backend/content
 COPY backend/specs backend/specs
 COPY backend/assets backend/assets
 COPY cloud-auth/src cloud-auth/src
@@ -80,6 +84,7 @@ COPY cli/src/commands/update_attestation.rs cli/src/commands/update_attestation.
 COPY cli/src/commands/update_attestation cli/src/commands/update_attestation
 COPY cli/resources/sigstore-root.json cli/resources/sigstore-root.json
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
+COPY docs/assistant/CHANNEL_SETUP_GUIDE.md docs/assistant/CHANNEL_SETUP_GUIDE.md
 # The oracle worker bundle is embedded via include_str! and served from
 # /api/v1/oracle/worker-bundle so installs stay in sync with the server.
 COPY integrations/oracle/cdp-worker/worker.mjs integrations/oracle/cdp-worker/worker.mjs
@@ -90,7 +95,20 @@ RUN touch backend/src/main.rs cloud-auth/src/lib.rs service-adapters/src/lib.rs 
 # Build the real binary
 RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
 
-# ── Stage 2: Runtime ─────────────────────────────────────────────────────────
+# The standalone page is served by the backend with its own SRI-bound CSP.
+# Keep the Node/lockfile/source/epoch inputs identical to the frontend build.
+FROM node:22.23.2-alpine AS credential-builder
+WORKDIR /build/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+ARG NYXID_GIT_HASH=unknown
+ARG SOURCE_DATE_EPOCH
+ENV SOURCE_COMMIT=${NYXID_GIT_HASH}
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+RUN npm run build:credential-accept
+
+# ── Runtime ─────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
 RUN apt-get update \
@@ -107,9 +125,17 @@ WORKDIR /app
 # to avoid colliding with the CLI's `nyxid` binary at the same workspace
 # `target/{triple}/release/` path.
 COPY --from=builder /build/target/release/nyxid-server /usr/local/bin/nyxid-server
+COPY --from=credential-builder /build/frontend/dist/credential-accept /app/frontend/dist/credential-accept
+COPY --from=credential-builder /build/frontend/dist/release-integrity /app/frontend/dist/release-integrity
 
 # Create directory for JWT keys (mounted at runtime)
-RUN mkdir -p /app/keys && chown nyxid:nyxid /app/keys
+RUN mkdir -p /app/keys /var/lib/nyxid/tuf \
+    && chown nyxid:nyxid /app/keys /var/lib/nyxid/tuf \
+    && chmod 0700 /var/lib/nyxid/tuf
+
+# Retain authenticated TUF rollback floors independently of the image/HOME.
+ENV NYXID_SERVER_TUF_STATE_DIR=/var/lib/nyxid/tuf
+VOLUME ["/var/lib/nyxid/tuf"]
 
 USER nyxid
 

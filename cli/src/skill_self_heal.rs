@@ -85,7 +85,8 @@ fn should_run(command: &Commands) -> bool {
 fn is_self_referential(command: &Commands) -> bool {
     matches!(
         command,
-        Commands::Update(_)
+        Commands::Nyxbot { .. }
+            | Commands::Update(_)
             | Commands::AiSetup { .. }
             | Commands::Login(_)
             | Commands::Logout(_)

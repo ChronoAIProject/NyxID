@@ -57,6 +57,17 @@ describe("AssistantNotificationsActionDialog", () => {
     });
   });
 
+  it("preserves the writes-only default when changing unrelated notification settings", async () => {
+    mockGet.mockResolvedValueOnce(evidence({ global_approval_mode: "writes_only", approval_required: true }))
+      .mockResolvedValueOnce(evidence({ global_approval_mode: "writes_only", approval_required: true, updated_at: "2026-01-01T00:00:01Z" }));
+    mockPost.mockResolvedValue({ resource: { bindingId: ID }, replayed: false, oneTimeMaterial: "delivered" });
+    renderDialog("update");
+    await submit();
+    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/notifications/update", expect.objectContaining({ globalApprovalMode: "writes_only" }));
+    expect(mockPost.mock.calls[0]?.[1]).not.toHaveProperty("approvalRequired");
+    expect(await screen.findByText("Notification change confirmed")).toBeInTheDocument();
+  });
+
   it("runs notifications.telegram_link, proves pending state, and displays the code once", async () => {
     mockGet.mockResolvedValueOnce(evidence()).mockResolvedValueOnce(evidence({ telegram_link_pending: true, updated_at: "2026-01-01T00:00:01Z" }));
     mockPost.mockResolvedValue({ resource: { bindingId: ID }, replayed: false, linkCode: "NYXID-ABC12345", botUsername: "NyxIDBot", expiresInSecs: 300 });

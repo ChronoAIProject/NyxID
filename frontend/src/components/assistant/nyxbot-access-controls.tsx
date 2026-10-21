@@ -18,6 +18,7 @@ import {
   ACCESS_MODE_DESCRIPTION,
   ACCESS_MODE_LABEL,
   effectiveAccessMode,
+  modelDisplayName,
 } from "@/lib/assistant/nyxbot-labels";
 import { cn } from "@/lib/utils";
 import {
@@ -60,9 +61,11 @@ export function AccessModeBadge({
 /** The owner's workspace access mode, readable and switchable in place. */
 export function AccessModeSwitcher({
   agentOverride,
+  disabled,
 }: {
   /** The thread's agent's own mode; when set it governs instead. */
   readonly agentOverride?: NyxAgentAccessMode | null;
+  readonly disabled?: boolean;
 }) {
   const settings = useNyxBotSettings();
   const update = useUpdateNyxBotSettings();
@@ -76,7 +79,7 @@ export function AccessModeSwitcher({
     <div className="flex items-center gap-1">
       <Select
         value={workspace}
-        disabled={update.isPending}
+        disabled={disabled || update.isPending}
         onValueChange={(value) => {
           setError(undefined);
           update
@@ -148,7 +151,7 @@ export function ModelSelect({
       <SelectContent>
         {options.map((row) => (
           <SelectItem key={row.id} value={row.id} disabled={!row.available}>
-            {row.available ? row.label : `${row.label} (unavailable)`}
+            {row.available ? modelDisplayName(row) : `${modelDisplayName(row)} (unavailable)`}
           </SelectItem>
         ))}
       </SelectContent>

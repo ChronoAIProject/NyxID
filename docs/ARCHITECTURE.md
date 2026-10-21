@@ -4,11 +4,68 @@ This document describes the system architecture, component design, data flows, a
 
 ---
 
+Credit allocations extend the existing `credit_grants`, `credit_schedules` and
+frozen `credit_schedule_periods` financial identities. `billing::service_limits`
+resolves disjoint catalog groups and enforces exact allocation-local counters;
+`billing::summaries` streams current exact state without financial writes.
+`credit_allocation_requests` stores actor-scoped UUID submission snapshots
+(payload, resolved policy and recipient snapshot), with its unique `_id` as the
+retry identity. `billing::submissions` freezes them before deterministic grant
+insertion; these snapshots contain no separately spendable funds. Ordinary and
+public/pool/managed admission commit all funding holds with usage rows; machine
+admission stays in its owning lifecycle transaction. Indexed
+`active_settlement.usage_row_id` lookups drain operation bridges on takeover.
+See [exact accounting](BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim)
+for cap, reclaim, recovery and all-writer rollout constraints.
+
 Catalog services own shared credentials, audience grants, endpoint policy, and
 billing; providers supply authentication configuration and may back multiple
 services. Provider linking and requirement mutations are serialized through the
 service record. A small retirement guard keeps historical vendor credential
 stores inaccessible. See [Service configuration and vendor retirement](SERVICE_CONFIGURATION.md).
+
+NyxBot's assistant-only concrete execution gate is shared by MCP, raw proxy,
+LLM gateway, native SSH/Oracle, and machine service requests. It preserves the
+existing authority and billing boundaries while enforcing per-catalog personal
+priority and organization consent. `assistant_service_execution` stores private
+turn input admissions, owner selections, exact card bindings, bounded model-use
+grants, model callback attempt correlation, job plans and outage evidence.
+Its compound index covers owner/conversation/key/turn/kind; `expires_at` has an
+absolute TTL index. Every read checks expiry (TTL deletion is asynchronous).
+Turn/key fences make old rows unusable immediately; conversation deletion,
+agent destruction and owner purge remove associated rows. Outages use one atomic
+bounded 32-entry array per turn with 60-second entry expiry and credential/config
+binding. Machine jobs persist their command-use grant on `machine_jobs` for their
+existing bounded lifetime. No secret or payload is stored in these digests or
+forwarded to providers. See [NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
+
+NyxBot model reporting reuses the journal-validated usage aggregation engine.
+Meters persist trusted execution provenance in additive billed and free rollup
+partitions; root identities and charging remain unchanged. Historical recovery
+uses the metadata-only MongoDB view `usage_api_key_lineage` and bounded,
+actor-bound credential, conversation, and audit evidence. The view projects no
+credential material. Legacy free summaries without attribution remain explicit
+uncovered residuals. All rollup writers must be upgraded to preserve provenance
+for new usage. See [NyxBot model usage](BILLING_ANALYTICS.md#nyxbot-model-usage).
+
+NyxBot phone/speech adapters extend the executable channel registry with typed
+messaging, conversation and Custom LLM interfaces. Versioned capabilities derive
+from that registry; persisted bindings separately compute live readiness.
+`handlers/call_adapters.rs` handles HTTP DTOs and provider ingress, while
+`services/call_channels` owns verification, guest admission, provider transport,
+recovery and settlement. Calls reuse the specialist engine and existing tool
+permissions. Instructions refresh between turns; FAQ reads use ordinary
+credential-brokered tools. See [NyxBot service adapters](NYXBOT_SERVICE_ADAPTERS.md).
+
+The metadata collections are `channel_adapter_bindings`,
+`channel_adapter_accounts`, `channel_adapter_allocations`,
+`channel_adapter_resource_claims`, `channel_adapter_sessions` and
+`channel_adapter_events`. Credentials stay in the existing encrypted stores;
+conversation text stays in normal assistant conversations/messages. Transactional
+owner/binding/session fences order admission against disable and deletion.
+Settlement reuses admitted billing meters and retains pending provider evidence
+until cleanup completes. The default-off rollout requires all API replicas to
+understand adapter-origin tool authority before activation.
 
 ## Table of Contents
 
@@ -175,6 +232,7 @@ Handlers are thin HTTP boundary functions. They:
 | `api_keys.rs` | list_keys, create_key, delete_key, rotate_key                   |
 | `services.rs` | list_services, create_service, delete_service                   |
 | `proxy.rs`    | proxy_request (UUID-based), proxy_request_by_slug (slug-based), list_proxy_services (discovery) |
+| `managed_executions.rs` | Authenticated metadata reads for managed provider executions and personal wallet liabilities |
 | `oauth.rs`    | authorize, token, userinfo                                      |
 | `admin.rs`    | list_users, get_user, update_user, set_user_role, set_user_status, force_password_reset, delete_user, verify_user_email, list_user_sessions, revoke_user_sessions, list_audit_log, oauth client CRUD |
 | `admin_roles.rs` | list_roles, create_role, get_role, update_role, delete_role, get_user_roles, assign_role, revoke_role |
@@ -198,6 +256,17 @@ Handlers are thin HTTP boundary functions. They:
 
 The service layer contains all business logic. Services receive database connections and domain objects -- they never interact with HTTP types.
 
+Oracle pool lifecycle preserves the polymorphic `oracle_pools.user_id` owner.
+`oracle_mutation_service` serializes Oracle writers through the existing pool
+enrollment fence in MongoDB transactions; lifecycle versions reject stale
+snapshots, and installation epochs invalidate credentials on ownership changes.
+Transfer and deletion commit their hash-chained audit entries atomically.
+Deletion retains a slug-reserving tombstone and a durable cleanup marker;
+bounded background transactions remove credentials and login material and close
+idle sessions while retaining task history under its existing TTL. This requires
+transaction-capable MongoDB and a coordinated upgrade/drain of old replicas
+before lifecycle operations are used. See [Oracle lifecycle](ORACLE_RELAY.md#pool-ownership-and-deletion-unreleased-1527-1542).
+
 | Module              | Responsibility                                            |
 |---------------------|-----------------------------------------------------------|
 | `auth_service.rs`   | User registration (email uniqueness, password hashing), credential verification |
@@ -205,6 +274,8 @@ The service layer contains all business logic. Services receive database connect
 | `oauth_service.rs`  | OAuth client validation, redirect URI verification, scope validation, authorization code creation/exchange, PKCE S256 verification, ID token generation |
 | `key_service.rs`    | API key creation (prefix + SHA-256 hash), listing, deletion (soft deactivation), rotation (atomic deactivate + recreate) |
 | `proxy_service.rs`  | Downstream service resolution (by UUID and slug), credential decryption, request forwarding with credential injection (header/bearer/query/basic), header allowlist enforcement |
+| `telnyx_platform_service.rs` | Shared HTTP/MCP runner for bounded text chat, validated provider usage, and dispatch authority tied to the funded request |
+| `managed_execution_service.rs` | Durable admission, dispatch fencing, evidence persistence, settlement, cancellation, recovery, and execution visibility |
 | `mfa_service.rs`    | TOTP secret generation with QR provisioning, code verification against encrypted secrets, recovery code management |
 | `admin_user_service.rs` | Admin user CRUD (update profile, set role, set status), cascade user deletion across 8 collections, force password reset, manual email verification, session listing and bulk revocation |
 | `role_service.rs`   | Role CRUD (slug uniqueness, system role protection), user role assignment/revocation, system role seeding at startup |
@@ -655,6 +726,28 @@ Client                     NyxID Backend                     Downstream
 
 ### Collection Details
 
+#### managed_executions
+
+Stores the durable lifecycle of an admitted platform provider request: the actor
+and personal payer, service and API-key identifiers, request/configuration
+digests, billing snapshot, exact reservation ceiling, three meter-row links,
+validated token usage, provider request ID, state, bounded pending reason, and
+BSON timestamps. It stores no prompts, completions, or credential material.
+The billing request ID is unique; additional indexes bound recovery walks and
+actor/payer status reads. Pending liabilities have no TTL that could release
+funding without evidence.
+
+The initial Telnyx runner supports a restricted fixed-model text-chat pilot.
+Funding and the input/output/cache meter rows commit together through existing
+allowance, grant, wallet, and ledger machinery. Dispatch atomically marks the
+execution and all three meter rows as forwarded. The worker retains its
+credential and concurrency lease after caller disconnection; validated usage is
+persisted before idempotent settlement. Reconciliation releases expired work
+that was never dispatched and settles persisted evidence, while unknown
+dispatched outcomes retain their holds. Ordinary forwarding requires a managed
+proof for these services and cannot bypass admission. See
+[Telnyx platform billing](TELNYX_PLATFORM_BILLING.md) for the contract and rollout.
+
 #### Aurinko email coordination
 
 The `aurinko` channel adapter extends the existing registry and relay. Its backend descriptor supplies registration fields, setup instructions, and capabilities to the platform catalog. It supports anchored text replies; initiated sends, edits, and channel media are unavailable. The separate `api-aurinko` AI Service uses ordinary owner-scoped catalog credentials and MCP discovery.
@@ -982,6 +1075,29 @@ Role definitions for RBAC. Roles have permission string tags and can be scoped t
 | `updated_at`  | ISO 8601 date | NOT NULL          | Last update                   |
 
 **Indexes:** `slug` (unique)
+
+#### feature flag definitions and settings
+
+`feature_flag_definitions` stores runtime-created flags alongside the built-in
+registry in `services/feature_flag_service.rs`. Each row has a UUID string `_id`,
+unique `flag_key`, required `description`, `default_enabled`, immutable
+`created_by` user ID, and BSON `created_at`. Built-ins take precedence over a
+runtime definition with the same key.
+
+`feature_flag_overrides` and `feature_flag_metadata` include an optional
+`definition_id`: missing or null identifies a built-in, while a runtime flag
+uses its definition UUID. Unique indexes include this identity so settings do
+not carry across a built-in/runtime key reuse. Startup creates the replacement
+indexes before removing the legacy indexes. See the
+[deployment notes](API.md#feature-flag-roles-and-management) before a mixed-version
+upgrade or rollback.
+
+The protected, non-default `feature-flag-operator` and `feature-flag-admin`
+system roles grant `nyxid:feature_flags:own:write` and
+`nyxid:feature_flags:admin`, respectively. Handlers resolve current direct and
+group assignments on every request. Operator writes require the immutable
+creator ID; editable owner metadata does not affect permission. Platform
+admins retain full access and platform operators retain read access.
 
 #### groups
 
@@ -1990,6 +2106,32 @@ The `telegram_new` handler delegates creation and Telegram consent to `telegram_
 
 Two collections hold setup metadata: `telegram_bot_requests` stores actor/destination bindings, hashed challenges, revisions, and request expiry; `telegram_managed_bot_events` stores immutable creation provenance and subsequent management revisions. Neither stores ordinary chat content or raw updates. The registration transaction checks shared Telegram identity and owner quota, inserts the pending `ChannelBot`, consumes creation provenance, and transitions the request to provisioning. Durable pending state and renewable per-bot leases support retries without duplicate registration. Observed management changes suspend both incoming messages and outgoing replies.
 
+The manager registry retains the default `telegram-new` credential and stores
+additional installations under `telegram-new/{manager_bot_id}`. Each has separate
+context-bound encrypted credentials, webhook secret, observed identity and
+configuration lease. Child creation and recovery select the issuing manager.
+
+BotFather help uses `platform_help_libraries` for mutable drafts and publication
+pointers, `platform_help_revisions` for immutable published snapshots, and
+`platform_help_assignments` for profile-to-library selection. The help service
+validates bounded public content, fences current administrators in transactions,
+and uses optimistic versions to reject stale updates. Missing assignments use a
+seeded shared library; a turn pins its first revision so publishing or rollback
+cannot change a response halfway through delivery.
+
+`channel_reply_plan` renders bounded provider parts before sending.
+`channel_text_deliveries` records the logical delivery identity, owner, content
+fingerprint and each part's pending/sending/sent/failed state without storing the
+message body. Confirmed parts are not replayed; ambiguous provider outcomes stop
+resubmission. The personal-erasure worker deletes these journals by exact owner.
+Direct Telegram input extraction preserves forwarded/quoted content as reference data.
+Current relay-sourced gateway delivery supplies plain text, original-message
+eligibility and own/quoted file handles, losing forward-origin names, quoted text
+and hidden link URLs (accepted demo limitation; see the CMA follow-up plan);
+only verified original messages can exercise pairing or action-card controls.
+Forwarded files use the existing owner-bound attachment roots and encrypted
+chunks, committed with the assistant turn.
+
 See [Telegram New](TELEGRAM_NEW.md) for the state machine, administrator steps, MongoDB and rollout requirements, and staging checks that must pass before customer enablement.
 
 ---
@@ -2002,6 +2144,17 @@ continuation rounds when the deployment advertises image input. The content
 route checks the live turn, conversation key, owner, retention and organization
 access before returning pixels. Image-round failure preserves the completed
 answer; budget and time continuations keep their existing text-only input.
+
+Source images use the shared `nyx__resource_get` runtime and provider adapters,
+starting with published Notion page and block-child reads. The short-lived
+`assistant_resources` collection binds opaque refs to owner, conversation,
+turn, agent, key and audience, plus immutable source identity and revision;
+it stores no file URL or credential. Redemption replays the authorized source
+read and commits validated bytes through the existing encrypted attachment
+transaction. An exact approved continuation receives a fresh current-turn ref
+only after rechecking the original pending intent and expiry. See
+[Source resources](chat/10-source-resources.md).
+
 See [Uploads](chat/10-uploads.md) and [NyxAgent engine](chat/08-nyxagent-engine.md).
 
 Skill permission decisions use an outbox embedded in
@@ -2064,3 +2217,55 @@ Production requirements:
 - Managed MongoDB with TLS connections (MongoDB Atlas or self-hosted)
 - `ENVIRONMENT=production` to enforce strict startup validation
 - Separate `ENCRYPTION_KEY` from development (never reuse)
+
+## Complete channel reply delivery
+
+The reply handlers authorize one logical reply and use `channel_reply_plan`
+with `channel_text` to preflight platform-specific parts before dispatch.
+Ordinary and native thread delivery send the plan sequentially and use
+`channel_reply_delivery` to record each outcome. The synchronous success
+receipt covers the entire plan.
+
+`channel_reply_deliveries` stores logical reply UUIDs, bot/owner/inbound IDs,
+expected part counts, completion and part outcomes with platform/outbound IDs
+and numeric failure codes. It stores no message bodies or credentials, in
+accordance with ADR-013. A 30-day TTL bounds retention; bot/inbound and outbound
+indexes support receipt correlation. Each part is marked uncertain before a
+provider call, then accepted only after validation and outbound persistence.
+There is no persisted message queue or automatic replay. See
+[Complete IM replies](CHANNEL_COMPLETE_REPLIES.md) for the API and rollout
+contract.
+
+## Composer dictation and platform voice authority
+
+Private-thread audio uses a live conversation/key/agent binding to authorize
+platform inference independently of specialist tool grants. Platform credential
+ACLs and operation restrictions remain mandatory; BYOK uses the exact granted
+connection. Platform audio is funded by the acting person's existing billing
+account.
+
+`handlers/assistant_voice/dictation.rs` provides bounded browser WebSocket ingress
+to `services/voice/dictation.rs`, which owns the fixed OpenAI transcription
+session, authorization refresh, concurrency slot, funding and final drain.
+Dictation reuses `assistant_voice_sessions` with an additive, default-false
+`dictation` discriminator and durable confirmed-duration checkpoints. Recovery
+settles those checkpoints without reopening capture; conversational attach and
+control paths reject dictation sessions. No audio recording is stored. See the
+[voice architecture and transport contract](chat/11-voice.md).
+
+## Native channel mention admission
+
+`channel_native_mentions` interprets bounded, authenticated Telegram and
+Lark/Feishu addressing facts. The receiving `NyxbotChannel` and live chat settings
+select the linked agent; display labels never resolve an agent or grant identity.
+Bot actors require an exact native mention in an existing enabled group and
+retain guest authority through execution, thread following and delayed delivery.
+
+`channel_bot_turn_service` atomically spends the existing `nyxbot_threads`
+chat/topic allowance and the owner's `assistant_group_handoffs` hourly window.
+The `nyxbot_events` claim fences duplicate execution and human budget resets;
+only admitted human messages refill the chat allowance. These are metadata-only
+additions to existing collections. The gateway policy is capability negotiated
+at management time, and existing connections reconcile without participant
+OAuth. See [the relay contract](CHANNEL_BOT_RELAY.md) for admission, compatibility
+and the required reader-before-writer rollout.

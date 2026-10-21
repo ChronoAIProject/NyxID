@@ -58,8 +58,49 @@ Plugins sign in with OAuth dynamic client registration. On the consent page the 
 
 MCP sessions created by tokens issued to an OAuth client, or by tokens restricted to certain services or nodes, never authenticate on their own: every request must carry a live bearer token, so the grant always applies. This holds once every backend replica runs a build with `session_fallback_allowed`; during a rolling deploy older replicas still honor the fallback. Sessions created before that build (no flag) need a live bearer once; clients refresh on the 401.
 
+For MFA-enabled accounts, fallback also requires the exact live parent human
+session to carry MFA assurance. Legacy MCP rows without a parent and sessions
+whose parent has expired, was revoked, or lacks assurance receive 401. Sign in
+again with MFA and initialize a new connection. An unrelated assured login does
+not authorize an older MCP session.
+
 Connections recover without user action. A request naming an unknown, expired or foreign `Mcp-Session-Id` gets HTTP 404 (JSON-RPC body `-32002`), which Streamable HTTP clients answer by initializing a new session with the credential they hold. Ending a NyxID login, and server restarts, only remove session-fallback sessions, so OAuth clients' sessions survive both. On `/oauth/token`, every dead refresh token (malformed, expired, revoked, rotated past the grace period, or unknown) returns `400 invalid_grant`, which makes Claude and Codex clear their tokens and ask the user to sign in again; a deactivated issuing client returns `401 invalid_client` so the client re-registers.
 
 ## Requirements
 
 The install commands (`claude mcp login`) and `claude plugin validate --strict` need Claude Code 2.1.284 or later (CI pins `CLAUDE_CODE_VERSION`). On older versions, run `/mcp` inside Claude Code to sign in.
+
+## Connection limits and protocol versions
+
+A user can hold up to 50 MCP sessions. When those slots are full, initialization
+atomically replaces the oldest session that has received no client activity for
+at least one hour. Recent sessions are protected; if every session is recent,
+initialization still reports `Too many active MCP sessions`. Replacement keeps
+the slot count bounded across replicas, removes the old notifications, and
+creates fresh authority and activation state. A client returning to a replaced
+session receives HTTP 404 and initializes again with its live credential.
+Sessions below capacity retain the existing 30-day idle lifetime.
+
+Initialization echoes the supported client version (`2025-06-18` or
+`2025-11-25`); an unsupported version receives the server's latest supported
+version, as required by MCP version negotiation.
+See the MCP [session lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management)
+and [version negotiation](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#version-negotiation)
+contracts for termination, HTTP 404 recovery and supported-version selection.
+
+## Service permissions on consent
+
+The consent page offers **Off** and **Allow**. Allow authorizes the service's
+available operations, including reads and writes, subject to the credential's
+permissions and configured approval policies. OAuth service grants do not
+currently enforce separate read-only access. MCP `readOnlyHint` annotations
+describe tools to clients; they are not authorization checks.
+
+Services start off unless preselected by the app or required by a resource
+request. App preselection can be removed. **All services** explicitly includes
+future connections; turning any service off submits an explicit allowlist,
+which does not include future connections. The server rejects unsupported
+`write_access=none` or `selected` submissions from older cached consent pages
+instead of silently granting more access than the page describes. Existing
+grants have no stored read/write distinction; users who intended read-only
+access must revoke those grants and review access again.

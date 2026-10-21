@@ -57,6 +57,9 @@ fn proposal(started: bool) -> AssistantAgentLearningProposal {
             ..Default::default()
         }),
         failure_code: None,
+        failure_rules: Vec::new(),
+        scope_encrypted: None,
+        scope_digest: None,
         evidence: Vec::new(),
         body_encrypted: Vec::new(),
         body_bytes: 0,
@@ -89,6 +92,64 @@ fn release_predicate_requires_no_dispatch_checkpoint_or_live_lease() {
     p.verified_at = None;
     p.lease_expires_at = Some(Utc::now() + Duration::seconds(30));
     assert!(!non_effective(&p, Utc::now()));
+}
+
+#[tokio::test]
+async fn erasure_accepted_during_publication_preflight_prevents_actual_dispatch_marker() {
+    let fixture = orchestrator_fixture("learning_erasure_dispatch_boundary").await;
+    let db = &fixture.state.db;
+    let mut row = proposal(false);
+    row.owner_id = fixture.owner.clone();
+    row.status = "publishing".into();
+    let p = row.publication.as_mut().unwrap();
+    p.lease_expires_at = Some(Utc::now() + Duration::minutes(3));
+    let p = p.clone();
+    db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    // Hold the already-loaded publication snapshot across closing admission.
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await
+        .unwrap();
+    crate::services::erasure_admission::close_in_session(db, &fixture.owner, &mut tx)
+        .await
+        .unwrap();
+    crate::services::transaction_service::commit(&mut tx)
+        .await
+        .unwrap();
+    assert!(matches!(
+        mark_started(&fixture.state, &row, &p).await,
+        Err(AppError::Conflict(_))
+    ));
+    let live = db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!live.publication.unwrap().started);
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn format_details_flag_only_marks_empty_format_verdicts() {
+    assert!(failure_details_unavailable(
+        Some("ornn_validation_failed"),
+        &[]
+    ));
+    assert!(failure_details_unavailable(
+        Some("ornn_package_rejected"),
+        &[]
+    ));
+    assert!(!failure_details_unavailable(
+        Some("ornn_validation_failed"),
+        &["allowed_root_items".into()]
+    ));
+    assert!(!failure_details_unavailable(Some("base_changed"), &[]));
+    assert!(!failure_details_unavailable(Some("ornn_name_taken"), &[]));
 }
 
 #[test]
@@ -228,6 +289,7 @@ async fn definitive_refusal_releases_target_for_revised_draft() {
         &row,
         &p,
         DeferredFailure {
+            rules: Vec::new(),
             code: publication::FailureCode::OrnnInterfaceChangeRequiresMajor,
             stage: PublicationStage::Publish,
             status: Some(409),
@@ -503,6 +565,7 @@ async fn definitive_refusal_clears_only_a_never_uncertain_attempt_and_fences_sta
         &row,
         &first,
         DeferredFailure {
+            rules: Vec::new(),
             code: publication::FailureCode::OrnnWriteForbidden,
             stage: PublicationStage::Publish,
             status: Some(403),
@@ -530,6 +593,7 @@ async fn definitive_refusal_clears_only_a_never_uncertain_attempt_and_fences_sta
             &row,
             &first,
             DeferredFailure {
+                rules: Vec::new(),
                 code: publication::FailureCode::OrnnValidationFailed,
                 stage: PublicationStage::Publish,
                 status: Some(400),
@@ -552,6 +616,7 @@ async fn definitive_refusal_clears_only_a_never_uncertain_attempt_and_fences_sta
         &row,
         &current,
         DeferredFailure {
+            rules: Vec::new(),
             code: publication::FailureCode::OrnnWriteForbidden,
             stage: PublicationStage::Publish,
             status: Some(403),
@@ -568,6 +633,72 @@ async fn definitive_refusal_clears_only_a_never_uncertain_attempt_and_fences_sta
     assert!(after.publication.as_ref().unwrap().started);
     assert!(after.publication.as_ref().unwrap().uncertain_dispatch);
     fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn invocation_publication_dispatch_boundary_refuses_cancelled_or_missing_root() {
+    let fixture = orchestrator_fixture("invocation_publication_boundary").await;
+    let db = &fixture.state.db;
+    let root = Uuid::new_v4().to_string();
+    let mut row = proposal(false);
+    row.owner_id = fixture.owner.clone();
+    row.status = "publishing".into();
+    let publication = row.publication.as_mut().unwrap();
+    publication.invocation_id = Some(root.clone());
+    publication.lease_expires_at = Some(Utc::now() + Duration::minutes(1));
+    let publication = publication.clone();
+    db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    let roots =
+        db.collection::<bson::Document>(crate::models::assistant_invocation::COLLECTION_NAME);
+    roots
+        .insert_one(doc! {
+            "_id": &root, "user_id": &fixture.owner,
+            "cancel_requested": true, "terminal_status": null,
+            "conversation_deleted": false, "generation": 0_i64,
+        })
+        .await
+        .unwrap();
+    assert!(
+        mark_started(&fixture.state, &row, &publication)
+            .await
+            .is_err()
+    );
+    let stored = db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!stored.publication.unwrap().started);
+
+    roots.delete_one(doc! {"_id": &root}).await.unwrap();
+    assert!(
+        mark_started(&fixture.state, &row, &publication)
+            .await
+            .is_err()
+    );
+    roots
+        .insert_one(doc! {
+            "_id": &root, "user_id": &fixture.owner,
+            "cancel_requested": false, "terminal_status": null,
+            "conversation_deleted": false, "generation": 0_i64,
+        })
+        .await
+        .unwrap();
+    mark_started(&fixture.state, &row, &publication)
+        .await
+        .unwrap();
+    let stored = db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored.publication.unwrap().started);
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -637,6 +768,7 @@ async fn started_boundary_and_target_state_commit_together_before_egress() {
         &row,
         &p,
         DeferredFailure {
+            rules: Vec::new(),
             code: publication::FailureCode::OrnnWriteForbidden,
             stage: PublicationStage::Publish,
             status: Some(403),
@@ -714,6 +846,11 @@ async fn stale_evidence_never_deletes_an_effective_operation_body() {
 #[test]
 fn approval_refuses_non_owner_guest_and_non_orchestrator() {
     let mut chat = crate::services::assistant_acknowledgement_service::ChatAuthority {
+        channel_adapter_origin: None,
+        invocation_controlled: false,
+        invocation_id: None,
+        platform_thread: false,
+        platform_origin: None,
         org_agent_access: None,
         turn_id: Some("turn".into()),
         turn_stopped: false,
@@ -728,6 +865,8 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         agent_name: "NyxBot".into(),
         guest: false,
         confirmation_policy: None,
+        report_to: None,
+        with_nyxbot: false,
     };
     let agent = crate::models::assistant_agent::AssistantAgent {
         id: "agent".into(),
@@ -1165,7 +1304,11 @@ impl OrnnReader for WireReader {
             .ok()
             .and_then(|v| v["code"].as_str().map(OrnnCode::parse))
             .unwrap_or(OrnnCode::Unknown);
-        OrnnOutcome::Response { status, code }
+        OrnnOutcome::Response {
+            status,
+            code,
+            rules: vec![],
+        }
     }
 }
 
@@ -1433,9 +1576,20 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .db
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
+                media_event_ids: Vec::new(),
+                media_queue_notice_id: None,
+                media_pending: None,
+                media_bound: None,
+                platform_delivery_recovery_queued: false,
+                platform_reply: None,
+                platform_origin: None,
+                continuation_of: None,
                 retry_of: None,
+                retry_claimed_by: None,
+                activity_count: None,
                 specialist_id: None,
                 steering: None,
+                author: None,
                 voice: None,
                 execution_pending: false,
                 id: Uuid::new_v4().to_string(),
@@ -1448,12 +1602,15 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
                 status: "completed".into(),
                 error_code: None,
                 upstream_error_code: None,
+                turn_metadata: None,
                 error_detail: None,
                 created_at: now + chrono::Duration::seconds(seq),
                 activities: Vec::new(),
+                activity_total: 0,
                 attachments: Vec::new(),
                 origin: Some(crate::models::assistant_conversation::TurnOrigin::User),
                 via: None,
+                report_to: None,
             })
             .await
             .unwrap();
@@ -1552,6 +1709,9 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             model_contract: "agent-learning-v1".into(),
             publication: None,
             failure_code: None,
+            failure_rules: Vec::new(),
+            scope_encrypted: None,
+            scope_digest: None,
             evidence: vec![evidence],
             body_encrypted: encrypted,
             body_bytes: body.len() as i64,
@@ -1670,10 +1830,13 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            invocation_id: None,
+            link: None,
             requester_agent_id: None,
             confirmation: None,
             authored_skill: None,
             machine_context: None,
+            routing: None,
             id: card.clone(),
             conversation_id: fixture.chat.conversation_id.clone(),
             user_id: fixture.owner.clone(),
@@ -1693,6 +1856,7 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
             summary: "Publish a learning skill".into(),
             status: "allowed".into(),
             requested_turn_id: None,
+            creation_turn_id: None,
             voice_request_id: None,
             continuation_receipt_id: None,
             trigger_run_id: None,
@@ -2012,7 +2176,7 @@ async fn stale_learned_evidence_checks_a_dispatched_version_but_never_attaches_i
             &id,
             0,
             agent.skills_revision,
-            &UnavailableReader,
+            &UnavailableReader
         )
         .await
         .unwrap_err()
@@ -2047,10 +2211,13 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            invocation_id: None,
+            link: None,
             requester_agent_id: None,
             confirmation: None,
             authored_skill: None,
             machine_context: None,
+            routing: None,
             id: card.clone(),
             conversation_id: fixture.chat.conversation_id.clone(),
             user_id: fixture.owner.clone(),
@@ -2070,6 +2237,7 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             summary: "Publish a learning skill".into(),
             status: "allowed".into(),
             requested_turn_id: None,
+            creation_turn_id: None,
             voice_request_id: None,
             continuation_receipt_id: None,
             trigger_run_id: None,
@@ -2140,7 +2308,7 @@ impl OrnnReader for TestReader {
 #[tokio::test]
 async fn authored_org_skill_refuses_personal_fallback() {
     let (f, agent, _, _) = org_review_fixture("authored_org_refusal").await;
-    let input = serde_json::from_value(json!({"agent":agent.id,"name":"team-review","description":"Review team work","skill_md":"# Review"})).unwrap();
+    let input = serde_json::from_value(json!({"agent":agent.id,"name":"team-review","description":"Review team work","skill_md":"# Review","scope":{"status":"complete","omissions":[]}})).unwrap();
     let error = crate::services::assistant_skill_authoring::create(
         &f.state,
         &f.chat,
@@ -2538,7 +2706,14 @@ async fn recovery_learned_legacy_update_is_rebuilt_from_the_panel() {
     assert_eq!(listed[0].failure_code.as_deref(), Some(LEGACY_PACKAGE));
     // The panel cannot raise a confirmation for the old package.
     assert!(matches!(
-        approval_binding(&f.state, &f.owner, &agent.id, &id, 0, agent.skills_revision, &UnavailableReader).await,
+        approval_binding(&f.state,
+&f.owner,
+&agent.id,
+&id,
+0,
+agent.skills_revision,
+&UnavailableReader)
+.await,
         Err(AppError::Conflict(message)) if message == LEGACY_PACKAGE));
     let acknowledgements = f
         .state
@@ -2638,4 +2813,346 @@ async fn recovery_stale_release_candidate_queries_use_indexes() {
         assert!(plan.contains("publication.started_1_status_1"), "{plan}");
     }
     fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn publication_failure_event_commits_once_under_concurrent_retry() {
+    let f = orchestrator_fixture("authoring_failure_event").await;
+    migrate_publication_targets(&f.state, false).await.unwrap();
+    super::super::feature_flag_service::set_platform_override(
+        &f.state.db,
+        super::super::assistant_agent_learning::FLAG_KEY,
+        &super::super::feature_flag_service::FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let result = super::super::assistant_skill_authoring::create(&f.state,&f.chat,super::super::assistant_skill_authoring::parse_input(&json!({"agent":f.chat.agent_id,"name":"weekly-review","description":"Public guide","skill_md":"Public guide","scope":{"status":"complete","omissions":[]}})).unwrap(),&UnavailableReader, &UnavailableReader)
+.await.unwrap();
+    let id = result["proposal_id"].as_str().unwrap();
+    let card = result["acknowledgement_id"].as_str().unwrap();
+    let lease = Uuid::new_v4().to_string();
+    f.state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(doc! {"_id":id},doc! {"$set":{"status":"publishing","publication.lease_id":&lease,"publication.lease_expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(5)),"publication.attempt":1_i64,"publication.acknowledgement_id":card}}).await.unwrap();
+    let row: AssistantAgentLearningProposal = f
+        .state
+        .db
+        .collection(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":id})
+        .await
+        .unwrap()
+        .unwrap();
+    let p = row.publication.as_ref().unwrap();
+    let refusal = || DeferredFailure {
+        code: publication::FailureCode::OrnnValidationFailed,
+        stage: publication::PublicationStage::FormatValidate,
+        status: Some(400),
+        definitive: true,
+        rules: vec!["allowed_root_items".into()],
+    };
+    let (a, b) = tokio::join!(
+        defer(&f.state, &f.owner, &row, p, refusal()),
+        defer(&f.state, &f.owner, &row, p, refusal())
+    );
+    assert!(a.is_ok() || b.is_ok());
+    let thread = super::super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        thread
+            .pending_events
+            .iter()
+            .filter(|event| event.kind == "skill_publication")
+            .count(),
+        1
+    );
+    assert!(
+        thread
+            .pending_events
+            .iter()
+            .any(|event| event.text.contains("allowed_root_items"))
+    );
+    let stored: AssistantAgentLearningProposal = f
+        .state
+        .db
+        .collection(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.failure_rules, vec!["allowed_root_items"]);
+    assert!(thread.pending_events.iter().any(|event| {
+        event
+            .text
+            .contains("Keep supporting files under references/.")
+    }));
+    // Simulate delivery after commit. Replaying settlement cannot enqueue another event.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id":&f.row.id}, doc! {"$set":{"pending_events":[]}})
+        .await
+        .unwrap();
+    assert!(defer(&f.state, &f.owner, &row, p, refusal()).await.is_err());
+    assert!(
+        super::super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stored_legacy_learned_root_file_still_previews() {
+    let SeededLearned {
+        fixture: f,
+        agent,
+        id,
+        mut generated,
+    } = seed_learned_proposal("learning_legacy_root_preview").await;
+    generated.files.push(learning::GeneratedFile {
+        path: "legacy.md".into(),
+        content: "Safe reusable guidance".into(),
+    });
+    let bytes = serde_json::to_vec(&generated).unwrap();
+    let encrypted = f.state.encryption_keys.encrypt(&bytes).await.unwrap();
+    f.state.db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
+        doc! {"_id":&id},
+        doc! {"$set":{"body_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},"body_bytes":bytes.len() as i64}},
+    ).await.unwrap();
+    let proposals = list(&f.state, &f.owner, &agent.id, true).await.unwrap();
+    let preview = proposals
+        .iter()
+        .find(|proposal| proposal.id == id)
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap();
+    assert_eq!(preview.files[0].path, "legacy.md");
+    assert_eq!(preview.files[0].content, "Safe reusable guidance");
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn learned_edit_refuses_new_invalid_description_before_review_card() {
+    let SeededLearned {
+        fixture: f,
+        agent,
+        id,
+        mut generated,
+    } = seed_learned_proposal("learning_edit_wire_contract").await;
+    let cards = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME);
+    let before = cards.count_documents(doc! {}).await.unwrap();
+    generated.description = "Invalid <description>".into();
+    assert!(
+        matches!(edit(&f.state, &f.owner, &agent.id, &id, 0, &serde_json::to_value(&generated).unwrap()).await,
+        Err(AppError::ValidationError(message)) if message == "Learning proposal failed validation")
+    );
+    let stored = f
+        .state
+        .db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.revision, 0);
+    assert!(stored.publication.is_none());
+    assert_eq!(cards.count_documents(doc! {}).await.unwrap(), before);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn publication_events_are_bounded_deduplicated_and_identifier_safe() {
+    use super::super::assistant_nyxagent::{MAX_PENDING_EVENTS, identifier};
+    use crate::models::assistant_conversation::AssistantConversation;
+
+    let f = orchestrator_fixture("publication_event_bound").await;
+    let mut row = proposal(false);
+    row.source = ProposalSource::Authored;
+    row.owner_id = f.owner.clone();
+    row.agent_id = f.chat.agent_id.clone();
+    let publication = row.publication.as_mut().unwrap();
+    publication.name = "skill\"\nname".into();
+    publication.version = "1.0\"\nversion".into();
+    let publication = publication.clone();
+    let mut agent = f
+        .state
+        .db
+        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    agent.name = "Research \"quoted\"\nteam".into();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": "card", "conversation_id": &f.row.id, "user_id": &f.owner,
+            "api_key_id": &f.chat.api_key_id, "kind": "action", "summary": "Review skill",
+            "status": "allowed", "created_at": bson::DateTime::now(),
+            "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::hours(1)),
+        })
+        .await
+        .unwrap();
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    for i in 0..MAX_PENDING_EVENTS + 5 {
+        let event = team::event("existing", format!("Earlier event {i}"), None);
+        push_publication_event(&f.state.db, &mut session, &f.row.id, &f.owner, &event)
+            .await
+            .unwrap();
+    }
+    for _ in 0..2 {
+        push_failure_event(
+            &f.state.db,
+            &mut session,
+            &row,
+            &publication,
+            PublicationFailureCode::OrnnValidationFailed,
+            &["no_readme_md".into()],
+        )
+        .await
+        .unwrap();
+        push_pinned_event(&f.state.db, &mut session, &row, &publication, &agent)
+            .await
+            .unwrap();
+    }
+    session.commit_transaction().await.unwrap();
+    let thread = f
+        .state
+        .db
+        .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id": &f.row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(thread.pending_events.len(), MAX_PENDING_EVENTS);
+    assert_eq!(thread.pending_events[0].text, "Earlier event 7");
+    let events: Vec<_> = thread
+        .pending_events
+        .iter()
+        .filter(|event| event.kind == "skill_publication")
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_ne!(events[0].id, events[1].id);
+    for event in &events {
+        assert_eq!(event.agent_id.as_deref(), Some(row.agent_id.as_str()));
+        assert!(event.text.contains(&identifier(&publication.name)));
+        assert!(event.text.contains(&identifier(&publication.version)));
+        assert!(event.text.contains(&format!("agent_id {}", row.agent_id)));
+        assert!(!event.text.contains(['"', '\n']));
+    }
+    assert!(events[0].text.contains("requires a corrected package"));
+    assert!(events[1].text.contains(&identifier(&agent.name)));
+    assert!(
+        events[1]
+            .text
+            .contains("published and attached; not yet tested")
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn invocation_publication_queue_refusal_rolls_back_settlement_and_duplicate_is_success() {
+    use crate::models::assistant_conversation::COLLECTION_NAME as CONVERSATIONS;
+    let fixture = orchestrator_fixture("invocation_publication_queue").await;
+    let db = &fixture.state.db;
+    let root = Uuid::new_v4().to_string();
+    db.collection::<bson::Document>(crate::models::assistant_invocation::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": &root, "user_id": &fixture.owner, "cancel_requested": false,
+            "terminal_status": null, "conversation_deleted": false, "generation": 0_i64,
+        })
+        .await
+        .unwrap();
+    let proposal = Uuid::new_v4().to_string();
+    let proposals = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME);
+    proposals
+        .insert_one(doc! {"_id": &proposal, "status": "publishing"})
+        .await
+        .unwrap();
+    let event = team::event("skill_publication", "published fixture".into(), None)
+        .for_invocation(Some(&root));
+    let filler = team::event("fixture", "queued fixture".into(), None);
+    let conversations = db.collection::<bson::Document>(CONVERSATIONS);
+    for duplicate in [false, true] {
+        let mut events = vec![
+            bson::to_bson(&filler).unwrap();
+            super::super::assistant_nyxagent::MAX_PENDING_EVENTS
+        ];
+        if duplicate {
+            events[0] = bson::to_bson(&event).unwrap();
+        }
+        conversations
+            .update_one(
+                doc! {"_id": &fixture.row.id},
+                doc! {"$set": {"pending_events": events}},
+            )
+            .await
+            .unwrap();
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        proposals
+            .update_one(doc! {"_id": &proposal}, doc! {"$set": {"status": "pinned"}})
+            .session(&mut session)
+            .await
+            .unwrap();
+        let outcome =
+            push_publication_event(db, &mut session, &fixture.row.id, &fixture.owner, &event).await;
+        if duplicate {
+            outcome.unwrap();
+            session.commit_transaction().await.unwrap();
+        } else {
+            assert!(matches!(outcome, Err(AppError::Conflict(_))));
+            session.abort_transaction().await.unwrap();
+        }
+        let stored = proposals
+            .find_one(doc! {"_id": &proposal})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.get_str("status").unwrap(),
+            if duplicate { "pinned" } else { "publishing" }
+        );
+        let stored = conversations
+            .find_one(doc! {"_id": &fixture.row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let queued = stored.get_array("pending_events").unwrap();
+        assert_eq!(
+            queued.len(),
+            super::super::assistant_nyxagent::MAX_PENDING_EVENTS
+        );
+        assert_eq!(
+            queued
+                .iter()
+                .filter(|value| value.as_document().unwrap().get_str("id").unwrap() == event.id)
+                .count(),
+            usize::from(duplicate)
+        );
+    }
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    assert!(
+        push_publication_event(
+            db,
+            &mut session,
+            "missing-conversation",
+            &fixture.owner,
+            &event
+        )
+        .await
+        .is_err()
+    );
+    session.abort_transaction().await.unwrap();
+    db.drop().await.unwrap();
 }

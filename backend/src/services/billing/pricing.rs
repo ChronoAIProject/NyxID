@@ -137,6 +137,16 @@ pub fn normalize_lane_pricing(
         ),
     ] {
         if let Some(lane) = lane {
+            if lane.metric == crate::models::service_billing::BillingMetric::MachineRunningSeconds
+                || lane.components.iter().any(|component| {
+                    component.metric
+                        == crate::models::service_billing::BillingMetric::MachineRunningSeconds
+                })
+            {
+                return Err(AppError::ValidationError(
+                    "Machine runtime prices use the accepted runtime contract, not service credential lanes".into(),
+                ));
+            }
             if !lane.operations.is_empty()
                 && lane.metric != crate::models::service_billing::BillingMetric::Requests
             {
@@ -376,7 +386,10 @@ async fn sync_lane_price(
         let Some(code) = cleanup.as_deref().filter(|c| !c.is_empty()) else {
             return Ok(false);
         };
-        if lago.remove_standard_charge(plan_code, code).await.is_err() {
+        if super::taxes::remove_charge(db, lago, plan_code, code)
+            .await
+            .is_err()
+        {
             return Ok(false);
         }
         retire_rate(db, code).await?;
@@ -469,7 +482,9 @@ async fn sync_lane_component(
         metric_description: format!("NyxID {field} usage for {}", service.slug),
         credits_per_unit: lane.credits_per_unit.clone(),
     };
-    let synced = lago.sync_standard_charge(plan_code, &input).await.is_ok();
+    let synced = super::taxes::sync_charge(db, lago, plan_code, &input)
+        .await
+        .is_ok();
     // Include the unit: identical prices in a different unit are different charges.
     let mut filter = doc! { "_id": &service.id,
         format!("{path}.lago_metric_code"): &lane.lago_metric_code,
@@ -558,7 +573,10 @@ async fn cleanup_components(
     };
     let mut changed = false;
     for code in &billing.component_cleanup_metric_codes {
-        if lago.remove_standard_charge(plan_code, code).await.is_err() {
+        if super::taxes::remove_charge(db, lago, plan_code, code)
+            .await
+            .is_err()
+        {
             continue;
         }
         retire_rate(db, code).await?;
@@ -591,7 +609,7 @@ async fn sync_legacy_price(
         else {
             return Ok(false);
         };
-        match lago.remove_standard_charge(plan_code, metric_code).await {
+        match super::taxes::remove_charge(db, lago, plan_code, metric_code).await {
             Ok(()) => {
                 complete_price_removal(db, &service.id, metric_code).await?;
                 return Ok(true);
@@ -618,7 +636,7 @@ async fn sync_legacy_price(
         credits_per_unit: pricing.credits_per_unit.clone(),
     };
 
-    match lago.sync_standard_charge(plan_code, &input).await {
+    match super::taxes::sync_charge(db, lago, plan_code, &input).await {
         Ok(()) => {
             let pico = decimal_to_pico(&pricing.credits_per_unit)
                 .ok_or_else(|| AppError::Internal("stored service price is invalid".to_string()))?;
@@ -819,6 +837,40 @@ mod tests {
         DOWNSTREAM_SERVICES, complete_price_removal, metric_code_for_service,
         normalize_platform_pricing, normalize_price,
     };
+
+    #[test]
+    fn machine_runtime_cannot_be_authored_as_a_service_lane() {
+        use crate::models::service_billing::{BillingMetric, LanePriceComponent, LanePricing};
+        for component in [false, true] {
+            let mut billing = ServiceBilling {
+                byok_pricing: Some(LanePricing {
+                    metric: if component {
+                        BillingMetric::Requests
+                    } else {
+                        BillingMetric::MachineRunningSeconds
+                    },
+                    credits_per_unit: "0.00004".into(),
+                    lago_metric_code: String::new(),
+                    sync_status: PricingSyncStatus::Pending,
+                    sync_error: None,
+                    operations: vec![],
+                    components: if component {
+                        vec![LanePriceComponent {
+                            metric: BillingMetric::MachineRunningSeconds,
+                            credits_per_unit: "0.00004".into(),
+                            lago_metric_code: String::new(),
+                            sync_status: PricingSyncStatus::Pending,
+                            sync_error: None,
+                        }]
+                    } else {
+                        vec![]
+                    },
+                }),
+                ..Default::default()
+            };
+            assert!(super::normalize_lane_pricing("service", None, &mut billing).is_err());
+        }
+    }
 
     #[test]
     fn prices_above_the_cap_have_one_validation_message_even_on_overflow() {

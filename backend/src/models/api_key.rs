@@ -12,6 +12,10 @@ pub enum ApiKeyPurpose {
     General,
     ScheduledInvocation,
     PermissionBound,
+    /// Server-issued, session-bound public runtime capability. Never a general key.
+    PublicNyxbot,
+    /// Dedicated primary transport capability; accepted only by shared entry ingress.
+    SharedEntryTransport,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +46,11 @@ pub struct ApiKey {
     /// the field deserialize as zero; every newly-created key starts at one.
     #[serde(default)]
     pub state_version: i64,
+
+    /// Sticky server-owned discovery hint, set with the first Machine grant.
+    /// Never grants execution authority. New and rotated keys start false.
+    #[serde(default)]
+    pub machine_external_grants_present: bool,
 
     /// Authoritative timestamp of the latest committed mutation. Legacy rows
     /// without the field deserialize as `None`.
@@ -146,6 +155,7 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(Utc::now()),
             description: None,
@@ -215,6 +225,7 @@ mod tests {
         doc.remove("scheduled_write_enabled");
         doc.remove("rotation_predecessor_id");
         doc.remove("state_version");
+        doc.remove("machine_external_grants_present");
         doc.remove("updated_at");
         let restored: ApiKey = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.rate_limit_per_second, None);
@@ -226,7 +237,30 @@ mod tests {
         assert!(!restored.scheduled_write_enabled);
         assert_eq!(restored.rotation_predecessor_id, None);
         assert_eq!(restored.state_version, 0);
+        assert!(!restored.machine_external_grants_present);
         assert_eq!(restored.updated_at, None);
+    }
+
+    #[test]
+    fn legacy_missing_grants_and_missing_or_null_expiry_keep_stored_policy() {
+        for missing_expiry in [false, true] {
+            let mut document = bson::to_document(&make_api_key()).unwrap();
+            if missing_expiry {
+                document.remove("expires_at");
+            }
+            for field in [
+                "allow_all_services",
+                "allow_all_nodes",
+                "allowed_service_ids",
+                "allowed_node_ids",
+            ] {
+                document.remove(field);
+            }
+            let key: ApiKey = bson::from_document(document).unwrap();
+            assert!(key.expires_at.is_none());
+            assert!(key.allow_all_services && key.allow_all_nodes);
+            assert!(key.allowed_service_ids.is_empty() && key.allowed_node_ids.is_empty());
+        }
     }
 
     #[test]

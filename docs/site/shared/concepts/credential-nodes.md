@@ -44,7 +44,7 @@ A node is registered using a one-time token issued by NyxID (`nyx_nreg_…`). Th
 1. A user or admin calls `POST /api/v1/nodes/register-token` to get a registration token.
 2. The node agent calls `nyxid node register --token nyx_nreg_... --url wss://...` to consume the token and receive a permanent auth token (`nyx_nauth_…`) and an HMAC signing secret.
 3. The raw auth token and signing secret are shown once and stored locally in the node config, encrypted with AES-256-GCM.
-4. Only the SHA-256 hash of each is stored on the NyxID server.
+4. The server stores SHA-256 hashes of the authentication token and signing secret. It also retains `signing_secret_encrypted` so it can sign node requests; the signing secret is not hash-only.
 
 After registration, the node connects to `wss://…/api/v1/nodes/ws` and authenticates via the first WebSocket message (not via HTTP headers, which would be visible in server logs). If no valid auth arrives within 10 seconds, the connection is closed.
 
@@ -72,7 +72,7 @@ After all nodes fail, NyxID falls through to the standard direct proxy. For serv
 
 Every proxy request NyxID sends to a node is signed with HMAC-SHA256 using the shared signing secret established at registration. The canonical string covers the timestamp, a nonce, the HTTP method, path, query string, and body. The node verifies the signature and rejects requests with:
 
-- Timestamps more than 5 minutes in the past
+- Timestamps more than 5 minutes in the past or future (absolute skew above 300 seconds)
 - Nonces seen within the recent window (last 10,000 nonces tracked)
 
 This prevents both replay attacks and request forgery by anyone who might intercept the WebSocket channel.

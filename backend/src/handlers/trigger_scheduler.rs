@@ -51,10 +51,10 @@ pub(crate) async fn tick(state: &AppState) -> AppResult<usize> {
                             && let Some(run_job) =
                                 schedules::claim(&state.db, &run.id, Utc::now()).await?
                         {
-                            run_job_once(state, &run_job).await?;
+                            Box::pin(run_job_once(state, &run_job)).await?;
                         }
                     } else {
-                        run_job_once(state, &job).await?;
+                        Box::pin(run_job_once(state, &job)).await?;
                     }
                 }
                 Ok(())
@@ -72,6 +72,9 @@ pub(crate) async fn tick(state: &AppState) -> AppResult<usize> {
 }
 
 async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
+    if job.get_str("kind").ok() == Some("pause_notice") {
+        return deliver_pause_notice(state, job).await;
+    }
     let id = job.get_str("_id").unwrap_or_default();
     let Some(run) = state
         .db
@@ -82,12 +85,14 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         return schedules::reschedule(&state.db, job, None).await;
     };
     if run.outcome == RunOutcome::Started {
-        if run.agent_id.is_none() {
+        if run.agent_id.is_none() && !schedules::result_delivery::versioned(&state.db, &run).await?
+        {
             return schedules::finish(
                 &state.db,
                 id,
                 RunOutcome::Failed,
                 Some("delivery_interrupted"),
+                &state.config.frontend_url,
             )
             .await;
         }
@@ -104,6 +109,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
                         id,
                         RunOutcome::Failed,
                         Some("thread_deleted"),
+                        &state.config.frontend_url,
                     )
                     .await;
                 }
@@ -133,7 +139,14 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
                 return Ok(());
             }
         }
-        return schedules::finish(&state.db, id, RunOutcome::Failed, Some("turn_lost")).await;
+        return schedules::finish(
+            &state.db,
+            id,
+            RunOutcome::Failed,
+            Some("turn_lost"),
+            &state.config.frontend_url,
+        )
+        .await;
     }
     let continuation = run.outcome == RunOutcome::Waiting;
     if run.outcome != RunOutcome::Pending && !continuation {
@@ -146,6 +159,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             id,
             RunOutcome::Skipped,
             run.reason.as_deref(),
+            &state.config.frontend_url,
         )
         .await;
     }
@@ -156,6 +170,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             id,
             RunOutcome::Skipped,
             Some(run.reason.as_deref().unwrap_or("grace_expired")),
+            &state.config.frontend_url,
         )
         .await;
     }
@@ -179,6 +194,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
                 id,
                 RunOutcome::Failed,
                 Some("confirmation_expired"),
+                &state.config.frontend_url,
             )
             .await;
         }
@@ -191,7 +207,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             return schedules::reschedule(&state.db, job, expiry).await;
         }
         Some(format!(
-            "Continue the automation after these confirmation decisions. Retry only allowed actions using their acknowledgement_id; do not retry denied or expired actions.\n{}",
+            "Continue the automation after these confirmation decisions. Retry only allowed actions using their acknowledgement_id; do not retry denied or expired actions. Then tell the user in one or two plain sentences what you did and the result.\n{}",
             crate::services::assistant_acknowledgement_service::decisions_note(&cards)
         ))
     } else {
@@ -209,6 +225,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             id,
             RunOutcome::Skipped,
             Some("trigger_deleted"),
+            &state.config.frontend_url,
         )
         .await;
     };
@@ -219,6 +236,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             id,
             RunOutcome::Skipped,
             Some("trigger_paused"),
+            &state.config.frontend_url,
         )
         .await;
     }
@@ -236,6 +254,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             id,
             RunOutcome::Skipped,
             Some("owner_unavailable"),
+            &state.config.frontend_url,
         )
         .await;
     }
@@ -252,6 +271,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
                 id,
                 RunOutcome::Failed,
                 Some("target_changed"),
+                &state.config.frontend_url,
             )
             .await;
         }
@@ -267,6 +287,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
                 id,
                 RunOutcome::Skipped,
                 Some("target_unavailable"),
+                &state.config.frontend_url,
             )
             .await;
         }
@@ -282,6 +303,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
                 id,
                 RunOutcome::Skipped,
                 Some("assistant_disabled"),
+                &state.config.frontend_url,
             )
             .await;
         }
@@ -294,6 +316,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             id,
             RunOutcome::Failed,
             Some("target_changed"),
+            &state.config.frontend_url,
         )
         .await;
     }
@@ -314,6 +337,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
                 id,
                 RunOutcome::Skipped,
                 Some("overlap"),
+                &state.config.frontend_url,
             )
             .await;
         }
@@ -330,6 +354,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
                 id,
                 RunOutcome::Skipped,
                 Some("queue_full"),
+                &state.config.frontend_url,
             )
             .await;
         }
@@ -381,6 +406,10 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         _ => "Your final reply stays in the web thread.",
     };
     let start = engine::TurnStart {
+        media_event_ids: Vec::new(),
+        channel_uploads: Vec::new(),
+        invocation_id: None,
+        acknowledgement_id: None,
         retry_of: None,
         channel_event_id: None,
         org_access: None,
@@ -442,8 +471,15 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         Ok(super::assistant_team::Started::PoolFull) => defer(state, job, &run, "pool_full").await,
         Err(AppError::TriggerRateLimited) => defer(state, job, &run, "budget_exhausted").await,
         Err(AppError::Conflict(reason)) if reason == "trigger_overlap_skip" => {
-            schedules::finish_claimed(&state.db, job, id, RunOutcome::Skipped, Some("overlap"))
-                .await
+            schedules::finish_claimed(
+                &state.db,
+                job,
+                id,
+                RunOutcome::Skipped,
+                Some("overlap"),
+                &state.config.frontend_url,
+            )
+            .await
         }
         Err(AppError::Conflict(reason)) if reason == "trigger_overlap_queue" => {
             defer(state, job, &run, "overlap").await
@@ -456,6 +492,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
                 id,
                 RunOutcome::Failed,
                 Some("turn_start_failed"),
+                &state.config.frontend_url,
             )
             .await
         }
@@ -632,6 +669,7 @@ async fn deliver_existing(
             RunOutcome::Failed
         },
         outcome.err().map(|_| "delivery_failed"),
+        &state.config.frontend_url,
     )
     .await
 }
@@ -671,7 +709,7 @@ pub(crate) async fn settled(
     }
 }
 
-async fn settle_result(
+pub(super) async fn settle_result(
     state: &AppState,
     row: &crate::models::assistant_conversation::AssistantConversation,
     run: &TriggerRun,
@@ -786,6 +824,10 @@ async fn settle_result(
             return Ok(());
         }
     }
+    schedules::terminal_result(&state.db, run, error, &state.config.frontend_url).await?;
+    if matches!(run.deliver_to, DeliverTo::Chat { .. }) {
+        return settle_chat_result(state, row, run, text, error).await;
+    }
     // One settlement owns the outbound attempt. Recovery never duplicates an
     // ambiguous network send; the thread remains the durable final result.
     if run.result_claimed {
@@ -794,13 +836,14 @@ async fn settle_result(
             &run.id,
             RunOutcome::Failed,
             Some("result_delivery_interrupted"),
+            &state.config.frontend_url,
         )
         .await;
     }
-    if state
+    let Some(run) = state
         .db
         .collection::<TriggerRun>(RUNS)
-        .update_one(
+        .find_one_and_update(
             doc! {
                 "_id": &run.id,
                 "outcome": RunOutcome::Started.as_str(),
@@ -809,17 +852,19 @@ async fn settle_result(
             },
             doc! { "$set": {"result_claimed":true} },
         )
+        .return_document(mongodb::options::ReturnDocument::After)
         .await?
-        .modified_count
-        == 0
-    {
+    else {
         return Ok(());
-    }
-    let final_text = if error.is_some() {
-        "This automation could not finish. Open its thread for details."
-    } else {
-        text
     };
+    let failure_text = error.map(|code| {
+        if code == "capacity_exceeded" {
+            crate::services::assistant_turn_observability::capacity_message(run.capacity_wait_ms)
+        } else {
+            engine::TurnError::new(code).message
+        }
+    });
+    let final_text = failure_text.as_deref().unwrap_or(text);
     let outcome = match &run.deliver_to {
         DeliverTo::Thread => Ok(()),
         DeliverTo::Notification => {
@@ -836,16 +881,28 @@ async fn settle_result(
             )
             .await
         }
-        DeliverTo::Chat { chat_id } => Box::pin(super::nyxbot::chats::post_automation(
-            state,
-            &run.user_id,
-            chat_id,
-            final_text,
-            run.agent_id.as_deref().filter(|_| row.is_subagent()),
-            &row.id,
-        ))
-        .await
-        .map(|_| ()),
+        DeliverTo::Chat { chat_id } => {
+            let agent_id = run.agent_id.as_deref().filter(|_| row.is_subagent());
+            if error.is_none() {
+                Box::pin(super::nyxbot::chats::post_automation_images(
+                    state, &run, chat_id, agent_id, &row.id, final_text,
+                ))
+                .await
+                .map(|_| ())
+            } else {
+                Box::pin(super::nyxbot::chats::post_automation(
+                    state,
+                    &run.user_id,
+                    chat_id,
+                    final_text,
+                    agent_id,
+                    &row.id,
+                    &run.id,
+                ))
+                .await
+                .map(|_| ())
+            }
+        }
     };
     schedules::finish(
         &state.db,
@@ -856,8 +913,100 @@ async fn settle_result(
             RunOutcome::Completed
         },
         error.or(outcome.err().map(|_| "result_delivery_failed")),
+        &state.config.frontend_url,
     )
     .await
+}
+
+async fn settle_chat_result(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    run: &TriggerRun,
+    text: &str,
+    error: Option<&str>,
+) -> AppResult<()> {
+    use schedules::result_delivery::{self as delivery, Claim};
+    let claim = match delivery::claim(&state.db, run).await? {
+        Claim::Acquired(claim) => claim,
+        Claim::Busy => return Ok(()),
+        Claim::Legacy | Claim::Expired => {
+            return delivery::finish_unrecoverable(&state.db, run, &state.config.frontend_url)
+                .await;
+        }
+    };
+    let run = &claim.run;
+    let DeliverTo::Chat { chat_id } = &run.deliver_to else {
+        return Err(AppError::Conflict(
+            "Result delivery destination changed".into(),
+        ));
+    };
+    let failure = error.map(|code| {
+        if code == "capacity_exceeded" {
+            crate::services::assistant_turn_observability::capacity_message(run.capacity_wait_ms)
+        } else {
+            engine::TurnError::new(code).message
+        }
+    });
+    let text = failure.as_deref().unwrap_or(text);
+    let agent = run.agent_id.as_deref().filter(|_| row.is_subagent());
+    let seconds = (claim.expires_at - Utc::now()).num_seconds().max(0) as u64;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(seconds.min(delivery::ATTEMPT_SECONDS)),
+        async {
+            if error.is_none() {
+                Box::pin(super::nyxbot::chats::post_automation_images(
+                    state, run, chat_id, agent, &row.id, text,
+                ))
+                .await
+                .map(|_| ())
+            } else {
+                Box::pin(super::nyxbot::chats::post_automation(
+                    state,
+                    &run.user_id,
+                    chat_id,
+                    text,
+                    agent,
+                    &row.id,
+                    &run.id,
+                ))
+                .await
+                .map(|_| ())
+            }
+        },
+    )
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            delivery::finish(
+                &state.db,
+                &claim,
+                if error.is_some() {
+                    RunOutcome::Failed
+                } else {
+                    RunOutcome::Completed
+                },
+                error,
+                &state.config.frontend_url,
+            )
+            .await
+        }
+        Ok(Err(ref failure)) if failure.retry_after_seconds().is_some() => {
+            delivery::defer(&state.db, &claim, failure.retry_after_seconds().unwrap()).await
+        }
+        // A cancelled attempt may have persisted a receipt before cancellation.
+        // The journal, not this worker's timeout, decides whether a retry can send.
+        Err(_) | Ok(Err(AppError::DatabaseError(_))) => delivery::defer(&state.db, &claim, 5).await,
+        Ok(Err(_)) => {
+            delivery::finish(
+                &state.db,
+                &claim,
+                RunOutcome::Failed,
+                Some("result_delivery_failed"),
+                &state.config.frontend_url,
+            )
+            .await
+        }
+    }
 }
 
 pub(crate) async fn validate_delivery(
@@ -969,9 +1118,21 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                        media_event_ids: Vec::new(),
+                        media_queue_notice_id: None,
+        media_pending: None,
+                        media_bound: None,
+                    platform_delivery_recovery_queued: false,
+                    platform_reply: None,
+                    platform_origin: None,
+                        report_to: None,
+                    continuation_of: None,
                     retry_of: None,
+                        retry_claimed_by: None,
+                        activity_count: None,
                         specialist_id: None,
                         steering: None,
+                        author: None,
                         voice: None,
                         execution_pending: false,
                         id: message_id,
@@ -984,9 +1145,11 @@ pub(crate) async fn webhook(
                         status: "completed".into(),
                         error_code: None,
                         upstream_error_code: None,
+                        turn_metadata: None,
                         error_detail: None,
                         created_at: now,
                         activities: vec![],
+                        activity_total: 0,
                         attachments: vec![],
                         origin: Some(TurnOrigin::Trigger),
                         via: None,
@@ -1006,3 +1169,36 @@ pub(crate) async fn webhook(
 #[cfg(test)]
 #[path = "trigger_scheduler_tests.rs"]
 mod tests;
+
+async fn deliver_pause_notice(state: &AppState, job: &Document) -> AppResult<()> {
+    let filter = doc! {"_id": job.get_str("_id").unwrap_or_default(),
+    "kind": "pause_notice", "fence": job.get_str("fence").unwrap_or_default(),
+    "at": {"$gt": schedules::date(Utc::now())}, "external_claimed": false};
+    let claimed = state
+        .db
+        .collection::<Document>(schedules::WORK)
+        .update_one(filter, doc! {"$set": {"external_claimed": true}})
+        .await?
+        .modified_count
+        == 1;
+    if claimed {
+        let owner = job.get_str("user_id").unwrap_or_default();
+        let reason = job.get_str("reason").unwrap_or_default();
+        let text = schedules::pause_notice(reason, &state.config.frontend_url);
+        let _ = crate::services::notification_service::send_trigger_notification(
+            &state.db, &state.config, &state.http_client, state.fcm_auth.as_deref(), state.apns_auth.as_deref(),
+            owner, "Automation paused", &serde_json::json!({"event_id": job.get_str("_id").unwrap_or_default(), "payload": text}),
+        ).await;
+        schedules::audit(
+            &state.db,
+            owner,
+            "trigger_paused",
+            doc! {
+                "trigger_id": job.get_str("trigger_id").unwrap_or_default(),
+                "run_id": job.get_str("run_id").unwrap_or_default(), "reason": reason,
+            },
+        )
+        .await;
+    }
+    schedules::reschedule(&state.db, job, None).await
+}

@@ -61,7 +61,7 @@ pub async fn thread(db: &Database, user: &str, id: &str) -> AppResult<AssistantC
     Ok(row)
 }
 
-fn private_thread(row: &AssistantConversation) -> AppResult<()> {
+pub(crate) fn private_thread(row: &AssistantConversation) -> AppResult<()> {
     if row.channel.is_some() || row.group_id.is_some() || row.automation_thread || row.guest_turn {
         return Err(AppError::Forbidden(
             "Voice requires a private owner thread".into(),
@@ -237,9 +237,21 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                media_event_ids: Vec::new(),
+                media_queue_notice_id: None,
+                media_pending: None,
+                media_bound: None,
+                platform_delivery_recovery_queued: false,
+                platform_reply: None,
+                platform_origin: None,
+                report_to: None,
+                continuation_of: None,
                 retry_of: None,
+                retry_claimed_by: None,
+                activity_count: None,
                 specialist_id: None,
                 steering: None,
+                author: Some(crate::models::assistant_message::MessageAuthor::Owner),
                 voice: None,
                 execution_pending: true,
                 id: request.message_id.clone(),
@@ -252,9 +264,11 @@ pub(crate) async fn enqueue_in_session(
                 status: "completed".into(),
                 error_code: None,
                 upstream_error_code: None,
+                turn_metadata: None,
                 error_detail: None,
                 created_at: request.created_at,
                 activities: Vec::new(),
+                activity_total: 0,
                 attachments: Vec::new(),
                 origin: Some(TurnOrigin::User),
                 via: Some("voice".into()),
@@ -346,9 +360,21 @@ pub(crate) async fn publish_result(
                 let text: String = source.text.chars().take(12_000).collect();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                        media_event_ids: Vec::new(),
+                        media_queue_notice_id: None,
+        media_pending: None,
+                        media_bound: None,
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
+        report_to: None,
+        continuation_of: None,
         retry_of: None,
+                        retry_claimed_by: None,
+                        activity_count: None,
                         specialist_id: None,
                         steering: None,
+                        author: None,
                         id: id.clone(),
                         conversation_id: current.conversation_id,
                         user_id: current.user_id,
@@ -358,10 +384,12 @@ pub(crate) async fn publish_result(
                         text,
                         status: source.status,
                         error_code: source.error_code,
-                        upstream_error_code: None,
-                        error_detail: None,
+                        upstream_error_code: source.upstream_error_code,
+                        turn_metadata: source.turn_metadata,
+                        error_detail: source.error_detail,
                         created_at: Utc::now(),
                         activities: source.activities,
+                        activity_total: source.activity_total,
                         attachments: source.attachments,
                         origin: source.origin,
                         via: Some("voice".into()),
@@ -748,9 +776,21 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
+            platform_delivery_recovery_queued: false,
+            platform_reply: None,
+            platform_origin: None,
+            report_to: None,
+            continuation_of: None,
             retry_of: None,
+            retry_claimed_by: None,
+            activity_count: None,
             specialist_id: None,
             steering: None,
+            author: None,
             id: Uuid::new_v4().to_string(),
             conversation_id: target.id,
             user_id: row.user_id.clone(),
@@ -761,9 +801,11 @@ async fn settle_lost_in_session(
             status: "failed".into(),
             error_code: Some("turn_lost".into()),
             upstream_error_code: None,
+            turn_metadata: None,
             error_detail: None,
             created_at: Utc::now(),
             activities: Vec::new(),
+            activity_total: 0,
             attachments: Vec::new(),
             origin: Some(TurnOrigin::Orchestrator),
             via: Some("voice".into()),
@@ -952,7 +994,7 @@ pub(crate) async fn continuation(
         return Err(AppError::Conflict("Voice task was stopped".into()));
     }
     let text = format!(
-        "The owner decided the confirmation: {} (acknowledgement_id {}). Continue within the existing authority; do not retry a denied action.",
+        "The owner decided the confirmation: {} (acknowledgement_id {}). Continue within the existing authority; do not retry a denied action. Then tell the user in one or two plain sentences what you did and the result.",
         card.status, card.id
     );
     let now = Utc::now();
@@ -1132,6 +1174,31 @@ pub async fn options(
     keys: &crate::crypto::aes::EncryptionKeys,
     thread: &AssistantConversation,
 ) -> AppResult<Vec<VoiceOption>> {
+    audio_options(db, keys, thread, false).await
+}
+
+pub async fn dictation_options(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    thread: &AssistantConversation,
+) -> AppResult<Vec<VoiceOption>> {
+    audio_options(db, keys, thread, true).await
+}
+
+async fn audio_options(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    thread: &AssistantConversation,
+    dictation: bool,
+) -> AppResult<Vec<VoiceOption>> {
+    // Authenticate this exact thread once; source checks reuse only this
+    // request's live key/org/agent authority, never a cross-request cache.
+    let Some(authority) = super::voice::credentials::discovery_result(
+        super::voice::credentials::inference_authority(db, thread).await,
+    )?
+    else {
+        return Ok(Vec::new());
+    };
     // Reuse catalog visibility and its request-scoped, batched platform grants.
     // Discovery neither provisions a connection nor decrypts a user credential.
     let catalog = super::catalog_service::list_catalog_all(db, keys, &thread.user_id).await?;
@@ -1159,43 +1226,101 @@ pub async fn options(
         else {
             continue;
         };
+        if dictation
+            && voice.protocol != crate::models::downstream_service::VoiceProtocol::OpenaiLive
+        {
+            continue;
+        }
+        if !super::voice::credentials::official_provider_origin(&service.base_url, &voice.protocol)
+        {
+            continue;
+        }
         if voice.protocol == crate::models::downstream_service::VoiceProtocol::XaiRealtime
-            && (!super::feature_flag_service::personal_flag_enabled(
+            && !super::feature_flag_service::personal_flag_enabled(
                 db,
                 &thread.user_id,
                 super::feature_flag_service::VOICE_GROK_FLAG_KEY,
             )
             .await?
-                || super::voice::credentials::authorize_inference(db, thread, service, None)
-                    .await
-                    .is_err()
-                || !super::voice::credentials::official_provider_origin(
-                    &service.base_url,
-                    &voice.protocol,
-                ))
         {
             continue;
         }
-        for model in &voice.models {
-            let billing = service.billing.as_ref();
-            let platform_priced =
-                super::voice::credentials::duration_billing(&VoiceKeySource::Platform, billing)
-                    .is_ok();
-            let own_billing =
-                super::voice::credentials::duration_billing(&VoiceKeySource::Own, billing);
-            let platform_enabled = super::feature_flag_service::personal_flag_enabled(
-                db,
-                &thread.user_id,
-                super::voice::credentials::platform_flag(&voice.protocol),
-            )
-            .await?;
-            if entry.platform_key.available {
+        // Compute source/connection eligibility once, before expanding models.
+        // Discovery reserves no funds and cannot promise later start capacity.
+        let platform_authorized = entry.platform_key.available
+            && super::voice::credentials::discovery_result(if dictation {
+                super::voice::credentials::authorize_dictation(db, &authority, service, None).await
+            } else {
+                super::voice::credentials::authorize_with_authority(db, &authority, service, None)
+                    .await
+            })?
+            .is_some();
+        let resource_owner = thread.agent_owner_id.as_deref().unwrap_or(&thread.user_id);
+        let mut own_connections = Vec::new();
+        for connection in connections.iter().filter(|c| {
+            !dictation
+                && c.service.user_id == resource_owner
+                && !matches!(
+                    c.source,
+                    super::user_service_service::CredentialSource::Org { allowed: false, .. }
+                )
+                && c.service.catalog_service_id.as_deref() == Some(&service.id)
+                && c.service.node_id.is_none()
+                && c.service.api_key_id.is_some()
+                && c.service.credential_binding.as_deref() != Some("platform")
+        }) {
+            if super::voice::credentials::discovery_result(
+                super::voice::credentials::authorize_with_authority(
+                    db,
+                    &authority,
+                    service,
+                    Some(&connection.service.id),
+                )
+                .await,
+            )?
+            .is_some()
+                && super::voice::credentials::discovery_result(
+                    Box::pin(super::voice::credentials::own_snapshot(
+                        db,
+                        keys,
+                        thread,
+                        service,
+                        &connection.service.id,
+                    ))
+                    .await,
+                )?
+                .is_some()
+            {
+                own_connections.push(connection);
+            }
+        }
+        let billing = service.billing.as_ref();
+        let platform_priced =
+            super::voice::credentials::duration_billing(&VoiceKeySource::Platform, billing).is_ok();
+        let own_billing =
+            super::voice::credentials::duration_billing(&VoiceKeySource::Own, billing);
+        let platform_enabled = super::feature_flag_service::personal_flag_enabled(
+            db,
+            &thread.user_id,
+            super::voice::credentials::platform_flag(&voice.protocol),
+        )
+        .await?;
+        for model in voice
+            .models
+            .iter()
+            .take(if dictation { 1 } else { usize::MAX })
+        {
+            if platform_authorized {
                 options.push(VoiceOption {
                     service_id: service.id.clone(),
                     connection_id: None,
                     key_source: "platform",
                     model: model.id.clone(),
-                    model_label: model.label.clone(),
+                    model_label: if dictation {
+                        "OpenAI · gpt-live-transcribe".into()
+                    } else {
+                        model.label.clone()
+                    },
                     default_model: model.default,
                     voice: voice.clone(),
                     available: platform_enabled && platform_priced,
@@ -1217,24 +1342,17 @@ pub async fn options(
                     billing_owner: "acting_person",
                 });
             }
-            let resource_owner = thread.agent_owner_id.as_deref().unwrap_or(&thread.user_id);
-            for connection in connections.iter().filter(|c| {
-                c.service.user_id == resource_owner
-                    && !matches!(
-                        c.source,
-                        super::user_service_service::CredentialSource::Org { allowed: false, .. }
-                    )
-                    && c.service.catalog_service_id.as_deref() == Some(&service.id)
-                    && c.service.node_id.is_none()
-                    && c.service.api_key_id.is_some()
-                    && c.service.credential_binding.as_deref() != Some("platform")
-            }) {
+            for connection in &own_connections {
                 options.push(VoiceOption {
                     service_id: service.id.clone(),
                     connection_id: Some(connection.service.id.clone()),
                     key_source: "own",
                     model: model.id.clone(),
-                    model_label: model.label.clone(),
+                    model_label: if dictation {
+                        "OpenAI · gpt-live-transcribe".into()
+                    } else {
+                        model.label.clone()
+                    },
                     default_model: model.default,
                     voice: voice.clone(),
                     available: own_billing.is_ok(),

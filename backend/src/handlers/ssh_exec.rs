@@ -22,7 +22,7 @@ use crate::services::{
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
-use super::ssh_tunnel::authorize_ssh_access_for_operation;
+use super::ssh_tunnel::authorize_ssh_access_for_connection;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -141,6 +141,22 @@ pub async fn ssh_exec(
     let body: SshExecRequest = serde_json::from_slice(&body_bytes)
         .map_err(|error| AppError::BadRequest(format!("Invalid SSH exec request: {error}")))?;
 
+    let connection = if auth_user.assistant_chat.is_some() {
+        Some(
+            crate::services::assistant_native_execution::ssh_connection(
+                &state,
+                &auth_user.proxy_resolution_user_id(),
+                &service_id,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let service_id = connection
+        .as_ref()
+        .and_then(|row| row.catalog_service_id.clone())
+        .unwrap_or(service_id);
     let billing_egress_permit =
         crate::services::billing::route_inventory::enforce_billing_egress_classification(
             Some(billing_route_policy),
@@ -152,8 +168,17 @@ pub async fn ssh_exec(
         operation_descriptor::SshOperationKind::Exec,
         Some(&body.command),
     );
-    let auth_context =
-        authorize_ssh_access_for_operation(&state, &auth_user, &service_id, &operation).await?;
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "ssh.exec")
+        .await?;
+    let auth_context = authorize_ssh_access_for_connection(
+        &state,
+        &auth_user,
+        &service_id,
+        &operation,
+        connection.as_ref(),
+    )
+    .await?;
 
     let concurrency = crate::services::service_concurrency_service::acquire_policy(
         &state.db,
@@ -202,6 +227,22 @@ pub async fn ssh_exec(
         }
         check_dangerous_command(&command)?;
 
+        let decision = if let Some(connection) = connection.as_ref() {
+            crate::services::assistant_native_execution::ssh_gate(&state, auth_user.assistant_chat.as_deref(), connection,
+                &ssh_svc,
+                &serde_json::json!({"command":command,"principal":principal,"timeout_secs":timeout_secs,
+                    "acknowledgement_id":headers.get(crate::services::assistant_service_execution::ACK_HEADER).and_then(|v| v.to_str().ok())})).await?
+        } else {
+            crate::services::assistant_service_execution::Decision {
+                admission: None,
+                automatic: None,
+                refusal: None,
+            }
+        };
+        if let Some(refusal) = decision.refusal.as_ref() {
+            return Ok((axum::http::StatusCode::CONFLICT, Json(refusal)).into_response());
+        }
+
         // -- Session limiting --
         let session_guard = state.ssh_session_manager.try_acquire(&user_id).await?;
 
@@ -213,23 +254,27 @@ pub async fn ssh_exec(
 
         // -- Require a node agent --
         // SSH commands are executed on the node agent, not the NyxID server.
-        let node_route = node_routing_service::resolve_node_route(
-            &state.db,
-            &user_id,
-            &service_id,
-            &state.node_ws_manager,
-        )
-        .await
-        .ok()
-        .flatten();
-
-        let node_route = node_route.ok_or_else(|| {
-            AppError::BadRequest(
-                "No node agent is bound to this SSH service. \
-             Deploy a NyxID node agent and bind it to this service to execute commands."
-                    .to_string(),
+        let node_route = if let Some(connection) = connection.as_ref() {
+            crate::services::assistant_native_execution::ssh_route(&state, connection).await?
+        } else {
+            let node_route = node_routing_service::resolve_node_route(
+                &state.db,
+                &user_id,
+                &service_id,
+                &state.node_ws_manager,
             )
-        })?;
+            .await
+            .ok()
+            .flatten();
+
+            node_route.ok_or_else(|| {
+                AppError::BadRequest(
+                    "No node agent is bound to this SSH service. \
+             Deploy a NyxID node agent and bind it to this service to execute commands."
+                        .to_string(),
+                )
+            })?
+        };
         let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
         let credential_class = CredentialClass::NodeManaged;
         let billing_owner = state
@@ -291,6 +336,38 @@ pub async fn ssh_exec(
         let mut last_error_message = None;
 
         for node_id in &all_node_ids {
+            if let Some(chat) = auth_user.assistant_chat.as_deref() {
+                if !node_routing_service::is_node_id_dispatchable(
+                    &state.db,
+                    node_id,
+                    &state.node_ws_manager,
+                )
+                .await?
+                {
+                    continue;
+                }
+                match crate::services::assistant_native_execution::verify_ssh_node(
+                    &state,
+                    chat,
+                    &connection
+                        .as_ref()
+                        .ok_or(AppError::AssistantTurnRequired)?
+                        .id,
+                    node_id,
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(AppError::ApiKeyScopeForbidden(_)) => continue,
+                    Err(error) => {
+                        state
+                            .billing
+                            .reject_before_send(&metered, "assistant_authority_changed", false)
+                            .await?;
+                        return Err(error);
+                    }
+                }
+            }
             let signing_secret = if state.config.node_hmac_signing_enabled {
                 match node_service::get_node_signing_secret(
                     &state.db,
@@ -316,6 +393,33 @@ pub async fn ssh_exec(
             };
 
             state.billing.mark_forwarded(&metered).await?;
+            if let (Some(admission), Some(connection)) =
+                (decision.admission.as_ref(), connection.as_ref())
+            {
+                let validation = async {
+                    admission
+                        .revalidate(&state.db, &connection.id, None)
+                        .await?;
+                    crate::services::assistant_native_execution::verify_ssh_node(
+                        &state,
+                        auth_user
+                            .assistant_chat
+                            .as_deref()
+                            .ok_or(AppError::AssistantTurnRequired)?,
+                        &connection.id,
+                        node_id,
+                    )
+                    .await
+                }
+                .await;
+                if let Err(error) = validation {
+                    state
+                        .billing
+                        .reject_before_send(&metered, "assistant_authority_changed", false)
+                        .await?;
+                    return Err(error);
+                }
+            }
             let exec_result = session_guard
                 .run_until_lost(async {
                     match auth_context.mode {
@@ -434,15 +538,41 @@ pub async fn ssh_exec(
                         auth_user.api_key_id.as_deref(),
                         &tele,
                         TelemetryEvent::SshTunnelOpened {
-                            service_slug,
+                            service_slug: service_slug.clone(),
                             mode: "exec".to_string(),
                         },
-                    );
+                    )
+                    .await;
 
-                    return Ok(Json(response));
+                    if response.exit_code == 0 && !response.timed_out {
+                        crate::services::approval_service::record_chat_approval(
+                            &state.db,
+                            auth_user.assistant_chat.as_deref(),
+                            auth_context.approval_bypass,
+                            &service_id,
+                            &service_slug,
+                            &operation,
+                        )
+                        .await;
+                    }
+                    if response.exit_code == 0
+                        && !response.timed_out
+                        && auth_context.approval_bypass.is_none()
+                        && let (Some(admission), Some(chat)) = (
+                            decision.admission.as_ref(),
+                            auth_user.assistant_chat.as_deref(),
+                        )
+                    {
+                        admission.receipt(&state.db, chat, decision.automatic).await;
+                    }
+                    return Ok(Json(response).into_response());
                 }
                 Err(error @ AppError::RateLimited) => return Err(error),
                 Err(error) => {
+                    if auth_user.assistant_chat.is_some() {
+                        state.billing.fail(&metered, "ssh_outcome_unknown").await?;
+                        return Err(error);
+                    }
                     if auth_context.mode == SshAuthMode::NodeKey {
                         let error_message = error.to_string();
                         record_node_ssh_metric_error(

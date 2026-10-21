@@ -1,19 +1,23 @@
 //! Live machine authorization and server-issued job authority.
+use super::node_service;
 use crate::{
+    AppState,
     errors::{AppError, AppResult},
     models::{
+        assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
         machine_job::{COLLECTION_NAME as JOBS, MachineJob},
         node::{COLLECTION_NAME as NODES, Node, NodeStatus},
     },
     services::{assistant_acknowledgement_service::ChatAuthority, org_service},
 };
 use chrono::{Duration, Utc};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use mongodb::{
     Database,
     bson::{self, doc},
 };
-use nyxid_machine::{Confirmation, Operation};
+use nyxid_machine::authority::Authority;
+use nyxid_machine::{Confirmation, Operation, Request};
 use serde_json::{Value, json};
 
 /// A setup/control notification and its watch settle atomically. The ordinary
@@ -26,22 +30,31 @@ pub async fn settle_watch(
     error: Option<&str>,
 ) -> AppResult<bool> {
     use super::api_key_mutation_service as transactions;
-    let event = bson::to_bson(&super::assistant_team_service::event(kind, text, None))
-        .map_err(|_| AppError::Internal("Could not encode machine event".into()))?;
+    let event = super::nyxbot_watch_service::watch_event(watch, kind, text);
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let watch = watch.clone();
     let error = error.map(str::to_owned);
     session
         .start_transaction()
-        .and_run2(async move |session| {
+        .and_run((db, watch, error, event), |session, (db, watch, error, event)| Box::pin(async move {
             let result: AppResult<bool> = async {
+                if !super::assistant_invocation_service::fence_in_session(
+                    db,
+                    session,
+                    &watch.user_id,
+                    watch.invocation_id.as_deref(),
+                )
+                .await?
+                {
+                    return Ok(false);
+                }
                 let update = db
                     .collection::<bson::Document>(
                         crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME,
                     )
                     .update_one(
-                        doc! {"_id":&watch.id,"status":"pending"},
+                        doc! {"_id":&watch.id,"user_id":&watch.user_id,"status":{"$in":["pending","claimed"]}},
                         doc! {
                             "$set":{
                                 "status":if error.is_some(){
@@ -49,7 +62,7 @@ pub async fn settle_watch(
                                 }else{
                                     "done"
                                 },
-                                "last_error":&error
+                                "last_error":&*error
                             }
                         },
                     )
@@ -58,27 +71,17 @@ pub async fn settle_watch(
                 if update.modified_count == 0 {
                     return Ok(false);
                 }
-                db.collection::<bson::Document>(
-                    crate::models::assistant_conversation::COLLECTION_NAME,
-                )
-                .update_one(
-                    doc! {"_id":&watch.conversation_id,"user_id":&watch.user_id},
-                    doc! {
-                        "$push":{
-                            "pending_events":{
-                                "$each":[event.clone()],
-                                "$slice":-(super::assistant_nyxagent::MAX_PENDING_EVENTS as i64)
-                            }
-                        }
-                    },
-                )
-                .session(&mut *session)
-                .await?;
+                if !super::assistant_nyxagent::append_events_in_session(
+                    db, &watch.user_id, &watch.conversation_id,
+                    std::slice::from_ref(event), session,
+                ).await? {
+                    return Err(AppError::Conflict("Assistant event queue is unavailable".into()));
+                }
                 Ok(true)
             }
             .await;
             transactions::transaction_result(result)
-        })
+        }))
         .await
         .map_err(transactions::map_transaction_error)
 }
@@ -187,37 +190,124 @@ pub fn metadata(node: &Node) -> Value {
     })
 }
 
-pub async fn issue_job(
-    db: &Database,
-    chat: &ChatAuthority,
-    node: &Node,
+#[cfg(test)]
+pub fn issue_job<'a>(
+    db: &'a Database,
+    chat: &'a ChatAuthority,
+    node: &'a Node,
     timeout: u64,
     services: Vec<crate::models::machine_job::DeclaredService>,
-) -> AppResult<MachineJob> {
-    caller(chat)?;
-    let now = Utc::now();
-    let runtime_id = node
-        .machine
-        .as_ref()
-        .map(|profile| profile.runtime_id.clone())
-        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
-        .ok_or_else(|| AppError::NodeOffline("Machine runtime has not connected".into()))?;
-    let job = MachineJob {
-        id: uuid::Uuid::new_v4().to_string(),
-        user_id: chat.user_id.clone(),
-        node_id: node.id.clone(),
-        runtime_id,
-        conversation_id: chat.conversation_id.clone(),
-        api_key_id: chat.api_key_id.clone(),
-        agent_id: chat.agent_id.clone(),
-        state: "running".into(),
+) -> futures::future::BoxFuture<'a, AppResult<MachineJob>> {
+    issue_job_with_id(
+        db,
+        chat,
+        node,
+        timeout,
         services,
-        created_at: now,
-        expires_at: now + Duration::seconds(timeout.min(86400) as i64 + 15),
-        finished_at: None,
-    };
-    db.collection::<MachineJob>(JOBS).insert_one(&job).await?;
-    Ok(job)
+        uuid::Uuid::new_v4().to_string(),
+    )
+}
+
+pub fn issue_job_with_id<'a>(
+    db: &'a Database,
+    chat: &'a ChatAuthority,
+    node: &'a Node,
+    timeout: u64,
+    services: Vec<crate::models::machine_job::DeclaredService>,
+    id: String,
+) -> futures::future::BoxFuture<'a, AppResult<MachineJob>> {
+    Box::pin(async move {
+        caller(chat)?;
+        let now = Utc::now();
+        let runtime_id = node
+            .machine
+            .as_ref()
+            .map(|profile| profile.runtime_id.clone())
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            .ok_or_else(|| AppError::NodeOffline("Machine runtime has not connected".into()))?;
+        let runtime_generation = if super::remote_machine_runtime::is_managed(node) {
+            if timeout == 0 || timeout > 3600 {
+                return Err(AppError::ValidationError(
+                    "Managed command timeout must be 1 to 3600 seconds".into(),
+                ));
+            }
+            let machine = super::remote_machine_service::managed_machine_for_node(db, &node.id)
+                .await?
+                .ok_or(AppError::MachineNotAllowed)?;
+            Some(
+                u64::try_from(machine.runtime_generation)
+                    .map_err(|_| AppError::MachineAuthorityStale)?,
+            )
+        } else {
+            None
+        };
+        let job = MachineJob {
+            id,
+            user_id: chat.user_id.clone(),
+            node_id: node.id.clone(),
+            runtime_id,
+            binding: chat
+                .turn_id
+                .as_ref()
+                .filter(|_| !chat.turn_stopped)
+                .map(
+                    |turn_id| crate::models::machine_job::MachineJobBinding::Assistant {
+                        version: 1,
+                        conversation_id: chat.conversation_id.clone(),
+                        turn_id: turn_id.clone(),
+                        api_key_id: chat.api_key_id.clone(),
+                        agent_id: chat.agent_id.clone(),
+                    },
+                ),
+            runtime_generation,
+            conversation_id: chat.conversation_id.clone(),
+            issuing_turn_id: chat.turn_id.clone(),
+            api_key_id: chat.api_key_id.clone(),
+            agent_id: chat.agent_id.clone(),
+            state: "running".into(),
+            exit_code: None,
+            stop_reason: None,
+            duration_ms: None,
+            cancellation_requested_by: None,
+            cancellation_requested_at: None,
+            services,
+            report_to: chat
+                .report_to
+                .clone()
+                .filter(|_| chat.turn_live && !chat.turn_stopped),
+            report_provenance: if chat.turn_live && !chat.turn_stopped {
+                crate::models::assistant_conversation::REPORT_PROVENANCE_V1
+            } else {
+                0
+            },
+            created_at: now,
+            expires_at: now + Duration::seconds(timeout.min(86400) as i64 + 15),
+            finished_at: None,
+            retain_until: None,
+        };
+        // Job publication and Stop contend on the exact active-turn write. A
+        // revocation capturing jobs cannot miss a concurrent admitted publication.
+        let mut session = db.client().start_session().await?;
+        let db = db.clone();
+        let chat = chat.clone();
+        let node = node.clone();
+        session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let result: AppResult<_> = async {
+                    fence_turn_operation_in_session(&db, session, &chat, &node).await?;
+                    db.collection::<MachineJob>(JOBS)
+                        .insert_one(&job)
+                        .session(&mut *session)
+                        .await?;
+                    Ok(job.clone())
+                }
+                .await;
+                super::api_key_mutation_service::transaction_result(result)
+            })
+            .await
+            .map_err(super::api_key_mutation_service::map_transaction_error)
+    })
 }
 
 pub async fn job(
@@ -246,16 +336,29 @@ pub async fn gateway_job(
     conversation: &str,
     id: &str,
 ) -> AppResult<MachineJob> {
-    db.collection::<MachineJob>(JOBS).find_one(doc!{"_id":id,"node_id":node,"runtime_id":runtime,
-        "conversation_id":conversation,"state":"running","expires_at":{"$gt":bson::DateTime::now()}})
-        .await?.ok_or_else(||AppError::Forbidden("Machine service call has no live server-issued job".into()))
+    let job = db
+        .collection::<MachineJob>(JOBS)
+        .find_one(doc! {"_id":id,"node_id":node,"runtime_id":runtime,
+        "state":"running","expires_at":{"$gt":bson::DateTime::now()}})
+        .await?
+        .ok_or_else(|| {
+            AppError::Forbidden("Machine service call has no live server-issued job".into())
+        })?;
+    if !matches!(
+        job.binding,
+        Some(crate::models::machine_job::MachineJobBinding::External { .. })
+    ) && (conversation.is_empty() || job.conversation_id != conversation)
+    {
+        return Err(AppError::MachinePermissionRevoked);
+    }
+    Ok(job)
 }
 
 pub async fn finish(db: &Database, id: &str) -> AppResult<()> {
     db.collection::<MachineJob>(JOBS)
         .update_one(
             doc! {"_id":id,"state":"running"},
-            doc! {"$set":{"state":"finished","finished_at":bson::DateTime::now()}},
+            doc! {"$set":{"state":"finished","finished_at":bson::DateTime::now(),"retain_until":bson::DateTime::from_chrono(Utc::now()+Duration::days(30))}},
         )
         .await?;
     Ok(())
@@ -385,6 +488,242 @@ pub async fn usable_owners(db: &Database, actor: &str) -> AppResult<Vec<String>>
         );
     }
     Ok(owners)
+}
+
+pub async fn dispatch(
+    state: &AppState,
+    node: &Node,
+    operation: Operation,
+    parameters: Value,
+) -> AppResult<Value> {
+    dispatch_authorized(state, node, operation, parameters, None).await
+}
+pub(crate) async fn dispatch_authorized(
+    state: &AppState,
+    node: &Node,
+    operation: Operation,
+    parameters: Value,
+    authority: Option<Box<Authority>>,
+) -> AppResult<Value> {
+    let request = signed_request(state, node, operation, parameters, authority).await?;
+    Ok(state
+        .node_dispatch
+        .machine_request_with_node(request, node)
+        .await?
+        .result)
+}
+
+pub(crate) async fn signed_request(
+    state: &AppState,
+    node: &Node,
+    operation: Operation,
+    parameters: Value,
+    authority: Option<Box<Authority>>,
+) -> AppResult<Request> {
+    capable(node, operation)?;
+    let secret = node_service::signing_secret_from_node(&state.encryption_keys, node).await?;
+    let mut request = Request {
+        external_authority: None,
+        version: if authority.is_some() { 2 } else { 1 },
+        authority,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        node_id: node.id.clone(),
+        operation,
+        parameters,
+        timestamp: Utc::now().timestamp(),
+        nonce: uuid::Uuid::new_v4().to_string(),
+        signature: String::new(),
+    };
+    request.signature = nyxid_machine::signing::sign(&request, &secret);
+    Ok(request)
+}
+
+/// Persist the issue-time runtime beside the exact turn before dispatch. Stop
+/// writes this same conversation, so capture cannot miss an admitted operation.
+pub(crate) async fn admit_turn_operation(
+    db: &Database,
+    chat: &ChatAuthority,
+    node: &Node,
+) -> AppResult<()> {
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let chat = chat.clone();
+    let node = node.clone();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result = fence_turn_operation_in_session(&db, session, &chat, &node).await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+async fn fence_turn_operation_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    chat: &ChatAuthority,
+    node: &Node,
+) -> AppResult<()> {
+    use crate::models::assistant_conversation::{
+        AssistantConversation, COLLECTION_NAME, MachineTurnScope,
+    };
+    let turn_id = chat
+        .turn_id
+        .as_deref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    let scope = node
+        .machine
+        .as_ref()
+        .filter(|profile| uuid::Uuid::parse_str(&profile.runtime_id).is_ok())
+        .map(|profile| MachineTurnScope {
+            node_id: node.id.clone(),
+            runtime_id: profile.runtime_id.clone(),
+        });
+    if chat.platform_thread && scope.is_none() {
+        return Err(AppError::NodeOffline(
+            "Machine runtime has not connected".into(),
+        ));
+    }
+    if let Some(scope) = &scope {
+        let node_fence = db
+            .collection::<bson::Document>(NODES)
+            .update_one(
+                doc! {"_id":&node.id,"machine.runtime_id":&scope.runtime_id,"status":"online"},
+                doc! {"$inc":{"machine_issue_generation":1_i64}},
+            )
+            .session(&mut *session)
+            .await?;
+        if node_fence.matched_count != 1 {
+            return Err(AppError::MachineTurnStopped);
+        }
+    }
+    let mut add = doc! {"active_turn.machine_node_ids":&node.id};
+    if let Some(scope) = &scope {
+        add.insert(
+            "active_turn.machine_scopes",
+            bson::to_bson(scope).map_err(|_| AppError::MachineTurnStopped)?,
+        );
+    }
+    let row=db.collection::<AssistantConversation>(COLLECTION_NAME).find_one_and_update(
+        doc! {"_id":&chat.conversation_id,"user_id":&chat.user_id,"credential_api_key_id":&chat.api_key_id,
+            "agent_id":&chat.agent_id,"active_turn.turn_id":turn_id,"active_turn.stop_requested":false},
+        doc! {"$addToSet":add,"$inc":{"machine_issue_generation":1_i64}},
+    ).session(&mut *session).await?.ok_or(AppError::MachineTurnStopped)?;
+    if super::assistant_nyxagent::live_turn(&row, Utc::now()).is_none() {
+        return Err(AppError::MachineTurnStopped);
+    }
+    let invocation = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.invocation_id.as_deref());
+    if invocation != chat.invocation_id.as_deref()
+        || !super::assistant_invocation_service::fence_in_session(
+            db,
+            session,
+            &chat.user_id,
+            invocation,
+        )
+        .await?
+    {
+        return Err(AppError::MachineTurnStopped);
+    }
+    if let Some(origin) = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.platform_origin.as_ref())
+    {
+        let origin = super::platform_personal_turn_service::contract_origin(origin)?;
+        let turn = super::platform_manager_contract::TurnRef {
+            conversation_id: row.id.clone(),
+            turn_id: turn_id.to_owned(),
+        };
+        let outcome = super::platform_personal_turn_service::fence_execution_in_session(
+            db,
+            session,
+            &super::platform_personal_binding_service::IdentityProducer,
+            &chat.user_id,
+            &chat.api_key_id,
+            &turn,
+            &origin,
+        )
+        .await?;
+        if !matches!(
+            outcome,
+            super::platform_manager_contract::FenceOutcome::Authorized
+        ) {
+            return Err(AppError::MachineTurnStopped);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn cancel_conversation(state: &AppState, user: &str, id: &str) -> AppResult<()> {
+    let row = state
+        .db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one_and_update(
+            doc! {"_id":id,"user_id":user,"active_turn":{"$ne":null}},
+            doc! {"$set":{"active_turn.stop_requested":true}},
+        )
+        .return_document(mongodb::options::ReturnDocument::After)
+        .await?;
+    let mut nodes: std::collections::HashSet<String> = row
+        .as_ref()
+        .and_then(|r| r.active_turn.as_ref())
+        .map(|t| t.machine_node_ids.iter().cloned().collect())
+        .unwrap_or_default();
+    let mut jobs = state
+        .db
+        .collection::<MachineJob>(JOBS)
+        .find(doc! {"conversation_id":id,"user_id":user,"state":"running"})
+        .await?;
+    while let Some(job) = jobs.next().await {
+        nodes.insert(job?.node_id);
+    }
+    state
+        .db
+        .collection::<MachineJob>(JOBS)
+        .update_many(
+            doc! {"conversation_id":id,"user_id":user,"state":"running"},
+            doc! {"$set":{"state":"finished","finished_at":bson::DateTime::now()}},
+        )
+        .await?;
+    // Cancelling every job in this conversation also covers background jobs
+    // started by an earlier turn. New turns have new node admission scopes.
+    let args = json!({"conversation_id":id,"turn_id":row.as_ref().and_then(|r|r.active_turn.as_ref()).map(|t|t.turn_id.as_str()).unwrap_or_default()});
+    futures::stream::iter(nodes)
+        .for_each_concurrent(16, |node| {
+            let args = args.clone();
+            async move {
+                send_cancel(state, &node, args).await;
+            }
+        })
+        .await;
+    Ok(())
+}
+
+pub(crate) async fn send_cancel(state: &AppState, id: &str, args: serde_json::Value) {
+    let work = async {
+        if let Some(node) = state
+            .db
+            .collection::<Node>(NODES)
+            .find_one(doc! {"_id":id})
+            .await?
+        {
+            dispatch(state, &node, nyxid_machine::Operation::Cancel, args).await?;
+        }
+        AppResult::Ok(())
+    };
+    if !tokio::time::timeout(std::time::Duration::from_millis(800), work)
+        .await
+        .is_ok_and(|r| r.is_ok())
+    {
+        tracing::warn!(
+            node_id = id,
+            "Machine stop delivery pending or node offline"
+        );
+    }
 }
 
 #[cfg(test)]

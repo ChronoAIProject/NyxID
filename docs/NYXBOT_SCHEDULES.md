@@ -122,7 +122,7 @@ And a new **delivery**:
   contracts share the guest classifier; there are no tool-name word lists.
   The owner may explicitly choose `destructive` after a warning, permitting
   ordinary changes without a card. The run waits for the owner and notifies them;
-  this policy cannot be bypassed by the global skip-destructive setting.
+  Auto and Ask every time enforce this policy; Full access bypasses it with an automatic receipt whose reason is `webhook`.
 - **Delivery of results.** Optional `deliver_to`:
   - a chat of one of the owner's channel bots (by chat ID from
     `nyxid__list_channel_chats`, only chats the owner may post to);
@@ -184,8 +184,10 @@ And a new **delivery**:
   browser. NyxBot asks when it is unknown and schedules are involved.
 - **Instructions.** NyxBot's instructions explain schedules and triggers
   briefly: when to offer them, confirming times, and preferring `deliver_to`
-  for things the owner wants pushed. Specialists ask NyxBot rather than
-  managing schedules themselves.
+  for things the owner wants pushed. Specialists never manage schedules
+  themselves: a specialist you talk to directly points you to the Automations
+  page filtered to its automations (`/assistant/automations?agent=<id>`), and
+  NyxBot manages them when you talk to NyxBot.
 - **Guests.** Guests can never create, see or change triggers (`nyxid__`
   tools are refused for guests today; keep it so).
 
@@ -218,9 +220,11 @@ assume, that schedules and triggers do not slow NyxID or NyxBot down:
   and channel inbound paths gain no extra database round trips for owners
   without triggers. For owners with triggers, list the added queries and keep
   them indexed.
-- **Turn start.** A due run starts its turn within 5 s of its scheduled time
-  under normal load; measure scheduled-to-turn-started latency in a test with
-  a fake NyxAgent.
+- **Turn start.** A due run starts its turn within 5 s of dispatch eligibility
+  under normal load. Automatic recurring eligibility includes the bounded
+  deterministic offset described below; Run now and confirmation continuations
+  have no offset. Measure both scheduled-to-start and eligible-to-start latency
+  with a fake NyxAgent.
 - **Benchmarks.** Add repeatable timing tests or benchmarks for the claim
   query at 10k schedules, next-run computation, and the Automations list API
   at 100 schedules. Report the numbers in the final report and in this
@@ -359,6 +363,54 @@ metadata and outcome only. The complete answer lives in the assistant transcript
 and delivery, through the existing post-to-chat path. Long replies respect the
 destination platform limit and explicitly say they were shortened, with a full
 thread link. Push has a concise preview and thread ID.
+A run whose saved `deliver_to` targets a chat receives that platform’s one-message
+length guidance in turn-only context, including confirmation continuations and
+specialist reports. Telegram prefers one 4,096-character message; an explicit
+request for long or complete output permits multiple parts. The delivery planner
+keeps all content and splits longer replies. Thread-only runs receive no channel
+length guidance. `list_channel_chats` supplies the same per-destination guidance
+for explicit `post_to_chat` calls.
+
+Successful `deliver_to: {"type":"chat"}` results send retained tool images,
+one per message, before the result text. Images use the same prepared target and
+live agent, org, bot and `allow_posts` checks. The text consumes one initiate
+limiter token for the logical result; its at most eight images consume none.
+Image claims are inside the single `result_claimed` attempt and never resend an
+ambiguous send. A partial image failure appends a count to the text; only an
+owner-private chat mentions the automation's thread in the NyxID app. Failed
+runs and confirmation notices send text only. Thread results retain their web
+attachments; notification delivery remains text-only.
+
+A run that spans several turns (the initial turn plus confirmation-resumed or
+async-result continuations, identified by the turn's `trigger_run_id`) keeps
+`TriggerRun.image_refs` (`RunImageRef { conversation_id, turn_id, attachment }`
+trusted metadata snapshots, `chat_tool_image` only, deduplicated by attachment
+id, bounded to 16; `services/trigger_run_images.rs`), appended from the fenced
+settlement snapshot in each run turn's settlement transaction. When full, the oldest ref whose delivery claim for the
+run's configured audience is terminal (`sent`, `failed`, `skipped`, `unknown`)
+is evicted; if none is, the newest ref is not added and the run records
+`image_refs_truncated += 1`. Chat delivery verifies each ref's run membership
+and source tuple, loads bytes per tuple with the existing loader, attempts
+first sends only for refs whose claim is absent or `pending` (newest first, up
+to 8, through the shared compare-and-set claim), reports existing claim states
+without consuming that budget, and appends "N additional images were omitted
+from this delivery. Check the automation's thread in the app; older images may
+have expired." when truncated or over budget. A ref whose metadata or source
+is unavailable never blocks the result text: the text is still delivered and
+the image is counted as failed. The single result-attempt claim and the
+error/Stop semantics are unchanged. Screenshots and images of an unrelated
+owner turn in the same home thread never enter a run.
+
+During the upgrade from 0.71.0, automation image delivery also honors v1
+claims for each reference's original conversation/turn and NyxBot channel,
+across all destination aliases. Previously sent or uncertain v1 items do not
+consume the eight-image first-send budget. The conservative guard may suppress
+a second audience of that bot until the old seven-day TTL expires. V2 claims
+use `nyxbot_image_deliveries_v2`; old rows and their TTL remain intact. Concurrent
+old/new replicas can still race during rollout. Remove the v1 read path and
+collection/index one release later, at least seven days after deployment;
+see `CHANNEL_BOT_RELAY.md` for the full compatibility contract.
+
 Final delivery is claimed once. If a replica dies around a remote send, recovery
 reports `result_delivery_interrupted` rather than duplicating an ambiguous send.
 Schedule-to-webhook delivery retains the existing signed delivery record and
@@ -387,8 +439,8 @@ classification shares guest access's HTTP method and catalog contract rules,
 including NyxID markers; names and payload instructions never authorize changes.
 Native tools use their closed effect inventory. Policy is snapshotted at run
 admission and persists across confirmation continuations. Scheduled turns retain
-normal owner authority. The global skip-destructive preference cannot bypass a
-webhook policy. NyxBot tools expose and explain this choice.
+normal owner authority. Full access bypasses webhook confirmation with an auto-allowed receipt. Auto
+and Ask every time retain the snapshotted policy. NyxBot tools expose and explain this choice.
 
 Automation REST operations (including previews, setup prefills, runs and list
 filtering) and timezone/budget settings use the shared first-party human check.
@@ -405,15 +457,18 @@ available for inbound secrets and replay; Automations sits next to Assistant.
 
 ## Performance measurements
 
-Repeat with Rust 1.98.1 and the replica-set MongoDB at port 27020:
+Repeat with Rust 1.98.1 and the `nyxidrs` replica-set MongoDB at port 27019:
 
 ```sh
-NYXID_TEST_DATABASE_URL="mongodb://127.0.0.1:27020/?directConnection=true" \
-  cargo +1.98.1 test -p nyxid --bin nyxid-server -- \
-  trigger_schedule --test-threads 2 --nocapture
+NYXID_TEST_DATABASE_URL="mongodb://127.0.0.1:27019/?replicaSet=nyxidrs" \
+  RUSTUP_TOOLCHAIN=1.98.1 cargo test -p nyxid --bin nyxid-server \
+  --config profile.test.incremental=false --config profile.test.debug=1 -- \
+  trigger_schedule --test-threads=1 --nocapture
 ```
 
-Recorded on the local macOS development machine, unoptimized test build. Timings
+Recorded on 2026-10-15 on the local macOS development machine, unoptimized test
+build with reduced debug information and incremental compilation disabled. The
+scheduler and compute module filters ran sequentially from one compiled executable. Timings
 are observations, not a production capacity guarantee. The fixture inserts
 10,000 active schedule documents and their derived work, with 100 belonging to
 the list-request owner. Database round trips and BSON work are included. The
@@ -422,16 +477,18 @@ it excludes HTTP socket/TLS and authentication middleware overhead:
 
 | Measurement | Result | Sample |
 | --- | ---: | --- |
-| Covered due discovery, 10,000 schedules / 1 due | 0.435 ms/query | 100 queries |
-| Fenced CAS claim, 10,000 schedules | 4.279 ms/claim | 100 claims |
-| Idle tick, 10,000 schedules / 0 due | 0.418 ms/tick | 100 ticks |
-| Automations list API, 100 interval schedules + previews + JSON encoding | 9.508 ms/request | 20 requests |
-| Next cron occurrence, weekday 08:00 Singapore | 91.361 µs/op | 10,000 computations |
-| Scheduled time → committed turn admission | 246 ms | fake NyxAgent; two concurrent replica ticks |
-| Confirmation decision → completed continuation | 487.193 ms | persisted owner decision, scheduler tick, fake NyxAgent |
-| Three-day outage, five-minute cadence | 111.843 ms | 864 missed occurrences; one execution, one summary, one summary audit |
+| Covered due discovery, 10,000 schedules / 1 due | 0.439 ms/query | 100 queries |
+| Fenced CAS claim, 10,000 schedules | 4.037 ms/claim | 100 claims |
+| Idle tick, 10,000 schedules / 0 due | 0.649 ms/tick | 100 ticks |
+| Automations list API, 100 interval schedules + previews + JSON encoding | 6.047 ms/request | 20 requests |
+| Next cron occurrence, weekday 08:00 Singapore | 70.748 µs/op | 10,000 computations |
+| Scheduled time → committed turn admission | 287 ms | fake NyxAgent; two concurrent replica ticks |
+| Confirmation decision → completed continuation | 177.912 ms | persisted owner decision, scheduler tick, fake NyxAgent |
+| Three-day outage, five-minute cadence | 85.262 ms | 864 missed occurrences; one execution, one summary, one summary audit |
 
-The 26 targeted scheduler tests that produce these numbers pass in 17.88 seconds.
+The 27 scheduler tests passed in 64.28 seconds; the five cron-computation tests
+passed in 0.73 seconds. The scheduler suite includes admission-deadline and
+failure-notification regressions in addition to these measurements.
 
 The explain test asserts `PROJECTION_COVERED → IXSCAN`, index
 `trigger_work_due {at:1,_id:1}`, `totalDocsExamined = 0`, and
@@ -479,3 +536,71 @@ link here with `?agent=…`; webhook setup links use `?setup=…`. The previous
 → Triggers remains for webhook secrets and replay and links to the assistant for
 automation management. Browser links share `services::assistant_links`; API
 endpoints and webhook confirmation policies are unchanged.
+
+## Capacity, terminal failures and dispatch spreading
+
+Automatic recurring occurrences have a stable SHA-256 dispatch offset based on
+the trigger ID. The offset is at most min(45 seconds, grace / 4, time to next
+occurrence / 4), and zero when grace is below 120 seconds. It changes only the
+work record's dispatch eligibility. `scheduled_at`, UUID-v5 occurrence identity,
+grace deadline, overlap rules and missed-run summaries use the original instant.
+It is applied after cron timezone/DST resolution. A delayed scheduler dispatches
+immediately if eligibility has passed, subject to the original grace deadline.
+Run now, one-off schedules, webhooks and confirmation continuations have no offset.
+
+Once admitted, the first request of an ordinary trigger turn retries explicit
+NyxAgent capacity refusals until the run deadline, capped at ten minutes from its
+first dispatch. Automatic task and image continuations get a fresh ten-minute
+request window, within the total-turn cap. A human confirmation continuation turn
+uses the interactive 120-second window and ignores the original run deadline.
+Retry deadlines gate only refusal retries and sleeps: a first dispatch is always
+allowed and every dispatched request keeps its normal response/body-read bounds. This wait holds the
+owner's pool slot and keeps the existing turn heartbeat and Stop watcher active.
+Accepted executions are never automatically replayed after an interrupted stream
+or worker crash.
+
+Terminal `insufficient_credits`, `wallet_suspended` and
+`plan_entitlement_required` pause immediately. The remedy is respectively top up,
+contact support/review billing, or check plan entitlement. `credential_invalid`,
+`model_unavailable` and `model_not_configured` pause after three consecutive
+identical terminal results. Any other terminal result or success resets the
+streak, including confirmation expiry while Waiting, `turn_lost`, and
+`thread_deleted`. The common terminal finalizers apply this transition in the
+same transaction as the run outcome, with run deduplication and the admitted
+trigger generation fence; recovery paths cannot leave an older streak intact.
+Scheduler and async-operation cancellation pass the configured frontend URL
+through these finalizers, so pause notices always retain absolute remedy and
+Resume links, including a pausing reason finalized through a fallback path.
+Edits and Resume reset the streak; Resume clears the pause reason and
+opens future occurrences without replaying missed history. Transient capacity,
+interrupted/unknown streams, `turn_lost` and `outcome_unknown` do not pause.
+
+Settlement deduplicates by run ID and fences against the trigger's authored
+`updated_at` generation captured at initial admission. Confirmation continuations
+retain that generation. An old completion cannot pause an edited or resumed
+trigger. Legacy started runs without that snapshot do not change failure streaks.
+The transaction commits the streak, pause, stable owner-thread event and
+`pause_notice` work identity together. The event includes the remedy, Billing &
+Usage and Automations links, and Resume instructions. Management shows readable
+pause copy.
+
+External notifications use the existing Telegram/FCM/APNS transports, which have
+no shared recipient idempotency protocol. A durable send barrier claims one
+external attempt; an ambiguous send is never replayed. A crash after that barrier
+may omit the external notification, while the committed owner-thread notice and
+pause reason remain available. This bounds duplicates without claiming exactly
+once remote delivery. If the original thread has been deleted, the pause reason
+and notification work remain durable.
+
+Run history shows both the scheduled occurrence and the actual turn start, so
+recurring dispatch spreading is visible. Additive `attempts` and
+`capacity_wait_ms` accumulate at settlement across the run's turns, including
+confirmation continuations and orphan recovery; a positive wait is
+shown as “waited 1 minute 5 seconds for capacity”, with singular/plural formatting
+and no waited phrase for zero/unknown waits. The per-request admission windows
+follow the grace, continuation and total-turn bounds described above. Automations never send pending acknowledgements,
+including automations with chat result delivery. Interactive acknowledgements use
+the shared ten-second admission delay; policy constants live in
+`services/assistant_engine_policy.rs`. Exhaustion
+reports the measured wait. A missing wait field on older runs is not a zero-wait
+claim.

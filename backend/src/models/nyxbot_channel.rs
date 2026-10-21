@@ -19,6 +19,15 @@ pub struct GatewayThreadSupport {
     pub checked_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GatewayBotMentionSupport {
+    pub supported: bool,
+    pub enabled: bool,
+    #[serde(with = "crate::models::bson_datetime::optional")]
+    pub checked_at: Option<DateTime<Utc>>,
+}
+
 /// A channel bot linked to one of the owner's agents (NyxBot or a
 /// specialist). Telegram bots, and bots on platforms whose
 /// `nyxbot:gateway-{platform}` feature flag is on for their linking person, are reached
@@ -27,6 +36,8 @@ pub struct GatewayThreadSupport {
 /// (`"direct"`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotChannel {
+    #[serde(default)]
+    pub gateway_bot_mentions: GatewayBotMentionSupport,
     #[serde(default)]
     pub gateway_threads: GatewayThreadSupport,
     #[serde(default)]
@@ -72,6 +83,9 @@ pub struct NyxbotChannel {
     pub gateway_record_id: Option<String>,
     #[serde(default)]
     pub gateway_version: Option<i64>,
+    /// Confirmed gateway echo of reply.ack_after_ms=0; absent means unverified.
+    #[serde(default)]
+    pub gateway_no_progress: bool,
     #[serde(default)]
     pub binding_id: Option<String>,
     /// Gateway only: the group admission last set on the gateway channel
@@ -172,6 +186,11 @@ impl std::fmt::Debug for NyxbotChannel {
 /// `kind`, so the gateway's conversation registry keeps working.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotThread {
+    /// Native bot-message handoffs left until the next admitted human message.
+    /// None is an existing chat's one-time initial budget; only atomic updates
+    /// in channel_bot_turn_service may spend or refill it.
+    #[serde(default)]
+    pub native_bot_hops_remaining: Option<i32>,
     #[serde(flatten, default)]
     pub follow: super::channel_thread_follow::ThreadFollow,
     #[serde(rename = "_id")]
@@ -200,6 +219,9 @@ pub struct NyxbotThread {
     pub platform_chat_id: Option<String>,
     #[serde(default)]
     pub platform_thread_id: Option<String>,
+    /// Outbound evidence; never changes partition, conversation or follow keys.
+    #[serde(default)]
+    pub telegram_topic: Option<super::channel_thread::TelegramTopic>,
     /// The agent this chat reaches instead of the channel's.
     #[serde(default)]
     pub agent_id: Option<String>,
@@ -236,6 +258,11 @@ pub struct NyxbotThread {
     /// Direct only: the newest inbound NyxID message ID, for asynchronous replies.
     #[serde(default)]
     pub last_message_id: Option<String>,
+    /// Newest inbound NyxID relay message ID, regardless of transport.
+    /// Kept separate from `last_message_id` so gateway text routing semantics
+    /// remain unchanged while image delivery can target the relay adapter.
+    #[serde(default)]
+    pub last_relay_message_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -250,11 +277,78 @@ impl std::fmt::Debug for NyxbotThread {
     }
 }
 
+/// Authorized source selectors only. Provider keys stay on ChannelMessage.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EventMediaItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<super::assistant_channel_media::MediaOutcome>,
+    /// Index into the source row's standalone or embedded attachments.
+    pub index: usize,
+    /// Selects the embedded attachment list when true.
+    pub embedded: bool,
+    /// Declared media kind, such as image or file.
+    pub kind: String,
+    /// Provider-declared size, when known.
+    pub size_bytes: Option<u64>,
+}
+/// Native media admission identity, selectors and interruption notice lifecycle.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EventMedia {
+    /// Captured route identity; no credential material is retained here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<MediaAuthority>,
+    /// v1 native media identity shared by deliveries of the same provider message.
+    pub key: String,
+    /// Declared attachment count, including items omitted by the parser's cap.
+    pub declared: usize,
+    /// Authorized selectors retained from the source message.
+    pub items: Vec<EventMediaItem>,
+    /// Bot component of the native chat scope for notices across channel rebuilds.
+    #[serde(default)]
+    pub channel_bot_id: String,
+    /// Platform component of the native chat scope for notices across channel rebuilds.
+    #[serde(default)]
+    pub platform: String,
+    /// Provider chat component of the notice scope, stable across channel rebuilds.
+    pub platform_chat_id: String,
+    /// Set after five minutes without a source binding to a turn or queue.
+    #[serde(default)]
+    pub interrupted: bool,
+    /// Set when the interruption notice is consumed by the next owner turn.
+    #[serde(default)]
+    pub noted: bool,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MediaAuthority {
+    pub route_api_key_id: String,
+    pub route_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub bot_owner_id: Option<String>,
+    pub follow_binding_generation: i64,
+}
+impl std::fmt::Debug for EventMedia {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EventMedia([REDACTED])")
+    }
+}
+
 /// Gateway turn admission, keyed by binding and idempotency key. Holds the
 /// gateway's `event_context` verbatim (encrypted; it carries message text) so
 /// `readEventContext` returns exactly what was admitted. TTL-expired.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotEvent {
+    /// Trusted presence for every sender; independent of owner-only media claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_media_declared: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<EventMedia>,
+    /// Atomic native bot budget/source-event claim. Never cleared on retries.
+    #[serde(default)]
+    pub native_bot_budget_claimed: bool,
+    /// Semantic provider request digest for proven no-turn human Busy retries.
+    /// Legacy/direct events cannot resume through this optional contract.
+    #[serde(default)]
+    pub retry_request_sha256: Option<String>,
     /// Present only on turns admitted by the durable-delivery implementation.
     #[serde(default)]
     pub delivery: Option<ChannelTurnDelivery>,
@@ -269,9 +363,17 @@ pub struct NyxbotEvent {
     pub user_id: String,
     pub partition: String,
     pub event_id: String,
+    /// NyxID relay message anchoring this event, when the gateway activity
+    /// originated from NyxID's own relay.
+    #[serde(default)]
+    pub relay_message_id: Option<String>,
     #[serde(with = "crate::models::bson_bytes::optional", default)]
     pub event_context_ciphertext: Option<Vec<u8>>,
-    /// `running`, `completed`, `failed`, or `refused`.
+    /// `running`, `queued`, `completed`, `failed`, `refused`, or `interrupted`. Queued work is
+    /// accepted with its original source before it is bound to an execution turn.
+    /// A proven no-turn human Busy attempt may be `retryable`, atomically
+    /// claimed as `resuming`.
+    /// Relay media events also terminalize as `completed` after intentional silence.
     pub status: String,
     #[serde(default)]
     pub conversation_id: Option<String>,
@@ -297,6 +399,8 @@ impl std::fmt::Debug for NyxbotEvent {
 /// TTL-expired.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NyxbotWatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
     #[serde(rename = "_id")]
     pub id: String,
     #[serde(default)]
@@ -322,12 +426,17 @@ pub struct NyxbotWatch {
     /// channel_bot: the bot that was linked.
     #[serde(default)]
     pub channel_bot_id: Option<String>,
-    /// connect_link: the hosted link being completed.
+    /// connect_link: a ConnectLink; channel_bot: the exact ChannelConnectLink.
+    /// Legacy channel_bot watches without this field retain the old creation-window lookup.
     #[serde(default)]
     pub connect_link_id: Option<String>,
     /// Stable code only, never upstream prose.
     #[serde(default)]
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub report_to: Option<String>,
+    #[serde(default)]
+    pub report_provenance: u8,
     /// When the sweep last looked at it: sweeps take the least recently
     /// checked first, so old abandoned watches never starve new ones.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
@@ -359,14 +468,23 @@ impl std::fmt::Debug for TriggerPrefill {
 /// neither they nor sender identifiers appear in Debug, logs or audit.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelTurnDelivery {
+    /// Absent only on legacy admitted turns; Bot always retains guest authority.
+    #[serde(default)]
+    pub sender_kind: Option<super::channel_thread::ThreadSenderKind>,
     pub version: i32,
-    /// waiting (stream), pending (async), streamed, sending, sent, unknown, refused.
+    /// waiting (stream), pending (async), streamed, sending, sent, silent, unknown, refused.
     pub state: String,
     pub origin: super::assistant_conversation::ChannelOrigin,
     pub sender_id: String,
     pub guest: bool,
     pub addressed: bool,
     pub transport: String,
+    /// Captured managed route authority for generic queued execution. Legacy
+    /// unanchored queued work cannot adopt a replacement route/key.
+    #[serde(default)]
+    pub source_route_id: Option<String>,
+    #[serde(default)]
+    pub source_route_api_key_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub stream_deadline: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

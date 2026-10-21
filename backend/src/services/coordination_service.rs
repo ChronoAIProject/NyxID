@@ -628,7 +628,9 @@ impl SlotStore {
             return Ok(None);
         }
         let ttl_ms = duration_millis(ttl, "slot TTL")?;
-        let lease_id = uuid::Uuid::new_v4().to_string();
+        // Time-ordered so claims made in the same millisecond keep their order
+        // (`is_oldest_live`); otherwise opaque.
+        let lease_id = uuid::Uuid::now_v7().to_string();
         let scope_hash = hash_parts(&[scope]);
         let holder_bson = bson::to_bson(holder).map_err(|error| {
             AppError::Internal(format!("Failed to encode slot holder: {error}"))
@@ -727,6 +729,37 @@ impl SlotStore {
             ))
             .await?;
         Ok(result.deleted_count == 1)
+    }
+
+    /// Whether any unexpired slot of `namespace` is held for `scope`.
+    pub async fn any_live(db: &mongodb::Database, namespace: &str, scope: &str) -> AppResult<bool> {
+        Ok(db
+            .collection::<Document>(SLOT_COLLECTION_NAME)
+            .find_one(live_slot_filter(namespace, &hash_parts(&[scope])))
+            .projection(doc! { "_id": 1 })
+            .await?
+            .is_some())
+    }
+
+    /// Whether `token` is the longest-held unexpired slot of its namespace
+    /// and scope, so slots can be granted in the order they were taken.
+    /// Same-millisecond claims are ordered by their time-ordered lease IDs.
+    pub async fn is_oldest_live(db: &mongodb::Database, token: &SlotToken) -> AppResult<bool> {
+        let oldest = db
+            .collection::<Document>(SLOT_COLLECTION_NAME)
+            .find_one(live_slot_filter(&token.namespace, &token.scope_hash))
+            .sort(doc! { "acquired_at": 1, "lease_id": 1 })
+            .projection(doc! { "lease_id": 1 })
+            .await?;
+        Ok(oldest.is_some_and(|row| row.get_str("lease_id") == Ok(token.lease_id.as_str())))
+    }
+}
+
+fn live_slot_filter(namespace: &str, scope_hash: &str) -> Document {
+    doc! {
+        "namespace": namespace,
+        "scope_hash": scope_hash,
+        "$expr": { "$gt": ["$expires_at", "$$NOW"] },
     }
 }
 

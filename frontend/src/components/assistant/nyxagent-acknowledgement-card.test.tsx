@@ -20,6 +20,17 @@ const acknowledgement: NyxAgentAcknowledgement = {
 };
 afterEach(cleanup);
 
+it("hides a stale owner ask in Full access while keeping specialist requests routed to NyxBot", () => {
+  const decide = vi.fn();
+  const view = render(<NyxAgentAcknowledgementCard acknowledgement={acknowledgement} accessMode="autopilot" deciding={false} onDecision={decide} />);
+  expect(screen.getByRole("status")).toHaveTextContent("No longer needed · Full access · Delete agent key ci-bot");
+  expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  expect(decide).not.toHaveBeenCalled();
+  view.rerender(<NyxAgentAcknowledgementCard acknowledgement={{ ...acknowledgement, decider: "orchestrator" }} accessMode="autopilot" deciding={false} onDecision={decide} />);
+  expect(screen.getByText("Requested from NyxBot")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Allow" })).toBeVisible();
+});
+
 it.each([
   ["service", "Allow this chat to use GitHub?"],
   ["account", "Allow this chat to manage your NyxID account"],
@@ -92,10 +103,10 @@ it.each([
 });
 
 it.each([
-  ["orchestrator", "allowed", "Scope matches the user's request", "Allowed by NyxBot: Scope matches the user's request"],
-  ["orchestrator", "denied", null, "Denied by NyxBot"],
-  ["user", "denied", null, "Denied by you"],
-  ["user", "allowed", null, "Allowed by you"],
+  ["orchestrator", "allowed", "Scope matches the user's request", "NyxBot allowed"],
+  ["orchestrator", "denied", null, "NyxBot denied"],
+  ["user", "denied", null, "You denied"],
+  ["user", "allowed", null, "You allowed"],
 ] as const)(
   "shows who decided a routed request (%s, %s)",
   (decidedBy, status, reason, text) => {
@@ -113,14 +124,14 @@ it.each([
       />,
     );
     expect(screen.getByRole("status")).toHaveTextContent(
-      `${text} · Allow this agent to use GitHub?`,
+      `${text} · ${acknowledgement.summary}`,
     );
   },
 );
 
 it.each([
-  [{ risk: "destructive", access_mode: "nyxmode", reason: "access_mode" }, "Destructive", "Your access mode is NyxMode."],
-  [{ risk: "change", access_mode: "ask_every_time", reason: "access_mode" }, "Change", "Your access mode is Ask Every Time."],
+  [{ risk: "destructive", access_mode: "nyxmode", reason: "access_mode" }, "Destructive", "Your access mode is Auto."],
+  [{ risk: "change", access_mode: "ask_every_time", reason: "access_mode" }, "Change", "Your access mode is Ask every time."],
   [{ risk: "sensitive", access_mode: null, reason: "webhook" }, "Sensitive", "This automation's confirmation policy asks."],
   [{ risk: "change", reason: "policy" }, "Change", "This machine's or saved login's confirmation setting asks."],
 ] as const)("explains an action card's risk and why it asks (%o)", (confirmation, risk, why) => {
@@ -145,4 +156,19 @@ it("shows no risk line on cards from older servers", () => {
     />,
   );
   expect(screen.queryByText(/access mode is/)).not.toBeInTheDocument();
+});
+
+it("never promises NyxBot's follow-up on a skills card NyxBot is not deciding", () => {
+  render(<NyxAgentAcknowledgementCard acknowledgement={{ ...acknowledgement, kind: "skills", decider: "user" }} deciding={false} onDecision={vi.fn()} />);
+  const card = screen.getByRole("region");
+  expect(card).toHaveTextContent("Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor.");
+  expect(card).not.toHaveTextContent("asks NyxBot");
+  expect(card).not.toHaveTextContent("Requested from NyxBot");
+});
+
+it.each(["skills", "operations"] as const)("explains that routed %s widening follows the permission mode", (kind) => {
+  render(<NyxAgentAcknowledgementCard acknowledgement={{ ...acknowledgement, kind, decider: "orchestrator" }} deciding={false} onDecision={vi.fn()} />);
+  expect(screen.getByRole("region")).toHaveTextContent("follows NyxBot's permission mode");
+  expect(screen.getByRole("region")).not.toHaveTextContent("Widening requires your confirmation");
+  expect(screen.getByRole("region")).not.toHaveTextContent("You will get a separate card");
 });

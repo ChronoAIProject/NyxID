@@ -213,7 +213,10 @@ impl<T: Send + Sync + Serialize + DeserializeOwned> Collection<T> {
 }
 
 impl<'a, T> Write<'a, T> {
-    pub fn session<'b>(self, session: &'b mut super::transaction::Transaction) -> Write<'b, T> {
+    pub fn session<'b>(self, session: &'b mut super::transaction::Transaction) -> Write<'b, T>
+    where
+        'a: 'b,
+    {
         Write {
             db: self.db,
             name: self.name,
@@ -399,7 +402,11 @@ impl LocalCommit {
         let mut session = self.db.client().start_session().await?;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
-            session.start_transaction().await?;
+            session
+                .start_transaction()
+                .read_concern(mongodb::options::ReadConcern::snapshot())
+                .write_concern(mongodb::options::WriteConcern::majority())
+                .await?;
             let result = self.run(&mut session).await;
             match result {
                 Ok(outcome) => loop {
@@ -549,6 +556,86 @@ impl LocalCommit {
                 });
             }
         }
+        // Journal commits are the shared mutation boundary for instance
+        // services/endpoints/keys. Fence creation and material replacement in
+        // the same transaction; cleanup deletions remain available afterward.
+        let admission: crate::errors::AppResult<()> = async {
+            let mut owners = std::collections::BTreeSet::new();
+            let mut dependency_owners = std::collections::BTreeSet::new();
+            for row in &after {
+                let old = before.iter().find(|old| old.get("_id") == row.get("_id"));
+                let owner = row.get_str("user_id").map_err(|_| {
+                    crate::errors::AppError::Internal(
+                        "Instance resource owner is unavailable".into(),
+                    )
+                })?;
+                let created_or_moved =
+                    old.is_none_or(|old| old.get("user_id") != row.get("user_id"));
+                let material_changed = self.name == "user_api_keys"
+                    && old.is_none_or(|old| {
+                        [
+                            "user_id",
+                            "credential_encrypted",
+                            "access_token_encrypted",
+                            "refresh_token_encrypted",
+                            "user_oauth_client_id_encrypted",
+                            "user_oauth_client_secret_encrypted",
+                            "provider_config_id",
+                            "connection_id",
+                            "source_id",
+                            "credential_source",
+                            "oauth_app_observation",
+                            "secret_context_versions",
+                        ]
+                        .iter()
+                        .any(|field| old.get(*field) != row.get(*field))
+                    });
+                if created_or_moved || material_changed {
+                    owners.insert(owner);
+                }
+                if material_changed {
+                    dependency_owners.insert(owner.to_owned());
+                    if let Some(old_owner) = old.and_then(|old| old.get_str("user_id").ok()) {
+                        dependency_owners.insert(old_owner.to_owned());
+                    }
+                    if let Ok(source_id) = row.get_str("source_id")
+                        && let Some(source) = self
+                            .db
+                            .collection::<Document>(
+                                crate::models::user_provider_token::COLLECTION_NAME,
+                            )
+                            .find_one(doc! {"_id":source_id})
+                            .projection(doc! {"user_id":1})
+                            .session(&mut *session)
+                            .await?
+                        && let Ok(source_owner) = source.get_str("user_id")
+                    {
+                        dependency_owners.insert(source_owner.to_owned());
+                    }
+                }
+            }
+            for owner in owners {
+                super::super::erasure_admission::fence_in_session(&self.db, owner, session).await?;
+            }
+            for owner in dependency_owners {
+                super::super::erasure_admission::credential_change_in_session(
+                    &self.db, &owner, session,
+                )
+                .await?;
+            }
+            // A lost source CAS produces no installed row. Preserve its
+            // received capability and let callers observe the current winner;
+            // it cannot consume an issuance receipt or become a DB error.
+            if self.name == "user_api_keys" && !after.is_empty() {
+                super::super::personal_erasure_service::issuance::install_current_key_in_session(
+                    &self.db, &after, session,
+                )
+                .await?;
+            }
+            Ok(())
+        }
+        .await;
+        super::super::api_key_mutation_service::transaction_result(admission)?;
         if self.name == "user_services" {
             // Snapshot isolation alone cannot see a reference inserted concurrently
             // with a backing-resource edit. Writing its fence makes those commits

@@ -19,8 +19,41 @@ use axum::{
 };
 use futures::{StreamExt, TryStreamExt};
 use mongodb::bson::doc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// Dedicated bounded wire projection; persisted model fields are never serialized directly.
+#[derive(Serialize)]
+struct FragmentResponse {
+    text: String,
+    start_ms: i64,
+    end_ms: i64,
+}
+fn fragments_response(
+    voice: Option<&crate::models::assistant_message::VoiceTranscript>,
+) -> Vec<FragmentResponse> {
+    let Some(voice) = voice else {
+        return Vec::new();
+    };
+    let mut bytes = 0usize;
+    voice
+        .fragments
+        .iter()
+        .take(crate::services::voice::transcript::MAX_FRAGMENTS)
+        .take_while(|f| {
+            bytes = bytes.saturating_add(f.text.len());
+            bytes <= crate::services::voice::transcript::MAX_TEXT_BYTES
+                && f.start_ms >= 0
+                && f.end_ms >= f.start_ms
+                && f.end_ms <= 1_830_000
+        })
+        .map(|f| FragmentResponse {
+            text: f.text.clone(),
+            start_ms: f.start_ms,
+            end_ms: f.end_ms,
+        })
+        .collect()
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -59,6 +92,11 @@ pub async fn stream(
             crate::services::voice::session::get(&state.db, &auth.user_id.to_string(), &id, &sid)
                 .await
                 .map_err(|e| Stage::Thread.error(e))?;
+        if call.dictation {
+            return Err(AppError::Forbidden(
+                "Dictation has a dedicated audio-only stream".into(),
+            ));
+        }
         let socket_id = uuid::Uuid::new_v4().to_string();
         crate::services::voice::session::claim_stream(&state.db, &call, &socket_id).await?;
         Ok((human_session, call, socket_id))
@@ -196,6 +234,8 @@ async fn serve(
                 let source_titles:std::collections::HashMap<_,_>=sources.into_iter().map(|m|(m.id,m.text.chars().take(120).collect::<String>())).collect();
                 let value=json!({"type":"snapshot","session":super::SessionResponse::from(call.clone()),
                     "captions":captions.into_iter().rev().map(|m|json!({"id":m.id,"speaker":m.role,"text":m.text,
+                        "start_ms":m.voice.as_ref().map(|v|v.start_ms),"end_ms":m.voice.as_ref().map(|v|v.end_ms),
+                        "fragments":fragments_response(m.voice.as_ref()),
                         "sealed":m.voice.as_ref().is_some_and(|v|v.sealed),"complete":m.voice.as_ref().is_some_and(|v|v.complete)})).collect::<Vec<_>>(),
                     "tasks":tasks.into_iter().rev().map(|r|json!({"id":r.id,"state":r.state,"turn_id":r.turn_id,
                         "pending_acknowledgement_ids":r.pending_acknowledgement_ids,

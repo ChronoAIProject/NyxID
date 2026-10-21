@@ -26,6 +26,7 @@ pub struct CatalogAuthority {
 impl CatalogAuthority {
     pub fn restriction_claims(&self) -> TokenRestrictionClaims {
         TokenRestrictionClaims {
+            oauth_lineage: None,
             resources: Some(self.resources.clone()),
             allowed_service_ids: Some(self.allowed_service_ids.clone()),
             allow_all_services: Some(self.allow_all_services),
@@ -72,9 +73,7 @@ pub async fn persist_grant(
         created_at: Utc::now(),
     };
 
-    db.collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
-        .insert_one(grant)
-        .await?;
+    super::erasure_admission::insert_owned(db, CATALOG_DELEGATION_GRANTS, user_id, &grant).await?;
     Ok(())
 }
 
@@ -240,6 +239,8 @@ pub fn authority_from_restriction_claims(
     restrictions: &TokenRestrictionClaims,
 ) -> AppResult<CatalogAuthority> {
     let claims = Claims {
+        delegation_origin: None,
+        oauth_lineage: None,
         sub: String::new(),
         iss: String::new(),
         aud: String::new(),
@@ -270,6 +271,7 @@ pub fn authority_from_restriction_claims(
         allow_all_services: restrictions.allow_all_services,
         allowed_node_ids: restrictions.allowed_node_ids.clone(),
         allow_all_nodes: restrictions.allow_all_nodes,
+        protected_consent: None,
         assistant_forward: None,
     };
     authority_from_claims(&claims)
@@ -348,6 +350,8 @@ mod tests {
         let actor_client_id = "catalog-live-actor";
         let receiving_client_id = "catalog-live-receiver";
         let claims = Claims {
+            delegation_origin: None,
+            oauth_lineage: None,
             sub: uuid::Uuid::new_v4().to_string(),
             iss: config.jwt_issuer.clone(),
             aud: config.jwt_issuer.clone(),
@@ -380,6 +384,7 @@ mod tests {
             allow_all_services: Some(false),
             allowed_node_ids: Some(Vec::new()),
             allow_all_nodes: Some(false),
+            protected_consent: None,
             assistant_forward: None,
         };
 
@@ -518,6 +523,8 @@ mod tests {
 
     fn claims() -> Claims {
         Claims {
+            delegation_origin: None,
+            oauth_lineage: None,
             sub: uuid::Uuid::new_v4().to_string(),
             iss: "https://nyx.example".to_string(),
             aud: "https://nyx.example".to_string(),
@@ -550,6 +557,7 @@ mod tests {
             allow_all_services: Some(false),
             allowed_node_ids: Some(Vec::new()),
             allow_all_nodes: Some(false),
+            protected_consent: None,
             assistant_forward: None,
         }
     }

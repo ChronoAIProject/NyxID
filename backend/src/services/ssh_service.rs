@@ -4,7 +4,6 @@ use chrono::Utc;
 use mongodb::bson::doc;
 use rand::RngCore;
 use ssh_key::{Algorithm, LineEnding, PrivateKey, PublicKey, certificate};
-use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
@@ -21,6 +20,7 @@ pub struct SshSessionManager {
 
 #[derive(Debug)]
 pub struct ResolvedSshAuthContext {
+    pub approval_bypass: Option<super::assistant_acknowledgement_service::AutoAllowed>,
     pub concurrency_policy: Option<crate::models::service_concurrency::ServiceConcurrencyPolicy>,
     pub mode: SshAuthMode,
     pub service_slug: String,
@@ -92,6 +92,7 @@ pub async fn resolve_ssh_auth_context_for_owner(
     .await?
     {
         return Ok(ResolvedSshAuthContext {
+            approval_bypass: None,
             concurrency_policy: service.concurrency_policy.clone(),
             mode: user_service.ssh_auth_mode,
             service_slug: user_service.slug,
@@ -102,6 +103,7 @@ pub async fn resolve_ssh_auth_context_for_owner(
     let ssh = ensure_ssh_service(service)?;
 
     Ok(ResolvedSshAuthContext {
+        approval_bypass: None,
         concurrency_policy: service.concurrency_policy.clone(),
         mode: ssh.ssh_auth_mode,
         service_slug: service.slug.clone(),
@@ -136,7 +138,7 @@ pub async fn build_ssh_config(
         input.allowed_principals,
     )?;
 
-    let (ca_private_key_encrypted, ca_public_key) = ca_material_for_upsert(
+    let (ca_private_key_encrypted, ca_public_key, ca_context_version) = ca_material_for_upsert(
         encryption_keys,
         service_id,
         existing,
@@ -145,6 +147,7 @@ pub async fn build_ssh_config(
     .await?;
 
     Ok(SshServiceConfig {
+        ca_context_version,
         host: input.host.trim().to_string(),
         port: input.port,
         ssh_auth_mode,
@@ -279,18 +282,19 @@ async fn ca_material_for_upsert(
     service_id: &str,
     existing: Option<&SshServiceConfig>,
     certificate_auth_enabled: bool,
-) -> AppResult<(Option<Vec<u8>>, Option<String>)> {
+) -> AppResult<(Option<Vec<u8>>, Option<String>, Option<u8>)> {
     if let Some(existing) = existing
         && (existing.ca_private_key_encrypted.is_some() || existing.ca_public_key.is_some())
     {
         return Ok((
             existing.ca_private_key_encrypted.clone(),
             existing.ca_public_key.clone(),
+            existing.ca_context_version,
         ));
     }
 
     if !certificate_auth_enabled {
-        return Ok((None, None));
+        return Ok((None, None, None));
     }
 
     generate_service_ca(encryption_keys, service_id).await
@@ -299,7 +303,7 @@ async fn ca_material_for_upsert(
 async fn generate_service_ca(
     encryption_keys: &EncryptionKeys,
     service_id: &str,
-) -> AppResult<(Option<Vec<u8>>, Option<String>)> {
+) -> AppResult<(Option<Vec<u8>>, Option<String>, Option<u8>)> {
     let mut rng = rand::rngs::OsRng;
     let mut ca_key = PrivateKey::random(&mut rng, Algorithm::Ed25519)
         .map_err(|e| AppError::Internal(format!("Failed to generate SSH CA key: {e}")))?;
@@ -312,9 +316,19 @@ async fn generate_service_ca(
         .public_key()
         .to_openssh()
         .map_err(|e| AppError::Internal(format!("Failed to encode SSH CA public key: {e}")))?;
-    let ca_private_key_encrypted = encryption_keys.encrypt(ca_private_pem.as_bytes()).await?;
+    let ca_private_key_encrypted = super::ssh_ca_record_service::encrypt(
+        encryption_keys,
+        service_id,
+        &ca_public_key,
+        ca_private_pem.as_bytes(),
+    )
+    .await?;
 
-    Ok((Some(ca_private_key_encrypted), Some(ca_public_key)))
+    Ok((
+        Some(ca_private_key_encrypted),
+        Some(ca_public_key),
+        encryption_keys.contextual_record_writes().then_some(3),
+    ))
 }
 
 pub async fn issue_certificate(
@@ -348,17 +362,10 @@ pub async fn issue_certificate(
     let ca_public_key = ssh_service.ca_public_key.clone().ok_or_else(|| {
         AppError::Internal("SSH certificate CA public key is not configured".to_string())
     })?;
-    let ca_private_key_encrypted =
-        ssh_service
-            .ca_private_key_encrypted
-            .as_deref()
-            .ok_or_else(|| {
-                AppError::Internal("SSH certificate CA private key is not configured".to_string())
-            })?;
     let decrypted_ca_private_key =
-        Zeroizing::new(encryption_keys.decrypt(ca_private_key_encrypted).await?);
+        super::ssh_ca_record_service::private_key(encryption_keys, service_id, ssh_service).await?;
     let ca_private_key = PrivateKey::from_openssh(&decrypted_ca_private_key)
-        .map_err(|e| AppError::Internal(format!("Stored SSH CA private key is invalid: {e}")))?;
+        .map_err(|_| AppError::Internal("Stored SSH signing authority is invalid".into()))?;
 
     let valid_after_time = SystemTime::now();
     let valid_before_time =
@@ -469,6 +476,7 @@ mod tests {
         catalog_service.service_type = "ssh".to_string();
         catalog_service.created_by = catalog_author_id.clone();
         catalog_service.ssh_config = Some(SshServiceConfig {
+            ca_context_version: None,
             host: "10.0.0.5".to_string(),
             port: 22,
             ssh_auth_mode: SshAuthMode::Cert,
@@ -587,6 +595,7 @@ mod tests {
         let encryption_keys =
             EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([7_u8; 32], None)));
         let existing = SshServiceConfig {
+            ca_context_version: None,
             host: "old.example".to_string(),
             port: 22,
             ssh_auth_mode: SshAuthMode::Cert,

@@ -12,7 +12,17 @@ use super::channel_platform::{
 };
 use crate::errors::{AppError, AppResult};
 
+pub const MAX_MEDIA_URL_BYTES: usize = 8192;
+
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// Returned when the provider outcome cannot be determined (for example a
+/// request timeout after bytes may have been accepted). Callers must never
+/// retry an operation carrying this sentinel.
+pub const DELIVERY_UNCERTAIN: &str = "Media upload or delivery failed";
+
+pub fn is_delivery_uncertain(error: &AppError) -> bool {
+    matches!(error, AppError::ChannelPlatformError(message) if message == DELIVERY_UNCERTAIN || message == crate::services::channel_text_delivery::UNCERTAIN)
+}
 
 pub fn fetch_failed() -> AppError {
     AppError::ChannelMediaFetchFailed(
@@ -20,7 +30,7 @@ pub fn fetch_failed() -> AppError {
     )
 }
 pub fn upload_failed() -> AppError {
-    AppError::ChannelPlatformError("Media upload or delivery failed".into())
+    AppError::ChannelPlatformError(DELIVERY_UNCERTAIN.into())
 }
 
 /// Match DNS labels, never substrings, userinfo, alternate ports or redirects.
@@ -52,6 +62,9 @@ pub async fn media_client(
     trusted_base: Option<&str>,
 ) -> AppResult<reqwest::Client> {
     tokio::time::timeout(TIMEOUT, async {
+        if target.len() > MAX_MEDIA_URL_BYTES {
+            return Err(fetch_failed());
+        }
         let parsed = url::Url::parse(target).map_err(|_| fetch_failed())?;
         if is_test_origin(&parsed, trusted_base) {
             return reqwest::Client::builder()
@@ -62,14 +75,19 @@ pub async fn media_client(
                 .map_err(|_| fetch_failed());
         }
         if parsed.scheme() != "https"
+            || parsed.fragment().is_some()
             || (hosts.is_some() && parsed.port_or_known_default() != Some(443))
             || hosts.is_some_and(|hosts| !allowed_host(&parsed, hosts))
         {
             return Err(fetch_failed());
         }
-        super::webhook_delivery_service::validate_webhook_url(target, "Media URL")
-            .await
-            .map_err(|_| fetch_failed())?;
+        super::url_validation::validate_public_http_url_with_limit(
+            target,
+            "Media URL",
+            MAX_MEDIA_URL_BYTES,
+        )
+        .await
+        .map_err(|_| fetch_failed())?;
         let host = parsed.host_str().ok_or_else(fetch_failed)?;
         // Pin the addresses used for this request and re-check after resolution;
         // no DNS rebinding or redirect may bypass the public-host boundary.
@@ -106,17 +124,25 @@ pub async fn bounded_response(
     if !response.status().is_success() {
         return Err(fetch_failed());
     }
+    let mime_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    Ok(FetchedMedia {
+        bytes: bounded_body(response, max_bytes).await?,
+        mime_type,
+        filename: None,
+    })
+}
+
+async fn bounded_body(response: reqwest::Response, max_bytes: u64) -> AppResult<Bytes> {
     if response
         .content_length()
         .is_some_and(|length| length > max_bytes)
     {
         return Err(AppError::ChannelMediaTooLarge);
     }
-    let mime_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
     let mut bytes = BytesMut::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -126,11 +152,7 @@ pub async fn bounded_response(
         }
         bytes.extend_from_slice(&chunk);
     }
-    Ok(FetchedMedia {
-        bytes: bytes.freeze(),
-        mime_type,
-        filename: None,
-    })
+    Ok(bytes.freeze())
 }
 
 pub async fn download(
@@ -212,6 +234,7 @@ pub async fn materialize(
 
 /// Provider control JSON responses are bounded to 256 KiB, allowing attachment-rich objects.
 pub async fn response_json(request: reqwest::RequestBuilder) -> AppResult<Value> {
+    super::channel_platform::mark_provider_attempt();
     let response = request
         .timeout(TIMEOUT)
         .send()
@@ -221,6 +244,72 @@ pub async fn response_json(request: reqwest::RequestBuilder) -> AppResult<Value>
         .await
         .map_err(|_| upload_failed())?;
     serde_json::from_slice(&media.bytes).map_err(|_| upload_failed())
+}
+
+/// Fetch a bounded provider control response while preserving the distinction
+/// between an unknown transport outcome and a definite platform refusal.
+/// Attachment senders use this helper so a non-2xx response is never reported
+/// as an uncertain delivery that must be suppressed forever.
+pub async fn platform_json(
+    request: reqwest::RequestBuilder,
+    platform: &str,
+    markers: &[&str],
+) -> AppResult<Value> {
+    let (status, value) = platform_json_value(request).await?;
+    platform_response(status, value, platform, markers)
+}
+
+pub fn platform_response(
+    status: reqwest::StatusCode,
+    value: Value,
+    platform: &str,
+    markers: &[&str],
+) -> AppResult<Value> {
+    // Every completed non-2xx HTTP response (including 408 and 5xx) is a
+    // definite provider refusal under the relay protocol. Only an absent or
+    // unreadable response leaves delivery uncertain. Never retry it here.
+    if !status.is_success() {
+        let description = value
+            .get("description")
+            .or_else(|| value.get("message"))
+            .or_else(|| value.get("msg"))
+            .or_else(|| value.pointer("/error/message"))
+            .or_else(|| value.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or("provider refusal");
+        return Err(
+            crate::services::channel_platform::classify_upstream_refusal(
+                platform,
+                &format!("HTTP {status}: {description}"),
+                markers,
+            ),
+        );
+    }
+    Ok(value)
+}
+
+/// Same bounded parser as [`platform_json`], retaining status and parsed error
+/// JSON for adapters (such as Telegram) that have a safe, narrowly-scoped
+/// fallback for a particular 400 response.
+pub async fn platform_json_value(
+    request: reqwest::RequestBuilder,
+) -> AppResult<(reqwest::StatusCode, Value)> {
+    super::channel_platform::mark_provider_attempt();
+    let response = request
+        .timeout(TIMEOUT)
+        .send()
+        .await
+        .map_err(|_| upload_failed())?;
+    let status = response.status();
+    let body = bounded_body(response, 256 * 1024)
+        .await
+        .map_err(|_| upload_failed())?;
+    let value: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) if !status.is_success() => Value::Null,
+        Err(_) => return Err(upload_failed()),
+    };
+    Ok((status, value))
 }
 
 pub fn multipart_part(attachment: &MaterializedAttachment) -> AppResult<reqwest::multipart::Part> {
@@ -305,6 +394,87 @@ mod tests {
                 assert!(matches!(result, Err(AppError::ChannelPlatformError(_))));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn platform_json_bounds_and_classifies_without_exposing_provider_bodies() {
+        let server = MockServer::start().await;
+        for status in [400, 403, 408, 429, 500, 503] {
+            let target = format!("/refusal/{status}");
+            Mock::given(method("GET"))
+                .and(path(&target))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_string("<html>PRIVATE provider body</html>"),
+                )
+                .mount(&server)
+                .await;
+            let error = platform_json(
+                reqwest::Client::new().get(format!("{}{target}", server.uri())),
+                "Telegram",
+                &[],
+            )
+            .await
+            .unwrap_err();
+            assert!(!is_delivery_uncertain(&error), "HTTP {status}");
+            assert!(!error.to_string().contains("PRIVATE"));
+            // Unmigrated callers retain their existing collapsed behavior.
+            let legacy =
+                response_json(reqwest::Client::new().get(format!("{}{target}", server.uri())))
+                    .await
+                    .unwrap_err();
+            assert!(is_delivery_uncertain(&legacy));
+        }
+        for (target, body) in [
+            ("/malformed", "not-json".to_owned()),
+            ("/oversized", "x".repeat(257 * 1024)),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(target))
+                .respond_with(ResponseTemplate::new(200).set_body_string(body))
+                .mount(&server)
+                .await;
+            let error = platform_json(
+                reqwest::Client::new().get(format!("{}{target}", server.uri())),
+                "Lark",
+                &[],
+            )
+            .await
+            .unwrap_err();
+            assert!(is_delivery_uncertain(&error));
+            assert!(
+                matches!(&error, AppError::ChannelPlatformError(message) if message == DELIVERY_UNCERTAIN)
+            );
+        }
+        Mock::given(method("GET"))
+            .and(path("/unreachable"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(serde_json::json!({"error":{"message":"chat not found"}})),
+            )
+            .mount(&server)
+            .await;
+        assert!(matches!(
+            platform_json(
+                reqwest::Client::new().get(format!("{}/unreachable", server.uri())),
+                "Telegram",
+                &["chat not found"]
+            )
+            .await,
+            Err(AppError::ChannelConversationNotReachable(_))
+        ));
+        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        drop(socket);
+        assert!(is_delivery_uncertain(
+            &platform_json(
+                reqwest::Client::new().get(format!("http://{address}")),
+                "Lark",
+                &[]
+            )
+            .await
+            .unwrap_err()
+        ));
     }
 
     #[tokio::test]

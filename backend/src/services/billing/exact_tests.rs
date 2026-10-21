@@ -8,6 +8,13 @@ use mongodb::bson::{self, Document, doc};
 struct Entitled;
 #[async_trait]
 impl LagoApi for Entitled {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        Ok(crate::services::billing::taxes::zero_config())
+    }
     async fn ensure_customer(
         &self,
         input: &OwnerProvisionInput,
@@ -61,6 +68,21 @@ async fn database(name: &str) -> mongodb::Database {
         ledger::TEST_BILLING_LEDGER_HMAC_KEY,
     ));
     let db = crate::test_utils::connect_test_database(name)
+        .await
+        .unwrap();
+    // Mirror the production transaction identity constraint for every test
+    // that admits and settles durable usage.
+    db.collection::<Document>("usage_meter")
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! { "transaction_id": 1 })
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
         .await
         .unwrap();
     db.collection::<Document>("billing_ledger")
@@ -158,6 +180,27 @@ fn usage(id: &str) -> Document {
         "created_at": now,
         "updated_at": now,
     }
+}
+
+// Match BillingService's funded handoff: gate_and_reserve already commits all
+// meters with its holds. Opening again would invent a second funding owner in
+// a fixture without startup indexes, rather than exercise production replay.
+async fn admitted_meter(
+    db: &mongodb::Database,
+    ctx: &route_context::BillingRouteContext,
+    reservation: &reservation::BillingReservation,
+) -> meter::MeteredProxyContext {
+    assert_eq!(reservation.owner_id, ctx.billing_owner_id);
+    assert!(meter::has_complete_funded_meter(db, ctx).await.unwrap());
+    let expected = ctx.platform_specs().count() + usize::from(ctx.resale.is_some());
+    assert_eq!(
+        db.collection::<Document>("usage_meter")
+            .count_documents(doc! { "billing_request_id": &ctx.billing_request_id })
+            .await
+            .unwrap(),
+        expected as u64
+    );
+    meter::MeteredProxyContext::from_route(ctx)
 }
 
 async fn assert_accounts(db: &mongodb::Database) {
@@ -341,7 +384,7 @@ async fn sub_micro_grant_funds_zero_wallet_end_to_end_and_44608_tokens() {
             .unwrap()
             .unwrap();
         assert_eq!(reservation.total_reserved_credits, Credits::ZERO);
-        let metered = meter::open(&db, &ctx, Some(&reservation)).await.unwrap();
+        let metered = admitted_meter(&db, &ctx, &reservation).await;
         meter::mark_forwarded(&db, &metered).await.unwrap();
         let result = PlatformUsage {
             cache_read_tokens: quantity,
@@ -1034,6 +1077,9 @@ async fn mixed_account_lifecycle_balances_after_issue_hold_release_expire_revoke
         .unwrap();
     exact_migration::run(&db).await.unwrap();
     let input = grants::IssueCreditGrantInput {
+        amount: None,
+        service_limits: Vec::new(),
+        request_id: None,
         amount_credits: 1,
         target_kind: BillingTargetKind::SelectedUsers,
         target_user_ids: vec![owner.clone()],
@@ -1087,7 +1133,9 @@ async fn mixed_account_lifecycle_balances_after_issue_hold_release_expire_revoke
         .unwrap();
     assert_eq!(expired.terminal_amount.to_string(), "0.9999992");
     let grant = grants::issue_grants(&db, input).await.unwrap().remove(0);
-    grants::revoke_grant(&db, &grant.id).await.unwrap();
+    grants::request_revoke_grant(&db, &grant.id, None)
+        .await
+        .unwrap();
     assert_accounts(&db).await;
     webhook::refresh_wallet_balance(&db, &owner, "10.12345".parse().unwrap())
         .await
@@ -1849,10 +1897,10 @@ async fn aggregation_exact_keys_take_precedence_including_null() {
     let pico = Credits::from_pico(1).unwrap();
     db.collection::<Document>("usage_meter")
         .insert_many([
-            doc! { "_id": "both", "funding": { "total_charge": pico, "total_charge_micros": 1_000_000_i64 } },
-            doc! { "_id": "null", "funding": { "total_charge": null, "total_charge_micros": 1_000_000_i64 } },
-            doc! { "_id": "old", "funding": { "total_charge_micros": 1_000_000_i64 } },
-            doc! { "_id": "none" },
+            doc! { "_id": "both", "transaction_id": "both", "funding": { "total_charge": pico, "total_charge_micros": 1_000_000_i64 } },
+            doc! { "_id": "null", "transaction_id": "null", "funding": { "total_charge": null, "total_charge_micros": 1_000_000_i64 } },
+            doc! { "_id": "old", "transaction_id": "old", "funding": { "total_charge_micros": 1_000_000_i64 } },
+            doc! { "_id": "none", "transaction_id": "none" },
         ])
         .await.unwrap();
     let rows: Vec<Document> = db
@@ -2027,7 +2075,7 @@ async fn voice_seconds_reconcile_uses_allowance_then_grant_then_wallet_once() {
         .await
         .unwrap()
         .unwrap();
-    let metered = meter::open(&db, &ctx, Some(&reservation)).await.unwrap();
+    let metered = admitted_meter(&db, &ctx, &reservation).await;
     meter::mark_forwarded(&db, &metered).await.unwrap();
     db.collection(WINDOWS)
         .insert_one(VoiceWindow {
@@ -2142,7 +2190,7 @@ async fn voice_and_reported_token_components_settle_independently_without_replay
                 .await
                 .unwrap()
                 .unwrap();
-            let metered = meter::open(&db, &ctx, Some(&reservation)).await.unwrap();
+            let metered = admitted_meter(&db, &ctx, &reservation).await;
             meter::mark_forwarded(&db, &metered).await.unwrap();
             let usage = PlatformUsage {
                 voice_seconds: duration,
@@ -2337,6 +2385,308 @@ async fn voice_without_byok_duration_price_records_seconds_without_charges_or_be
                 .unwrap(),
             0
         );
+        db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn zero_admission_usage_releases_reservations_without_spending_benefits_or_resale() {
+    use crate::models::service_billing::{
+        BillingMetric, PlatformUsage, ResaleSpec, ResaleUsage, ServiceBilling,
+    };
+    for funding_class in ["wallet", "grant", "allowance"] {
+        let db = database("zero_admission_usage").await;
+        db.collection::<Document>("billing_wallet")
+            .insert_one(old_wallet(100_000_000))
+            .await
+            .unwrap();
+        if funding_class == "grant" {
+            db.collection::<Document>("credit_grants")
+                .insert_one(old_grant(1_000_000))
+                .await
+                .unwrap();
+        }
+        exact_migration::run(&db).await.unwrap();
+        for metric in ["platform_requests", "resale_requests"] {
+            db.collection::<Document>("billing_rate_cache")
+                .insert_one(doc! {
+                    "_id": format!("{metric}:*"), "lago_metric_code": metric,
+                    "credits_per_unit_micros": 1_000_000_i64, "synced_at": bson::DateTime::now(),
+                })
+                .await
+                .unwrap();
+        }
+        let allowance = crate::models::usage_allowance::UsageAllowance {
+            id: "allowance".into(),
+            bundle_id: None,
+            service_id: "service".into(),
+            service_slug: "service".into(),
+            metric: BillingMetric::Requests,
+            quantity: 10,
+            recurrence: crate::models::usage_allowance::AllowanceRecurrence::Daily,
+            target_kind: crate::models::billing_target::BillingTargetKind::AllUsers,
+            target_user_ids: vec![],
+            target_org_ids: vec![],
+            target_group_ids: vec![],
+            is_active: funding_class == "allowance",
+            created_by: "admin".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.collection::<crate::models::usage_allowance::UsageAllowance>("usage_allowances")
+            .insert_one(&allowance)
+            .await
+            .unwrap();
+        let period = allowances::ensure_current_period(&db, &allowance, "owner", Utc::now())
+            .await
+            .unwrap();
+        let before_wallet = db
+            .collection::<Document>("billing_wallet")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        let before_grant = db
+            .collection::<Document>("credit_grants")
+            .find_one(doc! {})
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            let mut ctx = route_context::BillingRouteContext::new(
+                route_inventory::BillingIngress::Proxy,
+                uuid::Uuid::new_v4().to_string(),
+                "owner".into(),
+                "owner".into(),
+                None,
+                Some("service".into()),
+                Some("service".into()),
+                Some("service".into()),
+                route_context::NodeIntent::Direct,
+                "bearer".into(),
+                crate::models::usage_meter::CredentialClass::UserOwned,
+                BillingMetric::Requests,
+                Some(&ServiceBilling {
+                    platform_billable: true,
+                    ..Default::default()
+                }),
+                false,
+            )
+            .with_platform_metering(true);
+            ctx.resale = Some(ResaleSpec {
+                metric: BillingMetric::Requests,
+                lago_metric_code: "resale_requests".into(),
+            });
+            let reservation = reservation::gate_and_reserve(&db, Some(&Entitled), &ctx, false, 900)
+                .await
+                .unwrap()
+                .unwrap();
+            let metered = admitted_meter(&db, &ctx, &reservation).await;
+            meter::mark_forwarded(&db, &metered).await.unwrap();
+            meter::settle(
+                &db,
+                &metered,
+                PlatformUsage::default(),
+                Some(ResaleUsage {
+                    metric: BillingMetric::Requests,
+                    quantity: 0,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+            let rows = db
+                .collection::<UsageMeterRow>("usage_meter")
+                .find(doc! {"billing_request_id": &ctx.billing_request_id})
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                assert!(row.released);
+                assert_eq!(row.quantity, Some(0));
+            }
+        }
+        let after_wallet = db
+            .collection::<Document>("billing_wallet")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        for field in ["balance_credits", "reserved_credits", "pending_lago_debits"] {
+            assert_eq!(before_wallet.get(field), after_wallet.get(field), "{field}");
+        }
+        let after_grant = db
+            .collection::<Document>("credit_grants")
+            .find_one(doc! {})
+            .await
+            .unwrap();
+        for field in ["remaining", "reserved"] {
+            assert_eq!(
+                before_grant.as_ref().and_then(|row| row.get(field)),
+                after_grant.as_ref().and_then(|row| row.get(field)),
+                "{field}"
+            );
+        }
+        let after_period = db
+            .collection::<Document>("usage_allowance_periods")
+            .find_one(doc! {"_id": &period.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_period.get_i64("consumed_quantity").unwrap(), 0);
+        assert_eq!(after_period.get_i64("reserved_quantity").unwrap(), 0);
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn voice_funding_zero_observed_startup_releases_wallet_and_request_fee() {
+    Box::pin(async {
+        use crate::models::{
+            billing_wallet::BillingWallet,
+            service_billing::{
+                BillingMetric, LanePriceComponent, LanePricing, PricingSyncStatus, ServiceBilling,
+            },
+        };
+        let db = database("voice_zero_seconds_fee").await;
+        crate::services::assistant_voice::ensure_indexes(&db)
+            .await
+            .unwrap();
+        db.collection::<Document>("billing_wallet")
+            .insert_one(old_wallet(100))
+            .await
+            .unwrap();
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                "owner",
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        crate::services::feature_flag_service::set_platform_override(
+            &db,
+            crate::services::feature_flag_service::BILLING_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+            true,
+            "owner",
+        )
+        .await
+        .unwrap();
+        exact_migration::run(&db).await.unwrap();
+        let tariff = ServiceBilling {
+            platform_billable: true,
+            platform_key_pricing: Some(LanePricing {
+                metric: BillingMetric::VoiceSeconds,
+                credits_per_unit: "1".into(),
+                lago_metric_code: "voice-duration".into(),
+                sync_status: PricingSyncStatus::Synced,
+                sync_error: None,
+                components: vec![LanePriceComponent {
+                    metric: BillingMetric::Requests,
+                    credits_per_unit: "2".into(),
+                    lago_metric_code: "voice-start".into(),
+                    sync_status: PricingSyncStatus::Synced,
+                    sync_error: None,
+                }],
+                operations: vec![],
+            }),
+            ..Default::default()
+        };
+        let mut fee = crate::billing_integration_tests::rate("voice-start", Utc::now());
+        fee.credits_per_unit_micros = 2_000_000;
+        db.collection::<crate::models::billing_rate_cache::BillingRateCache>("billing_rate_cache")
+            .insert_many([
+                crate::billing_integration_tests::rate("voice-duration", Utc::now()),
+                fee,
+            ])
+            .await
+            .unwrap();
+        let billing = crate::billing_integration_tests::billing_service(
+            &db,
+            std::sync::Arc::new(crate::billing_integration_tests::FakeLago::default()),
+            0,
+        );
+        for forwarded in [false, true] {
+            let ctx = route_context::BillingRouteContext::new(
+                route_inventory::BillingIngress::LlmProvider,
+                "unused".into(),
+                "owner".into(),
+                "owner".into(),
+                None,
+                None,
+                Some("service".into()),
+                Some("service".into()),
+                route_context::NodeIntent::Direct,
+                "bearer".into(),
+                crate::models::usage_meter::CredentialClass::NyxidManagedMaster,
+                BillingMetric::VoiceSeconds,
+                Some(&tariff),
+                false,
+            );
+            let session = uuid::Uuid::new_v4().to_string();
+            let request = voice::window_id(&session, 0).unwrap();
+            let reserved = voice::reserve(&db, &billing, ctx, &session, 0)
+                .await
+                .unwrap();
+            let wallet = db
+                .collection::<BillingWallet>("billing_wallet")
+                .find_one(doc! {"owner_id":"owner"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(wallet.balance_credits, Credits::from_whole(100));
+            assert_eq!(wallet.reserved_credits, Credits::from_whole(32));
+            if forwarded {
+                billing.mark_forwarded(&reserved).await.unwrap();
+            }
+            // Failed local preparation and attempted provider creation share
+            // the zero-confirmed-usage rule. No clock-derived duration or fee.
+            voice::finalize(&db, &request, false).await.unwrap();
+            voice::finalize(&db, &request, false).await.unwrap();
+            let rows: Vec<UsageMeterRow> = db
+                .collection("usage_meter")
+                .find(doc! {"billing_request_id":&request})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                assert!(row.released);
+                if forwarded {
+                    assert_eq!(row.quantity, Some(0));
+                }
+                assert!(matches!(
+                    row.metric,
+                    BillingMetric::VoiceSeconds | BillingMetric::Requests
+                ));
+            }
+            let wallet = db
+                .collection::<BillingWallet>("billing_wallet")
+                .find_one(doc! {"owner_id":"owner"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(wallet.balance_credits, Credits::from_whole(100));
+            assert_eq!(wallet.reserved_credits, Credits::ZERO);
+            assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
+        }
+        assert_eq!(
+            db.collection::<Document>("billing_ledger")
+                .count_documents(doc! {
+                    "event_type":"accounting_v2",
+                    "movement":{"$in":["usage_settled","grant_consumed"]}
+                })
+                .await
+                .unwrap(),
+            0,
+            "zero confirmed usage must create neither a wallet debit nor a grant consumption posting"
+        );
+        assert_accounts(&db).await;
         db.drop().await.unwrap();
     })
     .await;

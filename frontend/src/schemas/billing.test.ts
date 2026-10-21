@@ -13,6 +13,65 @@ import {
 } from "./billing";
 
 describe("billing schemas", () => {
+  it("preserves the actual optional Machine gateway attribution without creating a second charge", () => {
+    const row = billingUsageRowSchema.parse({
+      metric: "requests",
+      lago_metric_code: "service_requests",
+      layer: "platform",
+      quantity: 1,
+      requests: 1,
+      bytes: 0,
+      events: 1,
+      lago_acked: true,
+      estimated_credits: "0.000040",
+      machine_usage: {
+        node_id: "machine",
+        job_id: "job",
+        runtime_id: "runtime",
+        runtime_generation: null,
+        grant_id: null,
+        principal_kind: "assistant",
+        command: "must not survive safe parsing",
+      },
+    });
+    expect(row.machine_usage).toEqual({
+      node_id: "machine",
+      job_id: "job",
+      runtime_id: "runtime",
+      runtime_generation: null,
+      grant_id: null,
+      principal_kind: "assistant",
+    });
+    expect(row.estimated_credits).toBe("0.000040");
+    expect(row.quantity).toBe(1);
+  });
+
+  it("rejects malformed supplied Machine attribution while allowing legacy unattributed rows", () => {
+    const row = {
+      metric: "requests",
+      lago_metric_code: "service_requests",
+      layer: "platform",
+      quantity: 1,
+      requests: 1,
+      bytes: 0,
+      events: 1,
+      lago_acked: true,
+    };
+    expect(billingUsageRowSchema.safeParse(row).success).toBe(true);
+    expect(
+      billingUsageRowSchema.safeParse({
+        ...row,
+        machine_usage: {
+          node_id: "machine",
+          job_id: "job",
+          runtime_id: "runtime",
+          runtime_generation: -1,
+          grant_id: null,
+          principal_kind: "api_key",
+        },
+      }).success,
+    ).toBe(false);
+  });
   it("accepts the read-only usage response shape returned by `/billing/usage`", () => {
     const result = billingUsageResponseSchema.safeParse({
       owner_id: "owner-1",
@@ -211,5 +270,22 @@ describe("normalizeBillingSearch service filter", () => {
   it("accepts only the topup action", () => {
     expect(normalizeBillingSearch({ action: "topup" }).action).toBe("topup");
     expect(normalizeBillingSearch({ action: "refund" }).action).toBeUndefined();
+  });
+});
+
+describe("bill contracts", () => {
+  it("preserves exact tax strings and rejects numeric money", async () => {
+    const { currentBillSchema, usageInvoicesSchema } =
+      await import("./billing");
+    const { currentBill, usageInvoices } =
+      await import("@/test/billing-bill-fixture");
+    expect(currentBillSchema.parse(currentBill).tax_total).toBe("0.91");
+    expect(
+      usageInvoicesSchema.parse(usageInvoices).invoices[0]
+        ?.prepaid_credits_applied,
+    ).toBe("10.9");
+    expect(
+      currentBillSchema.safeParse({ ...currentBill, tax_total: 0.91 }).success,
+    ).toBe(false);
   });
 });

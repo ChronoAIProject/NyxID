@@ -6,6 +6,7 @@
 //! Diagnostics are metadata only: codes, timestamps and counts. Never store
 //! message bodies, provider error prose with user content, or credentials.
 
+use super::channel_platform::platform_name;
 use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Utc};
@@ -148,20 +149,6 @@ impl<'a> HealthFacts<'a> {
 
 fn is_x(platform: &str) -> bool {
     matches!(platform, "x" | "twitter")
-}
-
-pub fn platform_name(platform: &str) -> String {
-    match platform {
-        "x" | "twitter" => "X".into(),
-        "whatsapp" => "WhatsApp".into(),
-        other => {
-            let mut chars = other.chars();
-            chars
-                .next()
-                .map(|first| first.to_uppercase().chain(chars).collect())
-                .unwrap_or_default()
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -450,3 +437,31 @@ pub(crate) fn reset_rejection_throttle() {
 #[cfg(test)]
 #[path = "channel_bot_health_tests.rs"]
 mod tests;
+
+/// Bounded read projection shared by NyxBot discovery and diagnostic surfaces.
+/// These are observed facts, not a provider probe or a setup-completion promise.
+pub fn setup_evidence(bot: &ChannelBot, gateway: bool) -> serde_json::Value {
+    use serde_json::json;
+    let facts = HealthFacts::for_bot(bot, Utc::now(), gateway);
+    let action = recommend(&facts);
+    let d = &bot.diagnostics;
+    json!({
+        "contract_version": 1, "observed_at": Utc::now().to_rfc3339(),
+        "bot_id": bot.id, "platform": bot.platform, "platform_bot_username": bot.platform_bot_username,
+        "credential_source": bot.credential_source, "credential_connection_id": bot.connection_id,
+        "provider_slug": if is_x(&bot.platform) { Some("twitter") } else { None },
+        "authorization": "not_probed", "mode": facts.mode(), "gateway": gateway,
+        "webhook_registered": bot.webhook_registered,
+        "subscription": d.subscription_state.as_ref().map(|s| json!({
+            "registered": s.registered, "checked_at": s.checked_at.to_rfc3339(), "last_error": s.last_error,
+        })),
+        "last_authenticated_inbound_at": d.last_inbound_at.map(|t| t.to_rfc3339()),
+        "last_authenticated_inbound_source": d.last_inbound_source,
+        "last_outbound_attempt_at": d.last_outbound_at.map(|t| t.to_rfc3339()),
+        "last_outbound_error": d.last_outbound_error.as_ref().map(|e| json!({"code": e.code, "reason": e.reason, "at": e.at.to_rfc3339()})),
+        "failure_reason": d.failure_reason,
+        "recommended_action": action.action, "recommended_action_text": action.text,
+        "automatic_reply": "not_verified",
+        "evidence_note": "Configured credentials, a registered subscription and historical traffic are separate evidence. No Verify, Resubscribe or test send was run. Gateway support and end-to-end automatic replies need their own evidence.",
+    })
+}

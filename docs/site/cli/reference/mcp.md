@@ -5,6 +5,8 @@ description: Reference for nyxid mcp — generate MCP client configuration so AI
 
 `nyxid mcp` generates the Model Context Protocol configuration that points an AI tool at NyxID's MCP proxy, so the agent discovers and calls your connected services as tools — without ever seeing a raw credential. For the agent-side walkthrough see [MCP proxy & tool discovery](/docs/ai/guides/mcp-proxy); for the model see [The MCP proxy](/docs/shared/concepts/mcp-proxy).
 
+To give your own NyxBot work from a terminal, use [nyxid nyxbot](/docs/cli/reference/nyxbot). That command uses a first-party owner account session and requires no MCP client configuration. MCP client credentials do not gain access to the owner invocation API.
+
 :::note
 The subcommand accepts the common flags `--base-url`, `--access-token` / `--access-token-env`, `--profile`, and `--output`. See [Authenticate](/docs/cli/getting-started/authenticate).
 :::

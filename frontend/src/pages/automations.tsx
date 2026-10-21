@@ -1,3 +1,5 @@
+import { formatCapacityWait } from "@/lib/assistant/capacity-wait";
+import { storedError } from "@/lib/assistant/nyxagent-transport";
 import { Link, useSearch } from "@tanstack/react-router";
 import { parseAutomationSearch } from "@/lib/automation-search";
 import { browserTimezone, formatAutomationTime } from "@/lib/automation-time";
@@ -242,7 +244,7 @@ export function AutomationsPage() {
                       </Badge>
                       {row.pause_reason && (
                         <span className="block text-11">
-                          {row.pause_reason.replaceAll("_", " ")}
+                          {automationPauseReason(row.pause_reason)}
                         </span>
                       )}
                     </TableCell>
@@ -274,7 +276,7 @@ export function AutomationsPage() {
                 </p>
                 {row.pause_reason && (
                   <p className="text-12">
-                    {row.pause_reason.replaceAll("_", " ")}
+                    {automationPauseReason(row.pause_reason)}
                   </p>
                 )}
               </div>
@@ -842,7 +844,9 @@ function AutomationHistory({
                 className="rounded-lg border border-border p-3 text-12"
               >
                 <strong className="capitalize">{run.outcome}</strong> ·{" "}
-                {formatAutomationTime(run.scheduled_at, zone)}
+                Scheduled {formatAutomationTime(run.scheduled_at, zone, true)}
+                {run.started_at && <p>Started {formatAutomationTime(run.started_at, zone, true)}</p>}
+                {run.capacity_wait_ms != null && run.capacity_wait_ms > 0 && <p>waited {formatCapacityWait(run.capacity_wait_ms)} for capacity</p>}
                 {run.missed ? (
                   <p>
                     Missed {run.missed.count} occurrences between{" "}
@@ -879,4 +883,9 @@ function AutomationHistory({
       </DialogContent>
     </Dialog>
   );
+}
+
+function automationPauseReason(reason: string): string {
+  if (["insufficient_credits", "wallet_suspended", "plan_entitlement_required", "credential_invalid", "model_unavailable", "model_not_configured"].includes(reason)) return storedError(reason);
+  return reason.replaceAll("_", " ");
 }

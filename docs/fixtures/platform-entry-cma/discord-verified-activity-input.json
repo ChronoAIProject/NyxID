@@ -1,0 +1,38 @@
+{
+  "activity": {
+    "schema_version": 1,
+    "event_id": "930ec99b-5cd3-451e-879e-08d84538f682",
+    "kind": {
+      "type": "message",
+      "text": "/status",
+      "attachments": [],
+      "mentions_bot": false
+    },
+    "actor": {
+      "id": "human-opaque",
+      "kind": "unknown"
+    },
+    "conversation": {
+      "id": "private-opaque",
+      "kind": "private"
+    },
+    "occurred_at": "2026-10-17T05:06:02.818940+00:00",
+    "source": {
+      "type": "nyxid_relay",
+      "platform": "discord",
+      "route_id": "44444444-4444-4444-8444-444444444444"
+    }
+  },
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "/status"
+        }
+      ]
+    }
+  ],
+  "channel_id": "cmaeg1.ch.1.vpkZzl3Fqa2Jmxr3SGdb5o38uUlbzAiBdPRk84OQp0vUxS328cw0K5HyznE6l6GlZQEy-9VgKOr1EwK2_BvqqD6p6yVu0enm0zQ7TNJwRTrBAxlQmjtX6RwYmagsJVwIYVV8VKn_jnsRghwLnUvF7LqPwnsI-A_OaBF8uu8lCFLm-ZcVrrEgsm4AX-LxIXdsPkUCgHLuAiLMKFFD11DTAUpraVr3b_XLlcWXEM_phMMJRrNvkjGgKWasYtsI"
+}

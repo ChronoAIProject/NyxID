@@ -111,7 +111,7 @@ pub struct RouteAssistantServiceResponse {
     pub replayed: bool,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RotateAssistantServiceCredentialRequest {
     pub action_request_id: String,
@@ -446,7 +446,15 @@ async fn credential_matches(
     let Some(ciphertext) = ciphertext else {
         return Ok(false);
     };
-    Ok(state.encryption_keys.decrypt(ciphertext).await? == credential.as_bytes())
+    let field = if key.credential_type == "oauth2" {
+        "access_token_encrypted"
+    } else {
+        "credential_encrypted"
+    };
+    let plaintext = crate::services::credential_record_service::CredentialRecord::key(key)
+        .decrypt(&state.encryption_keys, field, ciphertext)
+        .await?;
+    Ok(plaintext.as_slice() == credential.as_bytes())
 }
 
 async fn service_rotate_already_applied(
@@ -989,6 +997,13 @@ pub async fn rotate_credential(
     }))
 }
 
+impl std::fmt::Debug for RotateAssistantServiceCredentialRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RotateAssistantServiceCredentialRequest")
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
@@ -1117,6 +1132,7 @@ mod tests {
             status: NodeStatus::Online,
             auth_token_hash: "auth-hash".to_string(),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "signing-hash".to_string(),
             last_heartbeat_at: Some(now),
             connected_at: Some(now),
@@ -1131,6 +1147,7 @@ mod tests {
 
     fn fixture_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_epoch: 1,
             credential_source: None,
@@ -1236,6 +1253,7 @@ mod tests {
 
     fn grant_provider_for_test() -> ProviderConfig {
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "github".to_string(),
             name: "GitHub".to_string(),
@@ -1245,6 +1263,7 @@ mod tests {
             token_url: Some("https://example.com/token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "github".to_string(),
                 url: "https://api.github.com/applications".to_string(),
@@ -1272,6 +1291,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1756,6 +1776,7 @@ mod tests {
         };
         let encryption_keys = test_encryption_keys();
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: "github".to_string(),
             name: "GitHub".to_string(),
@@ -1765,6 +1786,7 @@ mod tests {
             token_url: Some("https://example.com/token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "github".to_string(),
                 url: "https://api.github.com/applications".to_string(),
@@ -1792,6 +1814,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,

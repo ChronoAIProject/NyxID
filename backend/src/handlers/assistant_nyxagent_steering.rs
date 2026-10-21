@@ -30,61 +30,25 @@ fn steer_capability(value: &Value) -> Option<SteerCapability> {
     .filter(|c| c.max_chars > 0 && c.max_per_turn > 0)
 }
 
-type CapabilityCache = HashMap<String, (Instant, Value)>;
-static CAPABILITIES: LazyLock<Mutex<CapabilityCache>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// One bounded metadata cache for image input and steering; never cache authority
-/// or credentials. Include the destination so catalog changes cannot reuse support.
 pub(super) async fn upstream_capabilities(
     state: &AppState,
     auth: &AuthUser,
+    row: &AssistantConversation,
     credential: &AssistantCredential,
     policy: Option<BillingRoutePolicy>,
 ) -> Value {
-    let Ok(service) =
-        assistant_service::resolve_admin_service_by_slug(&state.db, engine::SERVICE_SLUG).await
-    else {
+    let Ok(authority) = crate::services::assistant_nyxagent_runtime::owner_context(row) else {
         return Value::Null;
     };
-    let key = format!("{}:{}:{}", state.db.name(), service.id, service.base_url);
-    let mut cache = CAPABILITIES.lock().await;
-    if let Some((at, value)) = cache.get(&key)
-        && at.elapsed() < Duration::from_secs(60)
-    {
-        return value.clone();
-    }
-    let lookup = async {
-        let response = Box::pin(proxy(
-            state,
-            auth,
-            credential,
-            "GET",
-            "v1/capabilities",
-            None,
-            None,
-            policy,
-        ))
-        .await
-        .ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        let bytes = axum::body::to_bytes(response.into_body(), 16384)
-            .await
-            .ok()?;
-        serde_json::from_slice::<Value>(&bytes).ok()
-    };
-    let value = tokio::time::timeout(Duration::from_secs(5), lookup)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(Value::Null);
-    if cache.len() >= 64 {
-        cache.clear();
-    }
-    cache.insert(key, (Instant::now(), value.clone()));
-    value
+    let egress = http_egress(state.clone(), auth.clone());
+    crate::services::assistant_nyxagent_runtime::upstream_capabilities(
+        state,
+        egress.as_ref(),
+        &authority,
+        credential,
+        policy,
+    )
+    .await
 }
 
 pub async fn capabilities(
@@ -112,6 +76,7 @@ pub async fn capabilities(
     let value = upstream_capabilities(
         &state,
         &auth,
+        &row,
         &credential,
         request.extensions().get::<BillingRoutePolicy>().copied(),
     )
@@ -234,7 +199,7 @@ pub async fn steer(
     else {
         return Ok(refusal("steer_unavailable"));
     };
-    let cap = upstream_capabilities(&state, &auth, &credential, policy).await;
+    let cap = upstream_capabilities(&state, &auth, &row, &credential, policy).await;
     let Some(cap) = steer_capability(&cap) else {
         return Err(AppError::AssistantTurnActive);
     };

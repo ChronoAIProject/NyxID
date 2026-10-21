@@ -77,8 +77,23 @@ pub fn conversation_capabilities(
     capabilities
 }
 
+pub enum RegisteredInterface {
+    Messaging(Box<dyn PlatformAdapter>),
+    Nyxbot(super::call_channels::profiles::Adapter),
+}
+
 pub fn registered_adapters(cache: &Arc<TokenExchangeCache>) -> Vec<Box<dyn PlatformAdapter>> {
-    vec![
+    registered_interfaces(cache)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            RegisteredInterface::Messaging(adapter) => Some(adapter),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn registered_interfaces(cache: &Arc<TokenExchangeCache>) -> Vec<RegisteredInterface> {
+    let legacy: Vec<Box<dyn PlatformAdapter>> = vec![
         Box::new(telegram::TelegramAdapter::default()),
         Box::new(telegram_new::TelegramNewAdapter::default()),
         Box::new(discord::DiscordAdapter::default()),
@@ -88,8 +103,42 @@ pub fn registered_adapters(cache: &Arc<TokenExchangeCache>) -> Vec<Box<dyn Platf
         Box::new(whatsapp::WhatsAppAdapter),
         Box::new(x::XAdapter::default()),
         Box::new(openclaw::OpenClawAdapter),
-        Box::new(aurinko::AurinkoAdapter::default()),
-    ]
+        Box::new(aurinko::registered_adapter()),
+    ];
+    let mut entries: Vec<_> = legacy
+        .into_iter()
+        .map(RegisteredInterface::Messaging)
+        .collect();
+    use crate::models::channel_adapter::Profile;
+    for profile in [
+        Profile::TelnyxRelay,
+        Profile::TelnyxSms,
+        Profile::TwilioRelay,
+        Profile::TwilioSms,
+        Profile::ElevenlabsCustomLlm,
+    ] {
+        entries.push(RegisteredInterface::Nyxbot(
+            super::call_channels::profiles::Adapter::new(profile),
+        ));
+    }
+    entries
+}
+
+pub fn resolve_nyxbot_profile(
+    id: &str,
+    cache: &Arc<TokenExchangeCache>,
+) -> AppResult<super::call_channels::profiles::Adapter> {
+    registered_interfaces(cache)
+        .into_iter()
+        .find_map(|entry| match entry {
+            RegisteredInterface::Nyxbot(adapter)
+                if super::call_channels::profiles::id(adapter.profile()) == id =>
+            {
+                Some(adapter)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| AppError::ValidationError("Unknown adapter or unsupported version".into()))
 }
 
 #[cfg(test)]

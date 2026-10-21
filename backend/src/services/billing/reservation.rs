@@ -8,7 +8,8 @@ use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
 use crate::errors::{AppError, AppResult};
 use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as BILLING_RATE_CACHE};
-use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET, PlanKind};
+use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET};
+use crate::models::service_billing::BillingMetric;
 use crate::models::usage_meter::{
     AllowanceReservationAllocation, BillingLayer, COLLECTION_NAME as USAGE_METER,
     GrantReservationAllocation, UsageMeterRow, UsageStatus,
@@ -50,6 +51,8 @@ pub struct LayerReservation {
     pub reserved_credits: Credits,
     pub allowance_reservations: Vec<AllowanceReservationAllocation>,
     pub grant_reservations: Vec<GrantReservationAllocation>,
+    pub tax_cache_ttl_secs: u64,
+    pub applied_tax: Option<crate::models::billing_tax_profile::AppliedUsageTax>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,79 +115,24 @@ pub async fn gate_and_reserve(
         ));
     }
 
-    let mut layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
-    if ctx.pool_attempt.is_some() {
-        return super::funding::reserve_and_open_pool(db, ctx, &wallet, layers)
-            .await
-            .map(Some);
-    }
-    super::funding::reserve_estimated_funding(db, ctx, &mut layers).await?;
-    let total_reserved_credits = layers
-        .iter()
-        .map(|reservation| reservation.reserved_credits)
-        .try_fold(Credits::ZERO, Credits::checked_add)?;
-
-    if total_reserved_credits == Credits::ZERO {
-        return Ok(Some(BillingReservation {
-            owner_id: wallet.owner_id,
-            wallet_id: wallet.id,
-            total_reserved_credits,
-            layers,
-        }));
-    }
-
-    if wallet.available_with_overdraft_credits()? <= Credits::ZERO
-        && wallet.plan_kind != PlanKind::Prepaid
-    {
-        super::funding::release_layer_reservations(db, &layers).await?;
-        suspend_wallet(db, &wallet.owner_id).await?;
-        return Err(AppError::WalletSuspended);
-    }
-    if wallet.available_credits()? <= Credits::ZERO && wallet.plan_kind == PlanKind::Prepaid {
-        super::funding::release_layer_reservations(db, &layers).await?;
-        return Err(AppError::InsufficientCredits);
-    }
-
-    if try_reserve_prepaid(db, &wallet.owner_id, total_reserved_credits)
-        .await?
-        .is_some()
-    {
-        return Ok(Some(BillingReservation {
-            owner_id: wallet.owner_id,
-            wallet_id: wallet.id,
-            total_reserved_credits,
-            layers,
-        }));
-    }
-
-    if wallet.plan_kind == PlanKind::Prepaid {
-        super::funding::release_layer_reservations(db, &layers).await?;
-        return Err(AppError::InsufficientCredits);
-    }
-
-    if wallet.has_payment_instrument
-        && try_reserve_overdraft(db, &wallet.owner_id, total_reserved_credits)
-            .await?
-            .is_some()
-    {
-        return Ok(Some(BillingReservation {
-            owner_id: wallet.owner_id,
-            wallet_id: wallet.id,
-            total_reserved_credits,
-            layers,
-        }));
-    }
-
-    if wallet.has_payment_instrument {
-        super::funding::release_layer_reservations(db, &layers).await?;
-        suspend_wallet(db, &wallet.owner_id).await?;
-        return Err(AppError::WalletSuspended);
-    }
-
-    super::funding::release_layer_reservations(db, &layers).await?;
-    Err(AppError::InsufficientCredits)
+    let layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
+    // Best effort before the transaction: benefit-only admissions must survive
+    // tax provider outages. Wallet funding checks freshness in the transaction.
+    let _ = super::taxes::ensure_fresh(db, lago, &wallet, rate_cache_ttl_secs).await;
+    let result = if ctx.managed_admission.is_some() {
+        crate::services::managed_execution_service::validate_reserved_rates(ctx, &layers)?;
+        super::funding::reserve_and_open_managed(db, ctx, &wallet, layers).await
+    } else if ctx.public_admission.is_some() {
+        super::funding::reserve_and_open_public(db, ctx, &wallet, layers).await
+    } else if ctx.pool_attempt.is_some() {
+        super::funding::reserve_and_open_pool(db, ctx, &wallet, layers).await
+    } else {
+        super::funding::reserve_and_open_ordinary(db, ctx, &wallet, layers).await
+    };
+    result.map(Some)
 }
 
+#[cfg(test)]
 pub async fn try_reserve_prepaid(
     db: &mongodb::Database,
     owner_id: &str,
@@ -243,66 +191,6 @@ pub async fn try_reserve_prepaid(
         .map_err(Into::into)
 }
 
-pub async fn try_reserve_overdraft(
-    db: &mongodb::Database,
-    owner_id: &str,
-    credits: Credits,
-) -> AppResult<Option<BillingWallet>> {
-    if credits <= Credits::ZERO {
-        return try_reserve_prepaid(db, owner_id, credits).await;
-    }
-
-    let now = Utc::now();
-    let maximum_existing_hold =
-        Credits::from_pico(crate::models::credits::MAX_PICO)?.checked_sub(credits)?;
-    db.collection::<BillingWallet>(BILLING_WALLET)
-        .find_one_and_update(
-            doc! {
-                "owner_id": owner_id,
-                "suspended": false,
-                "has_payment_instrument": true,
-                "reserved_credits": { "$lte": maximum_existing_hold },
-                "$expr": {
-                    "$gte": [
-                        {
-                            "$subtract": [
-                                {
-                                    "$add": [
-                                        "$balance_credits",
-                                        "$overdraft_cap_credits"
-                                    ]
-                                },
-                                {
-                                    "$add": [
-                                        "$reserved_credits",
-                                        {
-                                            "$add": [
-                                                "$pending_lago_debits",
-                                                { "$ifNull": ["$pending_topup_expiry_credits", 0_i64] }
-                                            ]
-                                        }
-                                    ]
-                                }
-                            ]
-                        },
-                        credits
-                    ]
-                },
-            },
-            doc! {
-                "$inc": { "reserved_credits": credits },
-                "$set": { "updated_at": bson::DateTime::from_chrono(now) },
-            },
-        )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await
-        .map_err(Into::into)
-}
-
 pub async fn release_wallet_hold(
     db: &mongodb::Database,
     owner_id: &str,
@@ -327,19 +215,6 @@ pub async fn release_wallet_hold(
     Ok(())
 }
 
-pub async fn release_billing_reservation(
-    db: &mongodb::Database,
-    reservation: &BillingReservation,
-) -> AppResult<()> {
-    release_wallet_hold(
-        db,
-        &reservation.owner_id,
-        reservation.total_reserved_credits,
-    )
-    .await?;
-    super::funding::release_layer_reservations(db, &reservation.layers).await
-}
-
 pub async fn apply_settlement_for_row(
     db: &mongodb::Database,
     row: &UsageMeterRow,
@@ -352,6 +227,17 @@ pub async fn apply_settlement_for_row(
                 .await?;
         }
         return Ok(false);
+    }
+
+    // Machine runs are admitted only against finite, fully funded windows.
+    // Never turn a larger measured quantity or a corrupt funding split into
+    // wallet debt, including when a later top-up made funds available.
+    if row.metric == BillingMetric::MachineRunningSeconds
+        && (actual_credits < Credits::ZERO || actual_credits > row.reserved_credits)
+    {
+        return Err(AppError::Internal(
+            "Machine runtime settlement exceeds its reserved wallet funds".into(),
+        ));
     }
 
     if usage_rows
@@ -498,6 +384,19 @@ async fn ensure_wallet_settlement_lock(
     Err(AppError::Internal(format!(
         "billing wallet settlement lock busy for wallet {wallet_id}"
     )))
+}
+
+/// Finish only the admission owner's durable wallet operation. Call outside
+/// admission transactions so the retry sees its committed exact counters.
+pub(super) async fn finish_wallet_settlement(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    owner_id: &str,
+) -> AppResult<()> {
+    if let Some(lock) = load_wallet_settlement_lock(db, wallet_id, owner_id).await? {
+        complete_wallet_settlement_lock(db, wallet_id, owner_id, &lock).await?;
+    }
+    Ok(())
 }
 
 async fn complete_wallet_settlement_lock(
@@ -914,7 +813,9 @@ pub async fn abandon_stale_unforwarded(
             "status": "reserved",
             "forwarded": false,
             "released": false,
+            "metric": { "$ne": BillingMetric::MachineRunningSeconds.as_str() },
             "updated_at": { "$lt": bson::DateTime::from_chrono(cutoff) },
+            "managed_execution_id": { "$exists": false },
         })
         .await?;
     let mut rows = Vec::new();
@@ -1081,7 +982,7 @@ async fn mark_exhausted_settlement_dead_letter(
     Ok(result.modified_count == 1)
 }
 
-async fn estimate_layer_reservations(
+pub(crate) async fn estimate_layer_reservations(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
     rate_cache_ttl_secs: u64,
@@ -1100,7 +1001,13 @@ async fn estimate_layer_reservations(
         )
     });
     for (layer, metric, code) in platform.chain(resale) {
-        let rate = fresh_rate(db, code, None, rate_cache_ttl_secs).await?;
+        let rate = fresh_rate(
+            db,
+            code,
+            ctx.public_admission.as_ref().map(|a| a.model_id.as_str()),
+            rate_cache_ttl_secs,
+        )
+        .await?;
         let rate_pico =
             super::amounts::rate_pico(rate.credits_per_unit_pico, rate.credits_per_unit_micros);
         // Preserve the existing one-unit gate for standalone legacy charges
@@ -1123,6 +1030,8 @@ async fn estimate_layer_reservations(
             reserved_credits: super::amounts::cost(rate_pico, estimated_quantity)?,
             allowance_reservations: Vec::new(),
             grant_reservations: Vec::new(),
+            tax_cache_ttl_secs: rate_cache_ttl_secs,
+            applied_tax: None,
         });
     }
 
@@ -1181,6 +1090,12 @@ async fn release_one_unforwarded_row(
     terminal_status: UsageStatus,
     reason: Option<&str>,
 ) -> AppResult<bool> {
+    // A stale or failed HTTP caller is not proof that a Machine stopped.
+    // Its dedicated evidence path finalizes even zero-quantity windows and
+    // releases their funding through ordinary settlement after that proof.
+    if row.metric == BillingMetric::MachineRunningSeconds {
+        return Ok(false);
+    }
     let now = Utc::now();
     let mut set_doc = doc! {
         "status": bson::to_bson(&terminal_status)
@@ -1201,6 +1116,7 @@ async fn release_one_unforwarded_row(
                 "forwarded": false,
                 "status": "reserved",
                 "released": false,
+                "metric": { "$ne": BillingMetric::MachineRunningSeconds.as_str() },
             },
             doc! { "$set": set_doc },
         )
@@ -1287,6 +1203,14 @@ mod tests {
 
     #[async_trait]
     impl LagoApi for EntitledLago {
+        async fn tax_config(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig>
+        {
+            Ok(crate::services::billing::taxes::zero_config())
+        }
         async fn ensure_customer(
             &self,
             owner: &OwnerProvisionInput,
@@ -1402,6 +1326,156 @@ mod tests {
             false,
         )
         .with_platform_metering(true)
+    }
+
+    async fn machine_pending_fixture(
+        label: &str,
+    ) -> (mongodb::Database, crate::models::usage_meter::UsageMeterRow) {
+        use crate::models::credits::Credits;
+        use crate::models::usage_meter::{BillingLayer, COLLECTION_NAME as USAGE_METER};
+
+        let db = crate::test_utils::connect_transaction_test_database(label).await;
+        let owner_id = Uuid::new_v4().to_string();
+        let mut wallet = wallet(&owner_id, 10);
+        wallet.reserved_credits = Credits::from_whole(1);
+        db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .insert_one(&wallet)
+            .await
+            .expect("insert reserved wallet");
+        let mut row = super::super::meter::reserved_row(
+            &route_context(&owner_id),
+            BillingLayer::Platform,
+            BillingMetric::MachineRunningSeconds,
+            "remote_machine_running_seconds_v1".into(),
+            None,
+            None,
+        );
+        row.wallet_id = Some(wallet.id);
+        row.reserved_credits = Credits::from_whole(1);
+        row.updated_at = Utc::now() - chrono::Duration::hours(1);
+        db.collection::<crate::models::usage_meter::UsageMeterRow>(USAGE_METER)
+            .insert_one(&row)
+            .await
+            .expect("insert pending Machine liability");
+        (db, row)
+    }
+
+    #[tokio::test]
+    async fn machine_pending_hold_survives_generic_timeout_and_release() {
+        use crate::models::credits::Credits;
+        use crate::models::usage_meter::{
+            COLLECTION_NAME as USAGE_METER, UsageMeterRow, UsageStatus,
+        };
+
+        let (db, row) = machine_pending_fixture("machine_pending_release").await;
+        assert_eq!(
+            super::abandon_stale_unforwarded(&db, Utc::now())
+                .await
+                .expect("generic abandonment"),
+            0
+        );
+        assert_eq!(
+            super::release_unforwarded_rows(
+                &db,
+                &row.billing_request_id,
+                UsageStatus::Failed,
+                Some("generic caller failure"),
+            )
+            .await
+            .expect("generic explicit release"),
+            0
+        );
+        assert!(
+            !super::release_one_unforwarded_row(&db, &row, UsageStatus::Abandoned, None)
+                .await
+                .expect("stale-row release helper")
+        );
+        let saved = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .find_one(doc! { "_id": &row.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, UsageStatus::Reserved);
+        assert!(!saved.released);
+        assert!(saved.quantity.is_none());
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": &row.billing_owner_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(wallet.reserved_credits, Credits::from_whole(1));
+        assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn machine_settlement_cannot_exceed_reserved_wallet_funds() {
+        use crate::models::credits::Credits;
+        use crate::models::usage_meter::{COLLECTION_NAME as USAGE_METER, UsageStatus};
+
+        let (db, mut row) = machine_pending_fixture("machine_settlement_bound").await;
+        row.status = UsageStatus::Finalized;
+        row.quantity = Some(2);
+        db.collection::<crate::models::usage_meter::UsageMeterRow>(USAGE_METER)
+            .replace_one(doc! { "_id": &row.id }, &row)
+            .await
+            .unwrap();
+        let error = super::apply_settlement_for_row(&db, &row, Credits::from_whole(2))
+            .await
+            .expect_err("Machine settlement must never create unfunded wallet liability");
+        assert!(matches!(error, crate::errors::AppError::Internal(_)));
+        let wallet = db
+            .collection::<mongodb::bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": &row.billing_owner_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!wallet.contains_key("active_settlement"));
+        let wallet: BillingWallet = mongodb::bson::from_document(wallet).unwrap();
+        assert_eq!(wallet.reserved_credits, Credits::from_whole(1));
+        assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
+        assert_eq!(wallet.balance_credits, Credits::from_whole(10));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn machine_guards_preserve_service_timeout_release() {
+        use crate::models::credits::Credits;
+        use crate::models::usage_meter::{
+            COLLECTION_NAME as USAGE_METER, UsageMeterRow, UsageStatus,
+        };
+
+        let (db, mut row) = machine_pending_fixture("machine_service_release").await;
+        row.metric = BillingMetric::Requests;
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .replace_one(doc! { "_id": &row.id }, &row)
+            .await
+            .unwrap();
+        assert_eq!(
+            super::abandon_stale_unforwarded(&db, Utc::now())
+                .await
+                .expect("ordinary service hold remains reclaimable"),
+            1
+        );
+        let saved = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .find_one(doc! { "_id": &row.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, UsageStatus::Abandoned);
+        assert!(saved.released);
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": &row.billing_owner_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(wallet.reserved_credits, Credits::ZERO);
+        assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

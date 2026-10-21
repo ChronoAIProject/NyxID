@@ -1,3 +1,6 @@
+import "./lib/zod-csp";
+import "./lib/platform-personal-handoff";
+import "./lib/platform-onboarding-handoff";
 import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
 import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -51,14 +54,14 @@ if (import.meta.env.DEV) {
 }
 
 function isLoginApprovalPage() {
-  return ["/login/agent-key", "/login/device", "/login/code"].includes(window.location.pathname);
+  return ["/login/agent-key", "/login/device", "/login/code"].includes(
+    window.location.pathname,
+  );
 }
 
 function Root() {
   const [ready, setReady] = useState(false);
-  const [agentKeyLogin, setAgentKeyLogin] = useState(
-    isLoginApprovalPage,
-  );
+  const [agentKeyLogin, setAgentKeyLogin] = useState(isLoginApprovalPage);
   useEffect(
     () =>
       router.subscribe("onResolved", () => {
@@ -67,6 +70,7 @@ function Root() {
     [],
   );
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const telemetryAccountId = useAuthStore((s) => s.user?.id);
   const consentAsked = useConsentStore((s) => s.asked);
   const consentEnabled = useConsentStore((s) => s.enabled);
 
@@ -117,7 +121,7 @@ function Root() {
     if (isAuthenticated && user?.id) {
       telemetryIdentify(user.id);
     }
-  }, [ready, publicConfig, consentEnabled, isAuthenticated, agentKeyLogin]);
+  }, [ready, publicConfig, consentEnabled, isAuthenticated, agentKeyLogin, telemetryAccountId]);
 
   // When auth resolves, redirect as needed:
   // - Authenticated user on landing → dashboard
@@ -143,7 +147,9 @@ function Root() {
         preserveTelegramClaimForLogin();
         router.navigate({
           to: "/login",
-          search: { return_to: window.location.origin + path + window.location.search },
+          search: {
+            return_to: window.location.origin + path + window.location.search,
+          },
         });
       }
     }

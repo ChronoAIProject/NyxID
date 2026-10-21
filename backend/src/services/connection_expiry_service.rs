@@ -350,6 +350,7 @@ mod tests {
     fn oauth_key(user_id: &str) -> UserApiKey {
         let now = Utc::now();
         UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
@@ -472,6 +473,7 @@ mod tests {
     ) -> ProviderConfig {
         let now = Utc::now();
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: id.to_string(),
             slug: "test-provider".to_string(),
             name: "Test Provider".to_string(),
@@ -502,6 +504,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -552,6 +555,7 @@ mod tests {
 
         let now = Utc::now();
         let token = UserProviderToken {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id,
             provider_config_id: provider_id,

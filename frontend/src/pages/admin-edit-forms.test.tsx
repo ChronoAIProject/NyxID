@@ -536,6 +536,7 @@ it.each(["https://example.com/new-revoke", ""])(
         style: "rfc7009",
         auth: "basic",
         revokes_grant: true,
+        effect_scope: "grant_wide",
         request_encoding: "json",
       },
     } as ProviderConfig;
@@ -550,7 +551,7 @@ it.each(["https://example.com/new-revoke", ""])(
     );
     await waitFor(() =>
       expect(mock.updateProvider).toHaveBeenCalledWith({
-        revocation: url ? { ...mock.provider.data!.revocation, url } : null,
+        revocation: url ? { ...mock.provider.data!.revocation, url, effect_scope: null } : null,
       }),
     );
   },

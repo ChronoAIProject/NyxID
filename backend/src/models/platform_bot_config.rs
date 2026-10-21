@@ -44,6 +44,7 @@ pub struct CleanupMachineJob {
 #[serde(rename_all = "snake_case")]
 pub enum PlatformExecutionProfile {
     PlatformOnboarding,
+    NativeEntry,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,6 +53,10 @@ pub struct PlatformBotConfig {
     pub id: String,
     pub channel_bot_id: String,
     pub manager_bot_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_entry: Option<super::platform_entry_identity::NativeEntryConfiguration>,
     pub observation_id: String,
     pub execution_profile: PlatformExecutionProfile,
     pub generation: i64,

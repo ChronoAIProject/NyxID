@@ -428,7 +428,7 @@ pub async fn run(args: LoginArgs) -> Result<()> {
     }
     verification.set_query(None);
     verification.set_fragment(None);
-    let complete = super::login_hints::approval_url(&verification, &challenge.user_code, &hints)?;
+    let complete = super::login_hints::approval_url(&verification, &hints)?;
     let id = uuid::Uuid::new_v4().to_string();
     let pending = PendingLogin {
         version: 1,
@@ -453,7 +453,7 @@ pub async fn run(args: LoginArgs) -> Result<()> {
         );
     } else {
         eprintln!(
-            "One-time code: {}\nOpen {} to review and approve.\nResume: nyxid login resume {}",
+            "One-time code: {}\nOpen {} and enter the code above to review and approve.\nResume: nyxid login resume {}",
             challenge.user_code, complete, id
         );
     }

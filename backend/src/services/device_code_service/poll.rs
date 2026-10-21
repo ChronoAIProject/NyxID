@@ -90,6 +90,24 @@ pub async fn poll(
             })
         }
         DeviceCodeStatus::Approved => {
+            let key_id = row.issued_api_key_id.as_deref().ok_or_else(|| {
+                AppError::Internal("approved device code missing issued key id".into())
+            })?;
+            let key = db
+                .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+                .find_one(doc! {"_id": key_id})
+                .projection(doc! {"expires_at": 1})
+                .await?
+                .ok_or_else(|| AppError::Internal("issued device key is missing".into()))?;
+            let api_key_expires_at = match key.get("expires_at") {
+                None | Some(bson::Bson::Null) => None,
+                Some(bson::Bson::DateTime(value)) => Some(value.to_chrono().to_rfc3339()),
+                _ => {
+                    return Err(AppError::Internal(
+                        "issued device key expiry is invalid".into(),
+                    ));
+                }
+            };
             let claimed = claim_approved_delivery(&collection, &row.id, now, input.timestamp)
                 .await?
                 .ok_or(AppError::DeviceCodeAlreadyDelivered)?;
@@ -114,6 +132,7 @@ pub async fn poll(
                 node_id,
                 refresh_token,
                 expires_in: DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS,
+                api_key_expires_at,
             })
         }
         DeviceCodeStatus::Denied => Err(AppError::Forbidden("Device code denied".to_string())),
@@ -712,6 +731,9 @@ mod tests {
         let Some((db, response, key)) = setup_pending_row("device_code_poll_approved").await else {
             return;
         };
+        db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .insert_one(doc! {"_id": "fixture-key", "expires_at": bson::DateTime::parse_rfc3339_str("2099-01-01T00:00:00Z").unwrap()})
+            .await.unwrap();
         let api_key_encrypted = encrypt_for_test("nyx_secret").await;
         let refresh_token_encrypted = encrypt_for_test("refresh_secret").await;
         db.collection::<DeviceCode>(DEVICE_CODES)
@@ -721,6 +743,7 @@ mod tests {
                     "$set": {
                         "status": "approved",
                         "issued_node_id": "node-1",
+                        "issued_api_key_id": "fixture-key",
                         "delivery_api_key_encrypted": bson::Binary {
                             subtype: bson::spec::BinarySubtype::Generic,
                             bytes: api_key_encrypted,
@@ -755,6 +778,7 @@ mod tests {
                 node_id: "node-1".to_string(),
                 refresh_token: "refresh_secret".to_string(),
                 expires_in: DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS,
+                api_key_expires_at: Some("2099-01-01T00:00:00+00:00".into()),
             }
         );
 
@@ -789,6 +813,9 @@ mod tests {
         else {
             return;
         };
+        db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .insert_one(doc! {"_id": "fixture-key", "expires_at": bson::DateTime::parse_rfc3339_str("2099-01-01T00:00:00Z").unwrap()})
+            .await.unwrap();
         let api_key_encrypted = encrypt_for_test("nyx_secret").await;
         let refresh_token_encrypted = encrypt_for_test("refresh_secret").await;
         db.collection::<DeviceCode>(DEVICE_CODES)
@@ -798,6 +825,7 @@ mod tests {
                     "$set": {
                         "status": "approved",
                         "issued_node_id": "node-1",
+                        "issued_api_key_id": "fixture-key",
                         "delivery_api_key_encrypted": bson::Binary {
                             subtype: bson::spec::BinarySubtype::Generic,
                             bytes: api_key_encrypted,

@@ -2589,6 +2589,7 @@ mod tests {
             status: NodeStatus::Offline,
             auth_token_hash: "auth-hash".to_string(),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "signing-hash".to_string(),
             last_heartbeat_at: None,
             connected_at: None,
@@ -4813,9 +4814,16 @@ mod tests {
                 .await
                 .expect("push succeeds");
 
-        let transfer = node_service::transfer_node_owner(&db, &actor_id, &node.id, &org_id, 10)
-            .await
-            .expect("transfer succeeds");
+        let transfer = node_service::transfer_node_owner(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &actor_id,
+            &node.id,
+            &org_id,
+            10,
+        )
+        .await
+        .expect("transfer succeeds");
         assert_eq!(transfer.deactivated_pending_credentials_count, 1);
 
         let stored = load_pending(&db, &pending.id).await;

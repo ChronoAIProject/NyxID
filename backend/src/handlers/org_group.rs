@@ -84,6 +84,7 @@ pub(crate) async fn post(
         ids,
         Some(request),
         &addressed,
+        Vec::new(),
     ))
     .await?;
     groups::persist_actor_recipients(&state.db, &access.group.id, &access.actor, &addressed)
@@ -171,6 +172,10 @@ async fn run_member(
     )
     .await?;
     let start = engine::TurnStart {
+        media_event_ids: Vec::new(),
+        channel_uploads: Vec::new(),
+        invocation_id: None,
+        acknowledgement_id: None,
         retry_of: None,
         channel_event_id: None,
         org_access: access.org.clone(),
@@ -235,6 +240,18 @@ pub(crate) async fn member_settled(
         let agent =
             crate::services::assistant_team_service::agent_for_conversation(&state.db, row).await?;
         if error.is_none() && !text.trim().is_empty() {
+            let attachments = match row.active_turn.as_ref() {
+                Some(turn) => {
+                    crate::services::assistant_nyxagent::settled_tool_attachments(
+                        &state.db,
+                        &row.user_id,
+                        &row.id,
+                        &turn.turn_id,
+                    )
+                    .await
+                }
+                None => Vec::new(),
+            };
             let message = groups::append(
                 &state.db,
                 &access,
@@ -245,6 +262,7 @@ pub(crate) async fn member_settled(
                 &[],
                 None,
                 &[],
+                attachments,
             )
             .await?;
             Box::pin(crate::services::machine_activity_service::publish_group(
@@ -294,6 +312,7 @@ pub(crate) async fn member_settled(
                 &[],
                 None,
                 &[],
+                Vec::new(),
             )
             .await?;
             Box::pin(crate::services::machine_activity_service::publish_group(

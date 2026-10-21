@@ -1,3 +1,11 @@
+import { AllocateDialog } from "@/components/admin-credits/allocate-dialog";
+import { useAllocationOverview } from "@/hooks/use-billing-credits";
+import {
+  exactCredits,
+  formatExactCredits,
+  parseCredits,
+  CREDIT_SCALE,
+} from "@/lib/credits";
 import { normalizedBillingTargets } from "@/lib/billing-targets";
 import {
   changedFields,
@@ -8,7 +16,11 @@ import {
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { ADMIN_CREDITS_TABS, ADMIN_CREDITS_TAB_DEFAULT, parseTab } from "@/lib/url-tabs";
+import {
+  ADMIN_CREDITS_TABS,
+  ADMIN_CREDITS_TAB_DEFAULT,
+  parseTab,
+} from "@/lib/url-tabs";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
@@ -107,10 +119,21 @@ const GRANTS_PER_PAGE = 50;
 export function AdminCreditsPage() {
   const search = useSearch({ strict: false });
   const navigate = useNavigate();
-  const tab = parseTab(search.tab, ADMIN_CREDITS_TABS, ADMIN_CREDITS_TAB_DEFAULT);
+  const tab = parseTab(
+    search.tab,
+    ADMIN_CREDITS_TABS,
+    ADMIN_CREDITS_TAB_DEFAULT,
+  );
   const currentUser = useAuthStore((state) => state.user);
   const canWrite = canAdminWrite(currentUser);
   const canManageGrants = canManageCreditGrants(currentUser);
+  const overview = useAllocationOverview();
+  const allocationPolicies =
+    overview.data?.allocations_v1 === true && !overview.isError;
+  const [allocationRecurrence, setAllocationRecurrence] = useState<
+    "one_time" | "monthly"
+  >("one_time");
+  const [allocateOpen, setAllocateOpen] = useState(false);
   const [grantPage, setGrantPage] = useState(1);
   const grantsQuery = useAdminCreditGrants(grantPage, GRANTS_PER_PAGE);
   const allowancesQuery = useAdminAllowances();
@@ -149,7 +172,10 @@ export function AdminCreditsPage() {
 
   function openGrantDialog() {
     grantForm.reset(GRANT_DEFAULTS);
-    setGrantOpen(true);
+    if (allocationPolicies) {
+      setAllocationRecurrence("one_time");
+      setAllocateOpen(true);
+    } else setGrantOpen(true);
   }
 
   function openAllowanceDialog(allowance?: AllowanceBundle) {
@@ -164,6 +190,16 @@ export function AdminCreditsPage() {
       schedule
         ? {
             amount_credits: schedule.amount_credits,
+            amount: exactScheduleEdit(schedule)
+              ? (schedule.amount ??
+                exactCredits(undefined, schedule.amount_credits, "whole") ??
+                "0")
+              : undefined,
+            service_limits: schedule.service_limits?.map((r) => ({
+              label: r.label ?? "",
+              amount: r.limit,
+              service_refs: r.service_ids,
+            })),
             recurrence: schedule.recurrence,
             expiry: schedule.expiry,
             target_kind: schedule.target_kind,
@@ -195,9 +231,33 @@ export function AdminCreditsPage() {
     }
   }
 
+  function exactScheduleEdit(row: CreditSchedule) {
+    return (
+      allocationPolicies ||
+      Boolean(row.service_limits?.length) ||
+      (row.amount !== undefined &&
+        parseCredits(row.amount) % CREDIT_SCALE !== 0n)
+    );
+  }
   function scheduleProjection(row: CreditSchedule) {
     return {
-      amount_credits: row.amount_credits,
+      ...(!exactScheduleEdit(row)
+        ? { amount_credits: row.amount_credits }
+        : {}),
+      ...(exactScheduleEdit(row)
+        ? {
+            amount:
+              row.amount ??
+              exactCredits(undefined, row.amount_credits, "whole") ??
+              "0",
+            service_limits:
+              row.service_limits?.map((r) => ({
+                label: r.label ?? "",
+                amount: r.limit,
+                service_refs: r.service_ids,
+              })) ?? [],
+          }
+        : {}),
       expiry: row.expiry,
       target_kind: row.target_kind,
       ...normalizedBillingTargets(row),
@@ -317,7 +377,12 @@ export function AdminCreditsPage() {
       const serviceRefs = value.all_services ? [] : value.service_refs;
       if (editingSchedule) {
         const normalize = (data: ScheduleForm) => ({
-          amount_credits: data.amount_credits,
+          ...(data.amount === undefined
+            ? { amount_credits: data.amount_credits }
+            : {}),
+          ...(data.amount !== undefined
+            ? { amount: data.amount, service_limits: data.service_limits ?? [] }
+            : {}),
           expiry: data.expiry,
           target_kind: data.target_kind,
           ...normalizedBillingTargets(data),
@@ -353,11 +418,17 @@ export function AdminCreditsPage() {
   async function handleRevoke() {
     if (!grantToRevoke) return;
     try {
-      await revokeGrant.mutateAsync(grantToRevoke.id);
-      toast.success("Grant revoked");
+      await revokeGrant.mutateAsync(
+        allocationPolicies
+          ? { id: grantToRevoke.id, allocation: true }
+          : grantToRevoke.id,
+      );
+      toast.success(
+        "Reclaim requested. Any held requests finish before the unused remainder is reclaimed.",
+      );
       setGrantToRevoke(null);
     } catch (error) {
-      toast.error(errorMessage(error, "Failed to revoke grant"));
+      toast.error(errorMessage(error, "Failed to reclaim credits"));
     }
   }
 
@@ -422,12 +493,96 @@ export function AdminCreditsPage() {
       {statusReview.dialog}
       <PageHeader
         title="Credits"
-        description="Manage promotional credit grants, recurring credit schedules, and free usage allowances."
+        description="Allocate credits, set optional service ceilings, and reclaim unused amounts."
       />
 
-      <Tabs value={tab} onValueChange={(value) => {
-        void navigate({ to: "/admin/credits", search: { tab: value }, replace: true });
-      }}>
+      <section
+        aria-label="Issued credit balance"
+        className="min-w-0 rounded-lg border border-border p-4"
+      >
+        <p className="text-12 text-muted-foreground">
+          Remaining issued credits
+        </p>
+        {overview.data ? (
+          <>
+            <p className="min-w-0 break-all text-24 font-semibold tabular-nums">
+              {formatExactCredits(overview.data.summary.remaining, 12)} credits
+            </p>
+            {overview.isError ? (
+              <p role="alert" className="text-12 text-warning">
+                This total is stale. The refresh failed.
+              </p>
+            ) : null}
+            <details className="mt-2 text-12">
+              <summary className="cursor-pointer">Balance details</summary>
+              <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+                {[
+                  ["Unreserved", overview.data.summary.unreserved],
+                  ["Held for requests", overview.data.summary.held],
+                  [
+                    "Pending activation",
+                    overview.data.summary.pending_activation,
+                  ],
+                  ["Pending reclaim", overview.data.summary.pending_reclaim],
+                  [
+                    "Expired, awaiting processing (excluded)",
+                    overview.data.summary.expired_awaiting_cleanup,
+                  ],
+                  [
+                    "With restrictions (subset of unreserved)",
+                    overview.data.summary.restricted,
+                  ],
+                ].map(([label, amount]) => (
+                  <div key={label} className="min-w-0">
+                    <dt>{label}</dt>
+                    <dd className="break-all tabular-nums">
+                      {formatExactCredits(amount ?? "0", 12)} credits
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+              <p className="mt-3">
+                Unreserved values reflect allocation eligibility, before
+                recipient account or plan checks. Service ceilings may limit how
+                much of the remaining total can be used. Held and pending values
+                are included in remaining credits; expired unheld credits are
+                excluded.
+              </p>
+              <p>
+                Updated{" "}
+                {new Date(overview.data.summary.generated_at).toLocaleString()}
+              </p>
+            </details>
+          </>
+        ) : (
+          <p className="text-12 text-muted-foreground">
+            {overview.isLoading
+              ? "Loading credit balance…"
+              : "Balance summary unavailable. Individual allocations and existing actions remain available below."}
+          </p>
+        )}
+        {overview.isError ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void overview.refetch()}
+          >
+            Retry balance
+          </Button>
+        ) : null}
+      </section>
+
+      <Tabs
+        value={tab}
+        onValueChange={(value) => {
+          void navigate({
+            to: "/admin/credits",
+            search: { tab: value },
+            replace: true,
+          });
+        }}
+      >
         <TabsList>
           <TabsTrigger value="grants">Credit grants</TabsTrigger>
           <TabsTrigger value="allowances">Free allowances</TabsTrigger>
@@ -444,7 +599,7 @@ export function AdminCreditsPage() {
                 <ButtonIcon variant="primary">
                   <Plus className="h-3.5 w-3.5" />
                 </ButtonIcon>
-                Issue grant
+                Allocate credits
               </Button>
             ) : null}
           </div>
@@ -460,6 +615,7 @@ export function AdminCreditsPage() {
               grants={grantsQuery.data?.grants ?? []}
               canWrite={canManageGrants}
               revokePending={revokeGrant.isPending}
+              allocationPolicies={allocationPolicies}
               page={grantsQuery.data?.page ?? grantPage}
               perPage={grantsQuery.data?.per_page ?? GRANTS_PER_PAGE}
               total={grantsQuery.data?.total ?? 0}
@@ -514,14 +670,19 @@ export function AdminCreditsPage() {
         <TabsContent value="schedules" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
             <p className="text-12 text-muted-foreground">
-              Disburse wallet credits on recurring UTC periods. These are
-              credits, not metered service units.
+              Recurring allocations issue a fresh credit total and fresh service
+              ceilings each UTC period. Pausing stops future issuance.
             </p>
             {canWrite ? (
               <Button
                 size="sm"
                 variant="primary"
-                onClick={() => openScheduleDialog()}
+                onClick={() => {
+                  if (allocationPolicies) {
+                    setAllocationRecurrence("monthly");
+                    setAllocateOpen(true);
+                  } else openScheduleDialog();
+                }}
               >
                 <ButtonIcon variant="primary">
                   <Plus className="h-3.5 w-3.5" />
@@ -552,6 +713,16 @@ export function AdminCreditsPage() {
         </TabsContent>
       </Tabs>
 
+      <AllocateDialog
+        initialRecurrence={allocationRecurrence}
+        open={allocateOpen}
+        onOpenChange={setAllocateOpen}
+        services={services}
+        servicesError={servicesQuery.isError}
+        servicesLoading={servicesQuery.isLoading}
+        retryServices={() => void servicesQuery.refetch()}
+        canRecurring={canWrite}
+      />
       <GrantDialog
         open={grantOpen}
         onOpenChange={setGrantOpen}
@@ -576,6 +747,10 @@ export function AdminCreditsPage() {
         services={services}
         pending={createSchedule.isPending || updateSchedule.isPending}
         editingSchedule={editingSchedule}
+        allocationPolicies={allocationPolicies}
+        servicesError={servicesQuery.isError}
+        servicesLoading={servicesQuery.isLoading}
+        retryServices={() => void servicesQuery.refetch()}
         onSubmit={submitSchedule}
       />
       <Dialog
@@ -586,7 +761,7 @@ export function AdminCreditsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Revoke credit grant</DialogTitle>
+            <DialogTitle>Reclaim remaining credits</DialogTitle>
             {grantToRevoke ? (
               <GrantRevokeDescription grant={grantToRevoke} />
             ) : null}
@@ -606,7 +781,7 @@ export function AdminCreditsPage() {
               isLoading={revokeGrant.isPending}
               onClick={() => void handleRevoke()}
             >
-              Revoke grant
+              Reclaim remaining credits
             </Button>
           </DialogFooter>
         </DialogContent>

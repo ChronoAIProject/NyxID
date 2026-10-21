@@ -192,7 +192,7 @@ for (const nyxagentEnabled of [false, true]) {
         expect(page.context().pages()).toHaveLength(1);
         await dialog.getByRole("button", { name: "Done", exact: true }).click();
         await expect(dialog).toHaveCount(0);
-        await expect(page.locator("textarea")).toBeVisible();
+        await expect(page.locator("[data-composer-textbox]")).toBeVisible();
         if (nyxagentEnabled) {
           await expect(
             page.getByText(/Your Telegram bot @helper_bot is linked/),

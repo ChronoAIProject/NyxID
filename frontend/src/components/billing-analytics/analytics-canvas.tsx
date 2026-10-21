@@ -144,7 +144,7 @@ function AnalyticsPanelCard({
         />
         {panel.breakdown === "model" && (
           <p className="mt-1 text-11 text-muted-foreground">
-            Recorded request model. Filter a service to inspect its models.
+            Recorded model. Filter a service to inspect its models.
             Older usage without a model appears as Unattributed.
           </p>
         )}

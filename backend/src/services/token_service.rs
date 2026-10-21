@@ -169,6 +169,25 @@ pub(crate) async fn create_session_with_transaction(
     user_agent: Option<&str>,
     transaction: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<IssuedSession> {
+    create_session_with_transaction_and_assurance(
+        db,
+        user_id,
+        ip_address,
+        user_agent,
+        transaction,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn create_session_with_transaction_and_assurance(
+    db: &mongodb::Database,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    transaction: Option<&mut mongodb::ClientSession>,
+    mfa_assured: bool,
+) -> AppResult<IssuedSession> {
     Uuid::parse_str(user_id).map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
     let session_token = generate_random_token();
@@ -179,6 +198,9 @@ pub(crate) async fn create_session_with_transaction(
 
     // Create session record
     let new_session = Session {
+        purpose: Some(crate::models::session::SessionPurpose::Authenticated),
+        mfa_method: None,
+        mfa_assured,
         id: session_id.clone(),
         user_id: user_id.to_string(),
         token_hash: session_token_hash,
@@ -193,7 +215,9 @@ pub(crate) async fn create_session_with_transaction(
     let collection = db.collection::<Session>(SESSIONS);
     let insert = collection.insert_one(&new_session);
     if let Some(transaction) = transaction {
-        insert.session(transaction).await?;
+        // The transaction owner aborts definite preparation failures. Helpers
+        // must not abort a borrowed transaction behind its owner's back.
+        insert.session(&mut *transaction).await?;
     } else {
         insert.await?;
     }
@@ -214,6 +238,29 @@ pub async fn create_session_and_issue_tokens(
     user_agent: Option<&str>,
 ) -> AppResult<IssuedTokens> {
     issue_session_tokens(db, config, jwt_keys, user_id, ip_address, user_agent, None).await
+}
+
+pub async fn create_derived_session_tokens(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    assured: bool,
+) -> AppResult<IssuedTokens> {
+    let prepared = prepare_session_tokens_with_assurance(
+        db, config, jwt_keys, user_id, ip_address, user_agent, assured,
+    )
+    .await?;
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    insert_prepared_session(db, &prepared, &mut transaction).await?;
+    super::transaction_service::commit(&mut transaction).await?;
+    Ok(prepared.tokens)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -247,11 +294,18 @@ pub struct PreparedSessionTokens {
     refresh: RefreshToken,
 }
 
+impl PreparedSessionTokens {
+    pub(crate) fn set_mfa_assured(&mut self, assured: bool) {
+        self.session.mfa_assured = assured;
+    }
+}
+
 pub async fn insert_prepared_session(
     db: &mongodb::Database,
     prepared: &PreparedSessionTokens,
     transaction: &mut mongodb::ClientSession,
 ) -> AppResult<()> {
+    // Leave commit/abort ownership with the enclosing authentication workflow.
     db.collection::<Session>(SESSIONS)
         .insert_one(&prepared.session)
         .session(&mut *transaction)
@@ -271,11 +325,29 @@ pub async fn prepare_session_tokens(
     ip_address: Option<&str>,
     user_agent: Option<&str>,
 ) -> AppResult<PreparedSessionTokens> {
+    prepare_session_tokens_with_assurance(
+        db, config, jwt_keys, user_id, ip_address, user_agent, false,
+    )
+    .await
+}
+
+pub async fn prepare_session_tokens_with_assurance(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    mfa_assured: bool,
+) -> AppResult<PreparedSessionTokens> {
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
     let now = Utc::now();
     let session = Session {
+        purpose: Some(crate::models::session::SessionPurpose::Authenticated),
+        mfa_method: None,
+        mfa_assured,
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_owned(),
         token_hash: hash_token(&generate_random_token()),
@@ -313,6 +385,7 @@ pub async fn prepare_session_tokens(
 
     // Persist refresh token metadata
     let new_refresh = RefreshToken {
+        protected_consent: None,
         id: refresh_id,
         jti: refresh_jti,
         client_id: Uuid::nil().to_string(), // first-party client
@@ -347,32 +420,115 @@ pub async fn prepare_session_tokens(
 ///
 /// This binds a temporary token hash to the user_id so the MFA verification
 /// step can validate that the user already passed password authentication.
-/// The session expires in 5 minutes and is marked with a specific user_agent
-/// to distinguish it from real sessions.
-pub async fn create_mfa_pending_session(
+/// The challenge expires in 5 minutes. Its dedicated collection and explicit
+/// server-controlled purpose separate it from completed login authority.
+pub async fn create_mfa_pending_session_for_password(
+    db: &mongodb::Database,
+    user: &crate::models::user::User,
+    temp_token_hash: &str,
+) -> AppResult<String> {
+    if !user.mfa_enabled {
+        return Err(AppError::AuthenticationFailed("MFA state changed".into()));
+    }
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    super::auth_service::fence_password_proof(db, user, &mut transaction).await?;
+    let id = insert_mfa_pending_session_with_method(
+        db,
+        &user.id,
+        temp_token_hash,
+        Some("password"),
+        Some(&mut transaction),
+    )
+    .await?;
+    super::transaction_service::commit(&mut transaction).await?;
+    Ok(id)
+}
+/// Create a first-factor MFA challenge and retain the non-secret method label
+/// used for audit/telemetry after the challenge is redeemed. The raw token is
+/// never persisted; only its hash is stored in the dedicated challenge store.
+pub async fn create_mfa_pending_session_with_method(
     db: &mongodb::Database,
     user_id: &str,
     temp_token_hash: &str,
+    method: Option<&str>,
+) -> AppResult<String> {
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .find_one_and_update(
+            doc! {"_id": user_id, "is_active": true, "mfa_enabled": true,
+            "user_type": {"$ne": "org"}, "platform_personal_deleting": {"$ne": true}},
+            doc! {"$set": {"social_mfa_challenge_fence": uuid::Uuid::new_v4().to_string()}},
+        )
+        .session(&mut transaction)
+        .await?
+        .ok_or_else(|| AppError::AuthenticationFailed("MFA state changed".into()))?;
+    let id = insert_mfa_pending_session_with_method(
+        db,
+        user_id,
+        temp_token_hash,
+        method,
+        Some(&mut transaction),
+    )
+    .await?;
+    super::transaction_service::commit(&mut transaction).await?;
+    Ok(id)
+}
+
+/// All social first factors share the same transactionally fenced challenge.
+pub async fn start_social_mfa_challenge(
+    db: &mongodb::Database,
+    user_id: &str,
+    provider: &str,
+) -> AppResult<zeroize::Zeroizing<String>> {
+    let challenge = zeroize::Zeroizing::new(generate_random_token());
+    create_mfa_pending_session_with_method(db, user_id, &hash_token(&challenge), Some(provider))
+        .await?;
+    Ok(challenge)
+}
+
+async fn insert_mfa_pending_session_with_method(
+    db: &mongodb::Database,
+    user_id: &str,
+    temp_token_hash: &str,
+    method: Option<&str>,
+    transaction: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<String> {
     let session_id = Uuid::new_v4().to_string();
     let now = Utc::now();
     let expires = now + Duration::minutes(5);
 
     let pending_session = Session {
+        purpose: Some(crate::models::session::SessionPurpose::MfaPending),
+        mfa_method: method.map(str::to_owned),
+        mfa_assured: false,
         id: session_id.clone(),
         user_id: user_id.to_string(),
         token_hash: temp_token_hash.to_string(),
         ip_address: None,
-        user_agent: Some("mfa_pending".to_string()),
+        user_agent: None,
         expires_at: expires,
         revoked: false,
         created_at: now,
         last_active_at: now,
     };
 
-    db.collection::<Session>(SESSIONS)
-        .insert_one(&pending_session)
-        .await?;
+    let document = bson::to_document(&pending_session)
+        .map_err(|_| AppError::Internal("Failed to encode MFA challenge".into()))?;
+    let collection = db.collection::<bson::Document>(crate::models::session::MFA_CHALLENGES);
+    let insert = collection.insert_one(document);
+    if let Some(transaction) = transaction {
+        insert.session(transaction).await?;
+    } else {
+        insert.await?;
+    }
 
     Ok(session_id)
 }
@@ -401,24 +557,60 @@ pub async fn refresh_tokens(
     }
 
     // Look up the refresh token record by JTI
-    let stored = db
+    let mut stored = db
         .collection::<RefreshToken>(REFRESH_TOKENS)
         .find_one(doc! { "jti": &claims.jti })
         .await?
         .ok_or_else(|| AppError::Unauthorized("Refresh token not found".to_string()))?;
 
-    if stored.client_id == Uuid::nil().to_string()
-        && let Some(id) = stored.session_id.as_deref()
-    {
-        let live = db
-            .collection::<Session>(SESSIONS)
-            .find_one(doc! {
-                "_id": id, "user_id": &stored.user_id, "revoked": false,
-                "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}
-            })
+    if stored.client_id == Uuid::nil().to_string() {
+        let user = db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id": &stored.user_id})
+            .await?
+            .ok_or_else(|| AppError::Unauthorized("User account is inactive".into()))?;
+        if !user.is_active {
+            return Err(AppError::Unauthorized("User account is inactive".into()));
+        }
+        if user.mfa_enabled && stored.session_id.is_none() {
+            super::session_authority::reject_unassured(
+                db,
+                &stored.user_id,
+                None,
+                "sidless_refresh",
+                None,
+                None,
+            )
             .await?;
-        if live.is_none() {
-            return Err(AppError::Unauthorized("Session expired or revoked".into()));
+            return Err(AppError::Unauthorized(
+                "MFA verification required; sign in again".into(),
+            ));
+        }
+        if let Some(id) = stored.session_id.as_deref() {
+            let live = db
+                .collection::<Session>(SESSIONS)
+                .find_one(super::session_authority::authenticated(doc! {
+                    "_id": id, "user_id": &stored.user_id, "revoked": false,
+                    "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}
+                }))
+                .await?;
+            let Some(live) = live else {
+                return Err(AppError::Unauthorized("Session expired or revoked".into()));
+            };
+            if user.mfa_enabled && !live.mfa_assured {
+                super::session_authority::reject_unassured(
+                    db,
+                    &stored.user_id,
+                    Some(id),
+                    "refresh",
+                    None,
+                    None,
+                )
+                .await?;
+                return Err(AppError::Unauthorized(
+                    "MFA verification required; sign in again".into(),
+                ));
+            }
         }
     }
 
@@ -466,6 +658,96 @@ pub async fn refresh_tokens(
         }
     }
 
+    // PD-3: only an unused legacy OAuth record demonstrably newer than the
+    // current grant may acquire its revision. Keep the original row unbound:
+    // once consumed, it must never enter the normal rotation retry grace path.
+    let legacy_upgrade =
+        stored.client_id != Uuid::nil().to_string() && stored.protected_consent.is_none();
+    if legacy_upgrade {
+        if stored.revoked || stored.expires_at <= Utc::now() {
+            return Err(AppError::Unauthorized(
+                "Refresh token has expired or been revoked".into(),
+            ));
+        }
+        let consent =
+            super::consent_service::check_consent(db, &stored.user_id, &stored.client_id, "")
+                .await?
+                .ok_or_else(super::consent_service::grant_changed)?;
+        if stored.created_at <= consent.granted_at + Duration::seconds(60) {
+            return Err(super::consent_service::grant_changed());
+        }
+        let scope = stored
+            .scope
+            .as_deref()
+            .unwrap_or(FIRST_PARTY_ACCESS_SCOPES)
+            .split_whitespace()
+            .filter(|scope| {
+                *scope != "machine"
+                    && consent
+                        .scopes
+                        .split_whitespace()
+                        .any(|granted| granted == *scope)
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if scope.is_empty() {
+            return Err(super::consent_service::grant_changed());
+        }
+        // Pre-default-deny consent has no service authority, including for a
+        // legacy resource-bearing record. Preserve identity-only refreshes.
+        if !consent.allow_all_services
+            && consent.allowed_service_ids.is_none()
+            && !stored.resource_uris.is_empty()
+        {
+            return Err(super::consent_service::grant_changed());
+        }
+        let consent_services = consent.allowed_service_ids.as_deref().unwrap_or_default();
+        let allowed_service_ids = match (stored.allow_all_services, consent.allow_all_services) {
+            (true, true) => Vec::new(),
+            (true, false) => consent_services.to_vec(),
+            (false, true) => stored.allowed_service_ids.clone(),
+            (false, false) => stored
+                .allowed_service_ids
+                .iter()
+                .filter(|id| consent_services.contains(id))
+                .cloned()
+                .collect(),
+        };
+        let allow_all_services = stored.allow_all_services && consent.allow_all_services;
+        // Validate every retained URI before ensure_issuance_reference can write
+        // an unversioned consent or rotation can consume the legacy record.
+        if !stored.resource_uris.is_empty() {
+            let resolved = super::oauth_resource_service::resolve_requested_resources(
+                db,
+                config,
+                &stored.user_id,
+                Some(&stored.resource_uris),
+            )
+            .await
+            .map_err(|error| match error {
+                AppError::InvalidTarget(_)
+                | AppError::RequiredServiceNotConnected { .. }
+                | AppError::Forbidden(_)
+                | AppError::NotFound(_) => super::consent_service::grant_changed(),
+                error => error,
+            })?
+            .ok_or_else(super::consent_service::grant_changed)?;
+            if !allow_all_services
+                && resolved
+                    .service_ids
+                    .iter()
+                    .any(|id| !allowed_service_ids.contains(id))
+            {
+                return Err(super::consent_service::grant_changed());
+            }
+        }
+        stored.protected_consent =
+            Some(super::consent_service::ensure_issuance_reference(db, &consent).await?);
+        stored.scope = Some(scope);
+        stored.allowed_service_ids = allowed_service_ids;
+        stored.allow_all_services = allow_all_services;
+    }
+    let original_protected_consent = stored.protected_consent.clone();
     // If the token is revoked, check if this is a post-rotation retry
     // (client retried with old token after restart) vs actual token reuse.
     //
@@ -552,6 +834,20 @@ pub async fn refresh_tokens(
         RefreshTokenDisposition::Rotate(token) => (token, false),
         RefreshTokenDisposition::Reuse(token) => (token, true),
     };
+    if active_token.protected_consent != original_protected_consent {
+        return Err(super::consent_service::grant_changed());
+    }
+    super::consent_service::validate_protected_reference(
+        db,
+        &active_token.user_id,
+        &active_token.client_id,
+        active_token
+            .scope
+            .as_deref()
+            .unwrap_or(FIRST_PARTY_ACCESS_SCOPES),
+        active_token.protected_consent.as_ref(),
+    )
+    .await?;
     let user_id_str = active_token.user_id.clone();
     let user_id = Uuid::parse_str(&user_id_str)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in refresh token: {e}")))?;
@@ -601,7 +897,7 @@ pub async fn refresh_tokens(
             restrictions,
         )?
     } else {
-        jwt::generate_oauth_access_token(
+        jwt::generate_oauth_access_token_with_consent(
             jwt_keys,
             config,
             &user_id,
@@ -612,10 +908,19 @@ pub async fn refresh_tokens(
             None,
             restrictions,
             &active_token.client_id,
+            active_token.protected_consent.as_ref(),
         )?
     };
 
     if reuse_existing_refresh_token {
+        super::consent_service::fence_protected_reference(
+            db,
+            &active_token.user_id,
+            &active_token.client_id,
+            scope,
+            active_token.protected_consent.as_ref(),
+        )
+        .await?;
         touch_session_last_active(db, session_id.as_deref(), now).await?;
         return build_reused_refresh_response(
             jwt_keys,
@@ -648,6 +953,9 @@ pub async fn refresh_tokens(
         .await?;
 
     if revoked.is_none() {
+        if legacy_upgrade {
+            return Err(super::consent_service::grant_changed());
+        }
         // Another concurrent request rotated this token after we loaded it.
         // Recover the new active replacement token and return it so clients
         // converge on the same cookie value instead of logging out.
@@ -672,6 +980,17 @@ pub async fn refresh_tokens(
                 replacement_id = %recovered.id,
                 "Concurrent refresh rotation resolved to active replacement token"
             );
+            if recovered.protected_consent != active_token.protected_consent {
+                return Err(super::consent_service::grant_changed());
+            }
+            super::consent_service::fence_protected_reference(
+                db,
+                &active_token.user_id,
+                &active_token.client_id,
+                scope,
+                active_token.protected_consent.as_ref(),
+            )
+            .await?;
             touch_session_last_active(db, session_id.as_deref(), now).await?;
             return build_reused_refresh_response(
                 jwt_keys,
@@ -690,6 +1009,7 @@ pub async fn refresh_tokens(
 
     // Persist new refresh token
     let new_refresh = RefreshToken {
+        protected_consent: active_token.protected_consent.clone(),
         id: new_refresh_id,
         jti: new_jti,
         client_id: active_token.client_id.clone(),
@@ -710,6 +1030,18 @@ pub async fn refresh_tokens(
         .insert_one(&new_refresh)
         .await?;
 
+    if let Err(error) = super::consent_service::fence_protected_reference(
+        db,
+        &active_token.user_id,
+        &active_token.client_id,
+        scope,
+        active_token.protected_consent.as_ref(),
+    )
+    .await
+    {
+        super::oauth_service::revoke_issued_refresh(db, &new_refresh.jti).await?;
+        return Err(error);
+    }
     touch_session_last_active(db, session_id.as_deref(), now).await?;
 
     // Reuse the existing session token rather than generating a new orphan token.
@@ -745,6 +1077,7 @@ pub async fn revoke_session(
             doc! { "_id": session_id },
             doc! { "$set": { "revoked": true } },
         )
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
 
     // Revoke all refresh tokens for this session in a batch
@@ -753,6 +1086,7 @@ pub async fn revoke_session(
             doc! { "session_id": session_id, "revoked": false },
             doc! { "$set": { "revoked": true } },
         )
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
 
     // Cascade: end the user's MCP sessions that authenticate without a bearer
@@ -983,6 +1317,7 @@ mod tests {
         let allowed_service_ids = vec!["svc-1".to_string()];
         db.collection::<RefreshToken>(REFRESH_TOKENS)
             .insert_one(RefreshToken {
+                protected_consent: None,
                 id: Uuid::new_v4().to_string(),
                 jti: refresh_jti,
                 client_id: client_id.clone(),
@@ -998,6 +1333,32 @@ mod tests {
                 allow_all_services: false,
                 created_at: now,
             })
+            .await
+            .unwrap();
+
+        // Explicit legacy rejection: even a currently active client cannot
+        // upgrade an unbound refresh token using a later consent grant.
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            &client_id,
+            "openid proxy",
+            Some(allowed_service_ids.clone()),
+        )
+        .await
+        .unwrap();
+        let protected = super::super::consent_service::ensure_issuance_reference(&db, &consent)
+            .await
+            .unwrap();
+        assert!(matches!(
+            refresh_tokens(&db, &config, &jwt_keys, &refresh_jwt, None, None).await,
+            Err(AppError::Conflict(_))
+        ));
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .update_one(
+                doc! {"user_id":&user_id,"client_id":&client_id,"revoked":false},
+                doc! {"$set":{"protected_consent":bson::to_bson(&protected).unwrap()}},
+            )
             .await
             .unwrap();
 
@@ -1153,11 +1514,25 @@ mod tests {
         let resource_b =
             crate::services::oauth_resource_service::user_service_resource_uri(&config, "svc-b");
 
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            &client_id,
+            "openid proxy",
+            Some(vec![service_a_id.clone()]),
+        )
+        .await
+        .unwrap();
+        let protected = super::super::consent_service::ensure_issuance_reference(&db, &consent)
+            .await
+            .unwrap();
+
         let user_uuid = Uuid::parse_str(&user_id).unwrap();
         let (refresh_jwt, refresh_jti) =
             crate::crypto::jwt::generate_refresh_token(&jwt_keys, &config, &user_uuid).unwrap();
         db.collection::<RefreshToken>(REFRESH_TOKENS)
             .insert_one(RefreshToken {
+                protected_consent: Some(protected),
                 id: Uuid::new_v4().to_string(),
                 jti: refresh_jti,
                 client_id: client_id.clone(),
@@ -1308,27 +1683,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_mfa_pending_session() {
+    async fn test_create_mfa_pending_session_with_method() {
         let Some(db) = connect_test_database("token_svc").await else {
             return;
         };
         let user_id = Uuid::new_v4().to_string();
-        seed_user(&db, &user_id).await;
-
-        let temp_hash = "abc123hash";
-        let session_id = create_mfa_pending_session(&db, &user_id, temp_hash)
+        let mut user = test_user(&user_id, crate::models::user::UserType::Person);
+        user.mfa_enabled = true;
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(user)
             .await
             .unwrap();
 
+        let temp_hash = "abc123hash";
+        let session_id =
+            create_mfa_pending_session_with_method(&db, &user_id, temp_hash, Some("password"))
+                .await
+                .unwrap();
+
         let session = db
-            .collection::<Session>(SESSIONS)
+            .collection::<Session>(crate::models::session::MFA_CHALLENGES)
             .find_one(doc! { "_id": &session_id })
             .await
             .unwrap()
             .unwrap();
         assert_eq!(session.user_id, user_id);
         assert_eq!(session.token_hash, temp_hash);
-        assert_eq!(session.user_agent.as_deref(), Some("mfa_pending"));
+        assert_eq!(
+            session.purpose,
+            Some(crate::models::session::SessionPurpose::MfaPending)
+        );
+        assert_eq!(session.mfa_method.as_deref(), Some("password"));
+        assert!(session.user_agent.is_none());
         assert!(!session.revoked);
     }
 }
+
+#[cfg(test)]
+#[path = "token_service/legacy_tests.rs"]
+mod legacy_tests;

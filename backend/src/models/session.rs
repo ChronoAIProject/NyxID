@@ -2,12 +2,32 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "sessions";
+pub const MFA_CHALLENGES: &str = "mfa_challenges";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPurpose {
+    Authenticated,
+    MfaPending,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<SessionPurpose>,
+    /// Non-secret first-factor method retained on pending MFA challenges.
+    /// Completed sessions leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mfa_method: Option<String>,
+    /// A completed session may authenticate an MFA-enabled account only after
+    /// this assurance was established by a successful MFA step.
+    #[serde(default)]
+    pub mfa_assured: bool,
     /// SHA-256 hash of the session token stored in the cookie
     pub token_hash: String,
     pub ip_address: Option<String>,
@@ -21,6 +41,19 @@ pub struct Session {
     pub last_active_at: DateTime<Utc>,
 }
 
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("id", &self.id)
+            .field("user_id", &self.user_id)
+            .field("purpose", &self.purpose)
+            .field("token_hash", &"[REDACTED]")
+            .field("revoked", &self.revoked)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -32,6 +65,9 @@ mod tests {
 
     fn make_session() -> Session {
         Session {
+            purpose: Some(crate::models::session::SessionPurpose::Authenticated),
+            mfa_method: None,
+            mfa_assured: false,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             token_hash: "abcdef0123456789".to_string(),

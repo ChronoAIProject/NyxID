@@ -72,6 +72,8 @@ pub struct AuthorizeQuery {
     pub requested_service_ids: Vec<String>,
     #[serde(skip)]
     pub incremental_consent: Option<IncrementalConsent>,
+    #[serde(skip)]
+    pub machine_approval_request_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +103,18 @@ pub struct ConsentDecisionForm {
     pub service_access_mode: Option<ServiceAccessMode>,
     #[serde(default)]
     pub requested_service_ids: Vec<String>,
+    /// Older consent pages submitted controls the server never enforced.
+    #[serde(default)]
+    pub write_access: Option<String>,
+}
+
+fn validate_consent_write_access(write_access: Option<&str>) -> AppResult<()> {
+    match write_access {
+        None | Some("all") => Ok(()),
+        _ => Err(AppError::BadRequest(
+            "Read-only service access is not supported. Reload the consent page to review the supported permissions.".to_string(),
+        )),
+    }
 }
 
 fn default_allow_all_services_form() -> bool {
@@ -112,7 +126,7 @@ pub struct AuthorizeResponse {
     pub redirect_url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct TokenRequest {
     pub grant_type: String,
     pub code: Option<String>,
@@ -143,7 +157,7 @@ pub struct TokenRequest {
     pub resource: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct TokenResponse {
     pub access_token: String,
     pub token_type: String,
@@ -183,17 +197,23 @@ pub struct UserinfoResponse {
 
 // --- Introspection / Revocation types ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct IntrospectRequest {
     pub token: String,
     pub token_type_hint: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
+    /// Catalog service whose registered confidential client verifies an agent key.
+    pub service_id: Option<String>,
+    #[serde(flatten)]
+    pub resource_request: crate::services::resource_request_proof::IntrospectionInput,
 }
 
 #[derive(Debug, Serialize)]
 pub struct IntrospectResponse {
     pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aud: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -222,7 +242,7 @@ pub struct IntrospectResponse {
     pub resource: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct RevokeRequest {
     pub token: String,
     pub token_type_hint: Option<String>,
@@ -230,7 +250,7 @@ pub struct RevokeRequest {
     pub client_secret: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct GetBindingQuery {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -249,7 +269,7 @@ pub struct GetBindingResponse {
     pub revoked: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ListBindingsByExternalSubjectQuery {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -275,7 +295,7 @@ pub struct ListBindingsResponse {
     pub bindings: Vec<BindingSummary>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct PushedAuthorizationRequestForm {
     pub response_type: String,
     pub client_id: Option<String>,
@@ -312,11 +332,16 @@ pub struct PushedAuthorizationRequestResponse {
 /// RFC 6749 §5.2 compliant error body for the token endpoint.
 /// Standard OAuth clients expect `error` + `error_description`, not our
 /// internal `ErrorResponse` format which carries `error_code` / `message`.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct OAuthErrorBody {
     error: &'static str,
     error_description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_token: Option<zeroize::Zeroizing<String>>,
 }
+crate::errors::redacted_debug!(OAuthErrorBody);
 
 const CONSENT_REQUEST_AUDIENCE: &str = "nyxid/oauth-consent";
 const CONSENT_REQUEST_TOKEN_TYPE: &str = "oauth_consent_request";
@@ -350,6 +375,8 @@ struct ConsentRequestClaims {
     requested_service_ids: Vec<String>,
     #[serde(default)]
     incremental_consent: Option<IncrementalConsent>,
+    #[serde(default)]
+    machine_approval_request_id: Option<String>,
 }
 
 /// Map internal `AppError` to an RFC 6749 §5.2 JSON error response.
@@ -366,14 +393,27 @@ fn oauth_error_response(err: AppError) -> Response {
         other => other.to_string(),
     };
 
-    (
+    let mut response = (
         status,
         axum::Json(OAuthErrorBody {
             error: oauth_error,
             error_description: description,
+            error_code: matches!(err, AppError::MfaRequired { .. }).then_some(err.error_code()),
+            session_token: match &err {
+                AppError::MfaRequired { session_token } => {
+                    Some(zeroize::Zeroizing::new(session_token.clone()))
+                }
+                _ => None,
+            },
         }),
     )
-        .into_response()
+        .into_response();
+    if matches!(err, AppError::OAuthAuthorityUnavailable) {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, "1".parse().expect("fixed Retry-After"));
+    }
+    response
 }
 
 fn parse_basic_client_credentials(headers: &HeaderMap) -> AppResult<Option<(String, String)>> {
@@ -587,6 +627,7 @@ fn params_from_consent_form(form: &ConsentDecisionForm) -> AuthorizeQuery {
         include_granted_scopes: form.service_access_mode.is_some(),
         requested_service_ids: form.requested_service_ids.clone(),
         incremental_consent: None,
+        machine_approval_request_id: None,
         prompt: form.prompt.clone(),
         resource: form.resource.clone(),
         request_uri: None,
@@ -635,6 +676,7 @@ fn sign_consent_request(
         service_access_mode: params.service_access_mode,
         requested_service_ids: params.requested_service_ids.clone(),
         incremental_consent: params.incremental_consent.clone(),
+        machine_approval_request_id: params.machine_approval_request_id.clone(),
         prompt: params.prompt.clone(),
         resource: params.resource.clone(),
     };
@@ -665,12 +707,19 @@ fn verify_consent_request_with_expiry(
     validation.set_audience(&[CONSENT_REQUEST_AUDIENCE]);
     validation.validate_exp = !allow_expired;
 
-    let claims = decode::<ConsentRequestClaims>(token, &state.jwt_keys.decoding, &validation)
-        .map_err(|error| match error.kind() {
-            jsonwebtoken::errors::ErrorKind::ExpiredSignature => consent_service::grant_changed(),
-            _ => AppError::BadRequest("Invalid consent request".to_string()),
-        })?
-        .claims;
+    let claims = decode::<ConsentRequestClaims>(
+        token,
+        state
+            .jwt_keys
+            .decoding_key(token)
+            .map_err(|_| AppError::BadRequest("Invalid consent request".into()))?,
+        &validation,
+    )
+    .map_err(|error| match error.kind() {
+        jsonwebtoken::errors::ErrorKind::ExpiredSignature => consent_service::grant_changed(),
+        _ => AppError::BadRequest("Invalid consent request".to_string()),
+    })?
+    .claims;
 
     if claims.token_type != CONSENT_REQUEST_TOKEN_TYPE
         || claims.sub != user_id
@@ -696,6 +745,7 @@ fn verify_consent_request_with_expiry(
         include_granted_scopes: claims.service_access_mode.is_some(),
         requested_service_ids: claims.requested_service_ids,
         incremental_consent: claims.incremental_consent,
+        machine_approval_request_id: claims.machine_approval_request_id,
         prompt: claims.prompt,
         resource: claims.resource,
         request_uri: None,
@@ -884,6 +934,44 @@ pub async fn get_consent_request(
     Ok(Json(ConsentRequestResponse { token }))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareMachineConsentRequest {
+    pub consent_request: String,
+    pub selection: crate::services::machine_external_grant_service::GrantSelection,
+}
+
+/// Human-only stage of the existing consent page. Route registration is deferred
+/// until the full external Machine authority protocol is integrated.
+pub async fn prepare_machine_consent(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<PrepareMachineConsentRequest>,
+) -> AppResult<Json<ConsentRequestResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    let mut params = verify_consent_request(&state, &body.consent_request, &owner)?;
+    let (_, scope) = validate_authorize_request(&state, &params).await?;
+    if !scope.split_whitespace().any(|s| s == "machine") {
+        return Err(AppError::InvalidScope(
+            "Machine consent requires machine scope".into(),
+        ));
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    params.machine_approval_request_id = Some(id.clone());
+    let token = sign_consent_request(&state, &owner, &params, &scope)?;
+    crate::services::machine_oauth_consent_service::prepare(
+        &state.db,
+        &owner,
+        &params.client_id,
+        &id,
+        &token,
+        &body.selection,
+    )
+    .await?;
+    Ok(Json(ConsentRequestResponse { token }))
+}
+
 pub async fn authorize_decision(
     State(state): State<AppState>,
     opt_auth: OptionalAuthUser,
@@ -939,6 +1027,8 @@ pub async fn authorize_decision(
         return Err(AppError::BadRequest("Invalid consent decision".to_string()));
     }
 
+    validate_consent_write_access(form.write_access.as_deref())?;
+
     let (client, validated_scope) = validate_authorize_request(&state, &params).await?;
 
     // Re-resolve the reviewed binding after the consent round-trip. The
@@ -952,12 +1042,25 @@ pub async fn authorize_decision(
         ));
     }
 
+    let machine = if validated_scope.split_whitespace().any(|s| s == "machine") {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+        Some(
+            crate::services::machine_oauth_consent_service::MachineConsentApproval {
+                request_id: params.machine_approval_request_id.clone().ok_or_else(|| {
+                    AppError::BadRequest("Review and save Machine selection before approval".into())
+                })?,
+                signed_request: consent_request.to_owned(),
+            },
+        )
+    } else {
+        None
+    };
     let consent = if params.service_access_mode.is_some() {
         let snapshot = params.incremental_consent.as_ref().ok_or_else(|| {
             AppError::BadRequest("Missing incremental consent snapshot".to_string())
         })?;
         oauth_service::validate_scopes(&snapshot.scopes, &client.allowed_scopes)?;
-        let approved = incremental_consent_service::approve(
+        let approved = incremental_consent_service::approve_with_machine(
             &state.db,
             &user_id_str,
             &params.client_id,
@@ -966,6 +1069,7 @@ pub async fn authorize_decision(
             form.allow_all_services,
             params.binding_grant_id.as_deref(),
             external_subject.as_ref(),
+            machine.as_ref(),
         )
         .await;
         let approved = match approved {
@@ -1002,12 +1106,14 @@ pub async fn authorize_decision(
             validate_allowed_service_ids(&state.db, &user_id_str, &selected_service_ids).await?;
             Some(selected_service_ids)
         };
-        consent_service::grant_consent_with_services(
+        consent_service::grant_consent_with_machine(
             &state.db,
             &user_id_str,
             &params.client_id,
             &validated_scope,
-            consent_allowed_service_ids,
+            consent_allowed_service_ids.is_none(),
+            consent_allowed_service_ids.or_else(|| Some(Vec::new())),
+            machine.as_ref(),
         )
         .await?
     };
@@ -1047,6 +1153,8 @@ pub async fn authorize_decision(
     let tele_consent = TelemetryContext {
         surface: consent_surface,
         client_version: None,
+        analytics_allowed: false,
+        analytics_account: None,
     };
     emit_event(
         state.telemetry.as_deref(),
@@ -1060,7 +1168,8 @@ pub async fn authorize_decision(
             client_id: hash_short_id(&params.client_id),
             grant_type: "authorization_code".to_string(),
         },
-    );
+    )
+    .await;
     let _ = &tele;
 
     if needs_success_page(&params.redirect_uri) {
@@ -1090,6 +1199,15 @@ async fn authorize_inner(
     }
     let params = &normalized_params;
     let (client, validated_scope) = validate_authorize_request(state, params).await?;
+    if validated_scope
+        .split_whitespace()
+        .any(|scope| scope == "machine")
+        && let Some(auth) = opt_auth.0.as_ref()
+    {
+        // A saved human grant does not let another credential mint OAuth
+        // Machine authority through the silent authorization shortcut.
+        super::login_client_context::require_first_party_human(auth)?;
+    }
     if !is_browser_mode && params.service_access_mode.is_some() {
         return Err(AppError::BadRequest(
             "Incremental consent requires a browser review".to_string(),
@@ -1157,7 +1275,15 @@ async fn authorize_inner(
                     resolve_binding_grant_review(state, params, &user_id_str, external_subject)
                         .await?;
 
-                let needs_consent = params.service_access_mode.is_some()
+                let needs_consent = crate::services::machine_oauth_consent_service::needs_review(
+                    &state.db,
+                    &user_id_str,
+                    &params.client_id,
+                    &validated_scope,
+                    consent.as_ref(),
+                )
+                .await?
+                    || params.service_access_mode.is_some()
                     || binding_grant.is_some()
                     || consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref())
                     || force_consent;
@@ -1246,7 +1372,15 @@ async fn authorize_inner(
         let binding_grant =
             resolve_binding_grant_review(state, params, &user_id_str, external_subject).await?;
 
-        if params.service_access_mode.is_some()
+        if crate::services::machine_oauth_consent_service::needs_review(
+            &state.db,
+            &user_id_str,
+            &params.client_id,
+            &validated_scope,
+            consent.as_ref(),
+        )
+        .await?
+            || params.service_access_mode.is_some()
             || binding_grant.is_some()
             || consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref())
             || force_consent
@@ -1568,6 +1702,7 @@ async fn resolve_pushed_authorize_params(
         include_granted_scopes: record.service_access_mode.is_some(),
         requested_service_ids: record.requested_service_ids,
         incremental_consent: None,
+        machine_approval_request_id: None,
         prompt: record.prompt,
         resource: record.resources,
         request_uri: None,
@@ -2024,7 +2159,15 @@ async fn issue_authorization_code(
     consent: &Consent,
     external_subject: Option<&ExternalSubjectRef>,
 ) -> AppResult<String> {
+    if validated_scope
+        .split_whitespace()
+        .any(|scope| scope == "machine")
+    {
+        super::login_client_context::require_first_party_human(auth_user)?;
+    }
     let user_id_str = auth_user.user_id.to_string();
+    let protected_consent =
+        Some(consent_service::ensure_issuance_reference(&state.db, consent).await?);
     if let Some(snapshot) = &params.incremental_consent {
         incremental_consent_service::validate_current(
             &state.db,
@@ -2035,7 +2178,7 @@ async fn issue_authorization_code(
             external_subject,
         )
         .await?;
-        let code = oauth_service::create_authorization_code_with_incremental(
+        let code = oauth_service::create_authorization_code_with_consent(
             &state.db,
             &params.client_id,
             &user_id_str,
@@ -2050,6 +2193,7 @@ async fn issue_authorization_code(
             &snapshot.current_service_ids,
             snapshot.allow_all_services,
             Some(snapshot),
+            protected_consent.as_ref(),
         )
         .await?;
         audit_service::log_for_user(
@@ -2108,7 +2252,7 @@ async fn issue_authorization_code(
     if let Some(mcp) = mcp_resource_uri {
         resource_uris.push(mcp);
     }
-    let code = oauth_service::create_authorization_code(
+    let code = oauth_service::create_authorization_code_with_consent(
         &state.db,
         &params.client_id,
         &user_id_str,
@@ -2124,6 +2268,8 @@ async fn issue_authorization_code(
         // AuthorizationCode stores the allow-all flag, while this path
         // tracks whether the grant is service-restricted.
         !service_restricted,
+        None,
+        protected_consent.as_ref(),
     )
     .await?;
 
@@ -2290,7 +2436,8 @@ fn authorization_code_grant_error(error: AppError) -> AppError {
 }
 
 /// RFC 6749 §5.2: a refresh token that is malformed, expired, revoked,
-/// rotated away, or unknown is `invalid_grant`. MCP clients (Claude Code,
+/// rotated away, unknown, or no longer covered by consent is `invalid_grant`.
+/// MCP clients (Claude Code,
 /// Codex, web connectors) answer `invalid_grant` by discarding their tokens
 /// and asking the user to sign in again. `invalid_client` would make them
 /// discard their client registration too, and other codes leave them failing
@@ -2298,7 +2445,9 @@ fn authorization_code_grant_error(error: AppError) -> AppError {
 /// `invalid_client` so the client re-registers.
 fn refresh_token_grant_error(error: AppError) -> AppError {
     match error {
-        AppError::Unauthorized(message) => AppError::ExternalTokenInvalid(message),
+        AppError::Unauthorized(message) | AppError::Conflict(message) => {
+            AppError::ExternalTokenInvalid(message)
+        }
         AppError::TokenExpired => {
             AppError::ExternalTokenInvalid("Refresh token has expired".to_string())
         }
@@ -2408,6 +2557,7 @@ async fn token_inner(
                         &exchanged.refresh_token_resource_uris,
                         &exchanged.refresh_token_allowed_service_ids,
                         exchanged.refresh_token_allow_all_services,
+                        exchanged.protected_consent.as_ref(),
                     )
                     .await?
                 } else {
@@ -2680,7 +2830,8 @@ async fn token_inner(
                         subject_token_type: subject_token_type.to_string(),
                         exchange_provider: None,
                     },
-                );
+                )
+                .await;
 
                 Ok(Json(TokenResponse {
                     access_token: result.access_token,
@@ -2935,9 +3086,10 @@ pub async fn userinfo(
 pub async fn introspect(
     State(state): State<AppState>,
     Form(body): Form<IntrospectRequest>,
-) -> Json<IntrospectResponse> {
+) -> Response {
     let inactive = IntrospectResponse {
         active: false,
+        aud: None,
         scope: None,
         resource: None,
         client_id: None,
@@ -2956,18 +3108,80 @@ pub async fn introspect(
     // Authenticate the calling client (RFC 7662 requirement)
     let caller_client_id = match body.client_id.as_deref() {
         Some(id) if !id.is_empty() => id,
-        _ => return Json(inactive),
+        _ => return Json(inactive).into_response(),
     };
 
-    if oauth_service::authenticate_client(
+    let client = match oauth_service::authenticate_client(
         &state.db,
         caller_client_id,
         body.client_secret.as_deref(),
     )
     .await
-    .is_err()
     {
-        return Json(inactive);
+        Ok(client) => client,
+        Err(AppError::DatabaseError(_) | AppError::OAuthAuthorityUnavailable) => {
+            return AppError::OAuthAuthorityUnavailable.into_response();
+        }
+        Err(AppError::Internal(_)) => {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        Err(_) => return Json(inactive).into_response(),
+    };
+
+    if body.token_type_hint.as_deref() == Some("resource_request") {
+        let Some(service_id) = body.service_id.as_deref() else {
+            return Json(inactive).into_response();
+        };
+        let Ok(descriptor) = body.resource_request.descriptor() else {
+            return Json(inactive).into_response();
+        };
+        return match crate::services::resource_request_proof::introspect(
+            &state,
+            &client,
+            service_id,
+            &body.token,
+            descriptor,
+        )
+        .await
+        {
+            Ok(evidence) => Json(evidence).into_response(),
+            Err(AppError::DatabaseError(_) | AppError::Internal(_) | AppError::OrgQueryTimeout) => {
+                StatusCode::SERVICE_UNAVAILABLE.into_response()
+            }
+            Err(_) => Json(inactive).into_response(),
+        };
+    }
+
+    if body.token.starts_with("nyx_") || body.token.starts_with("nyxid_ag_") {
+        let Some(service_id) = body.service_id.as_deref() else {
+            return Json(inactive).into_response();
+        };
+        let evidence = match crate::services::agent_key_introspection::introspect(
+            &state.db,
+            &client,
+            service_id,
+            &body.token,
+        )
+        .await
+        {
+            Ok(evidence) => evidence,
+            Err(AppError::Unauthorized(_)) => return Json(inactive).into_response(),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+        return Json(IntrospectResponse {
+            active: true,
+            aud: Some(evidence.service_id),
+            sub: Some(evidence.subject),
+            token_type: Some("api_key".into()),
+            scope: Some(evidence.scope),
+            exp: evidence.expires_at.map(|date| date.timestamp()),
+            iat: Some(evidence.created_at.timestamp()),
+            jti: Some(evidence.key_id),
+            permissions: Some(evidence.permissions),
+            iss: Some(state.config.jwt_issuer.clone()),
+            ..inactive
+        })
+        .into_response();
     }
 
     // Broker-binding introspection: detect via the explicit token_type_hint
@@ -2991,11 +3205,12 @@ pub async fn introspect(
         .await
         {
             Ok(binding) if !binding.revoked => binding,
-            _ => return Json(inactive),
+            _ => return Json(inactive).into_response(),
         };
 
         return Json(IntrospectResponse {
             active: true,
+            aud: None,
             scope: Some(binding.scopes.join(" ")),
             resource: None,
             client_id: Some(binding.client_id),
@@ -3009,15 +3224,26 @@ pub async fn introspect(
             roles: None,
             groups: None,
             permissions: None,
-        });
+        })
+        .into_response();
     }
 
     // Try to verify the token
     let claims = match crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, &body.token)
     {
         Ok(c) => c,
-        Err(_) => return Json(inactive),
+        Err(_) => return Json(inactive).into_response(),
     };
+
+    if !matches!(claims.token_type.as_str(), "access" | "refresh") {
+        return Json(inactive).into_response();
+    }
+    match crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims).await
+    {
+        Ok(()) => {}
+        Err(error @ AppError::OAuthAuthorityUnavailable) => return error.into_response(),
+        Err(_) => return Json(inactive).into_response(),
+    }
 
     // For refresh tokens, check if revoked in the database
     if claims.token_type == "refresh" {
@@ -3030,9 +3256,29 @@ pub async fn introspect(
             .await;
 
         match stored {
-            Ok(Some(rt)) if rt.revoked => return Json(inactive),
-            Err(_) => return Json(inactive),
-            _ => {}
+            Ok(Some(rt))
+                if !rt.revoked && rt.user_id == claims.sub && rt.expires_at > Utc::now() =>
+            {
+                match consent_service::validate_protected_reference(
+                    &state.db,
+                    &rt.user_id,
+                    &rt.client_id,
+                    rt.scope
+                        .as_deref()
+                        .unwrap_or(crate::services::token_service::FIRST_PARTY_ACCESS_SCOPES),
+                    rt.protected_consent.as_ref(),
+                )
+                .await
+                {
+                    Ok(_) => {}
+                    Err(error @ AppError::OAuthAuthorityUnavailable) => {
+                        return error.into_response();
+                    }
+                    Err(_) => return Json(inactive).into_response(),
+                }
+            }
+            Err(_) => return AppError::OAuthAuthorityUnavailable.into_response(),
+            _ => return Json(inactive).into_response(),
         }
     }
 
@@ -3041,7 +3287,7 @@ pub async fn introspect(
             .await
             .is_err()
     {
-        return Json(inactive);
+        return Json(inactive).into_response();
     }
 
     // Fetch user email for username field
@@ -3061,11 +3307,30 @@ pub async fn introspect(
     let rbac = match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &claims.sub).await
     {
         Ok(rbac) => rbac,
-        Err(_) => return Json(inactive),
+        Err(_) => return Json(inactive).into_response(),
     };
+
+    let creator_permissions =
+        match crate::services::nyxbot_gateway_service::creator_gateway_permissions(
+            &state.db, &claims, &client,
+        )
+        .await
+        {
+            Ok(permissions) => permissions,
+            Err(error) => return error.into_response(),
+        };
+    let mut permissions = rbac.permissions;
+    permissions.extend(
+        creator_permissions
+            .iter()
+            .map(|permission| (*permission).to_owned()),
+    );
+    let mut seen = std::collections::HashSet::new();
+    permissions.retain(|permission| seen.insert(permission.clone()));
 
     Json(IntrospectResponse {
         active: true,
+        aud: None,
         scope: Some(claims.scope),
         resource: response_resources(claims.resources.unwrap_or_default()),
         client_id: None,
@@ -3078,8 +3343,9 @@ pub async fn introspect(
         jti: Some(claims.jti),
         roles: Some(rbac.role_slugs),
         groups: Some(rbac.group_slugs),
-        permissions: Some(rbac.permissions),
+        permissions: Some(permissions),
     })
+    .into_response()
 }
 
 /// GET /oauth/bindings?external_subject_*=...
@@ -3795,6 +4061,21 @@ mod wire_decoding_tests {
     }
 
     #[tokio::test]
+    async fn consent_decision_rejects_unenforced_read_only_choices_from_stale_pages() {
+        for choice in ["none", "selected", "unknown"] {
+            let body = format!(
+                "response_type=code&client_id=c1&redirect_uri=http%3A%2F%2Flocalhost%2Fcb&decision=allow&write_access={choice}"
+            );
+            let Form(form) = Form::<ConsentDecisionForm>::from_request(form_request(&body), &())
+                .await
+                .unwrap();
+            assert!(super::validate_consent_write_access(form.write_access.as_deref()).is_err());
+        }
+        assert!(super::validate_consent_write_access(None).is_ok());
+        assert!(super::validate_consent_write_access(Some("all")).is_ok());
+    }
+
+    #[tokio::test]
     async fn consent_decision_form_defaults_absent_vec_fields_to_empty() {
         let body = "response_type=code&client_id=c1&redirect_uri=http%3A%2F%2Flocalhost%2Fcb\
              &decision=allow&allow_all_services=true";
@@ -3886,6 +4167,33 @@ mod tests {
         connect_test_database, test_app_state, test_app_state_with_config, test_membership,
         test_user, test_user_service,
     };
+
+    #[tokio::test]
+    async fn consent_requests_validate_retained_signer_and_reject_retired_or_wrong_subject() {
+        let (old, current) = jwt::test_rotation_keys();
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.jwt_keys = old;
+        let user_id = Uuid::new_v4().to_string();
+        let params: AuthorizeQuery = serde_json::from_value(serde_json::json!({
+            "response_type":"code", "client_id":"retained-consent-client",
+            "redirect_uri":"https://client.example.test/callback", "scope":"openid email",
+            "state":"retained-state", "code_challenge":"retained-pkce",
+            "code_challenge_method":"S256"
+        }))
+        .unwrap();
+        let token = sign_consent_request(&state, &user_id, &params, "openid email").unwrap();
+        state.jwt_keys = current;
+        let restored = verify_consent_request(&state, &token, &user_id).unwrap();
+        assert_eq!(restored.client_id, params.client_id);
+        assert_eq!(restored.redirect_uri, params.redirect_uri);
+        assert_eq!(restored.scope, params.scope);
+        assert_eq!(restored.code_challenge, params.code_challenge);
+        assert!(verify_consent_request(&state, &token, &Uuid::new_v4().to_string()).is_err());
+        let fresh = sign_consent_request(&state, &user_id, &params, "openid email").unwrap();
+        state.jwt_keys.retained.clear();
+        assert!(verify_consent_request(&state, &token, &user_id).is_err());
+        verify_consent_request(&state, &fresh, &user_id).unwrap();
+    }
 
     #[test]
     fn consent_decision_form_defaults_service_access_to_deny() {
@@ -3981,8 +4289,28 @@ mod tests {
         let (refresh_jwt, refresh_jti) =
             jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user_uuid)
                 .expect("generate refresh jwt");
+        let consent =
+            match consent_service::check_consent(&state.db, user_id, client_id, &scopes.join(" "))
+                .await
+                .unwrap()
+            {
+                Some(consent) => consent,
+                None => consent_service::grant_consent_with_services(
+                    &state.db,
+                    user_id,
+                    client_id,
+                    &scopes.join(" "),
+                    None,
+                )
+                .await
+                .unwrap(),
+            };
+        let reference = consent_service::ensure_issuance_reference(&state.db, &consent)
+            .await
+            .unwrap();
         let now = Utc::now();
         let refresh = RefreshToken {
+            protected_consent: Some(reference),
             id: Uuid::new_v4().to_string(),
             jti: refresh_jti.clone(),
             client_id: client_id.to_string(),
@@ -3994,8 +4322,8 @@ mod tests {
             replaced_by: None,
             revoked_at: None,
             resource_uris: Vec::new(),
-            allowed_service_ids: Vec::new(),
-            allow_all_services: true,
+            allowed_service_ids: consent.allowed_service_ids.clone().unwrap_or_default(),
+            allow_all_services: consent.allow_all_services,
             created_at: now,
         };
         state
@@ -4012,6 +4340,7 @@ mod tests {
             .await
             .expect("encrypt binding refresh token");
         let binding = OauthBrokerBinding {
+            secret_context_versions: Default::default(),
             id: binding_hash,
             client_id: client_id.to_string(),
             user_id: user_id.to_string(),
@@ -4058,10 +4387,19 @@ mod tests {
         user_id: &str,
         scope: &str,
     ) {
+        let consent =
+            consent_service::grant_consent_with_services(db, user_id, client_id, scope, None)
+                .await
+                .unwrap();
+        let reference = consent_service::ensure_issuance_reference(db, &consent)
+            .await
+            .unwrap();
         let now = Utc::now();
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
+                protected_consent: Some(reference),
                 incremental_consent: None,
+
                 id: Uuid::new_v4().to_string(),
                 code_hash: crate::crypto::token::hash_token(code),
                 client_id: client_id.to_string(),
@@ -4298,6 +4636,7 @@ mod tests {
             include_granted_scopes: false,
             requested_service_ids: Vec::new(),
             incremental_consent: None,
+            machine_approval_request_id: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4363,6 +4702,7 @@ mod tests {
             include_granted_scopes: false,
             requested_service_ids: Vec::new(),
             incremental_consent: None,
+            machine_approval_request_id: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4437,6 +4777,7 @@ mod tests {
             include_granted_scopes: false,
             requested_service_ids: Vec::new(),
             incremental_consent: None,
+            machine_approval_request_id: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "https://app.example/callback".to_string(),
@@ -4511,6 +4852,7 @@ mod tests {
             include_granted_scopes: false,
             requested_service_ids: Vec::new(),
             incremental_consent: None,
+            machine_approval_request_id: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4572,6 +4914,7 @@ mod tests {
             include_granted_scopes: false,
             requested_service_ids: Vec::new(),
             incremental_consent: None,
+            machine_approval_request_id: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4633,6 +4976,7 @@ mod tests {
             include_granted_scopes: false,
             requested_service_ids: Vec::new(),
             incremental_consent: None,
+            machine_approval_request_id: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4689,6 +5033,7 @@ mod tests {
             include_granted_scopes: false,
             requested_service_ids: Vec::new(),
             incremental_consent: None,
+            machine_approval_request_id: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4747,6 +5092,7 @@ mod tests {
             include_granted_scopes: false,
             requested_service_ids: Vec::new(),
             incremental_consent: None,
+            machine_approval_request_id: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "https://app.example/callback".to_string(),
@@ -4810,6 +5156,7 @@ mod tests {
             include_granted_scopes: false,
             requested_service_ids: Vec::new(),
             incremental_consent: None,
+            machine_approval_request_id: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4829,11 +5176,47 @@ mod tests {
         let consent_request = sign_consent_request(&state, &user_id, &params, "openid")
             .expect("sign consent request");
 
+        for write_access in ["none", "selected"] {
+            let stale_form: ConsentDecisionForm = serde_json::from_value(serde_json::json!({
+                "response_type": "code", "client_id": client_id,
+                "redirect_uri": params.redirect_uri, "decision": "allow",
+                "allow_all_services": true, "write_access": write_access,
+                "consent_request": consent_request,
+            }))
+            .unwrap();
+            let error = authorize_decision(
+                State(state.clone()),
+                OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
+                TelemetryContext::default(),
+                Form(stale_form),
+            )
+            .await
+            .expect_err("stale read-only controls must not grant full access");
+            assert!(
+                matches!(error, AppError::BadRequest(message) if message.contains("Read-only service access"))
+            );
+            assert_eq!(
+                db.collection::<Consent>(crate::models::consent::COLLECTION_NAME)
+                    .count_documents(doc! { "user_id": &user_id })
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.collection::<AuthorizationCode>(AUTH_CODES)
+                    .count_documents(doc! { "user_id": &user_id })
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+
         let response = authorize_decision(
             State(state),
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
             TelemetryContext::default(),
             Form(ConsentDecisionForm {
+                write_access: None,
                 service_access_mode: None,
                 requested_service_ids: Vec::new(),
                 response_type: "code".to_string(),
@@ -5273,6 +5656,7 @@ mod tests {
             include_granted_scopes: false,
             requested_service_ids: Vec::new(),
             incremental_consent: None,
+            machine_approval_request_id: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: redirect_uri.to_string(),
@@ -5321,6 +5705,7 @@ mod tests {
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
             TelemetryContext::default(),
             Form(ConsentDecisionForm {
+                write_access: None,
                 service_access_mode: None,
                 requested_service_ids: Vec::new(),
                 response_type: params.response_type.clone(),
@@ -5610,6 +5995,7 @@ mod tests {
         let client_id = "public-broker-exchange";
         let raw_binding_id = crate::models::oauth_broker_binding::generate_binding_id();
         let user_id = Uuid::new_v4().to_string();
+        insert_person_user(&db, &user_id).await;
         insert_public_client(
             &db,
             client_id,
@@ -5730,6 +6116,24 @@ mod tests {
         let err = AppError::UnsupportedGrantType("magic_grant".to_string());
         let response = oauth_error_response(err);
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn oauth_mfa_challenge_has_oauth_error_shape_and_no_session_tokens() {
+        let response = oauth_error_response(AppError::MfaRequired {
+            session_token: "private-challenge".into(),
+        });
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "mfa_required");
+        assert_eq!(body["error_code"], 2002);
+        assert_eq!(body["session_token"], "private-challenge");
+        assert!(body.get("access_token").is_none());
+        assert!(body.get("refresh_token").is_none());
     }
 
     #[test]
@@ -5915,6 +6319,7 @@ mod tests {
     fn stored_refresh_token(jti: &str, client_id: &str, user_id: &str) -> RefreshToken {
         let now = Utc::now();
         RefreshToken {
+            protected_consent: None,
             id: Uuid::new_v4().to_string(),
             jti: jti.to_string(),
             client_id: client_id.to_string(),
@@ -5999,6 +6404,29 @@ mod tests {
             refresh_grant_error(&state, &stale).await,
             (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
         );
+
+        // PD-3: a live legacy row without current consent must ask the client
+        // to authorize again, while leaving the unconsumed record untouched.
+        let (unbound, unbound_jti) =
+            jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user)
+                .expect("mint legacy refresh token");
+        let row = stored_refresh_token(&unbound_jti, &client_id, &user.to_string());
+        refresh_tokens
+            .insert_one(&row)
+            .await
+            .expect("insert legacy");
+        assert_eq!(
+            refresh_grant_error(&state, &unbound).await,
+            (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
+        );
+        let unchanged = refresh_tokens
+            .find_one(doc! {"_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!unchanged.revoked);
+        assert!(unchanged.replaced_by.is_none());
+        assert!(unchanged.protected_consent.is_none());
     }
 
     #[tokio::test]
@@ -6105,6 +6533,7 @@ mod tests {
             include_granted_scopes: false,
             requested_service_ids: Vec::new(),
             incremental_consent: None,
+            machine_approval_request_id: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -6129,6 +6558,7 @@ mod tests {
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
             TelemetryContext::default(),
             Form(ConsentDecisionForm {
+                write_access: None,
                 service_access_mode: None,
                 requested_service_ids: Vec::new(),
                 response_type: "code".to_string(),
@@ -6525,6 +6955,7 @@ mod tests {
             include_granted_scopes: false,
             requested_service_ids: Vec::new(),
             incremental_consent: None,
+            machine_approval_request_id: None,
             response_type: "code".to_string(),
             client_id: "c1".to_string(),
             redirect_uri: "http://localhost/cb".to_string(),
@@ -6600,8 +7031,57 @@ mod tests {
         );
     }
     include!("oauth_incremental_tests.rs");
+    include!("oauth_machine_consent_tests.rs");
 }
 
 #[cfg(test)]
 #[path = "oauth_registration_tests.rs"]
 mod registration_tests;
+
+crate::errors::redacted_debug!(TokenRequest, TokenResponse);
+
+impl std::fmt::Debug for IntrospectRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IntrospectRequest").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RevokeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RevokeRequest").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for GetBindingQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GetBindingQuery").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for ListBindingsByExternalSubjectQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ListBindingsByExternalSubjectQuery")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PushedAuthorizationRequestForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushedAuthorizationRequestForm")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod credential_debug_tests {
+    use super::*;
+    #[test]
+    fn introspection_and_revocation_debug_redact_bearer_and_client_secrets() {
+        let secret = "distinctive-oauth-diagnostic-secret-28a4";
+        let value = serde_json::json!({"token":secret,"client_id":"client","client_secret":secret});
+        let introspect: IntrospectRequest = serde_json::from_value(value.clone()).unwrap();
+        let revoke: RevokeRequest = serde_json::from_value(value).unwrap();
+        assert!(!format!("{introspect:?}").contains(secret));
+        assert!(!format!("{revoke:?}").contains(secret));
+    }
+}

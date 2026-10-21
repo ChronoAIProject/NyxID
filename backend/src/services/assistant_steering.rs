@@ -115,6 +115,18 @@ pub async fn reserve(
             let response = row.active_turn.as_ref().unwrap().running_response.as_ref().unwrap();
             let now = Utc::now();
             let message = AssistantMessage {
+                media_event_ids: Vec::new(),
+                media_queue_notice_id: None,
+        media_pending: None,
+                media_bound: None,
+                platform_delivery_recovery_queued: false,
+                platform_reply: None,
+                platform_origin: None,
+                retry_claimed_by: None,
+                activity_count: None,
+                author: Some(crate::models::assistant_message::MessageAuthor::Owner),
+                report_to: None,
+                continuation_of: None,
                 specialist_id: None,
                 steering: Some(Box::new(Steering {
                     finalized: false,
@@ -124,9 +136,10 @@ pub async fn reserve(
                 voice: None, execution_pending: false, id: Uuid::new_v4().to_string(),
                 conversation_id: id.clone(), user_id: owner.clone(), seq: row.message_count + 1,
                 turn_id: turn_id.clone(), role: "user".into(), text: text.clone(), status: "completed".into(),
-                error_code: None, created_at: now, activities: vec![], attachments: vec![], origin: row.active_turn.as_ref().map(|turn| turn.origin), via: None,
+                error_code: None, created_at: now, activities: vec![], activity_total: 0, attachments: vec![], origin: row.active_turn.as_ref().map(|turn| turn.origin), via: None,
                     retry_of: None,
                         upstream_error_code: None,
+                        turn_metadata: None,
                         error_detail: None,
             };
             row.message_count += 1;

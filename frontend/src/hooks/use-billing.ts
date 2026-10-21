@@ -9,6 +9,8 @@ import {
   type TopUpBillingRequest,
   type TopUpBillingResponse,
   billingWalletResponseSchema,
+  currentBillSchema,
+  usageInvoicesSchema,
   invoiceDownloadResponseSchema,
   topUpHistoryResponseSchema,
   billingUsageResponseSchema,
@@ -16,6 +18,9 @@ import {
 } from "@/schemas/billing";
 
 const BILLING_WALLET_KEY = ["billing", "wallet"] as const;
+const BILLING_BILL_KEY = ["billing", "bill"] as const;
+const BILLING_INVOICES_KEY = ["billing", "invoices"] as const;
+export const BILLING_INVOICES_PAGE_SIZE = 10;
 const BILLING_USAGE_KEY = ["billing", "usage"] as const;
 
 export function billingUsagePath(
@@ -52,6 +57,8 @@ export function useProvisionBillingWallet() {
     onSuccess: (wallet) => {
       queryClient.setQueryData(BILLING_WALLET_KEY, wallet);
       void queryClient.invalidateQueries({ queryKey: BILLING_USAGE_KEY });
+      void queryClient.invalidateQueries({ queryKey: BILLING_BILL_KEY });
+      void queryClient.invalidateQueries({ queryKey: BILLING_INVOICES_KEY });
     },
   });
 }
@@ -68,6 +75,8 @@ export function useTopUpBilling() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: BILLING_WALLET_KEY });
       void queryClient.invalidateQueries({ queryKey: BILLING_USAGE_KEY });
+      void queryClient.invalidateQueries({ queryKey: BILLING_BILL_KEY });
+      void queryClient.invalidateQueries({ queryKey: BILLING_INVOICES_KEY });
     },
   });
 }
@@ -107,4 +116,30 @@ export async function openInvoiceReceipt(lagoInvoiceId: string): Promise<void> {
   );
   const { file_url } = invoiceDownloadResponseSchema.parse(response);
   window.open(file_url, "_blank", "noopener,noreferrer");
+}
+
+export function useCurrentBill(enabled = true) {
+  return useQuery({
+    queryKey: BILLING_BILL_KEY,
+    queryFn: async () =>
+      currentBillSchema.parse(await api.get<unknown>("/billing/bill")),
+    enabled,
+    retry: false,
+  });
+}
+export function useBillingInvoices(page = 1, enabled = true) {
+  return useQuery({
+    queryKey: [...BILLING_INVOICES_KEY, page],
+    queryFn: async () => {
+      const params = new URLSearchParams({
+        page: String(page),
+        per_page: String(BILLING_INVOICES_PAGE_SIZE),
+      });
+      return usageInvoicesSchema.parse(
+        await api.get<unknown>(`/billing/invoices?${params}`),
+      );
+    },
+    enabled,
+    retry: false,
+  });
 }

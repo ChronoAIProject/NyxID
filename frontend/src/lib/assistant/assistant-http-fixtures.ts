@@ -17,6 +17,10 @@ type JsonRecord = Record<string, unknown>;
 
 export interface AssistantHttpFixtureFaults {
   readonly nyxagentEnabled?: boolean;
+  /** Enable the existing voice feature for the mock user's composer preview. */
+  readonly voiceEnabled?: boolean;
+  /** Enable internal model and reasoning controls for this mock user. */
+  readonly modelControlsEnabled?: boolean;
   /** Serve NyxAgent's live change stream (otherwise it answers 404). */
   readonly nyxagentLive?: boolean;
   readonly historyDelayMs?: number;

@@ -5,12 +5,13 @@ export const browserTimezone = () =>
 export function formatAutomationTime(
   value: string | null | undefined,
   timezone: string,
+  withSeconds = false,
 ) {
   return value
     ? new Intl.DateTimeFormat(undefined, {
         timeZone: timezone,
         dateStyle: "medium",
-        timeStyle: "short",
+        timeStyle: withSeconds ? "medium" : "short",
       }).format(new Date(value))
     : "—";
 }

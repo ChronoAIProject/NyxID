@@ -18,7 +18,7 @@ type Adapter = std::sync::Arc<dyn crate::services::channel_platform::PlatformAda
 pub(super) static TEST_ADAPTERS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, Adapter>>,
 > = std::sync::LazyLock::new(Default::default);
-fn adapter(state: &AppState, bot: &ChannelBot) -> AppResult<Adapter> {
+pub(super) fn adapter(state: &AppState, bot: &ChannelBot) -> AppResult<Adapter> {
     adapter_for(state, &bot.id, &bot.platform)
 }
 
@@ -47,19 +47,16 @@ pub(super) async fn inbound(
     payload: &Value,
     message: &str,
     text: &str,
+    event_key: &str,
 ) -> AppResult<bool> {
     if row.transport != "direct" {
         return Ok(false);
     }
-    let key = sha256_hex(format!(
-        "thread-follow:v1\0{}\0{message}",
-        row.channel_bot_id
-    ));
-    Ok(
-        inbound_impl(state, row, payload, message, text, &key, false)
-            .await?
-            .is_some(),
-    )
+    Ok(Box::pin(inbound_impl(
+        state, row, payload, message, text, event_key, false,
+    ))
+    .await?
+    .is_some())
 }
 
 pub(super) async fn gateway_inbound(
@@ -76,7 +73,7 @@ pub(super) async fn gateway_inbound(
     }
     let payload = json!({"conversation":{"type":activity["conversation"]["kind"]},
         "sender":{"display_name":activity["actor"]["display_name"]}});
-    inbound_impl(
+    Box::pin(inbound_impl(
         state,
         row,
         &payload,
@@ -84,7 +81,7 @@ pub(super) async fn gateway_inbound(
         text,
         event_key,
         true,
-    )
+    ))
     .await
 }
 
@@ -146,17 +143,39 @@ async fn inbound_impl(
         return Ok(None);
     };
     let sender_id = source.sender_platform_id.as_deref().unwrap_or_default();
-    if facts.sender_kind != ThreadSenderKind::Human || sender_id.is_empty() {
+    if !matches!(
+        facts.sender_kind,
+        ThreadSenderKind::Human | ThreadSenderKind::Bot
+    ) || sender_id.is_empty()
+    {
         return Ok(Some(Inbound::Silent));
     }
-    if text.trim().is_empty() {
+
+    if text.trim().is_empty()
+        && Box::pin(crate::services::channel_media_events::for_turn(
+            &state.db, row, event_key,
+        ))
+        .await?
+        .0 == 0
+    {
         return Ok(Some(Inbound::Silent));
     }
     let sender = Sender {
+        media: crate::services::telegram_input::stored_attachments(&source.attachments),
+        original_message: canonical_platform(&row.platform) != "telegram"
+            || source.original_message == Some(true),
+        kind: facts.sender_kind,
+        owner_eligible: facts.sender_kind == ThreadSenderKind::Human,
         id: sender_id,
         display_name: payload["sender"]["display_name"].as_str(),
     };
-    if let Some(linked) = link_owner(state, row, &sender, text, false).await? {
+    let stop_requested = sender.kind == ThreadSenderKind::Human && text.trim() == "stop following";
+    if stop_requested && !sender.original_message {
+        return Ok(Some(Inbound::Silent));
+    }
+    if sender.kind == ThreadSenderKind::Human
+        && let Some(linked) = link_owner(state, row, &sender, text, false).await?
+    {
         if gateway {
             return Ok(Some(linked));
         }
@@ -165,11 +184,24 @@ async fn inbound_impl(
         }
         return Ok(Some(Inbound::Silent));
     }
+    if sender.kind == ThreadSenderKind::Bot {
+        let own = if gateway {
+            row.gateway_bot_id.clone()
+        } else {
+            own_user_id(state, &bot).await
+        };
+        if !chats::foreign_bot(&bot, own.as_deref(), sender_id) {
+            return Ok(Some(Inbound::Silent));
+        }
+    }
     // Only this signed callback can improve address evidence. Never convert
     // the legacy "unknown means owner" rule into follow authority.
-    if facts.address == ThreadAddress::Unknown {
-        let own = bot_user_id(state, &bot).await;
+    if facts.address == ThreadAddress::Unknown || (sender.kind == ThreadSenderKind::Bot && !gateway)
+    {
+        let own = own_user_id(state, &bot).await;
         let inbound = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: facts.message_id.clone(),
             conversation_id: facts.chat_id.clone(),
             conversation_type: payload["conversation"]["type"]
@@ -187,18 +219,21 @@ async fn inbound_impl(
         };
         if let Some(proven) = adapter.thread_facts(&inbound, &bot, own.as_deref())
             && threads::valid_facts(&proven, &inbound)
-            && proven.sender_kind == ThreadSenderKind::Human
+            && proven.sender_kind == sender.kind
         {
             facts = proven;
+        } else if sender.kind == ThreadSenderKind::Bot {
+            return Ok(Some(Inbound::Silent));
         }
     }
-    if chats::replies_to_bot(
-        state,
-        &bot,
-        &facts.chat_id,
-        facts.parent_message_id.as_deref(),
-    )
-    .await?
+    if facts.address != ThreadAddress::Mention
+        && chats::replies_to_bot(
+            state,
+            &bot,
+            &facts.chat_id,
+            facts.parent_message_id.as_deref(),
+        )
+        .await?
     {
         facts.address = if facts.kind == ThreadKind::Email {
             ThreadAddress::VerifiedReply
@@ -275,28 +310,36 @@ async fn inbound_impl(
         return Ok(None);
     }
     let exact = exact.pop();
-    let parent = chats::record_chat(
-        state,
-        row,
-        &parent_key,
-        &chats::ChatFacts {
-            kind,
-            chat_id: if facts.kind == ThreadKind::Email {
-                facts.chat_id.clone()
-            } else {
-                parent_chat.into()
+    let parent = if sender.kind == ThreadSenderKind::Bot {
+        let Some(chat) = chats::existing_bot_chat(state, row, &parent_key).await? else {
+            return Ok(None);
+        };
+        chat
+    } else {
+        chats::record_chat(
+            state,
+            row,
+            &parent_key,
+            &chats::ChatFacts {
+                kind,
+                chat_id: if facts.kind == ThreadKind::Email {
+                    facts.chat_id.clone()
+                } else {
+                    parent_chat.into()
+                },
+                thread_id: if facts.kind == ThreadKind::Email {
+                    facts.root_id.clone()
+                } else {
+                    topic.map(str::to_owned)
+                },
+                owner: sender.kind == ThreadSenderKind::Human
+                    && row.owner_sender_ids.iter().any(|id| id == sender_id),
+                title: None,
             },
-            thread_id: if facts.kind == ThreadKind::Email {
-                facts.root_id.clone()
-            } else {
-                topic.map(str::to_owned)
-            },
-            owner: row.owner_sender_ids.iter().any(|id| id == sender_id),
-            title: None,
-        },
-        None,
-    )
-    .await?;
+            None,
+        )
+        .await?
+    };
     // Email remains subject to the existing private-chat sender gate. Check
     // it before inspecting legacy sender partitions so an unauthorized guest
     // cannot learn that another sender has conflicting policy.
@@ -345,7 +388,11 @@ async fn inbound_impl(
             .filter(|c| c.id != parent.id)
             .unwrap_or_else(|| parent.clone())
     };
-    let settings = chats::note_owner_presence(state, row, &settings, sender_id).await?;
+    let settings = if sender.kind == ThreadSenderKind::Human {
+        chats::note_owner_presence(state, row, &settings, sender_id).await?
+    } else {
+        settings
+    };
     if settings
         .follow
         .threads
@@ -355,7 +402,8 @@ async fn inbound_impl(
         return Ok(None);
     }
     let Some(_guest) = follow::eligible_for_facts(row, &settings, facts, sender_id) else {
-        if facts.kind != ThreadKind::Email
+        if sender.kind == ThreadSenderKind::Human
+            && facts.kind != ThreadKind::Email
             && addressed
             && settings.members.is_none()
             && let Some(hint) = chats::waiting_hint(state, &settings).await?
@@ -399,7 +447,7 @@ async fn inbound_impl(
         message,
         sender_id,
         addressed,
-        text.trim() == "stop following",
+        stop_requested,
         &agent_id,
         on,
     )
@@ -409,6 +457,9 @@ async fn inbound_impl(
         Ok(follow::Selection::Quiet) => return Ok(Some(Inbound::Silent)),
         Ok(follow::Selection::Child(c, b)) => (c, b, false),
         Ok(follow::Selection::Stopped(c, b)) => (c, b, true),
+        Err(AppError::Conflict(_)) if sender.kind == ThreadSenderKind::Bot => {
+            return Ok(Some(Inbound::Silent));
+        }
         Err(AppError::Conflict(_)) => {
             let reply = OutboundReply {
                 text: Some(
@@ -434,6 +485,19 @@ async fn inbound_impl(
         }
         Err(e) => return Err(e),
     };
+    if !stopped
+        && !crate::services::channel_bot_turn_service::admit_with_owner_reset(
+            &state.db,
+            row,
+            &settings,
+            sender.kind,
+            sender.owner_eligible,
+            event_key,
+        )
+        .await?
+    {
+        return Ok(Some(Inbound::Silent));
+    }
     let origin = ChannelOrigin {
         nyxbot_channel_id: row.id.clone(),
         partition: child.partition.clone(),
@@ -484,6 +548,13 @@ async fn inbound_impl(
         ))
         .await
     };
+    let result = result.map(|result| {
+        if sender.kind == ThreadSenderKind::Bot && matches!(result, Inbound::Busy) {
+            Inbound::Silent
+        } else {
+            result
+        }
+    });
     if gateway {
         return Ok(Some(match result {
             Ok(Inbound::Busy) => {
@@ -495,24 +566,21 @@ async fn inbound_impl(
     }
     let reply = match result {
         Ok(Inbound::Reply(reply)) => Some(reply),
+        Ok(Inbound::Queued) => {
+            late_delivery::process(state, event_key).await;
+            None
+        }
         Ok(Inbound::Silent) => None,
         Ok(Inbound::Busy) => Some("I'm busy right now. Please try again in a moment.".into()),
         Ok(Inbound::Turn(receiver)) => {
             let _ = final_reply(receiver).await;
-            late_delivery::process(
-                state,
-                &sha256_hex(format!(
-                    "thread-follow:v1\0{}\0{message}",
-                    row.channel_bot_id
-                )),
-            )
-            .await;
+            late_delivery::process(state, event_key).await;
             None
         }
         Err(_) => Some("I could not start that. Please try again.".into()),
     };
     if let Some(reply) = reply {
-        send(state, &row.user_id, &origin, conversation, &reply).await?;
+        send(state, &row.user_id, &origin, conversation, &reply, None).await?;
     }
     // Opening reservations expire under the revision-fenced sweep. Another
     // simultaneous event may still be claiming this shared reservation.
@@ -578,12 +646,75 @@ pub(crate) async fn send(
     origin: &ChannelOrigin,
     conversation: &str,
     text: &str,
+    images: Option<super::images::ImageTurn<'_>>,
 ) -> AppResult<()> {
     let channel = follow::access(&state.db, owner, &origin.nyxbot_channel_id).await?;
+    let mut text = bounded_reply(text);
+    if let Some(images) = images {
+        let child = follow::validate_delivery(&state.db, owner, origin, conversation).await?;
+        let binding = origin.thread.as_ref().ok_or_else(follow::not_found)?;
+
+        let report = super::images::report_or_failure(
+            state,
+            super::images::ImageSendContext {
+                owner,
+                conversation_id: conversation,
+                turn_id: images.turn_id,
+                channel: &channel,
+                thread: &child,
+                anchor: super::images::ImageAnchor::Thread {
+                    origin: origin.clone(),
+                },
+                audience: super::images::ImageAudience {
+                    owner_private: !binding.guest
+                        && (images.app_visible
+                            || (child.kind.as_deref() == Some("private") && child.owner_chat)),
+                },
+                deadline: None,
+
+                initiated: None,
+                fence: None,
+            },
+            images.plan,
+        )
+        .await;
+        text = super::images::append_failure(&text, &report);
+    }
+    if text.trim().is_empty() {
+        return Ok(());
+    }
     if threads::gateway::negotiated(&channel) {
         follow::validate_delivery(&state.db, owner, origin, conversation).await?;
-        return super::gateway_threads::send(state, &channel, origin, conversation, text).await;
+        return super::gateway_threads::send(state, &channel, origin, conversation, &text).await;
     }
+    let outcome = send_bound_reply(
+        state,
+        &channel,
+        owner,
+        origin,
+        conversation,
+        &OutboundReply {
+            text: Some(text),
+            attachments: Vec::new(),
+            reply_to_platform_message_id: None,
+            metadata: None,
+        },
+    )
+    .await?;
+    match outcome.error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Resolve live thread credentials identically for image and text components.
+pub(super) async fn bound_image_audience(
+    state: &AppState,
+    channel: &NyxbotChannel,
+    owner: &str,
+    origin: &ChannelOrigin,
+    conversation: &str,
+) -> AppResult<String> {
     let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
     let adapter = adapter(state, &bot)?;
     let token = crate::services::channel_credentials::resolve_bot_token(
@@ -593,11 +724,30 @@ pub(crate) async fn send(
         &bot,
     )
     .await?;
+    let secrets = if bot.credential_source == "platform" {
+        Some(
+            crate::services::channel_managed::build_verify_secrets(
+                &state.db,
+                &state.encryption_keys,
+                adapter.as_ref(),
+                &bot,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        &bot,
+        Some(&channel.route_api_key_id),
+    );
     let credentials = BotCredentials {
         token: &token,
         platform_bot_id: Some(&bot.platform_bot_id),
-        platform_secrets: None,
-        billing: None,
+        platform_secrets: secrets.as_ref(),
+        billing: billing.as_ref(),
     };
     let target = threads::resolution::resolve_admitted(
         &state.db,
@@ -610,24 +760,90 @@ pub(crate) async fn send(
     )
     .await?
     .ok_or_else(follow::not_found)?;
-    let outcome = threads::delivery::send_reply(
-        &state.db,
-        adapter.as_ref(),
-        &bot,
-        &credentials,
-        &target,
-        &OutboundReply {
-            text: Some(bounded_reply(text)),
-            attachments: Vec::new(),
-            reply_to_platform_message_id: None,
-            metadata: None,
-        },
-    )
-    .await?;
-    match outcome.error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
+    let mut outbound = OutboundReply {
+        text: None,
+        metadata: None,
+        attachments: Vec::new(),
+        reply_to_platform_message_id: Some(target.facts().message_id.clone()),
+    };
+    let thread =
+        crate::services::channel_image_audience::facts_thread(&bot.platform, target.facts());
+    adapter.reply_context(thread, chrono::Utc::now(), &mut outbound.metadata);
+    Ok(crate::services::channel_image_audience::resolve(
+        &bot.id,
+        &bot.platform,
+        &target.facts().chat_id,
+        &outbound,
+    ))
+}
+
+pub(super) async fn send_bound_reply(
+    state: &AppState,
+    channel: &NyxbotChannel,
+    owner: &str,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    outbound: &OutboundReply,
+) -> AppResult<threads::delivery::ThreadDelivery> {
+    // Keep this multi-stage delivery future on the heap. Its callers include
+    // Tokio workers and nested image/automation delivery on normal stacks.
+    Box::pin(async move {
+        let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
+        let adapter = adapter(state, &bot)?;
+        let token = crate::services::channel_credentials::resolve_bot_token(
+            &state.db,
+            &state.encryption_keys,
+            adapter.as_ref(),
+            &bot,
+        )
+        .await?;
+        let secrets = if bot.credential_source == "platform" {
+            Some(
+                crate::services::channel_managed::build_verify_secrets(
+                    &state.db,
+                    &state.encryption_keys,
+                    adapter.as_ref(),
+                    &bot,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+            &state.db,
+            &state.billing,
+            &bot,
+            Some(&channel.route_api_key_id),
+        );
+        let credentials = BotCredentials {
+            token: &token,
+            platform_bot_id: Some(&bot.platform_bot_id),
+            platform_secrets: secrets.as_ref(),
+            billing: billing.as_ref(),
+        };
+        let target = threads::resolution::resolve_admitted(
+            &state.db,
+            adapter.as_ref(),
+            &bot,
+            &credentials,
+            owner,
+            origin,
+            conversation,
+        )
+        .await?
+        .ok_or_else(follow::not_found)?;
+        threads::delivery::send_reply(
+            &state.db,
+            adapter.as_ref(),
+            &bot,
+            &credentials,
+            &target,
+            outbound,
+        )
+        .await
+    })
+    .await
 }
 
 /// Append bounded provider/metadata context to a channel turn. The first

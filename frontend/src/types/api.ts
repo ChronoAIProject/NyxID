@@ -25,6 +25,7 @@ export interface User {
   /// Social login provider ("google", "github", ...) or null for
   /// email/password accounts. Older backends omit the field.
   readonly social_provider?: string | null;
+  readonly has_password?: boolean;
   readonly is_admin: boolean;
   /// Read-only platform admin. Defaults to false. When true (and `is_admin`
   /// is false) the user can hit admin GET endpoints but no writes.
@@ -58,6 +59,9 @@ export interface ProfileConfig {
 export interface UserCapabilities {
   /** Admin, or Operator holding Tools Manager. Older backends omit it. */
   readonly manage_tools?: boolean;
+  readonly read_feature_flags?: boolean;
+  readonly create_feature_flags?: boolean;
+  readonly manage_all_feature_flags?: boolean;
   /** Admin, or Operator holding Catalog Manager. Older backends omit it. */
   readonly manage_catalog?: boolean;
   readonly billing_available?: boolean;
@@ -176,7 +180,30 @@ export function canReadAdminUsage(
   return hasAdminRead(user) || user?.capabilities?.read_admin_usage === true;
 }
 
+export function canReadFeatureFlags(
+  user:
+    | Pick<User, "is_admin" | "is_operator" | "role" | "capabilities">
+    | null
+    | undefined,
+): boolean {
+  return hasAdminRead(user) || user?.capabilities?.read_feature_flags === true;
+}
+
+export function canCreateFeatureFlags(
+  user:
+    | Pick<User, "is_admin" | "is_operator" | "role" | "capabilities">
+    | null
+    | undefined,
+): boolean {
+  return (
+    canAdminWrite(user) || user?.capabilities?.create_feature_flags === true
+  );
+}
+
 export interface ApiKey {
+  /** Approval CAS only; normal use may advance this version. */
+  readonly state_version?: number;
+  readonly purpose?: string;
   readonly assistant_conversation_id?: string | null;
   readonly id: string;
   readonly name: string;
@@ -230,6 +257,7 @@ export interface ApiKeyCreateResponse {
   readonly key_prefix: string;
   readonly scopes: string;
   readonly created_at: string;
+  readonly expires_at: string | null;
 }
 
 export interface ApiKeyUsageService {
@@ -455,6 +483,7 @@ export interface ServiceCapabilities {
 }
 
 export interface ServiceBilling {
+  readonly managed_execution?: ManagedExecutionContract | null;
   readonly byok_pricing?: LanePricingView | null;
   readonly platform_key_pricing?: LanePricingView | null;
   /** Admin opt-in: only platform_billable services charge wallet credits. */
@@ -469,6 +498,17 @@ export interface ServiceBilling {
   readonly resale_billable?: boolean;
   readonly resale_metric?: string;
   readonly lago_resale_metric_code?: string | null;
+}
+
+export interface ManagedExecutionContract {
+  readonly model: string;
+  readonly max_input_tokens: number;
+  readonly max_output_tokens: number;
+  readonly max_request_bytes: number;
+  readonly max_response_bytes: number;
+  readonly tariff_version: string;
+  readonly tariff_source: string;
+  readonly tariff_verified_at: { readonly $date: { readonly $numberLong: string } | string };
 }
 
 export interface ServicePlatformPricing {
@@ -716,7 +756,7 @@ export interface MfaRequiredError {
 
 export interface MfaVerifyRequest {
   readonly code: string;
-  readonly mfa_token: string;
+  readonly mfa_token?: string;
 }
 
 export interface PublicConfig {
@@ -754,6 +794,7 @@ export interface ProviderConfig {
   readonly default_scopes: readonly string[] | null;
   readonly supports_oauth_scopes?: boolean;
   readonly supports_pkce: boolean;
+  readonly authorization_nonce_required?: boolean;
   readonly device_code_url: string | null;
   readonly device_token_url: string | null;
   readonly device_verification_url: string | null;
@@ -780,6 +821,7 @@ export interface ProviderRevocationConfig {
   readonly url: string;
   readonly auth: "inherit" | "none" | "client_id" | "basic" | "post";
   readonly revokes_grant: boolean;
+  readonly effect_scope?: "token_only" | "grant_wide" | "request_scoped" | null;
 }
 
 export interface UserProviderCredentials {

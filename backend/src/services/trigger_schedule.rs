@@ -1,7 +1,9 @@
 //! Trigger schedules: derived leased work, durable UUID-v5 occurrence identity,
 //! and admission fenced in the same transaction as an assistant turn.
 pub mod compute;
+pub mod result_delivery;
 use super::api_key_mutation_service as transactions;
+use super::assistant_engine_policy as policy;
 use crate::models::trigger_run::RunOutcome;
 use crate::{
     errors::{AppError, AppResult},
@@ -41,6 +43,12 @@ pub fn run_id(trigger_id: &str, at: DateTime<Utc>) -> String {
 pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
     for (collection, keys, name, ttl) in [
         (WORK, doc! { "at": 1, "_id": 1 }, "trigger_work_due", false),
+        (
+            WORK,
+            doc! { "trigger_id": 1, "_id": 1 },
+            "trigger_work_parent",
+            false,
+        ),
         (
             RUNS,
             doc! { "trigger_id": 1, "scheduled_at": -1, "_id": -1 },
@@ -140,6 +148,7 @@ pub async fn set_schedule_job(
         && trigger.status == TriggerStatus::Active
         && let Some(at) = trigger.schedule_state.next_due_at
     {
+        super::erasure_admission::fence_in_session(db, &trigger.user_id, session).await?;
         db.collection::<Document>(WORK)
             .replace_one(
                 doc! { "_id": &id },
@@ -147,6 +156,7 @@ pub async fn set_schedule_job(
                     "_id": &id,
                     "kind": "schedule",
                     "trigger_id": &trigger.id,
+                    "user_id": &trigger.user_id,
                     "at": date(at),
                     "fence": "",
                 },
@@ -165,6 +175,11 @@ pub async fn set_schedule_job(
 
 pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) -> TriggerRun {
     TriggerRun {
+        trigger_generation: None,
+        dispatch_at: None,
+        terminal_result_recorded: false,
+        attempts: None,
+        capacity_wait_ms: None,
         id: run_id(&trigger.id, at),
         trigger_id: trigger.id.clone(),
         user_id: trigger.user_id.clone(),
@@ -181,6 +196,8 @@ pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) ->
         missed: None,
         waiting_for: Vec::new(),
         result_claimed: false,
+        image_refs: Vec::new(),
+        image_refs_truncated: 0,
         agent_id: None,
         deliver_to: Default::default(),
         label: trigger.label.clone(),
@@ -195,6 +212,7 @@ pub(crate) async fn insert_run(
     run: &TriggerRun,
     session: &mut ClientSession,
 ) -> AppResult<()> {
+    super::erasure_admission::fence_in_session(db, &run.user_id, session).await?;
     let stored = db
         .collection::<Document>(TRIGGERS)
         .find_one_and_update(
@@ -250,7 +268,8 @@ pub(crate) async fn insert_run(
             "_id": &run.id,
             "kind": "run",
             "trigger_id": &run.trigger_id,
-            "at": date(Utc::now()),
+            "user_id": &run.user_id,
+            "at": date(run.dispatch_at.unwrap_or_else(Utc::now)),
             "fence": "",
         })
         .session(session)
@@ -316,7 +335,8 @@ pub async fn claim_occurrence(
                     return Ok(None);
                 };
                 let at = compute::latest(spec, now)?.unwrap_or(due).max(due);
-                let run = new_run(&trigger, at, at + compute::grace(spec, at)?);
+                let mut run = new_run(&trigger, at, at + compute::grace(spec, at)?);
+                run.dispatch_at = Some(at + dispatch_offset(&trigger.id, spec, at)?);
                 insert_run(&db, &run, session).await?;
                 // Catch-up executes only the newest occurrence. All missed work is
                 // one metadata-only summary with one deterministic identity/audit.
@@ -457,37 +477,58 @@ pub async fn finish(
     run_id: &str,
     outcome: RunOutcome,
     reason: Option<&str>,
+    frontend: &str,
 ) -> AppResult<()> {
-    if let Some(run) = finish_update(
-        db,
-        doc! {
-            "_id": run_id,
-            "outcome": {
-                "$in": [
-                    RunOutcome::Pending.as_str(),
-                    RunOutcome::Started.as_str(),
-                    RunOutcome::Waiting.as_str(),
-                ],
-            },
-        },
-        outcome,
-        reason,
-        None,
-    )
-    .await?
-    {
+    let mut session = db.client().start_session().await?;
+    let work_db = db.clone();
+    let run_id = run_id.to_owned();
+    let reason = reason.map(str::to_owned);
+    let frontend = frontend.to_owned();
+    let run = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result = Box::pin(finish_update(
+                &work_db,
+                doc! {"_id": &run_id, "outcome": {"$in": ["pending", "started", "waiting"]}},
+                outcome,
+                reason.as_deref(),
+                &frontend,
+                session,
+            ))
+            .await;
+            transactions::transaction_result(result)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)?;
+    if let Some(run) = run {
         finish_record(db, &run).await?;
     }
     Ok(())
 }
 
-/// Terminal decisions before turn admission belong only to the current worker.
-pub async fn finish_claimed(
+/// Fenced terminal decisions belong only to the current worker.
+pub fn finish_claimed<'a>(
+    db: &'a Database,
+    job: &'a Document,
+    run_id: &'a str,
+    outcome: RunOutcome,
+    reason: Option<&'a str>,
+    frontend: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    // The scheduler settles many exit paths. Keep each transaction's state
+    // out of its polling frame while it starts a complete assistant turn.
+    Box::pin(finish_claimed_inner(
+        db, job, run_id, outcome, reason, frontend,
+    ))
+}
+
+async fn finish_claimed_inner(
     db: &Database,
     job: &Document,
     run_id: &str,
     outcome: RunOutcome,
     reason: Option<&str>,
+    frontend: &str,
 ) -> AppResult<()> {
     let mut session = db.client().start_session().await?;
     let work_db = db.clone();
@@ -495,6 +536,7 @@ pub async fn finish_claimed(
     let id = run_id.to_owned();
 
     let reason = reason.map(str::to_owned);
+    let frontend = frontend.to_owned();
     let run = session
         .start_transaction()
         .and_run2(async move |session| {
@@ -516,7 +558,7 @@ pub async fn finish_claimed(
                 {
                     return Ok(None);
                 }
-                finish_update(
+                Box::pin(finish_update(
                     &work_db,
                     doc! {
                         "_id": &id,
@@ -524,8 +566,9 @@ pub async fn finish_claimed(
                     },
                     outcome,
                     reason.as_deref(),
-                    Some(session),
-                )
+                    &frontend,
+                    session,
+                ))
                 .await
             }
             .await;
@@ -544,7 +587,8 @@ async fn finish_update(
     filter: Document,
     outcome: RunOutcome,
     reason: Option<&str>,
-    session: Option<&mut ClientSession>,
+    frontend: &str,
+    session: &mut ClientSession,
 ) -> AppResult<Option<TriggerRun>> {
     let now = Utc::now();
     let collection = db.collection::<TriggerRun>(RUNS);
@@ -567,11 +611,15 @@ async fn finish_update(
             }],
         )
         .return_document(ReturnDocument::After);
-    Ok(if let Some(session) = session {
-        action.session(session).await?
-    } else {
-        action.await?
-    })
+    let mut run = action.session(&mut *session).await?;
+    if let Some(run) = &mut run {
+        Box::pin(record_terminal_in_session(
+            db, session, run, reason, frontend,
+        ))
+        .await?;
+        run.terminal_result_recorded = true;
+    }
+    Ok(run)
 }
 
 async fn finish_record(db: &Database, run: &TriggerRun) -> AppResult<()> {
@@ -724,7 +772,20 @@ pub struct TurnClaim {
 
 /// Called ONLY for trigger turns, inside begin_turn's transaction. A committed
 /// turn and its run barrier cannot be separated by a crash or a lease expiry.
-pub async fn admit_turn(
+pub fn admit_turn<'a>(
+    db: &'a Database,
+    owner: &'a str,
+    claim: &'a TurnClaim,
+    thread: &'a str,
+    turn: &'a str,
+    session: &'a mut ClientSession,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    // Keep the schedule's transaction state out of the enclosing owner-turn
+    // admission future, which also carries the assistant's authority fences.
+    Box::pin(admit_turn_inner(db, owner, claim, thread, turn, session))
+}
+
+async fn admit_turn_inner(
     db: &Database,
     owner: &str,
     claim: &TurnClaim,
@@ -881,6 +942,7 @@ pub async fn admit_turn(
         "waiting_for": [],
     };
     if !claim.continuation {
+        set.insert("trigger_generation", date(trigger.updated_at));
         set.insert("started_at", date(now));
         if let TriggerDelivery::Assistant {
             agent_id,
@@ -927,7 +989,21 @@ pub fn default_thread_policy(
 
 /// Choose and reserve the run thread transactionally, so competing/recovering
 /// workers never create a second dedicated or per-run thread.
-pub async fn run_thread(
+pub fn run_thread<'a>(
+    db: &'a Database,
+    keys: &'a std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+    run: &'a TriggerRun,
+    trigger: &'a Trigger,
+) -> futures::future::BoxFuture<
+    'a,
+    AppResult<crate::models::assistant_conversation::AssistantConversation>,
+> {
+    // Thread creation and its authority transaction precede a full assistant
+    // turn; do not embed their state in the scheduler's polling frame.
+    Box::pin(run_thread_inner(db, keys, run, trigger))
+}
+
+async fn run_thread_inner(
     db: &Database,
     keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
     run: &TriggerRun,
@@ -1062,33 +1138,8 @@ pub async fn pause_target(db: &Database, trigger: &Trigger, reason: &str) -> App
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<_> = async {
-                let modified = work_db
-                    .collection::<Trigger>(TRIGGERS)
-                    .update_one(
-                        doc! {
-                            "_id": &saved.id,
-                            "status": "active",
-                            "updated_at": date(saved.updated_at),
-                        },
-                        doc! {
-                            "$set": {
-                                "status": "disabled",
-                                "schedule_state.pause_reason": &saved_reason,
-                                "updated_at": date(Utc::now()),
-                            },
-                        },
-                    )
-                    .session(&mut *session)
-                    .await?
-                    .modified_count
-                    == 1;
-                if modified {
-                    work_db
-                        .collection::<Document>(WORK)
-                        .delete_one(doc! { "_id": format!("schedule:{}", saved.id) })
-                        .session(&mut *session)
-                        .await?;
-                }
+                let modified =
+                    pause_target_in_session(&work_db, &saved, &saved_reason, session).await?;
                 Ok(modified)
             }
             .await;
@@ -1105,5 +1156,281 @@ pub async fn pause_target(db: &Database, trigger: &Trigger, reason: &str) -> App
         )
         .await;
     }
+    Ok(())
+}
+
+async fn pause_target_in_session(
+    db: &Database,
+    trigger: &Trigger,
+    reason: &str,
+    session: &mut ClientSession,
+) -> AppResult<bool> {
+    let modified = db
+        .collection::<Trigger>(TRIGGERS)
+        .update_one(
+            doc! {"_id": &trigger.id, "status": "active", "updated_at": date(trigger.updated_at)},
+            doc! {"$set": {"status": "disabled", "schedule_state.pause_reason": reason,
+            "updated_at": date(Utc::now().max(trigger.updated_at + Duration::milliseconds(1)))}},
+        )
+        .session(&mut *session)
+        .await?
+        .modified_count
+        == 1;
+    if modified {
+        db.collection::<Document>(WORK)
+            .delete_one(doc! {"_id": format!("schedule:{}", trigger.id)})
+            .session(session)
+            .await?;
+    }
+    Ok(modified)
+}
+
+/// Offset only dispatch eligibility; occurrence identity and missed history use
+/// the original UTC instant, including cron occurrences around DST transitions.
+pub fn dispatch_offset(
+    trigger: &str,
+    spec: &crate::models::trigger_schedule::ScheduleSpec,
+    at: DateTime<Utc>,
+) -> AppResult<Duration> {
+    use sha2::{Digest, Sha256};
+    if matches!(
+        spec.timing,
+        crate::models::trigger_schedule::ScheduleKind::At { .. }
+    ) {
+        return Ok(Duration::zero());
+    }
+    let grace = compute::grace(spec, at)?;
+    if grace < Duration::from_std(policy::DISPATCH_JITTER_MIN_GRACE).expect("bounded grace") {
+        return Ok(Duration::zero());
+    }
+    let next_bound = compute::next(spec, at)?.map_or(
+        Duration::from_std(policy::DISPATCH_JITTER_MAX).expect("bounded jitter"),
+        |next| (next - at) / policy::DISPATCH_JITTER_WINDOW_DIVISOR,
+    );
+    let cap = Duration::from_std(policy::DISPATCH_JITTER_MAX)
+        .expect("bounded jitter")
+        .min(grace / policy::DISPATCH_JITTER_WINDOW_DIVISOR)
+        .min(next_bound)
+        .num_milliseconds()
+        .max(0) as u64;
+    let hash = Sha256::digest(trigger.as_bytes());
+    let value = u64::from_be_bytes(hash[..8].try_into().expect("SHA256 prefix"));
+    Ok(Duration::milliseconds((value % (cap + 1)) as i64))
+}
+
+pub fn failure_streak(
+    previous: Option<&str>,
+    count: u32,
+    result: Option<&str>,
+) -> (Option<String>, u32, bool) {
+    match result {
+        Some(
+            code @ ("insufficient_credits" | "wallet_suspended" | "plan_entitlement_required"),
+        ) => (Some(code.into()), 1, true),
+        Some(code @ ("credential_invalid" | "model_unavailable" | "model_not_configured")) => {
+            let count = if previous == Some(code) {
+                count.saturating_add(1)
+            } else {
+                1
+            };
+            (
+                Some(code.into()),
+                count,
+                count >= policy::PERSISTENT_FAILURE_PAUSE_THRESHOLD,
+            )
+        }
+        _ => (None, 0, false),
+    }
+}
+
+pub fn pause_notice(reason: &str, frontend: &str) -> String {
+    use super::assistant_links::AssistantPage;
+    let remedy = match reason {
+        "insufficient_credits" => "Top up your credits in Billing & Usage",
+        "wallet_suspended" => {
+            "Contact support about your suspended wallet or review Billing & Usage"
+        }
+        "plan_entitlement_required" => {
+            "Review your plan and service entitlement in Billing & Usage"
+        }
+        "credential_invalid" => "Check the assistant credential and reconnect if needed",
+        "model_unavailable" | "model_not_configured" => {
+            "Choose an available model in the assistant model selector"
+        }
+        _ => "Review the failed run in its thread",
+    };
+    let page = if matches!(
+        reason,
+        "insufficient_credits" | "wallet_suspended" | "plan_entitlement_required"
+    ) {
+        AssistantPage::Billing { tab: "overview" }
+    } else {
+        AssistantPage::NyxBotSettings
+    };
+    format!(
+        "Automation paused: {} {}: {}. After fixing it, open {} and select Resume. Missed runs will not be replayed.",
+        super::assistant_nyxagent::TurnError::new(reason).message,
+        remedy,
+        page.url(frontend),
+        AssistantPage::Automations {
+            setup: None,
+            agent: None
+        }
+        .url(frontend)
+    )
+}
+
+/// Run identity, authored generation, streak, pause, durable owner notice and
+/// external delivery work commit together. Replays cannot increment the streak.
+pub async fn terminal_result(
+    db: &Database,
+    run: &TriggerRun,
+    result: Option<&str>,
+    frontend: &str,
+) -> AppResult<()> {
+    if !matches!(run.outcome, RunOutcome::Started | RunOutcome::Waiting) {
+        return Ok(());
+    }
+    let db = db.clone();
+    let run = run.clone();
+    let result = result.map(str::to_owned);
+    let frontend = frontend.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation =
+                record_terminal_in_session(&db, session, &run, result.as_deref(), &frontend).await;
+            transactions::transaction_result(operation)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+async fn record_terminal_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    run: &TriggerRun,
+    result: Option<&str>,
+    frontend: &str,
+) -> AppResult<()> {
+    super::erasure_admission::fence_in_session(db, &run.user_id, session).await?;
+    let Some(run) = db
+        .collection::<TriggerRun>(RUNS)
+        .find_one_and_update(
+            doc! {"_id": &run.id, "outcome": run.outcome.as_str(), "turn_id": &run.turn_id,
+            "terminal_result_recorded": {"$ne": true}},
+            doc! {"$set": {"terminal_result_recorded": true}},
+        )
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(());
+    };
+    let Some(generation) = run.trigger_generation else {
+        return Ok(());
+    };
+    let Some(trigger) = db
+        .collection::<Trigger>(TRIGGERS)
+        .find_one(doc! {
+            "_id": &run.trigger_id, "user_id": &run.user_id,
+            "status": "active", "updated_at": date(generation),
+        })
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(());
+    };
+    let (code, count, pause) = failure_streak(
+        trigger.schedule_state.terminal_failure_code.as_deref(),
+        trigger.schedule_state.terminal_failure_count,
+        result,
+    );
+    db.collection::<Document>(TRIGGERS)
+        .update_one(
+            doc! {"_id": &trigger.id, "updated_at": date(generation)},
+            doc! {"$set": {
+                "schedule_state.terminal_failure_code": &code,
+                "schedule_state.terminal_failure_count": i64::from(count),
+            }},
+        )
+        .session(&mut *session)
+        .await?;
+    if !pause {
+        return Ok(());
+    }
+    let reason = code.as_deref().expect("pause code");
+    if !pause_target_in_session(db, &trigger, reason, session).await? {
+        return Ok(());
+    }
+    let notice_id = Uuid::new_v4().to_string();
+    let text = pause_notice(reason, frontend);
+    if let Some(thread) = &run.thread_id {
+        use crate::models::{
+            assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
+            assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
+        };
+        let now = Utc::now();
+        if let Some(conversation) = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one_and_update(
+                doc! {"_id": thread, "user_id": &run.user_id},
+                doc! {"$inc": {"message_count": 1}, "$set": {"updated_at": date(now)}},
+            )
+            .return_document(ReturnDocument::After)
+            .session(&mut *session)
+            .await?
+        {
+            let message = AssistantMessage {
+                media_event_ids: Vec::new(),
+                media_queue_notice_id: None,
+                media_pending: None,
+                media_bound: None,
+                platform_delivery_recovery_queued: false,
+                platform_reply: None,
+                platform_origin: None,
+                author: None,
+                retry_claimed_by: None,
+                activity_count: None,
+                activity_total: 0,
+                report_to: None,
+                id: notice_id.clone(),
+                conversation_id: thread.clone(),
+                user_id: run.user_id.clone(),
+                seq: conversation.message_count,
+                turn_id: notice_id.clone(),
+                role: "event".into(),
+                text,
+                status: "completed".into(),
+                error_code: None,
+                upstream_error_code: None,
+                error_detail: None,
+                turn_metadata: None,
+                created_at: now,
+                activities: vec![],
+                attachments: vec![],
+                origin: None,
+                via: None,
+                continuation_of: None,
+                retry_of: None,
+                specialist_id: None,
+                steering: None,
+                voice: None,
+                execution_pending: false,
+            };
+            db.collection::<AssistantMessage>(MESSAGES)
+                .insert_one(message)
+                .session(&mut *session)
+                .await?;
+        }
+    }
+    db.collection::<Document>(WORK)
+        .insert_one(doc! {
+            "_id": &notice_id, "kind": "pause_notice", "trigger_id": &run.trigger_id,
+            "run_id": &run.id, "user_id": &run.user_id, "reason": reason,
+            "at": date(Utc::now()), "fence": "", "external_claimed": false,
+        })
+        .session(&mut *session)
+        .await?;
     Ok(())
 }

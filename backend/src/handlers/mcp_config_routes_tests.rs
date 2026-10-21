@@ -245,6 +245,15 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
             .unwrap(),
         );
         definitions.push(crate::services::assistant_upload_service::definition());
+        definitions.push(crate::services::assistant_upload_service::list_definition());
+        definitions.push(crate::services::assistant_nyxagent::conversation_history_definition());
+    }
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
+    {
+        definitions.push(crate::services::assistant_resource_service::definition());
     }
     let expected: Vec<Value> = definitions
         .iter()

@@ -1,3 +1,4 @@
+vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -46,7 +47,7 @@ describe("NyxAgent web steering", () => {
     expect(nyxAgentTransport.steer).toHaveBeenCalledWith(conversation.id, "Focus on the latest results", "turn-1", expect.any(String));
     expect(view.props.onSend).not.toHaveBeenCalled();
     expect(screen.getByRole("textbox")).toHaveValue("");
-    expect(screen.getByRole("button", { name: "Attach files" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Add context" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Stop assistant turn" }));
     expect(view.props.onStop).toHaveBeenCalledOnce();
   });
@@ -102,4 +103,11 @@ describe("NyxAgent web steering", () => {
     render(<ChatMessageBubble message={{ id: "steer", role: "user", content: "Guidance", timestamp: 1, status: "complete", steering: accepted }} />);
     expect(screen.getByRole("note")).toHaveTextContent("Steering · Guidance applied to this reply.");
   });
+});
+
+it("includes the combined settings menu inside the composer", () => {
+  const view = mount();
+  expect(view.container.querySelector("[data-composer-footer]")).toContainElement(
+    screen.getByRole("button", { name: /Thinking and permissions/ }),
+  );
 });

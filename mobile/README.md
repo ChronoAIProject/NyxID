@@ -8,7 +8,7 @@ Think Duo Mobile, Microsoft Authenticator, or Authy — but bound to your own se
 
 - **Approves auth challenges.** When a service requests access (login, OAuth grant, MFA step-up, admin action), the backend pushes a notification to this app. You see the request details — who, what, when, where — and tap approve or deny.
 - **Manages granted permissions.** View every grant you've issued (per-service, per-scope), and revoke any of them.
-- **Acts as an MFA factor.** When MFA is enabled on a NyxID account, this app's approval is the second factor.
+- **Preserves MFA assurance.** NyxID MFA uses TOTP or a single-use recovery code after password or Google/GitHub/Apple sign-in. Social MFA callbacks carry a five-minute challenge in the URI fragment; the app keeps it in memory and verifies it before storing any session. App approvals derive from an existing human session that satisfied MFA. Legacy sessions without assurance must sign in again.
 - **Stays signed in securely.** Tokens persist in the OS secure enclave (iOS Keychain via `expo-secure-store`, Android EncryptedSharedPreferences).
 
 For end users this is a companion app to whatever website / service uses NyxID as its identity provider. For NyxID operators this is what your tenants install.

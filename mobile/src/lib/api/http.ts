@@ -1,8 +1,16 @@
+import { createSessionRefresh } from "../auth/sessionRefresh";
 import Constants from "expo-constants";
+import { guardedJsonTransport } from "./guardedTransport";
+import { analyticsConsentState, analyticsDeviceHeaders } from "../analyticsConsentState";
+import { decodeJwtSub } from "../auth/jwt";
+import { ACCOUNT_DELETION_POLICY_VERSION } from "../accountDeletionPolicy";
 
 import { ApiError } from "./ApiError";
+import { mfaChallengeFromResponse } from "../auth/mfaChallenge";
 import {
   clearStoredAuthSession,
+  commitRefreshedAuthSession,
+  authSessionGeneration,
   loadStoredAuthSession,
   persistAuthSession,
 } from "../auth/sessionStore";
@@ -40,6 +48,8 @@ export function setSessionInvalidationListener(listener: SessionInvalidationList
 }
 
 type RequestOptions = {
+  expectedAccountId?: string;
+  authorityGuard?: () => void;
   method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   body?: unknown;
   requiresAuth?: boolean;
@@ -196,7 +206,12 @@ function buildApiError(payload: unknown, status: number): ApiError | Error {
         ? obj.message
         : errorKey;
 
-    return new ApiError({ errorKey, errorCode, statusCode: status, message });
+    const challenge = mfaChallengeFromResponse(payload, status);
+    if (challenge) return challenge;
+    const reason = obj.details && typeof obj.details === "object" &&
+      (obj.details as Record<string, unknown>).reason === "mfa_challenge_expired"
+      ? "mfa_challenge_expired" : undefined;
+    return new ApiError({ errorKey, errorCode, statusCode: status, message, reason });
   }
 
   if (typeof payload === "string" && payload.length > 0) {
@@ -391,7 +406,6 @@ function buildPushDevicePayload(payload: PushTokenRegisterRequest): {
   };
 }
 
-let inFlightRefreshRequest: Promise<RefreshResponse | null> | null = null;
 
 async function requestRefreshAccessToken(
   refreshToken: string,
@@ -444,39 +458,10 @@ async function requestRefreshAccessToken(
   return null;
 }
 
-async function refreshAccessTokenWithSingleFlight(): Promise<RefreshResponse | null> {
-  if (inFlightRefreshRequest) {
-    return inFlightRefreshRequest;
-  }
-
-  inFlightRefreshRequest = (async () => {
-    const session = await loadStoredAuthSession();
-    if (!session?.refreshToken) {
-      return null;
-    }
-
-    const refreshed = await requestRefreshAccessToken(session.refreshToken);
-    if (!refreshed) {
-      return null;
-    }
-
-    const nextRefreshToken = refreshed.refresh_token || session.refreshToken;
-    await persistAuthSession({
-      accessToken: refreshed.access_token,
-      refreshToken: nextRefreshToken,
-      accessTokenExpiresAt: computeAccessTokenExpiresAt(refreshed.expires_in),
-    });
-
-    return {
-      ...refreshed,
-      refresh_token: nextRefreshToken,
-    };
-  })().finally(() => {
-    inFlightRefreshRequest = null;
-  });
-
-  return inFlightRefreshRequest;
-}
+const refreshAccessTokenWithSingleFlight = createSessionRefresh({
+  load: loadStoredAuthSession, commit: commitRefreshedAuthSession,
+  request: requestRefreshAccessToken, expiresAt: computeAccessTokenExpiresAt,
+});
 
 export async function refreshAccessTokenIfNeeded(): Promise<boolean> {
   const session = await loadStoredAuthSession();
@@ -502,16 +487,18 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
   const method = options.method ?? "GET";
   const requiresAuth = options.requiresAuth ?? true;
   const retryOnAuthFailure = options.retryOnAuthFailure ?? true;
+  const expectedSessionGeneration = authSessionGeneration();
+  const guard = () => {
+    options.authorityGuard?.();
+    if (requiresAuth && authSessionGeneration() !== expectedSessionGeneration) throw new Error("auth_session_changed");
+    if (options.expectedAccountId && analyticsConsentState.getSnapshot().accountId !== options.expectedAccountId)
+      throw new Error("analytics_account_changed");
+  };
 
-  // Surface identification for server-side telemetry. Sent on every
-  // request regardless of the mobile client's own telemetry config:
-  // the header identifies the calling app, not the telemetry state.
-  // Backend may be opted in for analytics even when the mobile client
-  // is opted out locally, and the surface attribution still needs to
-  // read "mobile" for those backend-emitted events -- otherwise
-  // mobile-driven auth / approval / device funnels collapse into
-  // `surface="backend"` in the hosted deploy.
+  // Device narrowing is bound to the expected actor; it cannot authorize
+  // collection under a different session loaded during a switch.
   const telemetryHeaders: Record<string, string> = {
+    ...analyticsDeviceHeaders(),
     "X-NyxID-Client": "mobile",
     "X-NyxID-Client-Version":
       (Constants.expoConfig?.version as string | undefined) ?? "dev",
@@ -527,7 +514,11 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
     headers["Content-Type"] = "application/json";
   }
 
+  guard();
   const session = requiresAuth ? await loadStoredAuthSession() : null;
+  guard();
+  if (options.expectedAccountId && (!session || decodeJwtSub(session.accessToken) !== options.expectedAccountId))
+    throw new Error("analytics_account_changed");
 
   if (requiresAuth) {
     if (!session?.accessToken) {
@@ -536,37 +527,33 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
     headers.Authorization = `Bearer ${session.accessToken}`;
   }
 
-  const send = () =>
-    fetch(buildUrl(path), {
+  const send = () => {
+    guard();
+    return fetch(buildUrl(path), {
       method,
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
 
-  let response = await send();
-  let payload = await readJsonSafely(response);
+  };
 
-  if (response.status === 401 && requiresAuth && retryOnAuthFailure) {
-    const refreshed = await refreshAccessTokenWithSingleFlight();
-    if (refreshed) {
+  return guardedJsonTransport<T>({
+    send, read: readJsonSafely, guard, requiresAuth, retry: retryOnAuthFailure,
+    refresh: async () => {
+      const refreshed = await refreshAccessTokenWithSingleFlight();
+      guard();
+      if (!refreshed) return false;
+      if (options.expectedAccountId && decodeJwtSub(refreshed.access_token) !== options.expectedAccountId)
+        throw new Error("analytics_account_changed");
       headers.Authorization = `Bearer ${refreshed.access_token}`;
-      response = await send();
-      payload = await readJsonSafely(response);
-    }
-  }
-
-  if (!response.ok) {
-    if (response.status === 401 && requiresAuth) {
-      if (onSessionInvalidated) {
-        onSessionInvalidated();
-      } else {
-        await clearStoredAuthSession();
-      }
-    }
-    throw buildApiError(payload, response.status);
-  }
-
-  return payload as T;
+      return true;
+    },
+    invalidate: async () => {
+      guard();
+      if (onSessionInvalidated) onSessionInvalidated(); else await clearStoredAuthSession();
+    },
+    failure: buildApiError,
+  });
 }
 
 async function listPendingApprovalRequests(
@@ -614,6 +601,10 @@ export async function loginWithPasswordRequest(payload: LoginRequest): Promise<L
     body: { ...payload, client: "mobile" },
     requiresAuth: false,
   });
+}
+
+export async function verifyMfaRequest(body: { code: string; mfa_token: string }): Promise<LoginResponse> {
+  return requestJson<LoginResponse>("/auth/mfa/verify", { method: "POST", body: { ...body, client: "mobile" }, requiresAuth: false, retryOnAuthFailure: false });
 }
 
 export async function registerWithPasswordRequest(
@@ -803,5 +794,6 @@ export async function getCurrentUserProfileRequest(): Promise<AccountProfile> {
 export async function deleteCurrentUserAccountRequest(): Promise<DeleteAccountResponse> {
   return requestJson<DeleteAccountResponse>("/users/me", {
     method: "DELETE",
+    headers: { "X-NyxID-Account-Deletion-Policy": ACCOUNT_DELETION_POLICY_VERSION },
   });
 }

@@ -19,6 +19,8 @@ pub struct LoginCode {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    #[serde(default)]
+    pub mfa_assured: bool,
     pub code_hmac: String,
     pub status: LoginCodeStatus,
     pub selection: Option<Selection>,
@@ -57,6 +59,7 @@ mod tests {
         let row = LoginCode {
             id: "fixture-request-id".into(),
             user_id: "fixture-owner-id".into(),
+            mfa_assured: false,
             code_hmac: "fixture-secret-code-hmac".into(),
             status: LoginCodeStatus::Pending,
             selection: None,

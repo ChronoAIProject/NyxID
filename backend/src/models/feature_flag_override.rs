@@ -54,6 +54,9 @@ pub struct FeatureFlagOverride {
     #[serde(default)]
     pub org_user_id: Option<String>,
     pub flag_key: String,
+    /// Runtime definition identity; null/missing belongs to a built-in flag.
+    #[serde(default)]
+    pub definition_id: Option<String>,
     pub target_kind: FlagTargetKind,
     /// `None` for org scope; role string for role scope; member_user_id for
     /// user scope. Legacy/org rows deserialize the missing field as `None`.
@@ -92,6 +95,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let row = FeatureFlagOverride {
+            definition_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             org_user_id: Some(uuid::Uuid::new_v4().to_string()),
             flag_key: "example_ui".to_string(),
@@ -114,6 +118,7 @@ mod tests {
     #[test]
     fn missing_target_key_defaults_to_none() {
         let row = FeatureFlagOverride {
+            definition_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             org_user_id: Some(uuid::Uuid::new_v4().to_string()),
             flag_key: "example_ui".to_string(),
@@ -133,6 +138,7 @@ mod tests {
     #[test]
     fn global_row_has_no_org() {
         let row = FeatureFlagOverride {
+            definition_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             org_user_id: None,
             flag_key: "example_ui".to_string(),
@@ -156,6 +162,7 @@ mod tests {
     #[test]
     fn missing_org_user_id_defaults_to_none() {
         let mut doc = bson::to_document(&FeatureFlagOverride {
+            definition_id: None,
             id: "x".to_string(),
             org_user_id: Some("org".to_string()),
             flag_key: "example_ui".to_string(),

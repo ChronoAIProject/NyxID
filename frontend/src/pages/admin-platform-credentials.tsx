@@ -1,3 +1,4 @@
+import { ChannelAdapterResources } from "@/components/admin/channel-adapter-resources";
 import { useState } from "react";
 import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
@@ -421,6 +422,7 @@ export function AdminPlatformCredentialsPage() {
   return (
     <div className="space-y-8">
       <PageHeader title="Platform Credentials" />
+      <ChannelAdapterResources />
       {query.error && (
         <ErrorBanner
           message="Unable to refresh platform credentials"

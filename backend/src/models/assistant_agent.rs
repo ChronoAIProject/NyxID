@@ -17,7 +17,8 @@ pub enum AgentKind {
     /// The owner's single personal agent and chief of staff. Full access.
     Nyxbot,
     /// A persistent specialist created by the owner or by NyxBot. Acts only
-    /// with its grants and asks NyxBot for anything else.
+    /// with its grants; when it lacks access it tells the person it works
+    /// for, or NyxBot only for work NyxBot assigned or shares a group with.
     Specialist,
 }
 
@@ -160,6 +161,11 @@ pub struct AssistantAgent {
 pub struct AgentSkillMetadata {
     pub description: String,
     pub size_bytes: usize,
+    /// Owner-selected files automatically supplied as untrusted turn context.
+    #[serde(default)]
+    pub preload_paths: Vec<String>,
+    #[serde(default)]
+    pub preload_bytes: usize,
 }
 
 impl AssistantAgent {

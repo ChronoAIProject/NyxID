@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{BufRead, Write};
 
 use anyhow::Result;
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
@@ -6,6 +6,40 @@ use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::cli::{OutputFormat, ProfileCommands};
+
+const ACCOUNT_DELETION_POLICY_VERSION: &str = "machine-data-provider-revocation-v2";
+const ACCOUNT_DELETION_DISCLOSURE: &str = "Deleting your account queues deletion of all of your managed Machines and their data, including paused /workspace disks and temporary files. This is irreversible: no snapshots, no recovery or restore.\n\nNyxID revokes every connected provider authorization where the provider supports it, including your other connections sharing the same grant. Unsupported or unconfirmed revocations are reported in the deletion status rather than assumed complete.\n\nAccess to Machine work and job output is blocked immediately. Resource cleanup targets 24 hours and keeps cleanup pending until applicable control-plane stop or absence, Sandbox object-cascade checks, creation obligations and accounting are verified. Delays escalate to operators. Underlying storage follows its reclaim policy; physical storage release is not verified. The cleanup target is not a guaranteed erasure deadline.\n\nRaw job output is held only in memory for at most 1 hour after a job ends and may disappear sooner.\n\nSafe job metadata is retained for 30 days after the job ends, and operation history for 90 days after completion. Necessary deletion, retry, cleanup and settlement records remain until resource cleanup, billing and related retries finish. Audit and financial records follow the platform’s existing retention policy.";
+
+fn erasure_preparing(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::api::ApiError>()
+        .is_some_and(|error| {
+            error.status() == reqwest::StatusCode::CONFLICT
+                && error
+                    .response()
+                    .is_some_and(|response| response.error_code == 12801)
+        })
+}
+
+fn confirm_account_deletion(
+    yes: bool,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<bool> {
+    writeln!(output, "{ACCOUNT_DELETION_DISCLOSURE}")?;
+    if yes {
+        return Ok(true);
+    }
+    write!(output, "Permanently delete your account? [y/N] ")?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    let confirmed = answer.trim().eq_ignore_ascii_case("y");
+    if !confirmed {
+        writeln!(output, "Cancelled.")?;
+    }
+    Ok(confirmed)
+}
 
 pub async fn run(command: ProfileCommands) -> Result<()> {
     match command {
@@ -39,25 +73,70 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
         }
 
         ProfileCommands::Delete { yes, auth } => {
-            if !yes {
-                eprint!("Permanently delete your account? This cannot be undone. [y/N] ");
-                std::io::stderr().flush()?;
-                let mut answer = String::new();
-                std::io::stdin().read_line(&mut answer)?;
-                if !answer.trim().eq_ignore_ascii_case("y") {
-                    eprintln!("Cancelled.");
-                    return Ok(());
-                }
+            if !confirm_account_deletion(
+                yes,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stderr().lock(),
+            )? {
+                return Ok(());
             }
 
+            let deletion_generation = crate::auth::login_generation(auth.profile.as_deref());
             let mut api = ApiClient::from_auth_checked(&auth).await?;
-            api.delete_empty("/users/me").await?;
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                "x-nyxid-account-deletion-policy",
+                reqwest::header::HeaderValue::from_static(ACCOUNT_DELETION_POLICY_VERSION),
+            );
+            let mut attempt = 0_u32;
+            let result: Value = loop {
+                match api.delete_with_headers("/users/me", headers.clone()).await {
+                    Ok(result) => break result,
+                    Err(error) if erasure_preparing(&error) && attempt < 9 => {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            (500_u64 << attempt).min(5000),
+                        ))
+                        .await;
+                        attempt += 1;
+                    }
+                    Err(error) if erasure_preparing(&error) => {
+                        anyhow::bail!(
+                            "Account deletion is still being prepared; try again in a minute."
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            let status = result["status"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Account deletion returned no durable status"))?;
+            if !matches!(
+                status,
+                "accepted" | "pending" | "operator_action" | "complete"
+            ) {
+                anyhow::bail!("Account deletion returned an unsupported status");
+            }
+            if api
+                .clear_deleted_account_credentials(deletion_generation.as_deref())
+                .is_err()
+            {
+                // Remote acceptance is already durable. A local I/O failure
+                // cannot turn it into a failed DELETE or justify clearing a
+                // successor login. Keep the server result authoritative.
+                eprintln!(
+                    "Account deletion accepted; local credential cleanup could not be confirmed. Review this profile's saved login."
+                );
+            }
             match auth.output {
-                OutputFormat::Json => println!(
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => eprintln!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                    if status == "complete" {
+                        "Account erasure complete."
+                    } else {
+                        "Account deletion accepted. Cleanup continues until verified."
+                    }
                 ),
-                OutputFormat::Table => eprintln!("Account deleted."),
             }
             Ok(())
         }
@@ -128,7 +207,7 @@ pub async fn run(command: ProfileCommands) -> Result<()> {
             match auth.output {
                 OutputFormat::Json => println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+                    serde_json::to_string_pretty(&serde_json::json!({"ok":true}))?
                 ),
                 OutputFormat::Table => eprintln!("Consent revoked for client {client_id}."),
             }
@@ -172,7 +251,7 @@ fn format_consent_service_access(consent: &Value) -> String {
 mod tests {
     use super::*;
     use crate::test_support::mock_auth;
-    use wiremock::matchers::{body_json, method, path};
+    use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     // `Update` maps the optional `--name` flag onto a `display_name` field
@@ -228,7 +307,8 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("DELETE"))
             .and(path("/api/v1/users/me"))
-            .respond_with(ResponseTemplate::new(204))
+            .and(header("x-nyxid-account-deletion-policy", "machine-data-provider-revocation-v2"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({"status":"accepted","accepted_at":"2026-01-01T00:00:00Z","completed_at":null,"domains":[]})))
             .expect(1)
             .mount(&server)
             .await;
@@ -239,6 +319,143 @@ mod tests {
         })
         .await
         .expect("account delete should succeed");
+    }
+
+    #[tokio::test]
+    async fn deletion_retries_preparation_but_preserves_other_conflicts() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let server = MockServer::start().await;
+        let count = Arc::new(AtomicUsize::new(0));
+        let calls = count.clone();
+        Mock::given(method("DELETE")).and(path("/api/v1/users/me"))
+            .and(header("x-nyxid-account-deletion-policy","machine-data-provider-revocation-v2"))
+            .respond_with(move |_: &wiremock::Request| {
+                match calls.fetch_add(1,Ordering::SeqCst) {
+                    0=>ResponseTemplate::new(409).set_body_json(serde_json::json!({"error":"erasure_preparing","error_code":12801,"message":"Preparing"})),
+                    _=>ResponseTemplate::new(409).set_body_json(serde_json::json!({"error":"conflict","error_code":1004,"message":"Other owners depend on your OAuth app"})),
+                }
+            }).expect(2).mount(&server).await;
+        let error = run(ProfileCommands::Delete {
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::api::ApiError>()
+                .unwrap()
+                .response()
+                .unwrap()
+                .error_code,
+            1004
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn deletion_preparation_exhaustion_explains_when_to_retry() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE")).and(path("/api/v1/users/me"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({"error":"erasure_preparing","error_code":12801,"message":"Preparing"})))
+            .expect(10).mount(&server).await;
+        let error = run(ProfileCommands::Delete {
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Account deletion is still being prepared; try again in a minute."
+        );
+    }
+
+    #[test]
+    fn delete_confirmation_discloses_all_retained_machine_data_before_prompt() {
+        let mut output = Vec::new();
+        assert!(
+            confirm_account_deletion(false, &mut std::io::Cursor::new(b"y\n"), &mut output)
+                .unwrap()
+        );
+        let output = String::from_utf8(output).unwrap();
+        let prompt = output.find("Permanently delete your account?").unwrap();
+        for disclosure in [
+            "every connected provider authorization",
+            "your other connections sharing the same grant",
+            "Unsupported or unconfirmed revocations are reported",
+            "all of your managed Machines",
+            "paused /workspace disks",
+            "irreversible",
+            "no snapshots, no recovery or restore",
+            "cleanup pending until applicable control-plane stop or absence",
+            "Sandbox object-cascade checks",
+            "creation obligations and accounting are verified",
+            "physical storage release is not verified",
+            "not a guaranteed erasure deadline",
+            "30 days after the job ends",
+            "90 days after completion",
+            "cleanup and settlement records remain until resource cleanup",
+            "Audit and financial records",
+        ] {
+            assert!(
+                output.find(disclosure).is_some_and(|index| index < prompt),
+                "actual confirmation must disclose {disclosure} before accepting consent",
+            );
+        }
+    }
+
+    #[test]
+    fn delete_confirmation_requires_yes_or_explicit_noninteractive_flag() {
+        for answer in [b"".as_slice(), b"\n", b"n\n", b"yes\n"] {
+            let mut output = Vec::new();
+            assert!(
+                !confirm_account_deletion(false, &mut std::io::Cursor::new(answer), &mut output)
+                    .unwrap(),
+                "default or unrecognized input must cancel",
+            );
+            assert!(String::from_utf8(output).unwrap().ends_with("Cancelled.\n"));
+        }
+        let mut output = Vec::new();
+        assert!(
+            confirm_account_deletion(true, &mut std::io::Cursor::new(b""), &mut output).unwrap()
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("paused /workspace disks"));
+        assert!(!output.contains("[y/N]"), "--yes skips only the prompt");
+    }
+
+    #[tokio::test]
+    async fn delete_with_yes_preserves_policy_denial() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/users/me"))
+            .and(header(
+                "x-nyxid-account-deletion-policy",
+                "machine-data-provider-revocation-v2",
+            ))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "validation_error",
+                "error_code": 1000,
+                "message": "Account deletion policy is no longer current"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = run(ProfileCommands::Delete {
+            yes: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect_err("a policy denial cannot be reported as successful deletion");
+        let api_error = error
+            .downcast_ref::<crate::api::ApiError>()
+            .expect("retain the typed API denial");
+        assert_eq!(api_error.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(api_error.response().map(|body| body.error_code), Some(1000));
     }
 
     #[tokio::test]

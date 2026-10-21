@@ -27,6 +27,13 @@ export function DocsSearch({
   const [entries, setEntries] = useState<IndexEntry[]>([]);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
+  const [previousOpen, setPreviousOpen] = useState(open);
+  // Reset as part of the opening transition. Async loading and delayed focus
+  // must never overwrite a selection the user has already made.
+  if (previousOpen !== open) {
+    setPreviousOpen(open);
+    if (open) setActiveIndex(0);
+  }
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const navigate = useNavigate();
@@ -39,12 +46,13 @@ export function DocsSearch({
         .then((d) => setEntries(Array.isArray(d) ? (d as IndexEntry[]) : []))
         .catch(() => {});
     }
-    const id = window.setTimeout(() => {
-      inputRef.current?.focus();
-      setActiveIndex(0); // start each open at the top of the result list
-    }, 20);
-    return () => window.clearTimeout(id);
   }, [open, entries.length]);
+
+  useEffect(() => {
+    if (!open) return;
+    const id = window.setTimeout(() => inputRef.current?.focus(), 20);
+    return () => window.clearTimeout(id);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;

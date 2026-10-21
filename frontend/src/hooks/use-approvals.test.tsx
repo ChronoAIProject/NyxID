@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -44,6 +44,19 @@ function wrapperFactory() {
 beforeEach(() => {
   vi.clearAllMocks();
   mockGet.mockResolvedValue({});
+});
+
+it("manual refresh discovers a pending request after an empty inbox and subsequent expiry", async () => {
+  mockGet.mockResolvedValueOnce({ requests: [], total: 0 });
+  const { result } = renderHook(() => useApprovalRequests(), { wrapper: wrapperFactory() });
+  await waitFor(() => expect(result.current.data?.total).toBe(0));
+  mockGet.mockResolvedValueOnce({ requests: [{ id: "new", status: "pending" }], total: 1 });
+  await act(async () => { await result.current.refetch(); });
+  await waitFor(() => expect(result.current.data?.requests[0]?.status).toBe("pending"));
+  mockGet.mockResolvedValueOnce({ requests: [{ id: "new", status: "expired" }], total: 1 });
+  await act(async () => { await result.current.refetch(); });
+  await waitFor(() => expect(result.current.data?.requests[0]?.status).toBe("expired"));
+  expect(mockGet).toHaveBeenCalledTimes(3);
 });
 
 describe("notification + device hooks", () => {

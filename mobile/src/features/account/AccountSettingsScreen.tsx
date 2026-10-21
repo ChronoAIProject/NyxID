@@ -1,3 +1,4 @@
+import { approvalDeliveryWarning } from "./approvalDeliveryPolicy";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { Alert, Image, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
@@ -10,9 +11,14 @@ import { OfflineBanner } from "../../components/OfflineBanner";
 import { TelegramLinkModal } from "../../components/TelegramLinkModal";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
 import { useAuthSession } from "../auth/AuthSessionContext";
+import { useMobileConsent } from "../../lib/consent";
+import { analyticsConsentState } from "../../lib/analyticsConsentState";
+import { saveAnalyticsPermission, type AnalyticsPermission } from "../../lib/analyticsRelay";
+import { requestJson } from "../../lib/api/http";
 import { capture } from "../../lib/telemetry";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
+import { ACCOUNT_DELETION_DISCLOSURE } from "../../lib/accountDeletionPolicy";
 import { isApiError } from "../../lib/api/ApiError";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { activatePushAfterLogin } from "../../lib/notifications/pushNotifications";
@@ -143,6 +149,23 @@ export function AccountSettingsScreen({ navigation }: Props) {
   const [toast, setToast] = useState<ToastState | null>(null);
   const queryClient = useQueryClient();
   const { signOut } = useAuthSession();
+  const deviceConsent = useMobileConsent();
+  const analyticsPermission = useQuery({
+    queryKey: ["analytics-consent", deviceConsent.accountId],
+    enabled: Boolean(deviceConsent.accountId), staleTime: 0,
+    queryFn: async () => {
+      const accountId = deviceConsent.accountId!;
+      const permission = await requestJson<AnalyticsPermission>("/users/me/preferences/analytics", { expectedAccountId: accountId });
+      if (permission.account_id !== accountId) throw new Error("analytics_account_changed");
+      return permission;
+    },
+  });
+  const saveAnalytics = useMutation({
+    mutationFn: (enabled: boolean) => saveAnalyticsPermission(deviceConsent.accountId!, enabled, requestJson,
+      analyticsConsentState.getSnapshot, deviceConsent.setConsent),
+    onSuccess: () => { void analyticsPermission.refetch(); },
+    onError: () => setToast({ message: "Could not save account analytics permission. This device remains off; retry to withdraw across devices.", kind: "error" }),
+  });
   const { isConnected, recheckConnection } = useNetworkStatus();
 
   const {
@@ -172,6 +195,9 @@ export function AccountSettingsScreen({ navigation }: Props) {
     queryKey: ["account", "notificationSettings"],
     queryFn: () => mobileApi.getNotificationSettings(),
   });
+
+  const selectedApprovalMode = notifSettings?.global_approval_mode
+    ?? (notifSettings?.approval_required ? "all" : "off");
 
   const notifMutation = useMutation({
     mutationFn: (payload: Parameters<typeof mobileApi.updateNotificationSettings>[0]) =>
@@ -299,9 +325,9 @@ export function AccountSettingsScreen({ navigation }: Props) {
       );
       return;
     }
-    const willSuspendApproval = isLastChannel("push") && notifSettings?.approval_required;
-    const message = willSuspendApproval
-      ? "This is your only notification channel. Approval protection will be suspended until a channel is available, then resume automatically."
+    const willUseWebApproval = isLastChannel("push") && notifSettings?.approval_required;
+    const message = willUseWebApproval
+      ? approvalDeliveryWarning(notifSettings)
       : "You will no longer receive push notifications for approval requests.";
 
     Alert.alert("Disable Push Notifications", message, [
@@ -332,10 +358,10 @@ export function AccountSettingsScreen({ navigation }: Props) {
       );
       return;
     }
-    const willSuspendApproval = isLastChannel("telegram") && notifSettings?.approval_required;
+    const willUseWebApproval = isLastChannel("telegram") && notifSettings?.approval_required;
     const willDisconnect = true; // disabling always disconnects
-    const message = willSuspendApproval
-      ? "This is your only notification channel. Disabling it will disconnect Telegram and suspend approval protection until a channel is available."
+    const message = willUseWebApproval
+      ? `This disconnects Telegram. ${approvalDeliveryWarning(notifSettings)}`
       : "This will disconnect your Telegram account and stop all Telegram notifications.";
 
     Alert.alert("Disable Telegram", message, [
@@ -390,8 +416,8 @@ export function AccountSettingsScreen({ navigation }: Props) {
 
   const deleteAccountMutation = useMutation({
     mutationFn: () => mobileApi.deleteAccount(),
-    onSuccess: async () => {
-      showToast("Account deleted. You have been signed out.", "success");
+    onSuccess: async (result) => {
+      showToast(result.status === "complete" ? "Account erasure complete. You have been signed out." : "Account deletion accepted. Cleanup continues until verified. You have been signed out.", "success");
       try { await signOut(); } catch {}
       queryClient.clear();
     },
@@ -429,7 +455,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
     });
     Alert.alert(
       "Delete Account",
-      "This action is permanent and will permanently delete your account and server-side data.",
+      ACCOUNT_DELETION_DISCLOSURE,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -582,9 +608,34 @@ export function AccountSettingsScreen({ navigation }: Props) {
                 )}
               </View>
               {notifSettings && (
+                <View accessibilityLabel="Approval (Global Default)">
+                  <Text style={styles.accountRowLabel}>Approval (Global Default)</Text>
+                  {([
+                    ["writes_only", "Writes only (default)"],
+                    ["all", "All requests"],
+                    ["off", "Off"],
+                  ] as const).map(([value, label]) => (
+                    <Pressable
+                      key={value}
+                      accessibilityRole="radio"
+                      accessibilityState={{ checked: selectedApprovalMode === value }}
+                      disabled={notifMutation.isPending}
+                      style={styles.accountRow}
+                      onPress={() => notifMutation.mutate({ global_approval_mode: value })}
+                    >
+                      <Text style={styles.accountRowLabel}>{label}</Text>
+                      <Text style={styles.accountRowValue}>
+                        {selectedApprovalMode === value ? "Selected" : ""}
+                      </Text>
+                    </Pressable>
+                  ))}
+                  <Text style={styles.channelHint}>Per-service and organization policies still apply.</Text>
+                </View>
+              )}
+              {notifSettings && (
                 <Text style={styles.channelHint}>
-                  {notifSettings.approval_suspended
-                    ? "Approval protection is suspended until a notification channel is available; it resumes automatically."
+                  {notifSettings.approval_required
+                    ? approvalDeliveryWarning(notifSettings)
                     : "Push or Telegram delivers requests when approval protection is on."}
                 </Text>
               )}
@@ -654,6 +705,30 @@ export function AccountSettingsScreen({ navigation }: Props) {
             />
           </View>
         </View>
+
+        <View style={styles.card}>
+          <Text style={styles.accountRowLabel}>Usage Analytics</Text>
+          <Text style={styles.accountRowValue}>Optional events require account permission and this device's choice. Security and billing records have separate retention rules.</Text>
+          <View style={styles.systemRow}>
+            <Text style={styles.accountRowLabel}>{analyticsPermission.isFetching ? "Loading permission…" : analyticsPermission.isError ? "Permission unavailable" : analyticsPermission.data?.enabled ? "Account permission enabled" : "Account permission disabled"}</Text>
+            <Switch accessibilityLabel="Allow account usage analytics"
+              value={analyticsPermission.data?.enabled === true}
+              disabled={saveAnalytics.isPending || analyticsPermission.isFetching || analyticsPermission.isError || !analyticsPermission.data}
+              onValueChange={(value) => saveAnalytics.mutate(value)} />
+          </View>
+          {analyticsPermission.isError && <PrimaryButton label="Retry" kind="ghost" onPress={() => { void analyticsPermission.refetch(); }} />}
+          <View style={styles.systemRow}>
+            <Text style={styles.accountRowLabel}>Allow on this device</Text>
+            <Switch accessibilityLabel="Allow usage analytics on this device" value={deviceConsent.enabled}
+              disabled={!deviceConsent.enabled && (analyticsPermission.data?.enabled !== true || analyticsPermission.isError || analyticsPermission.isFetching)}
+              onValueChange={deviceConsent.setConsent} />
+          </View>
+        </View>
+
+        {deviceConsent.persistenceError && <View style={styles.card}>
+          <Text style={styles.accountRowValue}>This device's choice could not be saved. Analytics is off in this session; retry to save it before closing the app.</Text>
+          <PrimaryButton label="Retry saving device choice" kind="ghost" onPress={deviceConsent.retryPersistence} />
+        </View>}
 
         {/* Actions */}
         <View style={styles.actionsWrap}>

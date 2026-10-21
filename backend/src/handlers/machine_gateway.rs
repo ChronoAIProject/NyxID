@@ -107,23 +107,10 @@ impl Session {
         if request.operation == nyxid_machine::Operation::JobFinished {
             if verify(state.clone(), self, node_id, &request).await.is_ok() {
                 let job_id = request.parameters["job_id"].as_str().unwrap_or_default();
-                let result = state.db.collection::<MachineJob>(JOBS).update_one(
-                    doc! {
-                        "_id": job_id,
-                         "node_id": node_id,
-                         "runtime_id": request.parameters["runtime_id"].as_str().unwrap_or_default(),
-                         "conversation_id": request.parameters["conversation_id"].as_str().unwrap_or_default()
-                    },
-                    doc! {
-                        "$set":{
-                            "state":"finished",
-                            "finished_at":mongodb::bson::DateTime::now()
-                        }
-                    },
-                ).await;
-                // Acknowledge only a durable update. A lost acknowledgement is
-                // retried with a fresh nonce, so this transition is idempotent.
-                if result.is_ok_and(|update| update.matched_count == 1) {
+                let result = finish_request(&state.db, node_id, &request).await;
+                // Late completion never overwrites revoked/stopped state. A
+                // replay gets an acknowledgement only for its exact binding.
+                if result.is_ok() {
                     for call in self
                         .calls
                         .lock()
@@ -136,10 +123,11 @@ impl Session {
                     let _ = self
                         .sender
                         .send(NodeOutboundMessage::Text(
-                            json!({
+                            (json!({
                                 "type":"machine_job_finished_ack", "request_id":request.request_id
                             })
-                            .to_string(),
+                            .to_string())
+                            .into(),
                         ))
                         .await;
                 }
@@ -178,13 +166,14 @@ impl Session {
                 let reply = async {
                     self.sender
                         .send(NodeOutboundMessage::Text(
-                            json!({
+                            (json!({
                                 "type":"machine_service_response",
                                 "request_id":id,
                                 "status":status,
                                 "headers":[["content-type","application/json"]]
                             })
-                            .to_string(),
+                            .to_string())
+                            .into(),
                         ))
                         .await
                         .ok()?;
@@ -232,102 +221,16 @@ impl Session {
             .try_with(Clone::clone)
             .ok();
         tokio::spawn(async move {
-            let execute = async {
-                let response = tokio::time::timeout(
-                    Duration::from_secs(header_timeout),
-                    authorize_and_execute(&state, &session, &node_id, request, rx),
-                )
-                .await;
-                let response = match response {
-                    Ok(Ok(response)) => response,
-                    Ok(Err(error)) => error.into_response(),
-                    Err(_) => AppError::NodeProxyTimeout.into_response(),
-                };
-                let status = response.status().as_u16();
-                let headers: Vec<_> = response
-                    .headers()
-                    .iter()
-                    .filter(|(k, _)| {
-                        matches!(
-                            k.as_str(),
-                            "content-type"
-                                | "content-encoding"
-                                | "content-length"
-                                | "cache-control"
-                                | "retry-after"
-                                | "content-disposition"
-                        )
-                    })
-                    .filter_map(|(k, v)| {
-                        v.to_str()
-                            .ok()
-                            .map(|v| (k.as_str().to_owned(), v.to_owned()))
-                    })
-                    .collect();
-                if session
-                    .sender
-                    .send(NodeOutboundMessage::Text(
-                        json!({
-                            "type":"machine_service_response",
-                            "request_id":id,
-                            "status":status,
-                            "headers":headers
-                        })
-                        .to_string(),
-                    ))
-                    .await
-                    .is_ok()
-                {
-                    let mut body = response.into_body().into_data_stream();
-                    let mut sequence = 0;
-                    let mut aborted = false;
-                    while let Some(result) = body.next().await {
-                        let Ok(bytes) = result else {
-                            aborted = true;
-                            break;
-                        };
-                        for chunk in bytes.chunks(nyxid_machine::STREAM_CHUNK_BYTES) {
-                            let Ok(frame) = (Frame {
-                                kind: Kind::GatewayDownload,
-                                end: false,
-                                id: uuid,
-                                sequence,
-                                bytes: chunk,
-                            })
-                            .encode() else {
-                                return;
-                            };
-                            if session
-                                .sender
-                                .send(NodeOutboundMessage::Binary(frame))
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                            sequence += 1;
-                        }
-                    }
-                    if let Ok(frame) = (Frame {
-                        kind: if aborted {
-                            Kind::GatewayDownloadAbort
-                        } else {
-                            Kind::GatewayDownload
-                        },
-                        end: true,
-                        id: uuid,
-                        sequence,
-                        bytes: &[],
-                    })
-                    .encode()
-                    {
-                        let _ = session
-                            .sender
-                            .send(NodeOutboundMessage::Binary(frame))
-                            .await;
-                    }
-                }
-            };
+            let execute = execute_service_response(
+                &state,
+                &session,
+                &node_id,
+                request,
+                rx,
+                &id,
+                uuid,
+                header_timeout,
+            );
             #[cfg(test)]
             let execute = async {
                 if let Some(builder) = target_client {
@@ -367,6 +270,118 @@ impl Session {
     }
 }
 
+// Construct the response future outside Session's select/task-local poll frames.
+// Its header/body temporaries must not multiply the nested proxy stack cost.
+#[allow(clippy::too_many_arguments)]
+fn execute_service_response<'a>(
+    state: &'a AppState,
+    session: &'a Session,
+    node_id: &'a str,
+    request: nyxid_machine::Request,
+    rx: mpsc::Receiver<Result<Vec<u8>, std::io::Error>>,
+    id: &'a str,
+    uuid: uuid::Uuid,
+    header_timeout: u64,
+) -> futures::future::BoxFuture<'a, ()> {
+    Box::pin(async move {
+        let response = tokio::time::timeout(
+            Duration::from_secs(header_timeout),
+            authorize_and_execute(state, session, node_id, request, rx),
+        )
+        .await;
+        let response = match response {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => error.into_response(),
+            Err(_) => AppError::NodeProxyTimeout.into_response(),
+        };
+        let status = response.status().as_u16();
+        let headers: Vec<_> = response
+            .headers()
+            .iter()
+            .filter(|(k, _)| {
+                matches!(
+                    k.as_str(),
+                    "content-type"
+                        | "content-encoding"
+                        | "content-length"
+                        | "cache-control"
+                        | "retry-after"
+                        | "content-disposition"
+                )
+            })
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|v| (k.as_str().to_owned(), v.to_owned()))
+            })
+            .collect();
+        if session
+            .sender
+            .send(NodeOutboundMessage::Text(
+                (json!({
+                    "type":"machine_service_response",
+                    "request_id":id,
+                    "status":status,
+                    "headers":headers
+                })
+                .to_string())
+                .into(),
+            ))
+            .await
+            .is_ok()
+        {
+            let mut body = response.into_body().into_data_stream();
+            let mut sequence = 0;
+            let mut aborted = false;
+            while let Some(result) = body.next().await {
+                let Ok(bytes) = result else {
+                    aborted = true;
+                    break;
+                };
+                for chunk in bytes.chunks(nyxid_machine::STREAM_CHUNK_BYTES) {
+                    let Ok(frame) = (Frame {
+                        kind: Kind::GatewayDownload,
+                        end: false,
+                        id: uuid,
+                        sequence,
+                        bytes: chunk,
+                    })
+                    .encode() else {
+                        return;
+                    };
+                    if session
+                        .sender
+                        .send(NodeOutboundMessage::Binary(frame))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    sequence += 1;
+                }
+            }
+            if let Ok(frame) = (Frame {
+                kind: if aborted {
+                    Kind::GatewayDownloadAbort
+                } else {
+                    Kind::GatewayDownload
+                },
+                end: true,
+                id: uuid,
+                sequence,
+                bytes: &[],
+            })
+            .encode()
+            {
+                let _ = session
+                    .sender
+                    .send(NodeOutboundMessage::Binary(frame))
+                    .await;
+            }
+        }
+    })
+}
+
 async fn authorize_and_execute(
     state: &AppState,
     session: &Session,
@@ -395,7 +410,7 @@ async fn authorize_and_execute(
         .db
         .collection::<mongodb::bson::Document>(JOBS)
         .find_one(doc! {"_id":&job.id})
-        .projection(doc! {"machine_authority":1})
+        .projection(doc! {"machine_authority":1,"external_authority":1})
         .await?;
     if let Some(authority) = binding
         .as_ref()
@@ -406,6 +421,15 @@ async fn authorize_and_execute(
         return Err(AppError::MachineAuthorityStale);
     }
 
+    if let Some(authority) = binding
+        .as_ref()
+        .and_then(|r| r.get_document("external_authority").ok())
+    {
+        let expected = json!({"kind":"external","context_id":authority.get_str("context_id").unwrap_or_default(),"grant_id":authority.get_str("grant_id").unwrap_or_default(),"grant_revision":authority.get_i64("grant_revision").unwrap_or_default(),"assignment_revision":authority.get_i64("assignment_revision").unwrap_or_default(),"lease_id":authority.get_str("lease_id").unwrap_or_default()});
+        if p["authority_binding"] != expected {
+            return Err(AppError::MachineAuthorityStale);
+        }
+    }
     crate::services::machine_desktop_service::agent_allowed(&state.db, node_id).await?;
     let raw_path = p["path"]
         .as_str()
@@ -414,12 +438,20 @@ async fn authorize_and_execute(
         return Err(AppError::ValidationError("Gateway path too long".into()));
     }
     let method = p["method"].as_str().unwrap_or("GET");
-    let available = crate::services::machine_gateway_service::services(
-        &state.db,
-        &job.user_id,
-        &job.api_key_id,
-    )
-    .await?;
+    let available = if matches!(
+        job.binding,
+        Some(crate::models::machine_job::MachineJobBinding::External { .. })
+    ) {
+        crate::services::machine_gateway_service::external_services(
+            &state.db,
+            &job.user_id,
+            &auth.allowed_service_ids,
+        )
+        .await?
+    } else {
+        crate::services::machine_gateway_service::services(&state.db, &job.user_id, &job.api_key_id)
+            .await?
+    };
     let is_declared = |row: &&crate::services::machine_gateway_service::AvailableService| {
         job.services
             .iter()
@@ -553,7 +585,36 @@ async fn authorize_and_execute(
         .insert(crate::services::machine_gateway_service::Ingress {
             declared_id: selected.id.clone(),
             git,
+            job: Some((&job).into()),
         });
+    let (grant_id, principal_kind) = match &job.binding {
+        Some(crate::models::machine_job::MachineJobBinding::External {
+            grant_id,
+            principal,
+            ..
+        }) => (
+            Some(grant_id.clone()),
+            match principal {
+                crate::models::machine_external_grant::ExternalPrincipalRef::OAuth { .. } => {
+                    "oauth"
+                }
+                crate::models::machine_external_grant::ExternalPrincipalRef::ApiKey { .. } => {
+                    "api_key"
+                }
+            },
+        ),
+        _ => (None, "assistant"),
+    };
+    request.extensions_mut().insert(
+        crate::services::machine_gateway_service::MachineUsageAttribution {
+            node_id: job.node_id.clone(),
+            job_id: job.id.clone(),
+            runtime_id: job.runtime_id.clone(),
+            runtime_generation: job.runtime_generation,
+            grant_id,
+            principal_kind,
+        },
+    );
     let path_only = path.split('?').next().unwrap_or_default();
     super::proxy::proxy_request_by_slug_inner(
         state,
@@ -573,6 +634,49 @@ pub(crate) async fn job_auth(state: &AppState, job: &MachineJob) -> AppResult<Au
     .await
 }
 
+async fn finish_request(
+    db: &mongodb::Database,
+    node_id: &str,
+    request: &nyxid_machine::Request,
+) -> AppResult<()> {
+    let p = &request.parameters;
+    let job=db.collection::<MachineJob>(JOBS).find_one(doc!{"_id":p["job_id"].as_str().unwrap_or_default(),"node_id":node_id,"runtime_id":p["runtime_id"].as_str().unwrap_or_default()}).await?.ok_or(AppError::MachineJobNotFound)?;
+    if let Some(crate::models::machine_job::MachineJobBinding::External {
+        grant_id,
+        grant_revision,
+        assignment_revision,
+        lease_id,
+        ..
+    }) = &job.binding
+    {
+        let stored = db
+            .collection::<mongodb::bson::Document>(JOBS)
+            .find_one(doc! {"_id":&job.id})
+            .await?
+            .ok_or(AppError::MachineJobNotFound)?;
+        let authority = stored
+            .get_document("external_authority")
+            .map_err(|_| AppError::MachineAuthorityStale)?;
+        if p["authority_binding"]
+            != json!({"kind":"external","context_id":authority.get_str("context_id").unwrap_or_default(),"grant_id":grant_id,"grant_revision":grant_revision,"assignment_revision":assignment_revision,"lease_id":lease_id})
+        {
+            return Err(AppError::MachineAuthorityStale);
+        }
+    } else if job.conversation_id.is_empty()
+        || p["conversation_id"].as_str() != Some(&job.conversation_id)
+    {
+        return Err(AppError::MachineAuthorityStale);
+    }
+    crate::services::machine_external_service::finish_observed(
+        db,
+        &job.id,
+        node_id,
+        &job.runtime_id,
+        p,
+    )
+    .await
+}
+
 async fn verify(
     state: AppState,
     session: &Session,
@@ -588,3 +692,7 @@ async fn verify(
         .verify(request, node_id, &secret, chrono::Utc::now().timestamp())
         .map_err(|_| AppError::Forbidden("Machine service signature refused".into()))
 }
+
+#[cfg(test)]
+#[path = "machine_service_policy_tests.rs"]
+mod service_policy_tests;
