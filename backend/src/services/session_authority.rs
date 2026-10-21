@@ -31,26 +31,27 @@ pub async fn mfa_assurance(
     session_id: Option<&str>,
 ) -> crate::errors::AppResult<bool> {
     use crate::errors::AppError;
-    let user = db
+    let (user_id, mfa_enabled) = db
         .collection::<crate::models::user::User>(USERS)
         .find_one(doc! {"_id": user_id, "is_active": true})
         .await?
-        .ok_or_else(|| AppError::Unauthorized("User account is inactive; sign in again".into()))?;
-    mfa_assurance_for_active_user(db, &user, session_id).await
+        .ok_or_else(|| AppError::Unauthorized("User account is inactive; sign in again".into()))
+        .map(|user| (user.id, user.mfa_enabled))?;
+    mfa_assurance_for_active_user(db, &user_id, mfa_enabled, session_id).await
 }
 
 /// Apply assurance to an active user already validated in this authentication
 /// request. Callers must keep this account snapshot local to the request.
 pub(crate) async fn mfa_assurance_for_active_user(
     db: &mongodb::Database,
-    user: &crate::models::user::User,
+    user_id: &str,
+    mfa_enabled: bool,
     session_id: Option<&str>,
 ) -> crate::errors::AppResult<bool> {
     use crate::errors::AppError;
-    let user_id = user.id.as_str();
     // Non-MFA MCP fallback keeps its historical lifetime independent of the
     // parent login. Only MFA users require live, assured parent authority.
-    if !user.mfa_enabled {
+    if !mfa_enabled {
         return Ok(false);
     }
     let live = if let Some(id) = session_id {
@@ -63,7 +64,15 @@ pub(crate) async fn mfa_assurance_for_active_user(
     };
     let assured = live.as_ref().is_some_and(|row| row.mfa_assured);
     if !assured {
-        reject_unassured(db, user_id, session_id, "session_authority", None, None).await?;
+        Box::pin(reject_unassured(
+            db,
+            user_id,
+            session_id,
+            "session_authority",
+            None,
+            None,
+        ))
+        .await?;
         return Err(AppError::Unauthorized(
             "MFA verification required; sign in again".into(),
         ));

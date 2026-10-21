@@ -1361,7 +1361,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                 ));
                             };
                             if user.mfa_enabled && !live.mfa_assured {
-                                crate::services::session_authority::reject_unassured(&state.db, &user_id_str, Some(&id.to_string()), "bearer", request_ip.as_deref(), request_ua.as_deref()).await?;
+                                Box::pin(crate::services::session_authority::reject_unassured(&state.db, &user_id_str, Some(&id.to_string()), "bearer", request_ip.as_deref(), request_ua.as_deref())).await?;
                                 return Err(AppError::Unauthorized(
                                     "MFA verification required; sign in again".into(),
                                 ));
@@ -1370,7 +1370,7 @@ impl FromRequestParts<AppState> for AuthUser {
                             Some(id)
                         } else {
                             if user.mfa_enabled {
-                                crate::services::session_authority::reject_unassured(&state.db, &user_id_str, None, "sidless_bearer", request_ip.as_deref(), request_ua.as_deref()).await?;
+                                Box::pin(crate::services::session_authority::reject_unassured(&state.db, &user_id_str, None, "sidless_bearer", request_ip.as_deref(), request_ua.as_deref())).await?;
                                 return Err(AppError::Unauthorized(
                                     "MFA verification required; sign in again".into(),
                                 ));
@@ -1470,7 +1470,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         match user_model {
                             Some(u) if u.is_active => {
                                 if u.mfa_enabled && !sess.mfa_assured {
-                                    crate::services::session_authority::reject_unassured(&state.db, &sess.user_id, Some(&sess.id), "cookie", request_ip.as_deref(), request_ua.as_deref()).await?;
+                                    Box::pin(crate::services::session_authority::reject_unassured(&state.db, &sess.user_id, Some(&sess.id), "cookie", request_ip.as_deref(), request_ua.as_deref())).await?;
                                     return Err(AppError::Unauthorized(
                                         "MFA verification required; sign in again".into(),
                                     ));

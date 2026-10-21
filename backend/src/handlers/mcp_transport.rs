@@ -1077,7 +1077,9 @@ async fn authenticate_mcp_or_public(
                     .map_err(|error| match error {
                         crate::errors::AppError::OAuthAuthorityUnavailable => error.into_response(),
                         _ => mcp_401(&state.config.base_url),
-                    })?;
+                    })?
+                    // Keep only the assurance snapshot across later awaits.
+                    .map(|user| (user.id, user.mfa_enabled));
                 // Manual MCP authentication preserves the same sender-bound
                 // proof checks as the REST extractor. It never turns a bound
                 // token into an ordinary bearer for Machine execution.
@@ -1155,13 +1157,16 @@ async fn authenticate_mcp_or_public(
                     let (sa_id, owner_id) = verify_service_account_active(state, &claims).await?;
                     (sa_id, Some(owner_id))
                 } else if auth_method == AuthMethod::AccessToken && claims.client_id.is_none() {
-                    let user = authority_user
+                    let (user_id, mfa_enabled) = authority_user
                         .as_ref()
                         .ok_or_else(|| mcp_401(&state.config.base_url))?;
-                    crate::services::session_authority::mfa_assurance_for_active_user(
-                        &state.db,
-                        user,
-                        claims.sid.as_deref(),
+                    Box::pin(
+                        crate::services::session_authority::mfa_assurance_for_active_user(
+                            &state.db,
+                            user_id,
+                            *mfa_enabled,
+                            claims.sid.as_deref(),
+                        ),
                     )
                     .await
                     .map_err(|_| mcp_401(&state.config.base_url))?;
@@ -1294,11 +1299,11 @@ async fn authenticate_mcp_or_public(
         if !session.session_fallback_allowed {
             return Err(mcp_401(&state.config.base_url));
         }
-        crate::services::session_authority::mfa_assurance(
+        Box::pin(crate::services::session_authority::mfa_assurance(
             &state.db,
             &session.user_id,
             session.parent_session_id.as_deref(),
-        )
+        ))
         .await
         .map_err(|_| mcp_401(&state.config.base_url))?;
         let user_id = session.user_id;
