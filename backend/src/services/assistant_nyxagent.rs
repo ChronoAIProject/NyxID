@@ -537,7 +537,91 @@ pub fn channel_note(row: &AssistantConversation) -> String {
             super::channel_platform::platform_name(&channel.platform),
         ));
     }
+    prompt.push_str(&channel_length_note(row));
     prompt
+}
+
+fn channel_length_note(row: &AssistantConversation) -> String {
+    let Some(turn) = row.active_turn.as_ref() else {
+        return String::new();
+    };
+    let routing = answer_routing(row, turn);
+    let mut platforms = Vec::new();
+    if let Some(crate::models::assistant_conversation::PlatformReplyRouting::Captured {
+        origin,
+        ..
+    }) = &turn.platform_reply
+    {
+        platforms.push(origin.thread.platform.as_str());
+    }
+    match &routing.primary {
+        PrimaryDestination::ChannelEvent { origin } => platforms.push(&origin.platform),
+        PrimaryDestination::ChatUpdate { origins } => {
+            platforms.extend(origins.iter().map(|origin| origin.platform.as_str()));
+        }
+        _ => {}
+    }
+    platforms.extend(routing.also.iter().map(|origin| origin.platform.as_str()));
+    // There are only these distinct provider budgets/names. Even malformed
+    // legacy routing cannot grow the note with arbitrary platform labels.
+    let mut seen = std::collections::HashSet::new();
+    let mut note = String::new();
+    for platform in platforms {
+        let guidance = super::channel_text::reply_length_guidance(platform);
+        if seen.insert(guidance.clone()) {
+            note.push_str("\n\n");
+            note.push_str(&guidance);
+        }
+    }
+    note
+}
+
+/// Automation destinations are saved on the admitted run. Ordinary app and
+/// inbound channel turns incur no additional reads.
+pub(crate) async fn additional_channel_length_note(
+    db: &Database,
+    row: &AssistantConversation,
+) -> AppResult<String> {
+    if let Some(turn) = &row.active_turn {
+        let primary = answer_routing(row, turn).primary;
+        if matches!(primary, PrimaryDestination::Trigger { .. })
+            && let Some((platform, _)) = image_chat(db, &row.user_id, &primary).await?
+        {
+            return Ok(format!(
+                "\n\n{}",
+                super::channel_text::reply_length_guidance(&platform)
+            ));
+        }
+    }
+    Ok(String::new())
+}
+
+/// Capture advice when assigning the work, before the reporting turn can
+/// settle or change destination. This note conveys no delivery authority.
+pub(crate) async fn reporting_channel_length_note(
+    db: &Database,
+    owner: &str,
+    report_to: Option<&str>,
+) -> AppResult<Option<String>> {
+    let Some(report_to) = report_to else {
+        return Ok(None);
+    };
+    let Some(parent) = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id": report_to, "user_id": owner})
+        .await?
+    else {
+        return Ok(None);
+    };
+    let mut inherited = channel_length_note(&parent);
+    inherited.push_str(&additional_channel_length_note(db, &parent).await?);
+    if inherited.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(format!(
+            "Your report is intended for the requesting turn's chat destination:{inherited}"
+        )))
+    }
 }
 
 #[derive(Clone, Deserialize)]

@@ -371,17 +371,35 @@ Forwarded, quoted, edited, bot-originated and unverified input cannot pair an
 account or decide a pending action. Native manager controls consume proofs before
 any agent call; fallback input removes pairing proofs and claim codes, including
 those in link metadata and quotes. The manager's embedded setup messages are never
-used as agent context. Relay metadata stores only original-message eligibility;
-raw provider updates remain ephemeral.
+used as agent context. Relay metadata stores original-message eligibility and
+attachment handles; raw provider updates remain ephemeral.
 
-Ordinary child bots using CMA also require its authenticated `telegram_input`
-envelope for native forwarding provenance, quotes and hidden links. Missing
-provenance refuses commands and approvals. The NyxID-relay path can recover
-provenance and media handles from its exact authenticated message record; its
-text envelope stays byte-identical to Telegram for CMA verification. Enable
-`CMAEG_MEDIA_ENABLED=true` in the gateway to admit media, including external
-reply media, after upgrading its forwarding contract. The manager's direct
-Telegram path does not depend on this gateway setting.
+Telegram-destined turns receive per-turn guidance to fit one 4,096-character
+message unless the user asks for long or complete output. The guidance uses the
+same UTF-16 budget as delivery, covers manager personal replies and channel or
+automation destinations, and never authorizes truncation: longer replies still
+split losslessly. App-only turns and stable instructions receive no Telegram
+length preference.
+
+NyxID provisions Telegram NyxBot gateway channels with `nyxid_relay` sources.
+Their callback text and attachment list match the sending message's own
+Telegram fields, preserving the existing gateway verifier contract. NyxID's
+metadata record keeps that exact own-file prefix followed by unique
+`external_reply` file handles. NyxBot recovers eligibility and the complete file
+list from the authenticated message/bot/route-key/sender binding, even when the
+gateway sends no `telegram_input` envelope. Callback download indexes keep their
+original positions. Quoted files do not add gateway envelope attachments or
+change the message type; a text-only external reply remains admissible with
+gateway media disabled. The gateway's existing `CMAEG_MEDIA_ENABLED=true` setting
+is needed for the sending message's own top-level media.
+
+Native gateway Telegram sources without a sealed `telegram_input` envelope use
+plain text and cannot make card, pairing or control decisions. NyxID does not
+create those sources, so this fail-closed compatibility behavior does not block
+NyxID-managed channels. The optional [CMA forwarding follow-up](plans/2026-10-21-cma-telegram-forwarding-followup.md)
+describes richer native-source input and gateway rendering of quoted files; it
+is not required for this NyxID change. The manager's direct Telegram path is
+independent of the gateway media setting.
 
 After `/login` (or `/link` for personal access), review the account in NyxID and
 choose **Open Telegram to finish**. Telegram sends a purpose-specific `/start`

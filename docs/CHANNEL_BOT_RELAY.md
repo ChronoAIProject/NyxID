@@ -2290,6 +2290,22 @@ content under the same automation run is rejected. These journals have no TTL
 and are purged on owner deletion. They do not replace ordinary relay receipts or
 the legacy/v2 image migration checks.
 
+### Channel reply length
+
+NyxBot and specialist turns destined for a chat receive turn-only length guidance
+from the same per-platform limits as the delivery planner: Telegram 4,096 UTF-16
+code units, Discord 2,000, and each other adapter's own budget. The model is asked
+to fit one message unless the user explicitly requests long or complete output.
+This is a preference: content is never truncated or discarded, and longer output
+still uses the lossless multipart planner. The guidance follows direct/gateway
+replies, followed threads, additional chat recipients, manager personal replies
+and automation result destinations. Assigned specialists inherit their reporting
+turn's chat guidance. `list_channel_chats` tool results supply destination-specific
+`reply_length_guidance` before `post_to_chat` drafting; explicit posts accept up
+to the existing 32,768-character turn-input bound and still split for delivery.
+App-only turns receive no channel-length guidance. Stable instructions stay
+independent of the destination.
+
 ### Telegram forwarded input and approval provenance
 
 NyxBot extracts full visible text/captions, hidden link URLs (using Telegram
@@ -2302,17 +2318,27 @@ the authenticated original event permits owner linking or action-card decisions;
 missing legacy metadata fails closed. Followed-thread dispatch uses the same
 stored eligibility, exact owner and route checks.
 
-For gateway activity, the additive `telegram_input` contract is
-`{"version":1,"original":false,"message":{...}}`. `message` contains only selected
-text, entities, captions, forward origin, quotes and media handles, not a raw
-Telegram update, nested setup message or keyboard. CMA must derive eligibility at
-authenticated ingress, bind the envelope into its activity digest/seal and retain
-it in the public activity projection. NyxID bounds the envelope to 64 KiB. Native
-gateway events without that verified envelope cannot approve actions or pair an
-owner. Relay-sourced gateway events additionally resolve eligibility and media
-handles from the exact NyxID message/channel/route-key/sender metadata. Full native forwarding
-requires the companion CMA change; enabling this NyxID consumer alone does not
-make an older gateway preserve content.
+NyxID creates Telegram NyxBot gateway channels exclusively with `nyxid_relay`
+sources. Relay callback text and attachments describe only the sending message's
+own top-level fields, as required by the existing CMA verifier. Stored inbound
+attachment metadata preserves the exact callback list as a prefix and appends
+unique `external_reply` handles. Every gateway download index therefore still
+selects the same stored file. NyxBot resolves the complete list and eligibility
+using the exact message/channel/route-key/sender binding; no gateway change or
+`telegram_input` envelope is required for that recovery. An external-reply-only
+file leaves a text-only callback with no envelope attachments and remains
+compatible with both existing gateway media modes. Top-level media still uses
+the gateway's existing media-enabled setting.
+
+For native gateway activity, the optional additive `telegram_input` contract is
+`{"version":1,"original":false,"message":{...}}`. Its selected text, entities,
+captions, forward origin, quotes and media handles must be derived at
+authenticated ingress and bound into the activity digest/seal, without nested
+setup messages or keyboards. NyxID bounds this envelope to 64 KiB. Native-source
+events without it remain plain text and cannot decide actions, pair an owner or
+run controls. NyxID does not provision native Telegram gateway sources. Richer
+native-source forwarding and gateway rendering of quoted files are separate,
+optional [CMA follow-up work](plans/2026-10-21-cma-telegram-forwarding-followup.md).
 
 The owner turn atomically binds encrypted inbound files with its message, checks
 owner isolation and applies existing upload retention. Unsupported binary media

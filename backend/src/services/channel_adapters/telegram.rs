@@ -342,7 +342,9 @@ fn parse_message(msg: &serde_json::Value, raw: serde_json::Value) -> Option<Inbo
         .and_then(|v| v.as_i64())
         .map(|id| id.to_string());
 
-    let attachments = crate::services::telegram_input::attachments(msg);
+    // The gateway verifies this list against the sending message's own media.
+    // Quoted files are retained separately in NyxID's inbound metadata.
+    let attachments = extract_attachments(msg);
 
     Some(InboundMessage {
         embedded_attachments: Vec::new(),
@@ -1710,6 +1712,62 @@ mod tests {
         ] {
             assert!(content.contains(expected));
         }
+    }
+
+    #[test]
+    fn quoted_handles_preserve_every_own_attachment_download_index() {
+        let update = serde_json::json!({"message":{
+            "message_id":7,"chat":{"id":123,"type":"private"},
+            "from":{"id":123,"is_bot":false},
+            "photo":[{"file_id":"own-photo"}],
+            "document":{"file_id":"own-animation"},
+            "animation":{"file_id":"own-animation"},
+            "external_reply":{"document":{"file_id":"own-animation"},
+                "video_note":{"file_id":"quoted-video"}}
+        }});
+        let inbound = parse_message(&update["message"], update.clone()).unwrap();
+        let stored = crate::services::channel_relay_service::inbound_metadata(
+            "bot",
+            "conversation",
+            "owner",
+            "telegram",
+            &inbound,
+            "route",
+            "event",
+        );
+        assert_eq!(
+            inbound
+                .attachments
+                .iter()
+                .map(|a| a.url.as_str())
+                .collect::<Vec<_>>(),
+            ["own-photo", "own-animation", "own-animation"]
+        );
+        assert_eq!(
+            stored
+                .attachments
+                .iter()
+                .map(|a| a.provider_ref.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "own-photo",
+                "own-animation",
+                "own-animation",
+                "quoted-video"
+            ]
+        );
+        for (index, attachment) in inbound.attachments.iter().enumerate() {
+            assert_eq!(stored.attachments[index].provider_ref, attachment.url);
+        }
+        let turn_files = crate::services::telegram_input::stored_attachments(&stored.attachments);
+        assert_eq!(
+            turn_files
+                .iter()
+                .map(|a| a.url.as_str())
+                .collect::<Vec<_>>(),
+            ["own-photo", "own-animation", "quoted-video"]
+        );
+        assert_eq!(stored.original_message, Some(false));
     }
 
     #[test]

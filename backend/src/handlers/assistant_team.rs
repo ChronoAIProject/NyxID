@@ -906,6 +906,7 @@ pub(crate) async fn assign(
     ))
     .await?;
     let limit = team_pool_limit(state, owner).await;
+    let note = engine::reporting_channel_length_note(&state.db, owner, report_to).await?;
     start_server_turn(
         state,
         owner,
@@ -927,7 +928,7 @@ pub(crate) async fn assign(
             origin: TurnOrigin::Orchestrator,
             channel: None,
             title: None,
-            note: None,
+            note,
             new_id: None,
             agent_id: None,
             report_to: report_to.map(str::to_owned),
@@ -2463,7 +2464,10 @@ async fn dispatch_channels(
                 args["channel_agent_id"].as_str(),
             ))
             .await?;
-            (json!({"chats": chats}), false)
+            (
+                json!({"chats": chats.iter().map(|chat| chat.posting_context()).collect::<Vec<_>>()}),
+                false,
+            )
         }
         "list_channel_threads" => (
             super::nyxbot::thread_controls::list_tool(state, owner, args).await?,

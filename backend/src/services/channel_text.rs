@@ -14,6 +14,35 @@ pub struct TextLimit {
     budget: usize,
 }
 
+/// Turn-only advice; the lossless delivery planner remains authoritative.
+/// Names come from this fixed inventory, never a stored label or user text.
+pub(crate) fn reply_length_guidance(platform: &str) -> String {
+    let name = match platform {
+        "telegram" | "telegram-new" => "Telegram",
+        "discord" => "Discord",
+        "slack" => "Slack",
+        "whatsapp" => "WhatsApp",
+        "x" => "X",
+        "lark" => "Lark",
+        "feishu" => "Feishu",
+        _ => "the destination chat app",
+    };
+    let limit = TextLimit::for_platform(platform);
+    let budget = limit.budget();
+    let budget = format!("{},{:03}", budget / 1000, budget % 1000);
+    let units = match limit.units {
+        Units::Utf16 => "characters (counted as UTF-16 code units; some emoji count as two)",
+        Units::Scalars => "characters (Unicode scalar values)",
+        Units::JsonBytes => "bytes of JSON-escaped text, after reserving the message wrapper",
+    };
+    format!(
+        "Destination: {name}. One message holds {budget} {units}. Keep the answer within one \
+        message unless the user explicitly asks for long or complete output; then splitting \
+        into multiple messages is fine. Never truncate or drop content to satisfy this \
+        preference: NyxID's delivery planner still splits longer replies losslessly."
+    )
+}
+
 impl TextLimit {
     pub fn for_platform(platform: &str) -> Self {
         let (units, budget) = match platform {
@@ -129,6 +158,31 @@ impl TextLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reply_guidance_uses_provider_limits_and_never_trades_away_content() {
+        for (platform, name, budget) in [
+            ("telegram", "Telegram", "4,096 characters"),
+            ("telegram-new", "Telegram", "4,096 characters"),
+            ("discord", "Discord", "2,000 characters"),
+            ("slack", "Slack", "40,000 characters"),
+            ("whatsapp", "WhatsApp", "4,096 characters"),
+            ("x", "X", "10,000 characters"),
+            ("lark", "Lark", "30,709 bytes of JSON-escaped text"),
+            ("feishu", "Feishu", "30,709 bytes of JSON-escaped text"),
+        ] {
+            let note = reply_length_guidance(platform);
+            assert!(note.contains(&format!("Destination: {name}.")));
+            assert!(note.contains(budget));
+            assert!(note.contains("unless the user explicitly asks for long or complete output"));
+            assert!(note.contains("Never truncate or drop content"));
+            assert!(note.contains("splits longer replies losslessly"));
+            assert!(note.len() < 600);
+        }
+        let injected = reply_length_guidance(&"INJECTED".repeat(1000));
+        assert!(!injected.contains("INJECTED"));
+        assert!(injected.contains("2,000 characters"));
+    }
 
     #[test]
     fn reduced_display_budgets_make_progress_without_splitting_scalars() {

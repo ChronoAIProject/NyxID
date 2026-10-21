@@ -18,7 +18,7 @@ use crate::{
 
 pub(super) const MAX_TITLE_CHARS: usize = 80;
 const LIST_LIMIT: i64 = 100;
-pub(super) const MAX_POST_CHARS: usize = 4000;
+pub(super) const MAX_POST_CHARS: usize = engine::MAX_MESSAGE_CHARS;
 
 /// `private`, `group` or `channel`; anything else counts as a group.
 pub(super) fn chat_kind(kind: &str) -> &'static str {
@@ -1094,6 +1094,20 @@ pub struct ChannelChatResponse {
     followed_thread_count: i64,
     follow_readiness: &'static str,
     follow_guidance: Option<String>,
+}
+
+impl ChannelChatResponse {
+    /// Tool results are per-turn input. Keep platform advice out of the stable
+    /// tool inventory and app-only conversation instructions.
+    pub(crate) fn posting_context(&self) -> Value {
+        let mut context = json!(self);
+        context["reply_length_guidance"] = format!(
+            "When drafting a post_to_chat message to this chat: {}",
+            crate::services::channel_text::reply_length_guidance(&self.platform)
+        )
+        .into();
+        context
+    }
 }
 
 fn chat_response(row: &NyxbotChannel, chat: &NyxbotThread) -> ChannelChatResponse {

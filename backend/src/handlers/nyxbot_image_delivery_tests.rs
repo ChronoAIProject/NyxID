@@ -2741,7 +2741,7 @@ async fn nyxbot_multipart_post_delivers_all_text_and_repeated_calls_reuse_receip
         )
         .mount(&server)
         .await;
-    let text = "🦉x".repeat(1800);
+    let text = "🦉x".repeat(3000);
     let result = chats::post_current_turn(&f.state, &chat, &target.id, &text, false)
         .await
         .unwrap();

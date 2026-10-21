@@ -2942,6 +2942,19 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
     let chats = chats::list_chats(&state, OWNER, Some(&row.id))
         .await
         .unwrap();
+    let posting = chats[0].posting_context();
+    assert!(
+        posting["reply_length_guidance"]
+            .as_str()
+            .unwrap()
+            .contains("Destination: Lark.")
+    );
+    assert!(
+        posting["reply_length_guidance"]
+            .as_str()
+            .unwrap()
+            .contains("30,709 bytes")
+    );
     let listed = serde_json::to_value(&chats).unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 1);
     assert_eq!(listed[0]["kind"], "group");
@@ -5191,6 +5204,8 @@ mod late_delivery_tests;
 mod gateway_thread_tests;
 #[path = "nyxbot_gateway_topic_tests.rs"]
 mod gateway_topic_tests;
+#[path = "nyxbot_telegram_relay_tests.rs"]
+mod telegram_relay_tests;
 
 /// Plan v7 §2.2 carriers: a watch stores the causing turn's report snapshot
 /// with validated provenance and wakes its thread with an event bound from

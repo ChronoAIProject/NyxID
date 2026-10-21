@@ -240,27 +240,55 @@ pub(crate) fn attachments(message: &Value) -> Vec<super::channel_platform::Inbou
             source,
         ));
     }
+    unique_attachments(attachments)
+}
+
+fn unique_attachments(
+    mut attachments: Vec<super::channel_platform::InboundAttachment>,
+) -> Vec<super::channel_platform::InboundAttachment> {
     let mut seen = std::collections::HashSet::new();
     attachments.retain(|a| !a.url.is_empty() && seen.insert(a.url.clone()));
     attachments
 }
 
+/// Preserve the callback's exact own-file prefix: its positions are public
+/// download indexes. Quoted files follow it only in NyxID's stored record.
+pub(crate) fn relay_attachments(
+    inbound: &super::channel_platform::InboundMessage,
+) -> Vec<super::channel_platform::InboundAttachment> {
+    let mut result = inbound.attachments.clone();
+    let quoted = ["message", "edited_message", "channel_post"]
+        .iter()
+        .find_map(|key| inbound.raw_data.get(*key))
+        .and_then(|message| message.get("external_reply"));
+    if let Some(quoted) = quoted {
+        for attachment in super::channel_adapters::telegram::extract_attachments(quoted) {
+            if !attachment.url.is_empty() && !result.iter().any(|own| own.url == attachment.url) {
+                result.push(attachment);
+            }
+        }
+    }
+    result
+}
+
 pub(crate) fn stored_attachments(
     attachments: &[crate::models::channel_message::StoredAttachment],
 ) -> Vec<super::channel_platform::InboundAttachment> {
-    attachments
-        .iter()
-        .map(|a| super::channel_platform::InboundAttachment {
-            content_type: a.content_type.clone(),
-            url: a.provider_ref.clone(),
-            platform_message_id: a.platform_message_id.clone(),
-            file_key: a.file_key.clone(),
-            image_key: a.image_key.clone(),
-            filename: a.filename.clone(),
-            mime_type: a.mime_type.clone(),
-            size_bytes: a.size_bytes,
-        })
-        .collect()
+    unique_attachments(
+        attachments
+            .iter()
+            .map(|a| super::channel_platform::InboundAttachment {
+                content_type: a.content_type.clone(),
+                url: a.provider_ref.clone(),
+                platform_message_id: a.platform_message_id.clone(),
+                file_key: a.file_key.clone(),
+                image_key: a.image_key.clone(),
+                filename: a.filename.clone(),
+                mime_type: a.mime_type.clone(),
+                size_bytes: a.size_bytes,
+            })
+            .collect(),
+    )
 }
 
 /// Relay records are written only after provider authentication and routing.
@@ -305,8 +333,19 @@ pub(crate) async fn prepare_uploads(
     user: &str,
     attachments: &[super::channel_platform::InboundAttachment],
 ) -> crate::errors::AppResult<Vec<super::assistant_upload_service::PreparedChannelUpload>> {
+    #[cfg(test)]
+    let test_api_base = TEST_API_BASES.lock().unwrap().get(&bot.id).cloned();
+    #[cfg(test)]
+    if let Some(api_base) = test_api_base {
+        return prepare_uploads_from(state, bot, user, attachments, &api_base).await;
+    }
     prepare_uploads_from(state, bot, user, attachments, "https://api.telegram.org").await
 }
+
+#[cfg(test)]
+pub(crate) static TEST_API_BASES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 pub(crate) async fn prepare_uploads_from(
     state: &crate::AppState,

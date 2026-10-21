@@ -325,6 +325,11 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].follow.follow_state.as_deref(), Some("active"));
     assert_eq!(calls.lock().await.len(), 2);
+    for call in calls.lock().await.iter() {
+        let input = call.to_string();
+        assert!(input.contains("Destination: Telegram."));
+        assert!(input.contains("4,096 characters"));
+    }
     let conversation = first[0].conversation_id.clone();
     assert!(calls.lock().await[0].to_string().contains("body_available"));
     let messages = engine::messages(
