@@ -527,7 +527,7 @@ async fn optional_helper_rejects_connection_owner_key_node_and_target_mismatches
             "service_url" => target.service.base_url = "https://unrelated.example".into(),
             "auth" => target.auth_method = "bearer".into(),
             "connection" => target.connection_id = Some(uuid::Uuid::new_v4().to_string()),
-            "credential" => target.credential = "selected-modern-token".into(),
+            "credential" => target.credential = "selected-modern-token".to_string().into(),
             _ => unreachable!(),
         }
         let result = optional_credentials(&f, &f.owner, &f.catalog.id, &target).await;
