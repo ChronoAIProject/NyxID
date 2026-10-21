@@ -8,6 +8,8 @@ import {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  vi.resetModules();
   window.history.replaceState({}, "", "/");
 });
 
@@ -55,6 +57,28 @@ describe("website authentication entry parity", () => {
 });
 
 describe("legacy authentication fragment context", () => {
+  it("hands an accepted legacy solution to auth with the invitation and selected target intact", async () => {
+    vi.stubEnv(
+      "VITE_WEBSITE_SOLUTION_ACTIVATIONS",
+      JSON.stringify({
+        "help-desk": {
+          target: "/assistant?setup=help-desk",
+          acceptance: "review/help-desk",
+        },
+      }),
+    );
+    vi.resetModules();
+    const { legacyDestination: resolve } = await import("./auth-links");
+    const destination = new URL(
+      resolve("#/start?t=help-desk", "?code=NYX-ABCDEF12&return_to=%2Fkeys")!,
+      window.location.origin,
+    );
+    expect(destination.pathname).toBe("/login");
+    expect(destination.searchParams.get("code")).toBe("NYX-ABCDEF12");
+    expect(destination.searchParams.get("return_to")).toBe(
+      "/assistant?setup=help-desk",
+    );
+  });
   it.each([
     ["/login", "/login"],
     ["/signup", "/register"],

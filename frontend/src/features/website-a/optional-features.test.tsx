@@ -186,7 +186,7 @@ it.each(solutionSlugs)(
     const view = render(<SolutionActivation targets={release.solutions} />);
     expect(screen.getByRole("link")).toHaveAttribute(
       "href",
-      `/assistant?setup=${slug}`,
+      `/login?return_to=${encodeURIComponent(`/assistant?setup=${slug}`)}`,
     );
     view.unmount();
     for (const other of solutionSlugs) {

@@ -84,7 +84,7 @@ it("updates availability metadata only for the configured solution", async () =>
     "/solutions/restaurant-manager",
     async () => "",
   );
-  expect(enabled.html).toContain("/assistant?setup=help-desk");
+  expect(enabled.html).toContain("/login?return_to=%2Fassistant%3Fsetup%3Dhelp-desk");
   expect(enabled.meta.description).not.toContain("Not available yet.");
   expect(closed.html).toContain("Not available yet");
   expect(closed.meta.description).toContain("Not available yet.");

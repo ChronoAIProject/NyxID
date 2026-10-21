@@ -2,6 +2,7 @@ import { websiteRelease } from "./release-config";
 import { SiteLink } from "./site-link";
 import { useId } from "react";
 import { useWebsite } from "./website-context";
+import { solutionAuthPath } from "./auth-links";
 export function SolutionActivation({
   targets = websiteRelease.solutions,
 }: {
@@ -15,7 +16,7 @@ export function SolutionActivation({
       <SiteLink
         className="btn lg"
         data-solution-activation={route.split("/").at(-1)}
-        href={siteHref(target)}
+        href={siteHref(solutionAuthPath(target))}
       >
         {language === "zh" ? "使用此方案" : "Use this solution"}
       </SiteLink>

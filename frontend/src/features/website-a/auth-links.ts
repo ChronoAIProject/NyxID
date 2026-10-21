@@ -40,6 +40,11 @@ export function siteHref(pathname: string, search = typeof window === "undefined
   return `${destination.pathname}${query ? `?${query}` : ""}${destination.hash}`;
 }
 
+/** Keep invitations at the auth URL's top level and bind return_to to the selected solution. */
+export function solutionAuthPath(target: string) {
+  return `/login?${new URLSearchParams({ return_to: target })}`;
+}
+
 /** Only recognized public prototype paths may leave the fragment namespace. */
 export function legacyDestination(
   hash: string,
@@ -57,7 +62,13 @@ export function legacyDestination(
   }
   if (pathname === "/start" || pathname === "/done") {
     const solution = solutionStartTarget(query);
-    if (solution) return siteHref(solution, search);
+    if (solution)
+      return siteHref(
+        /^\/(?:assistant|dashboard)(?:\?|$)/.test(solution)
+          ? solutionAuthPath(solution)
+          : solution,
+        search,
+      );
     // Mock provisioning fragments (including `t`) are not real auth state.
     // Preserve only the original outer query when entering real registration.
     return authHref("register", search);

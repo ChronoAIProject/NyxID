@@ -276,7 +276,7 @@ for (const page of release.pages) {
         assert.ok(link, "Missing enabled activation CTA");
         assert.equal(
           link.getAttribute("href"),
-          release.configuration.solutions[slug],
+          `/login?${new URLSearchParams({ return_to: release.configuration.solutions[slug] })}`,
         );
       }
       assert.ok(!doc.querySelector('a[href^="/start"]'));
