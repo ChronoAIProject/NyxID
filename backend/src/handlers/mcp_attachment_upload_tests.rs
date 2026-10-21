@@ -28,6 +28,40 @@ struct UploadFixture {
     attachment_id: String,
 }
 
+async fn replace_upload_bytes(u: &UploadFixture, bytes: &[u8]) {
+    let chunks =
+        u.f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME);
+    let chunk = chunks
+        .find_one(doc! {"parent_attachment_id":&u.attachment_id,"chunk_index":0_i64})
+        .await
+        .unwrap()
+        .unwrap();
+    let chunk_id = chunk.get_str("_id").unwrap();
+    let encrypted = crate::services::assistant_record_service::encrypt_chunk(
+        &u.f.state.encryption_keys,
+        chunk_id,
+        &u.f.owner,
+        &u.attachment_id,
+        0,
+        bytes,
+    )
+    .await
+    .unwrap();
+    let updated = chunks
+        .update_one(
+            doc! {"_id":chunk_id},
+            doc! {"$set":{"data_encrypted":bson::Binary {
+                subtype:bson::spec::BinarySubtype::Generic,
+                bytes:encrypted,
+            }}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.matched_count, 1);
+}
+
 async fn flag(f: &Fixture, key: &str, enabled: bool) {
     let now = bson::DateTime::now();
     f.state
@@ -825,25 +859,11 @@ async fn lark_attachment_cards_bind_bytes_filename_parent_type_and_destination_o
             assert_error(&response);
             assert_eq!(payload(&response)["error"], "acknowledgement_invalid");
         }
-        let encrypted =
-            u.f.state
-                .encryption_keys
-                .encrypt(b"changed bytes")
-                .await
-                .unwrap();
-        u.f.state.db.collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME)
-            .update_one(doc! {"parent_attachment_id":&u.attachment_id},doc! {"$set":{"data_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
+        replace_upload_bytes(&u, b"changed bytes").await;
         let changed = call(&u, &auth, meta, confirmed.clone()).await;
         assert_error(&changed);
         assert_eq!(payload(&changed)["error"], "acknowledgement_invalid");
-        let encrypted =
-            u.f.state
-                .encryption_keys
-                .encrypt(b"receipt bytes")
-                .await
-                .unwrap();
-        u.f.state.db.collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME)
-            .update_one(doc! {"parent_attachment_id":&u.attachment_id},doc! {"$set":{"data_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
+        replace_upload_bytes(&u, b"receipt bytes").await;
         let sent = call(&u, &auth, meta, confirmed).await;
         assert_eq!(sent["result"]["isError"], false, "{sent}");
     }
@@ -1152,14 +1172,7 @@ async fn lark_attachment_platform_cards_bind_materialized_bytes_and_boundary_con
         .unwrap();
     let mut retry = original.clone();
     retry["acknowledgement_id"] = json!(id);
-    let encrypted =
-        u.f.state
-            .encryption_keys
-            .encrypt(b"changed bytes")
-            .await
-            .unwrap();
-    u.f.state.db.collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME)
-        .update_one(doc! {"parent_attachment_id":&u.attachment_id},doc! {"$set":{"data_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
+    replace_upload_bytes(&u, b"changed bytes").await;
     let changed = mcp_service::prepare_chat_proxy_tool_call(
         &u.f.state.db,
         &u.f.state.encryption_keys,
