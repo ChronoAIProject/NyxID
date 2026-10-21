@@ -52,7 +52,9 @@ function probe(name) {
     }
   } else if (name === 'forge' || name === 'forge_der') {
     const forge = load('node-forge');
-    const keys = crypto.generateKeyPairSync('rsa', { modulusLength: 1024, publicExponent: 3 });
+    // Retain the low exponent used by the forged-DigestInfo regression, with
+    // a production-strength modulus so the fixture does not use a weak key.
+    const keys = crypto.generateKeyPairSync('rsa', { modulusLength: 2048, publicExponent: 3 });
     const privateKey = forge.pki.privateKeyFromPem(keys.privateKey.export({ type: 'pkcs1', format: 'pem' }));
     const publicKey = forge.pki.publicKeyFromPem(keys.publicKey.export({ type: 'pkcs1', format: 'pem' }));
     const digest = forge.md.sha256.create().update('bounded fixture').digest().getBytes();

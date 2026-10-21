@@ -20,7 +20,7 @@
       "regressions": {
         "GHSA-vcc3-ghjq-m6fr": "uri"
       },
-      "regression_sha256": "cf0be94835b0f569fc8591ffc5dd0b89eec0b28df237b6af6fbce9d684588b17",
+      "regression_sha256": "9fe5d08cc457a5d3555eb8e7f766b4fbb8901cd9cd66bd6b417898d02277dba0",
       "compatibility_sha256": "ad21fa1ffa151e8c86e68c614a050fc3e7341838420acd6174973c41cda23053",
       "owner": "NyxID security maintainers",
       "expires": "2026-11-19",
@@ -100,7 +100,7 @@
         "GHSA-5p2g-fcmc-qvqq": "image",
         "GHSA-w3rx-r6r6-pgpr": "icns"
       },
-      "regression_sha256": "cf0be94835b0f569fc8591ffc5dd0b89eec0b28df237b6af6fbce9d684588b17",
+      "regression_sha256": "9fe5d08cc457a5d3555eb8e7f766b4fbb8901cd9cd66bd6b417898d02277dba0",
       "compatibility_sha256": "ad21fa1ffa151e8c86e68c614a050fc3e7341838420acd6174973c41cda23053",
       "owner": "NyxID security maintainers",
       "expires": "2026-11-19",
@@ -181,7 +181,7 @@
       "regressions": {
         "GHSA-86w9-cpqp-85rv": "forge"
       },
-      "regression_sha256": "cf0be94835b0f569fc8591ffc5dd0b89eec0b28df237b6af6fbce9d684588b17",
+      "regression_sha256": "9fe5d08cc457a5d3555eb8e7f766b4fbb8901cd9cd66bd6b417898d02277dba0",
       "compatibility_sha256": "ad21fa1ffa151e8c86e68c614a050fc3e7341838420acd6174973c41cda23053",
       "owner": "NyxID security maintainers",
       "expires": "2026-11-19",

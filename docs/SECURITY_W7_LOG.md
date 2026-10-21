@@ -473,3 +473,19 @@
   command-results.md and results.jsonl in that directory retain every local gate
   attempt, exact command, exit status and log location, including failures and
   their subsequent resolutions. Raw secret scanner output is not retained.
+
+## W7 PR #1976 follow-up — RSA regression key strength
+
+- Replace the node-forge DigestInfo fixture's 1024-bit modulus with 2048 bits,
+  retaining exponent 3 and every malformed/canonical DigestInfo assertion.
+  Update only the bound regression-script digests in dependency-patches.json;
+  patch inventories, lock, dispositions and 2026-11-19 expiry are unchanged.
+- A fresh locked pnpm install with lifecycle scripts/pnpmfile disabled passes
+  all eight patched regressions and all five consumer compatibility tests.
+  Independently authenticated original node-forge 1.4.0 still fails the targeted
+  assertion (`security-assertion-failed`); the three other original-vulnerability
+  proofs also pass. All 119 patched source files across three packages match.
+- `python3 scripts/test-dependency-patches.py` passes. Exact commands, outputs
+  and original proofs are retained under
+  ~/Library/Caches/nyxid-targets/w7-apt-followup/ (results.jsonl,
+  mobile-original-proofs.json and logs/).
