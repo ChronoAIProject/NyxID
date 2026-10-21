@@ -1,0 +1,45 @@
+{
+  "method": "Read-only TypeScript transpilation in memory; import.meta.env replaced with empty object for deterministic defaults; actual exported functions invoked. App login handoff evaluated from exact source expressions. No build/server/browser.",
+  "sourceCommit": "ed91d302ff560388315b6cc1149491bb9d5beb95",
+  "status": [
+    {
+      "url": "https://nyx.chrono-ai.fun/",
+      "accepted": false,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://nyx.chrono-ai.fun/zh",
+      "accepted": true,
+      "result": "https://nyx.chrono-ai.fun/zh"
+    },
+    {
+      "url": "https://nyx.chrono-ai.fun/zh/",
+      "accepted": true,
+      "result": "https://nyx.chrono-ai.fun/zh/"
+    }
+  ],
+  "solution": {
+    "source": "/solutions/help-desk?code=NYX-ABCDEF12",
+    "configuredTarget": "/assistant?setup=help-desk",
+    "actualSiteHref": "/assistant?code=NYX-ABCDEF12&setup=help-desk",
+    "appEntryReturnExpression": "window.location.origin + path + window.location.search",
+    "loginHref": "/login?return_to=https%3A%2F%2Fnyx.chrono-ai.fun%2Fassistant%3Fcode%3DNYX-ABCDEF12%26setup%3Dhelp-desk",
+    "loginInviteExpression": "params.get(\"code\") ?? undefined",
+    "loginInviteCode": null,
+    "normalRegisterHref": "/register?code=NYX-ABCDEF12",
+    "scope": "Pure source-function/expression probe; no browser, auth session, or backend was executed."
+  },
+  "sameBooleansDifferentTargetRejected": true,
+  "literalGate": [
+    {
+      "code": "{\"data-website-feature\":\"newsletter\"}",
+      "detected": [
+        "newsletter"
+      ]
+    },
+    {
+      "code": "{\"data-website-feature\":`newsletter`}",
+      "detected": []
+    }
+  ]
+}

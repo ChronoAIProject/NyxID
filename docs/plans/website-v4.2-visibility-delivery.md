@@ -57,9 +57,9 @@ Local verification is limited to serial tests, TypeScript and source/static chec
 
 Isolated CI performs the full build, 90-page artifact checks, HTTP/privacy and single-worker browser tests. Gates check effective markers/URLs, menu and activation controls, dormant feature code and unreviewed article exclusion. Live enabled services still need their own accepted target-environment evidence; current production defaults remain off.
 
-最终工程 SHA：**`fd00726ec086ed5cf3d8ad19a20e88a00555a2b0`**。[最终 CI](https://github.com/aelf-hzz780/NyxID/actions/runs/39578181573) 全通过：30 文件 / 232 单测、完整 TypeScript/生产构建、90 页产物、219 HTTP、日志隐私、10 项单 worker browser（0 skipped / 0 flaky）。[完整 artifact](https://github.com/aelf-hzz780/NyxID/actions/runs/39578181573/artifacts/12335496628) 已下载核对 digest：`sha256:d0f0bc5adb532428f9022061a9a8b896540a3527d1fcd69d057d1917c57fad32`。manifest、源码 SHA 和配置快照一致：四开关 false、solutions 空集合。contentRevision 为 `49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1`，configRevision 为 `a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27`。机器证据见 [verification.json](website-visibility-evidence/verification.json)，精简原始日志见 [ci-proof.txt](website-visibility-evidence/ci-proof.txt)。最终文档 Commit 只补证据，交付 HEAD 以包含本记录的最后 Commit 为准。
+首轮交付工程 SHA（历史 CI，不代表独立验收通过）：**`fd00726ec086ed5cf3d8ad19a20e88a00555a2b0`**。[最终 CI](https://github.com/aelf-hzz780/NyxID/actions/runs/39578181573) 全通过：30 文件 / 232 单测、完整 TypeScript/生产构建、90 页产物、219 HTTP、日志隐私、10 项单 worker browser（0 skipped / 0 flaky）。[完整 artifact](https://github.com/aelf-hzz780/NyxID/actions/runs/39578181573/artifacts/12335496628) 已下载核对 digest：`sha256:d0f0bc5adb532428f9022061a9a8b896540a3527d1fcd69d057d1917c57fad32`。manifest、源码 SHA 和配置快照一致：四开关 false、solutions 空集合。contentRevision 为 `49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1`，configRevision 为 `a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27`。机器证据见 [verification.json](website-visibility-evidence/verification.json)，精简原始日志见 [ci-proof.txt](website-visibility-evidence/ci-proof.txt)。最终文档 Commit 只补证据，交付 HEAD 以包含本记录的最后 Commit 为准。
 
-Final engineering source **`fd00726ec086ed5cf3d8ad19a20e88a00555a2b0`** passed the linked CI: 232 tests in 30 files, complete build, 90-page gate, 219 HTTP checks, privacy and ten browser tests without skips/flakes. The complete artifact was downloaded and its digest, source SHA and all-off configuration verified. The final documentation commit records evidence only; delivery HEAD is the last commit containing this handoff.
+Historical first-delivery source **`fd00726ec086ed5cf3d8ad19a20e88a00555a2b0`** passed the linked CI, but failed independent acceptance: 232 tests in 30 files, complete build, 90-page gate, 219 HTTP checks, privacy and ten browser tests without skips/flakes. The complete artifact was downloaded and its digest, source SHA and all-off configuration verified. The final documentation commit records evidence only; delivery HEAD is the last commit containing this handoff.
 
 | 新增 Commit / Commit | 内容 / Change |
 |---|---|
@@ -91,3 +91,10 @@ The separate visibility review, generator and evidence belong to the main chat a
 历史图片与切片仍按要求保持未跟踪，因此单独 checkout 本次新增 review 文本并不包含其全部本机图片依赖；主对话的视觉材料后续提交由主对话负责。正式前端构建和四项开关的恢复不依赖这些原型文件，已生成的页面与可恢复组件均有受版本管理的源码。
 
 Historical images/excerpts remain untracked as requested, so this commit's review text alone does not include every local image dependency. The main chat owns subsequent visual-material submission. Production builds and feature restoration use tracked component/generated source and do not require those prototype assets.
+
+
+## 首轮独立验收失败后的修复 / Repairs after the first independent FAIL
+
+首轮正式独立验收对象 `ed91d302f` / 工程 `fd00726ec` 的结论为 **FAIL**，3 项 P2；既有 CI 通过不能覆盖该结论。原始报告、findings、checks 和探针已逐字归档到 [round1-independent-failure](website-visibility-evidence/round1-independent-failure/report.md)，原有 `verification.json`/`ci-proof.txt` 继续绑定历史工程 SHA，未覆盖为通过。修复与新工程/CI 证据见 [首轮修复交接](website-visibility-round1-fixes.md)。第二轮正式独立复验尚未完成，本记录不宣称已通过。
+
+The first formal independent acceptance of `ed91d302f` / source `fd00726ec` **failed** with three P2 findings. Its report and probes are archived verbatim; old CI evidence remains bound to its original source. The linked repair handoff identifies the new source and CI. Formal second-round independent acceptance remains pending.
