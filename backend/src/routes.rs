@@ -578,6 +578,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .nest("/mfa", mfa_routes);
 
     let user_routes = Router::new()
+        .route(
+            "/me/analytics/events",
+            post(handlers::users::capture_analytics).layer(handlers::users::analytics_body_limit()),
+        )
+        .route(
+            "/me/preferences/analytics",
+            get(handlers::users::get_analytics_consent).put(handlers::users::set_analytics_consent),
+        )
         .route("/me", get(handlers::users::get_me))
         .route("/me", put(handlers::users::update_me))
         .route("/me", delete(handlers::users::delete_me))
@@ -1050,6 +1058,26 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .delete(handlers::admin::delete_user),
         )
         .route(
+            "/users/{user_id}/analytics-dispatches",
+            get(handlers::admin::analytics_dispatches),
+        )
+        .route(
+            "/users/{user_id}/analytics-dispatches/reconcile",
+            post(handlers::admin::reconcile_analytics_dispatch),
+        )
+        .route(
+            "/users/{user_id}/erasure",
+            get(handlers::admin::erasure_status),
+        )
+        .route(
+            "/users/{user_id}/erasure/retry",
+            post(handlers::admin::erasure_retry),
+        )
+        .route(
+            "/users/{user_id}/erasure/reconcile",
+            post(handlers::admin::erasure_reconcile),
+        )
+        .route(
             "/users/{user_id}/role",
             patch(handlers::admin::set_user_role),
         )
@@ -1223,6 +1251,23 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::admin_usage::get_workspace).put(handlers::admin_usage::save_workspace),
         )
         .route("/audit-log/verify", get(handlers::admin::verify_audit_log))
+        .route(
+            "/encrypted-records",
+            get(handlers::admin_encrypted_records::status)
+                .post(handlers::admin_encrypted_records::start),
+        )
+        .route(
+            "/encrypted-records/{generation}/advance",
+            post(handlers::admin_encrypted_records::advance),
+        )
+        .route(
+            "/encrypted-records/findings/{finding_id}/lookup",
+            post(handlers::admin_encrypted_records::lookup_finding),
+        )
+        .route(
+            "/encrypted-records/findings",
+            get(handlers::admin_encrypted_records::findings),
+        )
         .route(
             "/billing-ledger/verify",
             get(handlers::admin::verify_billing_ledger),

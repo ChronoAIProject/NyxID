@@ -42,6 +42,7 @@ const MAX_SERVICE_SLUG_LEN: usize = 80;
 /// disabled/deleted service is never silently re-enabled by verification.
 pub(crate) async fn provision_imported_api_key_in_transaction(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     session: &mut crate::services::service_history::transaction::Transaction,
     token: &UserProviderToken,
     catalog: &DownstreamService,
@@ -91,8 +92,8 @@ pub(crate) async fn provision_imported_api_key_in_transaction(
         .session(&mut *session).await? {
         Some(key) => key,
         None => {
-            let mut key = user_api_key_service::api_key_from_provider_token(&token.user_id,
-                "Codex API key", &token.provider_config_id, token)?;
+            let mut key = user_api_key_service::api_key_from_provider_token(encryption_keys, &token.user_id,
+                "Codex API key", &token.provider_config_id, token).await?;
             // A confirmed reconnect gets a fresh key when the prior one was
             // deleted/revoked. Keep terminal keys and their audit identity.
             if token.state_version > 1 {
@@ -449,7 +450,7 @@ async fn resolve_oauth_client_credentials_input(
     encryption_keys: &EncryptionKeys,
     user_id: &str,
     input: &OauthClientCredentialsInput<'_>,
-) -> AppResult<Option<(String, String)>> {
+) -> AppResult<Option<(zeroize::Zeroizing<String>, zeroize::Zeroizing<String>)>> {
     use zeroize::Zeroizing;
 
     match input {
@@ -466,7 +467,10 @@ async fn resolve_oauth_client_credentials_input(
                         .to_string(),
                 ));
             }
-            Ok(Some((id.to_string(), secret.to_string())))
+            Ok(Some((
+                Zeroizing::new(id.to_string()),
+                Zeroizing::new(secret.to_string()),
+            )))
         }
         OauthClientCredentialsInput::CopyFrom { source_key_id } => {
             let trimmed = source_key_id.trim();
@@ -504,14 +508,17 @@ async fn resolve_oauth_client_credentials_input(
                     )
                 })?;
 
-            let dec_id = Zeroizing::new(encryption_keys.decrypt(enc_cid).await?);
-            let id = String::from_utf8((*dec_id).clone()).map_err(|_| {
-                AppError::Internal("Source key client_id is not valid UTF-8".to_string())
-            })?;
-            let dec_sec = Zeroizing::new(encryption_keys.decrypt(enc_sec).await?);
-            let secret = String::from_utf8((*dec_sec).clone()).map_err(|_| {
-                AppError::Internal("Source key client_secret is not valid UTF-8".to_string())
-            })?;
+            let record = super::credential_record_service::CredentialRecord::key(&source);
+            let id = record
+                .text(encryption_keys, "user_oauth_client_id_encrypted", enc_cid)
+                .await?;
+            let secret = record
+                .text(
+                    encryption_keys,
+                    "user_oauth_client_secret_encrypted",
+                    enc_sec,
+                )
+                .await?;
             Ok(Some((id, secret)))
         }
     }
@@ -1225,6 +1232,7 @@ async fn create_key_inner(
                 Some(
                     user_api_key_service::create_api_key_from_provider_token(
                         db,
+                        encryption_keys,
                         user_id,
                         label,
                         provider_config_id.expect("provider token implies provider config"),
@@ -1488,6 +1496,7 @@ async fn create_key_inner(
         let empty_credential = encryption_keys.encrypt(b"").await?;
         let internal_ds_slug = format!("_ssh_{ds_id}");
         let ds = DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,
@@ -2643,6 +2652,21 @@ pub async fn list_keys_read_only_with_tool_bindings(
         apps.into_iter().map(|a| (a.id, a.client_name)).collect()
     };
 
+    let mut displayed_headers = HashMap::new();
+    for item in &tagged {
+        let svc = &item.service;
+        displayed_headers.insert(
+            svc.id.clone(),
+            super::default_header_service::management(
+                Some(encryption_keys),
+                crate::models::user_service::COLLECTION_NAME,
+                &svc.id,
+                &svc.user_id,
+                svc.default_request_headers.as_deref(),
+            )
+            .await?,
+        );
+    }
     let mut views: Vec<KeyView> = tagged
         .into_iter()
         .filter_map(|t| {
@@ -2680,6 +2704,7 @@ pub async fn list_keys_read_only_with_tool_bindings(
     // present. Sequential await is fine — N is bounded by the user's
     // key count and decrypt is fast.
     for view in views.iter_mut() {
+        view.default_request_headers = displayed_headers.remove(&view.id).flatten();
         view.oauth_app_source = view
             .api_key_id
             .as_ref()
@@ -2720,12 +2745,11 @@ pub async fn list_keys_read_only_with_tool_bindings(
                 view.platform_key_available,
             );
         }
-        let enc = view
+        let key = view
             .api_key_id
             .as_deref()
-            .and_then(|id| ak_map.get(id).copied())
-            .and_then(|k| k.user_oauth_client_id_encrypted.as_ref());
-        enrich_view_with_oauth_client_id(encryption_keys, view, enc).await;
+            .and_then(|id| ak_map.get(id).copied());
+        enrich_view_with_oauth_client_id(encryption_keys, view, key).await;
     }
 
     Ok(views)
@@ -2822,19 +2846,22 @@ pub async fn get_key(
         );
     }
 
-    enrich_view_with_oauth_client_id(
-        encryption_keys,
-        &mut view,
-        ak.as_ref()
-            .and_then(|k| k.user_oauth_client_id_encrypted.as_ref()),
+    view.default_request_headers = super::default_header_service::management(
+        Some(encryption_keys),
+        crate::models::user_service::COLLECTION_NAME,
+        &svc.id,
+        &svc.user_id,
+        svc.default_request_headers.as_deref(),
     )
-    .await;
+    .await?;
+    enrich_view_with_oauth_client_id(encryption_keys, &mut view, ak.as_ref()).await;
 
     Ok(view)
 }
 
 pub async fn reconcile_provider_key_for_service_routing(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     service_id: &str,
 ) -> AppResult<()> {
@@ -2909,8 +2936,13 @@ pub async fn reconcile_provider_key_for_service_routing(
             direct_credential_type,
         )
         .await?;
-        user_api_key_service::sync_provider_token_to_api_keys(db, user_id, provider_config_id)
-            .await?;
+        user_api_key_service::sync_provider_token_to_api_keys(
+            db,
+            encryption_keys,
+            user_id,
+            provider_config_id,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -2933,7 +2965,7 @@ pub async fn reconcile_provider_key_for_service_routing(
 /// `update_user_service` refuses to flip `auth_method` away from `"none"`
 /// under the same condition. Both short-circuits are correct for the
 /// "no api_key yet" state — the fix is to provision one first.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub(crate) enum UpdateCredentialAction<'a> {
     /// Nothing to do — service already in the target state, or caller
     /// didn't touch credential/auth_method.
@@ -2960,6 +2992,30 @@ pub(crate) enum UpdateCredentialAction<'a> {
     /// Caller's inputs are inconsistent — reject up front instead of
     /// letting the service-layer guards return a misleading error.
     Reject(&'static str),
+}
+
+impl std::fmt::Debug for UpdateCredentialAction<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Nothing => f.write_str("Nothing"),
+            Self::Reject(reason) => f.debug_tuple("Reject").field(reason).finish(),
+            Self::Provision {
+                credential_type, ..
+            } => f
+                .debug_struct("Provision")
+                .field("credential_type", credential_type)
+                .field("credential", &"[REDACTED]")
+                .finish(),
+            Self::Rotate { .. } => f.write_str("Rotate { credential: [REDACTED] }"),
+            Self::Promote {
+                credential_type, ..
+            } => f
+                .debug_struct("Promote")
+                .field("credential_type", credential_type)
+                .field("credential", &"[REDACTED]")
+                .finish(),
+        }
+    }
 }
 
 /// Pure decision: classify what a PUT /keys request intends with respect
@@ -3356,6 +3412,7 @@ pub async fn ensure_user_api_key_for_update(
             {
                 user_api_key_service::create_api_key_from_provider_token(
                     db,
+                    encryption_keys,
                     user_id,
                     label,
                     pid,
@@ -3510,6 +3567,24 @@ struct DisconnectPlan {
     expected_provider_token_state_version: Option<i64>,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct DisconnectClaimPause {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+#[cfg(test)]
+tokio::task_local! {
+    static DISCONNECT_CLAIM_PAUSE: std::sync::Arc<DisconnectClaimPause>;
+}
+#[cfg(test)]
+async fn disconnect_claim_checkpoint() {
+    if let Ok(pause) = DISCONNECT_CLAIM_PAUSE.try_with(Clone::clone) {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
+}
+
 /// Shared local-teardown and remote-revocation orchestration for every OAuth
 /// deletion surface. No upstream work is handed off until all local writes
 /// represented by the plan have completed successfully.
@@ -3547,7 +3622,7 @@ pub async fn disconnect_credentials_with_expected_siblings(
     expected_siblings: Option<&[(String, String, String)]>,
 ) -> AppResult<DisconnectResult> {
     options.validate()?;
-    let mut plan = build_disconnect_plan(
+    let plan = build_disconnect_plan(
         db,
         encryption_keys,
         owner_id,
@@ -3577,40 +3652,86 @@ pub async fn disconnect_credentials_with_expected_siblings(
             .await?;
     }
 
+    let grant_effect_id = (plan.scope == oauth_revocation::RevocationScope::Grant)
+        .then(|| uuid::Uuid::new_v4().to_string());
+    let claim_context = DisconnectClaim {
+        db,
+        keys: encryption_keys,
+        owner: owner_id,
+        provider: plan.provider.as_ref(),
+        scope: plan.scope,
+        actor,
+        cascade_record_count: plan.keys.len() + usize::from(plan.provider_token.is_some()),
+        grant_effect_id: grant_effect_id.as_deref(),
+        remote_key_id: plan.initiating_key_id.as_deref().filter(|id| {
+            plan.keys
+                .iter()
+                .any(|key| key.id == *id && key.connection_id.is_some())
+        }),
+    };
+    let mut sources: Vec<_> = plan
+        .keys
+        .iter()
+        .map(|key| (USER_API_KEYS, key.id.as_str(), None))
+        .collect();
+    if let Some(token) = plan.provider_token.as_ref() {
+        sources.push((
+            USER_PROVIDER_TOKENS,
+            token.id.as_str(),
+            plan.expected_provider_token_state_version,
+        ));
+    }
+    // The first source supplies the one grant capability. Claim the planner's
+    // selected source first; every subsequent local removal atomically refers
+    // to that same durable intent, including recovery from a partial cascade.
+    if plan.scope == oauth_revocation::RevocationScope::Grant {
+        sources.sort_by_key(|(collection, id, _)| {
+            !if *collection == USER_API_KEYS {
+                claim_context.remote_key_id == Some(*id)
+            } else {
+                claim_context.remote_key_id.is_none()
+            }
+        });
+    }
+    let mut effect_ids = std::collections::BTreeSet::new();
     let mut claimed_keys = Vec::new();
-    for key in &plan.keys {
-        match user_api_key_service::claim_api_key(db, owner_id, &key.id).await? {
-            Some(claimed) => claimed_keys.push(claimed),
-            None if plan.initiating_key_id.as_deref() == Some(key.id.as_str()) => {
-                return Err(AppError::NotFound("API key not found".to_string()));
+    let mut claimed_provider_token = None;
+    for (collection, id, expected) in sources {
+        match claim_disconnect_source(&claim_context, collection, id, expected).await? {
+            Some((claimed, effect)) => {
+                effect_ids.extend(effect);
+                if collection == USER_API_KEYS {
+                    claimed_keys
+                        .push(bson::from_document::<UserApiKey>(claimed).map_err(|_| {
+                            AppError::Internal("Invalid claimed credential".into())
+                        })?);
+                } else {
+                    claimed_provider_token = Some(
+                        bson::from_document::<UserProviderToken>(claimed)
+                            .map_err(|_| AppError::Internal("Invalid claimed token".into()))?,
+                    );
+                }
+                #[cfg(test)]
+                disconnect_claim_checkpoint().await;
+            }
+            None if plan.initiating_key_id.as_deref() == Some(id)
+                || plan.initiating_provider_token_id.as_deref() == Some(id) =>
+            {
+                return Err(AppError::NotFound("Disconnect credential not found".into()));
             }
             None => {}
         }
     }
     for key in &claimed_keys {
+        if let Some(encrypted) = key.credential_encrypted.as_deref()
+            && let Ok(plaintext) = super::credential_record_service::CredentialRecord::key(key)
+                .decrypt(encryption_keys, "credential_encrypted", encrypted)
+                .await
+        {
+            super::provider_token_exchange_service::retire_credential(&plaintext).await;
+        }
         user_api_key_service::cleanup_claimed_api_key(db, owner_id, &key.id).await?;
     }
-
-    let mut claimed_provider_token = if let Some(token) = plan.provider_token.take() {
-        match user_token_service::claim_provider_token_by_id_with_expected_state_version(
-            db,
-            owner_id,
-            &token.id,
-            plan.expected_provider_token_state_version,
-        )
-        .await?
-        {
-            Some(claimed) => Some(claimed),
-            None if plan.initiating_provider_token_id.as_deref() == Some(token.id.as_str()) => {
-                return Err(AppError::NotFound(
-                    "No active token found for this provider".to_string(),
-                ));
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
 
     if claimed_provider_token.is_none()
         && plan.scope == oauth_revocation::RevocationScope::Token
@@ -3619,14 +3740,22 @@ pub async fn disconnect_credentials_with_expected_siblings(
                 && key.connection_id.is_none()
         })
         && let Some(provider_id) = initiating_key.provider_config_id.as_deref()
+        && let Some(token) =
+            find_legacy_provider_token_if_last_key(db, owner_id, provider_id).await?
+        && let Some((claimed, effect)) =
+            claim_disconnect_source(&claim_context, USER_PROVIDER_TOKENS, &token.id, None).await?
     {
-        claimed_provider_token =
-            claim_legacy_provider_token_if_last_key(db, owner_id, provider_id).await?;
+        effect_ids.extend(effect);
+        claimed_provider_token = Some(
+            bson::from_document(claimed)
+                .map_err(|_| AppError::Internal("Invalid claimed token".into()))?,
+        );
     }
 
     if let Some(token) = claimed_provider_token.as_ref() {
         user_api_key_service::sync_provider_token_to_api_keys(
             db,
+            encryption_keys,
             owner_id,
             &token.provider_config_id,
         )
@@ -3693,37 +3822,13 @@ pub async fn disconnect_credentials_with_expected_siblings(
         );
     }
 
-    let cascade_record_count = claimed_keys.len() + usize::from(claimed_provider_token.is_some());
-    let remote_source = if let Some(initiating_key_id) = plan.initiating_key_id.as_deref() {
-        let initiating_key = claimed_keys.iter().find(|key| key.id == initiating_key_id);
-        match initiating_key {
-            Some(key) if key.connection_id.is_some() => Some(RemoteCredentialSource::Key(key)),
-            Some(_) => claimed_provider_token
-                .as_ref()
-                .map(RemoteCredentialSource::ProviderToken),
-            None => None,
-        }
-    } else {
-        claimed_provider_token
-            .as_ref()
-            .map(RemoteCredentialSource::ProviderToken)
-    };
-    let upstream_revocation_scheduled =
-        if let (Some(provider), Some(source)) = (plan.provider, remote_source) {
-            hand_off_remote_revocation(
-                db,
-                encryption_keys,
-                owner_id,
-                actor,
-                provider,
-                plan.scope,
-                source,
-                cascade_record_count,
-            )
-            .await
-        } else {
-            false
-        };
+    let mut upstream_revocation_scheduled = false;
+    for effect_id in effect_ids {
+        // No fire-and-forget capability: each ID already committed with its
+        // exact source claim. Saturation/crash leaves it for the shared worker.
+        upstream_revocation_scheduled |=
+            hand_off_remote_revocation(db, encryption_keys, &effect_id).await?;
+    }
 
     Ok(DisconnectResult {
         upstream_revocation_scheduled,
@@ -3828,7 +3933,7 @@ async fn build_disconnect_plan(
     let grant_capable = provider
         .as_ref()
         .and_then(oauth_revocation::effective_revocation)
-        .is_some_and(|config| config.revokes_grant);
+        .is_some_and(|config| oauth_revocation::grant_capable(&config));
     let initiating_is_legacy_copy = initiating_key
         .as_ref()
         .is_some_and(|key| key.connection_id.is_none());
@@ -4116,11 +4221,11 @@ async fn hash_encrypted_client_id(
     let Some(encrypted) = key.user_oauth_client_id_encrypted.as_deref() else {
         return OAuthAppLineage::Unknown(key.id.clone());
     };
-    match encryption_keys.decrypt(encrypted).await {
-        Ok(plaintext) => {
-            let plaintext = Zeroizing::new(plaintext);
-            OAuthAppLineage::Byo(Sha256::digest(plaintext.as_slice()).into())
-        }
+    match super::credential_record_service::CredentialRecord::key(key)
+        .decrypt(encryption_keys, "user_oauth_client_id_encrypted", encrypted)
+        .await
+    {
+        Ok(plaintext) => OAuthAppLineage::Byo(Sha256::digest(plaintext.as_slice()).into()),
         Err(_) => OAuthAppLineage::Unknown(key.id.clone()),
     }
 }
@@ -4142,12 +4247,14 @@ async fn provider_token_oauth_app_lineage(
     )
     .await
     {
-        Ok(credentials) => OAuthAppLineage::Byo(Sha256::digest(credentials.client_id).into()),
+        Ok(credentials) => {
+            OAuthAppLineage::Byo(Sha256::digest(credentials.client_id.as_bytes()).into())
+        }
         Err(_) => OAuthAppLineage::Unknown(token.id.clone()),
     }
 }
 
-async fn claim_legacy_provider_token_if_last_key(
+async fn find_legacy_provider_token_if_last_key(
     db: &mongodb::Database,
     owner_id: &str,
     provider_id: &str,
@@ -4172,7 +4279,15 @@ async fn claim_legacy_provider_token_if_last_key(
             "status": { "$ne": "revoked" },
         })
         .await?;
-    match token {
+    Ok(token)
+}
+
+async fn claim_legacy_provider_token_if_last_key(
+    db: &mongodb::Database,
+    owner_id: &str,
+    provider_id: &str,
+) -> AppResult<Option<UserProviderToken>> {
+    match find_legacy_provider_token_if_last_key(db, owner_id, provider_id).await? {
         Some(token) => {
             user_token_service::claim_provider_token_by_id(db, owner_id, &token.id).await
         }
@@ -4180,41 +4295,223 @@ async fn claim_legacy_provider_token_if_last_key(
     }
 }
 
+/// Authenticate outside the retry transaction; exact BSON CAS makes the
+/// retained capability and local removal one indivisible majority commit.
+struct DisconnectClaim<'a> {
+    db: &'a mongodb::Database,
+    keys: &'a EncryptionKeys,
+    owner: &'a str,
+    provider: Option<&'a ProviderConfig>,
+    scope: oauth_revocation::RevocationScope,
+    actor: &'a AuditActor,
+    cascade_record_count: usize,
+    grant_effect_id: Option<&'a str>,
+    remote_key_id: Option<&'a str>,
+}
+async fn claim_disconnect_source(
+    context: &DisconnectClaim<'_>,
+    collection: &str,
+    id: &str,
+    expected_state_version: Option<i64>,
+) -> AppResult<Option<(bson::Document, Option<String>)>> {
+    let DisconnectClaim {
+        db,
+        keys,
+        owner,
+        provider,
+        scope,
+        actor,
+        cascade_record_count,
+        grant_effect_id,
+        remote_key_id,
+    } = *context;
+    let collection = match collection {
+        USER_API_KEYS => USER_API_KEYS,
+        USER_PROVIDER_TOKENS => USER_PROVIDER_TOKENS,
+        _ => return Err(AppError::Internal("Invalid disconnect collection".into())),
+    };
+    let Some(raw) = db
+        .collection::<bson::Document>(collection)
+        .find_one(doc! {"_id":id,"user_id":owner})
+        .await?
+    else {
+        return Ok(None);
+    };
+    if collection == USER_PROVIDER_TOKENS && raw.get_str("status").ok() == Some("revoked") {
+        return Ok(None);
+    }
+    if collection == USER_PROVIDER_TOKENS {
+        let token: UserProviderToken = bson::from_document(raw.clone())
+            .map_err(|_| AppError::Internal("Invalid disconnect token".into()))?;
+        if expected_state_version.is_some_and(|expected| expected != token.state_version) {
+            return Err(AppError::Conflict(
+                "The provider token changed since this action was prepared".into(),
+            ));
+        }
+    }
+    let (credentials, access, refresh, failed) = if let Some(provider) = provider {
+        if collection == USER_API_KEYS {
+            let key: UserApiKey = bson::from_document(raw.clone())
+                .map_err(|_| AppError::Internal("Invalid disconnect credential".into()))?;
+            resolve_revocation_material(db, keys, provider, RemoteCredentialSource::Key(&key)).await
+        } else {
+            let token: UserProviderToken = bson::from_document(raw.clone())
+                .map_err(|_| AppError::Internal("Invalid disconnect token".into()))?;
+            resolve_revocation_material(
+                db,
+                keys,
+                provider,
+                RemoteCredentialSource::ProviderToken(&token),
+            )
+            .await
+        }
+    } else {
+        let mut values = Vec::new();
+        for field in ["access_token_encrypted", "refresh_token_encrypted"] {
+            let value = match raw.get(field).filter(|v| **v != bson::Bson::Null) {
+                Some(value) => {
+                    let bytes = super::record_field_service::stored_bytes(value)?;
+                    let plaintext = super::credential_record_service::decrypt_stored_field(
+                        keys, collection, &raw, field, &bytes,
+                    )
+                    .await?;
+                    Some(Zeroizing::new(
+                        std::str::from_utf8(&plaintext)
+                            .map_err(|_| {
+                                AppError::Internal("Invalid disconnect credential encoding".into())
+                            })?
+                            .to_owned(),
+                    ))
+                }
+                None => None,
+            };
+            values.push(value);
+        }
+        (None, values.remove(0), values.remove(0), false)
+    };
+    if failed {
+        return Err(AppError::Internal(
+            "Disconnect credential authentication failed".into(),
+        ));
+    }
+    let selected = scope == oauth_revocation::RevocationScope::Grant
+        || if collection == USER_API_KEYS {
+            remote_key_id == Some(id)
+        } else {
+            remote_key_id.is_none()
+        };
+    let effect = if selected && (access.is_some() || refresh.is_some()) {
+        let material = match provider {
+            Some(provider) => super::personal_erasure_service::provider::RevocationMaterial::new(
+                provider.clone(),
+                credentials,
+                access,
+                refresh,
+            ),
+            None => {
+                super::personal_erasure_service::provider::RevocationMaterial::unattributed_oauth(
+                    access, refresh,
+                )
+            }
+        };
+        let mut effect = super::personal_erasure_service::provider::prepare_disconnect_effect(
+            keys,
+            owner,
+            material,
+            scope,
+            collection,
+            id,
+            grant_effect_id,
+        )
+        .await?;
+        effect.insert("audit_actor",doc! {"user_id":&actor.user_id,"ip_address":&actor.ip_address,
+            "user_agent":&actor.user_agent,"api_key_id":&actor.api_key_id,"api_key_name":&actor.api_key_name});
+        effect.insert(
+            "cascade_record_count",
+            i64::try_from(cascade_record_count).unwrap_or(i64::MAX),
+        );
+        Some(effect)
+    } else {
+        None
+    };
+    let context = (db, collection, &raw, &effect);
+    let result = super::service_history::transaction::run_send(db, &context, |tx, context| {
+        let &(db, collection, raw, effect) = context;
+        Box::pin(async move {
+            let filter = doc! {"_id":raw.get("_id").cloned().unwrap_or(bson::Bson::Null),
+                "$expr":{"$eq":["$$ROOT",{"$literal":raw}]}};
+            let claimed = if collection == USER_API_KEYS {
+                super::service_history::collection::<bson::Document>(db, collection)
+                    .find_one_and_delete(filter).session(tx).await?
+            } else {
+                db.collection::<bson::Document>(collection).find_one_and_update(filter, vec![doc! {"$set":{
+                    "status":"revoked","api_key_encrypted":bson::Bson::Null,
+                    "access_token_encrypted":bson::Bson::Null,"refresh_token_encrypted":bson::Bson::Null,
+                    "secret_context_versions":{"$literal":{}},"updated_at":"$$NOW",
+                    "state_version":{"$add":[{"$ifNull":["$state_version",0_i64]},1_i64]},
+                }}]).return_document(mongodb::options::ReturnDocument::Before).session(&mut **tx).await?
+            };
+            if claimed.is_none() {
+                return Err(super::api_key_mutation_service::abort_transaction(AppError::Conflict("Disconnect credential changed before removal".into())));
+            }
+            if let Some(effect) = effect {
+                db.collection::<bson::Document>(super::personal_erasure_service::provider::EFFECTS)
+                    .update_one(doc! {"_id":effect.get("_id").cloned()}, doc! {"$setOnInsert":effect})
+                    .upsert(true).session(&mut **tx).await?;
+            }
+            Ok(claimed)
+        })
+    }).await.map_err(super::api_key_mutation_service::map_transaction_error)?;
+    Ok(result.map(|row| {
+        (
+            row,
+            effect
+                .as_ref()
+                .and_then(|e| e.get_str("_id").ok())
+                .map(str::to_owned),
+        )
+    }))
+}
+
 enum RemoteCredentialSource<'a> {
     Key(&'a UserApiKey),
     ProviderToken(&'a UserProviderToken),
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn hand_off_remote_revocation(
+async fn resolve_revocation_material(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
-    owner_id: &str,
-    actor: &AuditActor,
-    provider: ProviderConfig,
-    scope: oauth_revocation::RevocationScope,
+    provider: &ProviderConfig,
     source: RemoteCredentialSource<'_>,
-    cascade_record_count: usize,
-) -> bool {
-    let (credentials, access_token, refresh_token, decrypt_failed) = match source {
+) -> (
+    Option<user_credentials_service::ResolvedOAuthCredentials>,
+    Option<Zeroizing<String>>,
+    Option<Zeroizing<String>>,
+    bool,
+) {
+    match source {
         RemoteCredentialSource::Key(key) => {
             let credentials = user_credentials_service::decrypt_claimed_key_oauth_credentials(
                 encryption_keys,
-                &provider,
+                provider,
                 key,
             )
             .await
             .ok();
-            let access = oauth_revocation::decrypt_token(
-                encryption_keys,
-                key.access_token_encrypted.as_deref(),
-            )
-            .await;
-            let refresh = oauth_revocation::decrypt_token(
-                encryption_keys,
-                key.refresh_token_encrypted.as_deref(),
-            )
-            .await;
+            let access = match key.access_token_encrypted.as_deref() {
+                Some(ciphertext) => super::credential_record_service::CredentialRecord::key(key)
+                    .text(encryption_keys, "access_token_encrypted", ciphertext)
+                    .await
+                    .ok(),
+                None => None,
+            };
+            let refresh = match key.refresh_token_encrypted.as_deref() {
+                Some(ciphertext) => super::credential_record_service::CredentialRecord::key(key)
+                    .text(encryption_keys, "refresh_token_encrypted", ciphertext)
+                    .await
+                    .ok(),
+                None => None,
+            };
             let failed = (key.access_token_encrypted.is_some() && access.is_none())
                 || (key.refresh_token_encrypted.is_some() && refresh.is_none());
             (credentials, access, refresh, failed)
@@ -4223,100 +4520,208 @@ async fn hand_off_remote_revocation(
             let credentials = user_credentials_service::resolve_token_oauth_credentials(
                 db,
                 encryption_keys,
-                &provider,
+                provider,
                 token.credential_user_id.as_deref(),
             )
             .await
             .ok();
-            let access = oauth_revocation::decrypt_token(
-                encryption_keys,
-                token.access_token_encrypted.as_deref(),
-            )
-            .await;
-            let refresh = oauth_revocation::decrypt_token(
-                encryption_keys,
-                token.refresh_token_encrypted.as_deref(),
-            )
-            .await;
+            let access = match token.access_token_encrypted.as_deref() {
+                Some(ciphertext) => {
+                    super::credential_record_service::CredentialRecord::token(token)
+                        .text(encryption_keys, "access_token_encrypted", ciphertext)
+                        .await
+                        .ok()
+                }
+                None => None,
+            };
+            let refresh = match token.refresh_token_encrypted.as_deref() {
+                Some(ciphertext) => {
+                    super::credential_record_service::CredentialRecord::token(token)
+                        .text(encryption_keys, "refresh_token_encrypted", ciphertext)
+                        .await
+                        .ok()
+                }
+                None => None,
+            };
             let failed = (token.access_token_encrypted.is_some() && access.is_none())
                 || (token.refresh_token_encrypted.is_some() && refresh.is_none());
             (credentials, access, refresh, failed)
         }
-    };
-    let skip_reason = known_remote_skip_reason(
-        &provider,
-        scope,
-        credentials.as_ref(),
-        access_token.as_ref(),
-        refresh_token.as_ref(),
-        decrypt_failed,
-    );
-    if let Some(reason) = skip_reason {
-        write_remote_audit(
-            db.clone(),
-            actor,
-            owner_id,
-            &provider,
-            scope,
-            cascade_record_count,
-            reason,
-            None,
-            None,
-        )
-        .await;
-        return false;
     }
-    let permit = match oauth_revocation::try_acquire_revocation_permit() {
-        Ok(permit) => permit,
-        Err(_) => {
-            write_remote_audit(
-                db.clone(),
-                actor,
-                owner_id,
-                &provider,
-                scope,
-                cascade_record_count,
-                "skipped_saturated",
-                None,
-                None,
-            )
-            .await;
-            return false;
-        }
-    };
-    let db = db.clone();
-    let owner_id = owner_id.to_string();
-    let actor = actor.clone();
-    tokio::spawn(async move {
-        let _permit = permit;
-        let outcome = oauth_revocation::revoke_remote(oauth_revocation::RevocationRequest {
-            provider: &provider,
-            scope,
-            creds: credentials,
-            access_token,
-            refresh_token,
-        })
-        .await;
-        let aggregate = aggregate_revocation_outcome(&outcome);
-        let access = outcome.access.as_ref().map(token_outcome_name);
-        let refresh = outcome.refresh.as_ref().map(token_outcome_name);
-        write_remote_audit(
-            db,
-            &actor,
-            &owner_id,
-            &provider,
-            scope,
-            cascade_record_count,
-            aggregate,
-            access,
-            refresh,
-        )
-        .await;
-    });
-    true
 }
 
-fn known_remote_skip_reason(
+/// Use the same OAuth app lineage as ordinary disconnect. The preparation
+/// marker contains no token fingerprint and is never compared across owners.
+pub(crate) async fn erasure_credential_group(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    collection: &str,
+    raw: &bson::Document,
+) -> AppResult<bson::Document> {
+    let owner = raw
+        .get_str("user_id")
+        .map_err(|_| AppError::Internal("Invalid credential owner".into()))?;
+    let id = raw
+        .get_str("_id")
+        .map_err(|_| AppError::Internal("Invalid credential identity".into()))?;
+    let provider_id = raw.get_str("provider_config_id").ok();
+    let provider = match provider_id {
+        Some(id) => {
+            db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .find_one(doc! {"_id":id})
+                .await?
+        }
+        None => None,
+    };
+    let lineage = if let Some(provider) = provider.as_ref() {
+        if collection == USER_API_KEYS {
+            let key: UserApiKey = bson::from_document(raw.clone())
+                .map_err(|_| AppError::Internal("Invalid credential source".into()))?;
+            let legacy = if key.connection_id.is_none() {
+                db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS).find_one(doc! {"user_id":owner,"provider_config_id":&provider.id,"status":{"$ne":"revoked"}}).await?
+            } else {
+                None
+            };
+            key_oauth_app_lineage(keys, &key, legacy.as_ref(), db, provider).await
+        } else {
+            let token: UserProviderToken = bson::from_document(raw.clone())
+                .map_err(|_| AppError::Internal("Invalid credential source".into()))?;
+            provider_token_oauth_app_lineage(db, keys, provider, &token).await
+        }
+    } else {
+        OAuthAppLineage::Unknown(id.to_owned())
+    };
+    let lineage = match lineage {
+        OAuthAppLineage::Platform => "platform".to_owned(),
+        OAuthAppLineage::Byo(hash) => format!("byo:{}", hex::encode(hash)),
+        OAuthAppLineage::Unknown(id) => format!("unknown:{id}"),
+    };
+    let group = hex::encode(Sha256::digest(
+        serde_json::to_vec(&(owner, provider_id, &lineage))
+            .map_err(|_| AppError::Internal("Credential group encoding failed".into()))?,
+    ));
+    let config = provider
+        .as_ref()
+        .and_then(oauth_revocation::effective_revocation);
+    Ok(doc! {"group":group,"app_lineage":lineage,
+    "non_legacy":collection==USER_PROVIDER_TOKENS || raw.get_str("connection_id").is_ok(),
+    "revokes_grant":config.as_ref().is_some_and(|config|config.revokes_grant),
+    "grant_wide_only":config.as_ref().is_some_and(|config|config.effect_scope==Some(crate::models::provider_config::RevocationEffectScope::GrantWide) || config.style=="facebook_deauth")})
+}
+
+/// Capture a personally owned credential; preparation supplies its group scope.
+pub(crate) async fn prepare_erasure_revocation(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    owner: &str,
+    collection: &str,
+    raw: &bson::Document,
+) -> AppResult<Option<super::personal_erasure_service::provider::RevocationMaterial>> {
+    let (provider, source_key, source_token) = if collection == USER_API_KEYS {
+        let key: UserApiKey = bson::from_document(raw.clone())
+            .map_err(|_| AppError::Internal("Invalid erasure credential".into()))?;
+        if key.access_token_encrypted.is_none() && key.refresh_token_encrypted.is_none() {
+            return Ok(None);
+        }
+        if key.credential_type == "gcp_service_account" {
+            if key.refresh_token_encrypted.is_some() {
+                return Err(AppError::Conflict(
+                    "Unexpected GCP service-account refresh material requires repair".into(),
+                ));
+            }
+            let access = super::credential_record_service::CredentialRecord::key(&key)
+                .text(
+                    keys,
+                    "access_token_encrypted",
+                    key.access_token_encrypted.as_deref().ok_or_else(|| {
+                        AppError::Conflict(
+                            "GCP service-account token attribution requires repair".into(),
+                        )
+                    })?,
+                )
+                .await?;
+            return Ok(Some(
+                super::personal_erasure_service::provider::RevocationMaterial::gcp_service_account(
+                    access,
+                    key.expires_at,
+                ),
+            ));
+        }
+        if key.provider_config_id.is_none() {
+            let record = super::credential_record_service::CredentialRecord::key(&key);
+            let access = match key.access_token_encrypted.as_deref() {
+                Some(bytes) => Some(record.text(keys, "access_token_encrypted", bytes).await?),
+                None => None,
+            };
+            let refresh = match key.refresh_token_encrypted.as_deref() {
+                Some(bytes) => Some(record.text(keys, "refresh_token_encrypted", bytes).await?),
+                None => None,
+            };
+            return Ok(Some(
+                super::personal_erasure_service::provider::RevocationMaterial::unattributed_oauth(
+                    access, refresh,
+                ),
+            ));
+        }
+        let plan = build_disconnect_plan(
+            db,
+            keys,
+            owner,
+            DisconnectTarget::UserApiKey(&key.id),
+            &DisconnectOptions {
+                cascade_grant: false,
+                grant_scope: Some("token".into()),
+            },
+            None,
+        )
+        .await?;
+        (plan.provider, Some(key), None)
+    } else {
+        let token: UserProviderToken = bson::from_document(raw.clone())
+            .map_err(|_| AppError::Internal("Invalid erasure provider token".into()))?;
+        if token.access_token_encrypted.is_none() && token.refresh_token_encrypted.is_none() {
+            return Ok(None);
+        }
+        let provider = db
+            .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .find_one(doc! {"_id":&token.provider_config_id})
+            .await?;
+        (provider, None, Some(token))
+    };
+    let provider = provider.ok_or_else(|| {
+        AppError::Conflict("Provider configuration is required for credential revocation".into())
+    })?;
+    let source = if let Some(key) = source_key.as_ref() {
+        RemoteCredentialSource::Key(key)
+    } else {
+        RemoteCredentialSource::ProviderToken(source_token.as_ref().unwrap())
+    };
+    let (credentials, access_token, refresh_token, failed) =
+        resolve_revocation_material(db, keys, &provider, source).await;
+    if failed {
+        return Err(AppError::Internal(
+            "Credential revocation material could not be authenticated".into(),
+        ));
+    }
+    Ok(Some(
+        super::personal_erasure_service::provider::RevocationMaterial::new(
+            provider,
+            credentials,
+            access_token,
+            refresh_token,
+        ),
+    ))
+}
+
+async fn hand_off_remote_revocation(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    effect_id: &str,
+) -> AppResult<bool> {
+    super::personal_erasure_service::provider::schedule_disconnect(db, keys, effect_id).await
+}
+
+pub(crate) fn known_remote_skip_reason(
     provider: &ProviderConfig,
     scope: oauth_revocation::RevocationScope,
     credentials: Option<&user_credentials_service::ResolvedOAuthCredentials>,
@@ -4368,7 +4773,9 @@ fn known_remote_skip_reason(
     }
 }
 
-fn aggregate_revocation_outcome(outcome: &oauth_revocation::RevocationOutcome) -> &'static str {
+pub(crate) fn aggregate_revocation_outcome(
+    outcome: &oauth_revocation::RevocationOutcome,
+) -> &'static str {
     let outcomes = [outcome.access.as_ref(), outcome.refresh.as_ref()];
     if outcomes.iter().all(Option::is_none) {
         return "skipped_no_token";
@@ -4379,6 +4786,13 @@ fn aggregate_revocation_outcome(outcome: &oauth_revocation::RevocationOutcome) -
         .any(|outcome| matches!(outcome, oauth_revocation::TokenOutcome::SendFailed))
     {
         return "send_failed";
+    }
+    if outcomes
+        .iter()
+        .flatten()
+        .any(|outcome| matches!(outcome, oauth_revocation::TokenOutcome::PermanentFailure))
+    {
+        return "permanent_failure";
     }
     if let Some(reason) = outcomes.iter().flatten().find_map(|outcome| match outcome {
         oauth_revocation::TokenOutcome::Skipped(reason) => Some(*reason),
@@ -4402,17 +4816,18 @@ fn aggregate_revocation_outcome(outcome: &oauth_revocation::RevocationOutcome) -
     "delivered"
 }
 
-fn token_outcome_name(outcome: &oauth_revocation::TokenOutcome) -> &'static str {
+pub(crate) fn token_outcome_name(outcome: &oauth_revocation::TokenOutcome) -> &'static str {
     match outcome {
         oauth_revocation::TokenOutcome::Delivered => "delivered",
         oauth_revocation::TokenOutcome::NotFound => "not_found",
         oauth_revocation::TokenOutcome::SendFailed => "send_failed",
+        oauth_revocation::TokenOutcome::PermanentFailure => "permanent_failure",
         oauth_revocation::TokenOutcome::Skipped(reason) => reason,
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn write_remote_audit(
+pub(crate) async fn write_remote_audit(
     db: mongodb::Database,
     actor: &AuditActor,
     owner_id: &str,
@@ -4609,7 +5024,9 @@ fn build_key_view(
         inject_delegation_token: svc.inject_delegation_token,
         delegation_token_scope: svc.delegation_token_scope.clone(),
         custom_user_agent: svc.custom_user_agent.clone(),
-        default_request_headers: svc.default_request_headers.clone(),
+        default_request_headers: crate::models::default_request_header::stored_list_for_response(
+            svc.default_request_headers.clone(),
+        ),
         ws_frame_injections: svc.ws_frame_injections.clone(),
         auto_connected,
         source_app_id: svc.source_app_id.clone(),
@@ -4698,24 +5115,22 @@ fn parse_granted_scopes(raw: &str) -> Option<Vec<String>> {
 async fn enrich_view_with_oauth_client_id(
     encryption_keys: &EncryptionKeys,
     view: &mut KeyView,
-    encrypted_client_id: Option<&Vec<u8>>,
+    key: Option<&UserApiKey>,
 ) {
-    let Some(enc) = encrypted_client_id else {
+    let Some(key) = key else {
         return;
     };
-    match encryption_keys.decrypt(enc).await {
-        Ok(plain) => match String::from_utf8(plain) {
-            Ok(s) => view.oauth_client_id = Some(s),
-            Err(e) => tracing::warn!(
-                error = %e,
-                view_id = %view.id,
-                "Failed to decode oauth_client_id as UTF-8; surfacing as None"
-            ),
-        },
-        Err(e) => tracing::warn!(
-            error = %e,
+    let Some(enc) = key.user_oauth_client_id_encrypted.as_deref() else {
+        return;
+    };
+    match super::credential_record_service::CredentialRecord::key(key)
+        .text(encryption_keys, "user_oauth_client_id_encrypted", enc)
+        .await
+    {
+        Ok(plain) => view.oauth_client_id = Some(plain.to_string()),
+        Err(_) => tracing::warn!(
             view_id = %view.id,
-            "Failed to decrypt oauth_client_id for key view; surfacing as None"
+            "OAuth client ID is unavailable for key view"
         ),
     }
 }
@@ -4828,7 +5243,6 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    use std::time::Duration;
 
     use axum::{
         Json, Router,
@@ -4926,6 +5340,7 @@ mod tests {
 
     fn sample_api_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: "key-1".to_string(),
@@ -5047,14 +5462,25 @@ mod tests {
         let token_id = uuid::Uuid::new_v4().to_string();
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
+                secret_context_versions: Default::default(),
                 id: token_id.clone(),
                 user_id: user_id.to_string(),
                 provider_config_id: provider_id.to_string(),
                 connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
-                access_token_encrypted: Some(vec![1, 2, 3]),
-                refresh_token_encrypted: Some(vec![4, 5, 6]),
+                access_token_encrypted: Some(
+                    test_encryption_keys()
+                        .encrypt(b"fixture-access-token")
+                        .await
+                        .unwrap(),
+                ),
+                refresh_token_encrypted: Some(
+                    test_encryption_keys()
+                        .encrypt(b"fixture-refresh-token")
+                        .await
+                        .unwrap(),
+                ),
                 token_scopes: None,
                 expires_at: None,
                 api_key_encrypted: None,
@@ -5115,6 +5541,7 @@ mod tests {
 
     fn sample_catalog_service() -> DownstreamService {
         DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,
@@ -5225,6 +5652,7 @@ mod tests {
             status: NodeStatus::Online,
             auth_token_hash: "deadbeef".repeat(8),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "feedface".repeat(8),
             last_heartbeat_at: Some(now),
             connected_at: Some(now),
@@ -7003,6 +7431,7 @@ mod tests {
     /// `api_key` → legacy reuse path).
     fn multi_conn_provider(provider_type: &str) -> ProviderConfig {
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             slug: format!("prov-{}", uuid::Uuid::new_v4()),
             name: "Multi-Conn Test Provider".to_string(),
@@ -7080,6 +7509,7 @@ mod tests {
         provider.slug = "github".to_string();
         provider.name = "GitHub".to_string();
         provider.revocation = Some(RevocationConfig {
+            effect_scope: None,
             request_encoding: "form".to_string(),
             style: "github".to_string(),
             url: "https://api.github.com/applications".to_string(),
@@ -7419,6 +7849,379 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_provider_cannot_bypass_expected_version_before_disconnect_claim() {
+        let db = connect_test_database("disconnect_missing_provider_version")
+            .await
+            .expect("Mongo fixture required");
+        let keys = test_encryption_keys();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let id = insert_provider_token(&db, &owner, "removed-provider-config").await;
+        let before = db
+            .collection::<bson::Document>(USER_PROVIDER_TOKENS)
+            .find_one(doc! {"_id":&id})
+            .await
+            .unwrap()
+            .unwrap();
+        let actor = test_audit_actor(&owner);
+        let context = super::DisconnectClaim {
+            db: &db,
+            keys: &keys,
+            owner: &owner,
+            provider: None,
+            scope: super::oauth_revocation::RevocationScope::Token,
+            actor: &actor,
+            cascade_record_count: 1,
+            grant_effect_id: None,
+            remote_key_id: None,
+        };
+        assert!(matches!(
+            super::claim_disconnect_source(&context, USER_PROVIDER_TOKENS, &id, Some(0)).await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            db.collection::<bson::Document>(USER_PROVIDER_TOKENS)
+                .find_one(doc! {"_id":&id})
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(
+                super::super::personal_erasure_service::provider::EFFECTS
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+            0
+        );
+        // Legacy absent state_version still means zero, independent of config.
+        db.collection::<bson::Document>(USER_PROVIDER_TOKENS)
+            .update_one(doc! {"_id":&id}, doc! {"$unset":{"state_version":""}})
+            .await
+            .unwrap();
+        assert!(
+            super::claim_disconnect_source(&context, USER_PROVIDER_TOKENS, &id, Some(0))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.collection::<bson::Document>(
+                super::super::personal_erasure_service::provider::EFFECTS
+            )
+            .find_one(
+                doc! {"source_id":&id,"status":"pending","capability_encrypted":{"$exists":true}}
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_restart_after_atomic_source_claim_recovers_exact_remote_obligation() {
+        let db = connect_test_database("disconnect_restart_atomic_claim")
+            .await
+            .expect("Mongo fixture required");
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let keys = test_encryption_keys();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let sends = Arc::new(AtomicUsize::new(0));
+        let observed = sends.clone();
+        let app = Router::new().route(
+            "/revoke",
+            post(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                async { axum::Json(serde_json::json!({ "ok": true })) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/revoke", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut provider = multi_conn_provider("oauth2");
+        provider.revocation = Some(RevocationConfig {
+            effect_scope: Some(crate::models::provider_config::RevocationEffectScope::TokenOnly),
+            style: "self_bearer".into(),
+            url,
+            auth: "none".into(),
+            revokes_grant: false,
+            request_encoding: "form".into(),
+        });
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        insert_modern_oauth_service(&db, &keys, &owner, &provider.id, "crash-source", None).await;
+        let pause = Arc::new(super::DisconnectClaimPause::default());
+        let stopped = pause.clone();
+        let task_db = db.clone();
+        let task_owner = owner.clone();
+        let writer = tokio::spawn(super::DISCONNECT_CLAIM_PAUSE.scope(stopped, async move {
+            super::disconnect_credentials(
+                &task_db,
+                &keys,
+                &task_owner,
+                &test_audit_actor(&task_owner),
+                super::DisconnectTarget::UserService("crash-source"),
+                super::DisconnectOptions::default(),
+            )
+            .await
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.notified())
+            .await
+            .unwrap();
+        writer.abort();
+        assert!(writer.await.unwrap_err().is_cancelled());
+        let effects = super::super::personal_erasure_service::provider::EFFECTS;
+        let effect = db
+            .collection::<bson::Document>(effects)
+            .find_one(doc! {"source_id":"key-crash-source"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(effect.contains_key("capability_encrypted"));
+        assert_eq!(effect.get_str("status"), Ok("pending"));
+        assert!(
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .find_one(doc! {"_id":"key-crash-source"})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 0);
+        // A fresh worker owns all necessary material after the caller is gone.
+        let restart_keys = test_encryption_keys();
+        super::super::personal_erasure_service::provider::drain_one(&db, &restart_keys)
+            .await
+            .unwrap();
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        let done = db
+            .collection::<bson::Document>(effects)
+            .find_one(doc! {"_id":effect.get_str("_id").unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(done.get_str("status"), Ok("complete"));
+        assert!(!done.contains_key("capability_encrypted"));
+        server.abort();
+        db.drop().await.unwrap();
+    }
+
+    async fn import_copy_for_owner(
+        db: &mongodb::Database,
+        keys: &crate::crypto::aes::EncryptionKeys,
+        owner: &str,
+        provider: &str,
+        token: &str,
+    ) -> AppResult<UserApiKey> {
+        super::super::user_api_key_service::create_api_key(
+            db,
+            keys,
+            owner,
+            super::super::user_api_key_service::CreateApiKeyParams {
+                label: "manually imported retained copy",
+                credential_type: "bearer",
+                credential: token,
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: Some(provider),
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn direct_disconnect_and_cross_owner_manual_import_remain_independent() {
+        for import_before_dispatch in [true, false] {
+            let db = crate::test_utils::connect_transaction_test_database(
+                "direct_disconnect_import_race",
+            )
+            .await;
+            crate::test_utils::init_test_audit_chain_hmac_key();
+            let keys = test_encryption_keys();
+            let owner = uuid::Uuid::new_v4().to_string();
+            let org = uuid::Uuid::new_v4().to_string();
+            db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+                .insert_one(crate::test_utils::test_user(
+                    &org,
+                    crate::models::user::UserType::Org,
+                ))
+                .await
+                .unwrap();
+            let sends = Arc::new(AtomicUsize::new(0));
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            let count = sends.clone();
+            let arrived = entered.clone();
+            let gate = release.clone();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/revoke", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    Router::new().route(
+                        "/revoke",
+                        post(move || {
+                            let count = count.clone();
+                            let arrived = arrived.clone();
+                            let gate = gate.clone();
+                            async move {
+                                count.fetch_add(1, Ordering::SeqCst);
+                                arrived.notify_one();
+                                let permit = gate.acquire().await.unwrap();
+                                permit.forget();
+                                axum::Json(serde_json::json!({"ok":true}))
+                            }
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+            });
+            let mut provider = multi_conn_provider("oauth2");
+            provider.revocation = Some(RevocationConfig {
+                effect_scope: Some(
+                    crate::models::provider_config::RevocationEffectScope::TokenOnly,
+                ),
+                style: "self_bearer".into(),
+                url,
+                auth: "none".into(),
+                revokes_grant: false,
+                request_encoding: "form".into(),
+            });
+            db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .insert_one(&provider)
+                .await
+                .unwrap();
+            let mut other_provider = multi_conn_provider("api_key");
+            other_provider.id = uuid::Uuid::new_v4().to_string();
+            other_provider.slug = "unrelated-import-provider".into();
+            db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .insert_one(&other_provider)
+                .await
+                .unwrap();
+            insert_modern_oauth_service(&db, &keys, &owner, &provider.id, "held-disconnect", None)
+                .await;
+            let pause = Arc::new(super::DisconnectClaimPause::default());
+            let task_db = db.clone();
+            let task_owner = owner.clone();
+            let task_pause = pause.clone();
+            let disconnect = tokio::spawn(async move {
+                let task_keys = test_encryption_keys();
+                let actor = test_audit_actor(&task_owner);
+                let operation = Box::pin(super::disconnect_credentials(
+                    &task_db,
+                    &task_keys,
+                    &task_owner,
+                    &actor,
+                    super::DisconnectTarget::UserService("held-disconnect"),
+                    super::DisconnectOptions::default(),
+                ));
+                if import_before_dispatch {
+                    super::DISCONNECT_CLAIM_PAUSE
+                        .scope(task_pause, operation)
+                        .await
+                } else {
+                    operation.await
+                }
+            });
+            let copy = if import_before_dispatch {
+                tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.notified())
+                    .await
+                    .unwrap();
+                let copy =
+                    import_copy_for_owner(&db, &keys, &org, &other_provider.id, "access-token")
+                        .await
+                        .unwrap();
+                pause.release.notify_one();
+                Some(copy)
+            } else {
+                None
+            };
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), disconnect)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(result.upstream_revocation_scheduled);
+            tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+                .await
+                .unwrap();
+            let copy = match copy {
+                Some(copy) => copy,
+                None => import_copy_for_owner(&db, &keys, &org, &other_provider.id, "access-token")
+                    .await
+                    .unwrap(),
+            };
+            assert_eq!(sends.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                db.collection::<UserApiKey>(USER_API_KEYS)
+                    .find_one(doc! {"_id":&copy.id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "active"
+            );
+            release.add_permits(1);
+            for _ in 0..100 {
+                let completed = db
+                    .collection::<bson::Document>(
+                        super::super::personal_erasure_service::provider::EFFECTS,
+                    )
+                    .find_one(doc! {"source_id":"key-held-disconnect","status":"complete"})
+                    .await
+                    .unwrap();
+                if completed.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            let effect = db
+                .collection::<bson::Document>(
+                    super::super::personal_erasure_service::provider::EFFECTS,
+                )
+                .find_one(doc! {"source_id":"key-held-disconnect"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(effect.get_str("status"), Ok("complete"));
+            assert!(!effect.contains_key("capability_encrypted"));
+            assert_eq!(sends.load(Ordering::SeqCst), 1);
+            assert!(
+                db.collection::<UserApiKey>(USER_API_KEYS)
+                    .find_one(doc! {"_id":&copy.id,"status":"active"})
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            // PD-1 preserves ordinary import availability before and after
+            // another owner's independent upstream revocation.
+            import_copy_for_owner(
+                &db,
+                &keys,
+                &org,
+                &other_provider.id,
+                "independent-live-token",
+            )
+            .await
+            .unwrap();
+            server.abort();
+            db.drop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn legacy_copy_revokes_shared_token_only_after_last_key_is_deleted() {
         let Some(db) = connect_test_database("unified_revocation_legacy_last_key").await else {
             return;
@@ -7443,6 +8246,8 @@ mod tests {
 
         let mut provider = multi_conn_provider("oauth2");
         provider.revocation = Some(RevocationConfig {
+            // This fixture endpoint implements the reviewed single-token contract.
+            effect_scope: Some(crate::models::provider_config::RevocationEffectScope::TokenOnly),
             request_encoding: "form".to_string(),
             style: "self_bearer".to_string(),
             url: format!("http://{address}/revoke"),
@@ -7484,6 +8289,8 @@ mod tests {
                 .await
                 .unwrap();
         }
+
+        crate::test_utils::init_test_audit_chain_hmac_key();
 
         let first = super::disconnect_credentials(
             &db,
@@ -7546,6 +8353,7 @@ mod tests {
         provider.slug = "facebook".to_string();
         provider.name = "Facebook".to_string();
         provider.revocation = Some(RevocationConfig {
+            effect_scope: None,
             request_encoding: "form".to_string(),
             style: "facebook_deauth".to_string(),
             url: "https://graph.facebook.com/me/permissions".to_string(),
@@ -7662,7 +8470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn confirmed_cascade_calls_upstream_once_after_local_teardown() {
+    async fn confirmed_cascade_dispatches_one_grant_then_never_revokes_successor() {
         let Some(db) = connect_test_database("unified_revocation_confirmed_cascade").await else {
             return;
         };
@@ -7724,6 +8532,8 @@ mod tests {
             .await;
         }
 
+        crate::test_utils::init_test_audit_chain_hmac_key();
+
         let result = super::disconnect_credentials(
             &db,
             &encryption_keys,
@@ -7740,13 +8550,88 @@ mod tests {
         assert!(result.upstream_revocation_scheduled);
         assert_eq!(result.deleted_services.len(), 2);
 
-        for _ in 0..50 {
-            if calls.load(Ordering::SeqCst) == 1 {
-                break;
+        assert_eq!(
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .count_documents(doc! {"user_id":&user_id})
+                .await
+                .unwrap(),
+            0
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if db
+                    .collection::<bson::Document>(
+                        super::super::personal_erasure_service::provider::EFFECTS,
+                    )
+                    .count_documents(
+                        doc! {"user_id":&user_id,"status":"complete","kind":"oauth_disconnect"},
+                    )
+                    .await
+                    .unwrap()
+                    == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        })
+        .await
+        .expect("immediate durable grant revocation");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let successor = super::user_api_key_service::create_api_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            super::user_api_key_service::CreateApiKeyParams {
+                label: "Successor authorization",
+                credential_type: "oauth2",
+                credential: "",
+                access_token: Some("successor-access"),
+                refresh_token: None,
+                token_scopes: Some("read"),
+                expires_at: None,
+                provider_config_id: Some(&provider.id),
+                connection_id: Some("successor-connection"),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        // A confirmed receipt is final. A later drain cannot revoke a newly
+        // created authorization after this one immediate grant call.
+        for _ in 0..3 {
+            super::super::personal_erasure_service::provider::drain_one(&db, &encryption_keys)
+                .await
+                .unwrap();
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .count_documents(doc! {"user_id":&user_id})
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .find_one(doc! {"_id":&successor.id,"status":"active"})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            db.collection::<UserService>(USER_SERVICES)
+                .count_documents(doc! {"user_id":&user_id,"is_active":true})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(db.collection::<bson::Document>(super::super::personal_erasure_service::provider::EFFECTS)
+            .count_documents(doc! {"user_id":&user_id,"kind":"oauth_disconnect","status":"complete","capability_encrypted":{"$exists":false}}).await.unwrap(),1);
     }
 
     /// Catalog `DownstreamService` backed by `provider`, shaped so
@@ -7875,6 +8760,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
+                secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
                 provider_config_id: provider.id.clone(),
@@ -7954,6 +8840,7 @@ mod tests {
         let token_id = uuid::Uuid::new_v4().to_string();
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
+                secret_context_versions: Default::default(),
                 id: token_id.clone(),
                 user_id: user_id.clone(),
                 provider_config_id: provider.id.clone(),
@@ -7964,7 +8851,12 @@ mod tests {
                 refresh_token_encrypted: None,
                 token_scopes: None,
                 expires_at: None,
-                api_key_encrypted: Some(vec![9, 9, 9]),
+                api_key_encrypted: Some(
+                    encryption_keys
+                        .encrypt(b"reusable-provider-api-key")
+                        .await
+                        .unwrap(),
+                ),
                 status: "active".to_string(),
                 state_version: 1,
                 last_refreshed_at: None,
@@ -7997,6 +8889,18 @@ mod tests {
             key.source_id.as_deref(),
             Some(token_id.as_str()),
             "api_key provider must still reuse the existing provider token"
+        );
+        assert_eq!(
+            crate::services::credential_record_service::CredentialRecord::key(&key)
+                .text(
+                    &encryption_keys,
+                    "credential_encrypted",
+                    key.credential_encrypted.as_deref().unwrap()
+                )
+                .await
+                .unwrap()
+                .as_str(),
+            "reusable-provider-api-key"
         );
         assert!(
             key.connection_id.is_none(),
@@ -8103,8 +9007,24 @@ mod tests {
             .user_oauth_client_secret_encrypted
             .as_ref()
             .expect("BYO client_secret must be encrypted on the key");
-        let plain_id = encryption_keys.decrypt(stored_id).await.unwrap();
-        let plain_sec = encryption_keys.decrypt(stored_sec).await.unwrap();
+        let plain_id = crate::services::credential_record_service::CredentialRecord::key(&key)
+            .decrypt(
+                &encryption_keys,
+                "user_oauth_client_id_encrypted",
+                stored_id,
+            )
+            .await
+            .unwrap()
+            .to_vec();
+        let plain_sec = crate::services::credential_record_service::CredentialRecord::key(&key)
+            .decrypt(
+                &encryption_keys,
+                "user_oauth_client_secret_encrypted",
+                stored_sec,
+            )
+            .await
+            .unwrap()
+            .to_vec();
         assert_eq!(String::from_utf8(plain_id).unwrap(), "cli_marketing");
         assert_eq!(String::from_utf8(plain_sec).unwrap(), "super-secret");
     }
@@ -8252,7 +9172,15 @@ mod tests {
             .user_oauth_client_id_encrypted
             .as_ref()
             .expect("copy must encrypt client_id onto B");
-        let plain_id = encryption_keys.decrypt(stored_id).await.unwrap();
+        let plain_id = crate::services::credential_record_service::CredentialRecord::key(&key_b)
+            .decrypt(
+                &encryption_keys,
+                "user_oauth_client_id_encrypted",
+                stored_id,
+            )
+            .await
+            .unwrap()
+            .to_vec();
         assert_eq!(String::from_utf8(plain_id).unwrap(), "cli_marketing");
 
         // Independence proof: the two ciphertexts must NOT be byte-equal
@@ -8353,6 +9281,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
                 id: stripped_key_id.clone(),
@@ -8494,6 +9423,7 @@ mod tests {
         let service = sample_service("bearer");
         let now = Utc::now();
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: "p1".to_string(),
             slug: "test".to_string(),
             name: "Test".to_string(),
@@ -10422,9 +11352,14 @@ mod tests {
         .unwrap();
 
         // Should be a no-op (no api_key to reconcile)
-        reconcile_provider_key_for_service_routing(&db, &user_id, &created.service.id)
-            .await
-            .unwrap();
+        reconcile_provider_key_for_service_routing(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &user_id,
+            &created.service.id,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -10461,9 +11396,14 @@ mod tests {
         .unwrap();
 
         // Service has a credential stored; reconcile should be a no-op
-        reconcile_provider_key_for_service_routing(&db, &user_id, &created.service.id)
-            .await
-            .unwrap();
+        reconcile_provider_key_for_service_routing(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &user_id,
+            &created.service.id,
+        )
+        .await
+        .unwrap();
 
         // Verify key is still active and unchanged
         let ak_id = created.api_key.as_ref().unwrap().id.clone();
@@ -11494,5 +12434,27 @@ mod tests {
         assert_eq!(changes[1].before, Some(serde_json::json!("user")));
         assert_eq!(changes[1].after, Some(serde_json::json!("platform")));
         assert!(!serde_json::to_string(&events).unwrap().contains("SECRET"));
+    }
+}
+
+#[cfg(test)]
+mod credential_action_debug_tests {
+    use super::UpdateCredentialAction;
+    #[test]
+    fn raw_credentials_never_appear_in_action_debug() {
+        let secret = "distinctive-credential-action-089b6f";
+        for action in [
+            UpdateCredentialAction::Provision {
+                credential_type: "bearer",
+                credential: secret,
+            },
+            UpdateCredentialAction::Rotate { credential: secret },
+            UpdateCredentialAction::Promote {
+                credential_type: "api_key",
+                credential: secret,
+            },
+        ] {
+            assert!(!format!("{action:?}").contains(secret));
+        }
     }
 }

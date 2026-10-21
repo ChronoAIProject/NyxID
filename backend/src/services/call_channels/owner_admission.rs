@@ -48,23 +48,3 @@ pub async fn fence(db: &Database, tx: &mut ClientSession, owner: &str) -> AppRes
     }
     Ok(())
 }
-
-/// Keep authentication available while already-admitted cleanup is pending.
-/// Admission transactions write this same row, so completion of this update
-/// precedes the deletion caller's pending-evidence query.
-pub async fn close(db: &Database, owner: &str) -> AppResult<()> {
-    let changed = db
-        .collection::<Document>(COLLECTION_NAME)
-        .update_one(
-            doc! {"_id": owner},
-            doc! {
-                "$set": {"channel_adapter_admission_closed": true},
-                "$inc": {"channel_adapter_admission_fence": 1_i64},
-            },
-        )
-        .await?;
-    if changed.matched_count != 1 {
-        return Err(AppError::NotFound("User not found".into()));
-    }
-    Ok(())
-}

@@ -168,8 +168,12 @@ fn verify_assertion(state: &AppState, raw: &str, scope: &str, body: &[u8]) -> Ap
     validation.set_audience(&[AUDIENCE]);
     validation.set_issuer(&[&state.config.jwt_issuer]);
     validation.leeway = 0;
-    let data = jsonwebtoken::decode::<Assertion>(raw, &state.jwt_keys.decoding, &validation)
-        .map_err(|_| denied())?;
+    let data = jsonwebtoken::decode::<Assertion>(
+        raw,
+        state.jwt_keys.decoding_key(raw).map_err(|_| denied())?,
+        &validation,
+    )
+    .map_err(|_| denied())?;
     if data.header.typ.as_deref() != Some("nyxid-public+jwt")
         || data.claims.scope != scope
         || data.claims.token_type != "nyxid_public_authority"

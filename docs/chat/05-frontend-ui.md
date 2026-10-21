@@ -215,13 +215,26 @@ upstream display names when present, with **Default model** for the legacy
 while a turn runs. New-chat selections are local to that composer, passed on the
 first send, and applied to any persisted upload draft before submission.
 
-The combined settings menu also offers **Next message connection**. It
-lists enabled accessible exact connections and shows the selected label on the
-compact trigger. A successful send clears this local choice; a failed send
-retains it. Submission prefixes the owner's message with `/service <UUID>` and
-an actual newline. The server binds that choice to the newly admitted turn.
-Choosing an organization connection still requires the existing action card
-in Auto and Ask every time. This choice is independent of Permissions.
+Connection selection is separate from the permission/model menu. **Agent Details →
+Connections** groups accounts by service and identifies personal and organization
+ownership. NyxBot's Details lets the owner edit the existing saved connection
+order; this preference is account-wide and applies across agents. Eligible
+personal connections still precede organization connections. Specialist Details
+shows only granted connections; its Access section owns service grants and
+operation/resource limits. Choosing a connection does not impose folder/database
+restrictions or widen access.
+
+For a one-message exception, the composer's **Add context** (+) menu offers
+**Attach files** and **Use a connection**. The connection dialog is searchable
+by service, account, slug or organization and groups results by service. Selecting
+an account displays a removable chip naming the service, account, owner and
+**This message**, visible before sending. It clears after successful send and
+on navigation; a failed send retains it. If the selected connection becomes
+unavailable, sending is refused until the owner removes or replaces it. Voice
+is unavailable while a text-message connection is selected. Submission retains
+the leading `/service <UUID>` and actual newline; the server binds the choice
+to the admitted turn. Organization connections still require the existing action
+card in Auto and Ask every time.
 
 The composer stays in one row while empty or while its text fits alongside the
 controls. It expands only when text wraps or contains a newline, then collapses

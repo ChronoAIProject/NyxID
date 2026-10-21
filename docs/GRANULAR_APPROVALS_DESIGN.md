@@ -1,10 +1,20 @@
 # Granular Approvals Design
 
-Status: Proposal (no code yet)
+Status: Implemented in stages; historical proposal and baseline below. Current code includes operation descriptors, scoped grants, exact authority validation and MCP preparation/approval gates. Consult `approval_service`, `execution_authority` and MCP preparation/redeem paths for the live contract.
 Author: design exploration, 2026-05-29
+
+## Current implementation status (2026-10-19)
+
+The original proposal is retained below as dated design history, including its old call-site table and decisions. It is not a description of current enforcement. MCP now has preparation and approval enforcement, and exact grants bind live execution authority. Current details are defined by `approval_service`, `execution_authority` and MCP preparation/redeem code. This status does not assert every original proposal item is shipped or enabled; feature gates and rollout requirements remain applicable.
+
+---
+
+## Historical proposal begins (2026-05-29)
+
+The original design statements, tables, line numbers, implementation gates and future-tense decisions below belong to that baseline, ending at the explicitly marked current execution-authority section.
 Related: per-service approval config (`ServiceApprovalConfig`), `approval_service`, proxy paths
 
-## Problem
+## Historical problem (2026-05-29 baseline)
 
 AI-service approval is currently **binary per (user, service)**. A `ServiceApprovalConfig`
 row carries only `approval_required: bool` and `approval_mode` (`per_request` | `grant`).
@@ -30,7 +40,7 @@ degenerates for MCP/SSH/LLM, where "everything is `POST /`" and one rule matches
 GitHub itself avoids raw-path rules by mapping many endpoints onto a **small set of
 named permissions** (Contents: read/write, Issues: read/write, ...).
 
-## Decisions (locked)
+## Historical decisions (2026-05-29 proposal)
 
 1. **Rule model: hybrid.** Semantic `read` / `write` / `destructive` classification
    (derived from the request, overridable) PLUS optional path-glob rules for power
@@ -38,13 +48,13 @@ named permissions** (Contents: read/write, Issues: read/write, ...).
 2. **Protocol scope: generalized now.** Introduce a protocol-agnostic
    `OperationDescriptor` and populate it for **HTTP, MCP, SSH, and LLM gateway** from
    the start, rather than retrofitting later.
-3. Deliverable: this design doc. Implementation gated on review.
+3. Deliverable: this design doc. Historical proposal: implementation was gated on review.
 
-## Current state (verified against code)
+## Historical state (verified for the 2026-05-29 proposal)
 
-Approval call sites today (`approval_service` fns: `approval_service.rs`):
+Approval call sites at the historical baseline (`approval_service` fns: `approval_service.rs`):
 
-| Path        | Handler / fn                                   | resolve | check | create | operation_summary today |
+| Path        | Handler / fn                                   | resolve | check | create | operation_summary at baseline |
 |-------------|------------------------------------------------|---------|-------|--------|-------------------------|
 | HTTP proxy  | `proxy.rs::execute_proxy_inner` (~1050)        | 1321    | 1367  | 1427   | `proxy:{METHOD} {path}` |
 | LLM gateway | `llm_gateway.rs::check_llm_approval` (1099)    | 1111    | 1137  | 1182   | `llm:{METHOD} {path}`   |
@@ -62,13 +72,13 @@ Key facts that shape the plan:
 - **SSH** captures no command/principal in the approval request (`operation_summary =
   "ssh:tunnel"`, `action_description = None`). Granular SSH approval requires
   threading the command/principal through first.
-- **MCP has no approval checks at all.** Adding the descriptor here is also adding the
+- **At the historical baseline, MCP had no approval checks.** Current MCP preparation/redeem paths enforce approvals and live authority; the following described the original gap.  Adding the descriptor here is also adding the
   *first* approval enforcement to MCP -- treat as a distinct, higher-risk workstream.
 - Grants (`ApprovalGrant`) are **service-scoped** (+ optional org-scoped). They carry
   no method/path scope, so any granularity on the request side would leak through a
   grant unless grants are also scoped.
 
-## Proposed design
+## Historical proposed design (2026-05-29)
 
 ### 1. `OperationDescriptor` (protocol-agnostic operation identity)
 
@@ -295,7 +305,13 @@ endpoint.
 - Approval prompt (history + Telegram/push + mobile) shows structured method/resource
   from the new `ApprovalRequest` fields.
 
-## Execution authority binding
+---
+
+## Current execution authority binding
+
+The dated historical proposal ends here. The following implementation contract describes subsequent execution-authority work.
+
+### Execution authority binding
 
 Approval fences bind *what* operation was approved. They do not bind *where the
 effect goes* or *which credential pays for it*. Those are the execution inputs,
@@ -437,7 +453,7 @@ on the row for audit. No automatic retry follows because the provider may have
 committed a non-idempotent effect; provider-specific read-back or human
 reconciliation must resolve the ambiguity outside this approval identity.
 
-## Security notes
+## Original proposal security notes (historical; execution-authority contract above is current)
 
 - `Deny` rules must short-circuit **before** credential resolution and before the
   downstream request is built.
@@ -460,7 +476,7 @@ reconciliation must resolve the ambiguity outside this approval identity.
   (`ssh_auth_mode = proxy_only`, or omit terminal access) and allow only `ssh exec`,
   where the command is visible to the rule engine.
 
-## Resolved decisions
+## Original proposal decisions (historical)
 
 1. **SSH tunnel stays coarse.** Per-command approval inside a live tunnel is infeasible
    (opaque interactive byte stream after handshake). Granular command matching applies

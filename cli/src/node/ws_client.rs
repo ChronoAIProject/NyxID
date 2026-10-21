@@ -4107,7 +4107,9 @@ async fn handle_ws_proxy_open(
         .await;
         return;
     }
-    let raw_credential = cred.raw_credential().map(str::to_string);
+    let raw_credential = cred
+        .raw_credential()
+        .map(|raw| zeroize::Zeroizing::new(raw.to_owned()));
 
     // Resolve effective base URL.
     let effective_base_url = if base_url.is_empty() {
@@ -4171,40 +4173,28 @@ async fn handle_ws_proxy_open(
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut ws_request = match url.into_client_request() {
         Ok(r) => r,
-        Err(e) => {
-            let _ = send_ws_proxy_error(
-                &tx,
-                &session_id,
-                &format!("Failed to build WS request: {e}"),
-            )
-            .await;
+        Err(_) => {
+            let _ = send_ws_proxy_error(&tx, &session_id, "Downstream WS request invalid").await;
             return;
         }
     };
 
-    // Forward headers from the proxy message.
-    if let Some(headers) = parsed["headers"].as_object() {
-        for (name, value) in headers {
-            // Values are already wire-safe (percent-encoded) per identity_service::sanitize_header_value.
-            if let Some(v) = value.as_str()
-                && let (Ok(hn), Ok(hv)) = (
-                    reqwest::header::HeaderName::from_bytes(name.as_bytes()),
-                    reqwest::header::HeaderValue::from_str(v),
-                )
-            {
-                ws_request.headers_mut().insert(hn, hv);
-            }
-        }
-    }
-
-    // Inject header credential.
-    if let Some((hdr_name, hdr_value)) = cred.header()
-        && let (Ok(hn), Ok(hv)) = (
-            reqwest::header::HeaderName::from_bytes(hdr_name.as_bytes()),
-            reqwest::header::HeaderValue::from_str(hdr_value),
-        )
+    // A configured authentication/default header may never disappear while
+    // connecting. Return one sanitized protocol error before opening a socket.
+    if install_ws_proxy_headers(
+        ws_request.headers_mut(),
+        parsed.get("headers"),
+        cred.header(),
+    )
+    .is_err()
     {
-        ws_request.headers_mut().insert(hn, hv);
+        let _ = send_ws_proxy_error(
+            &tx,
+            &session_id,
+            "Invalid downstream WS header configuration",
+        )
+        .await;
+        return;
     }
 
     // Connect to downstream WS with timeout and message size limits
@@ -4244,13 +4234,8 @@ async fn handle_ws_proxy_open(
                 .map(str::to_string);
             (ws, selected_protocol)
         }
-        Ok(Err(e)) => {
-            let _ = send_ws_proxy_error(
-                &tx,
-                &session_id,
-                &format!("Downstream WS connection failed: {e}"),
-            )
-            .await;
+        Ok(Err(_)) => {
+            let _ = send_ws_proxy_error(&tx, &session_id, "Downstream WS connection failed").await;
             return;
         }
         Err(_) => {
@@ -4321,7 +4306,7 @@ async fn run_ws_proxy_session(
     tx: mpsc::Sender<NodeWsMessage>,
     active_ws_proxies: ActiveWsProxyMap,
     ws_frame_injections: Vec<WsFrameInjection>,
-    raw_credential: Option<String>,
+    raw_credential: Option<zeroize::Zeroizing<String>>,
 ) {
     run_ws_proxy_session_with_limits(
         session_id,
@@ -4401,7 +4386,7 @@ async fn run_ws_proxy_session_with_limits<S>(
     tx: mpsc::Sender<NodeWsMessage>,
     active_ws_proxies: ActiveWsProxyMap,
     ws_frame_injections: Vec<WsFrameInjection>,
-    raw_credential: Option<String>,
+    raw_credential: Option<zeroize::Zeroizing<String>>,
     max_duration_limit: Duration,
     idle_timeout_limit: Duration,
 ) where
@@ -4546,16 +4531,16 @@ async fn run_ws_proxy_session_with_limits<S>(
                         // Handled at protocol level by tungstenite
                     }
                     Some(Ok(Message::Frame(_))) => {}
-                    Some(Err(e)) => {
+                    Some(Err(_)) => {
                         tracing::debug!(
                             session_id = %session_id,
-                            error = %e,
+                            code = "downstream_ws_failed",
                             "Downstream WS error in node proxy"
                         );
                         let json = serde_json::json!({
                             "type": "ws_proxy_closed",
                             "session_id": session_id,
-                            "reason": format!("downstream error: {e}"),
+                            "reason": "Downstream WS connection failed",
                         });
                         let _ = send_ws_message(&tx, json.to_string()).await;
                         break;
@@ -4759,6 +4744,30 @@ async fn drain_active_ws_proxies(active_ws_proxies: &ActiveWsProxyMap) {
         entry.task_handle.abort();
         tracing::debug!(session_id = %session_id, "WS proxy drained on disconnect");
     }
+}
+
+/// Build the exact WS transport headers without dropping a malformed configured
+/// value. Partial construction cannot escape: the caller stops before connect.
+fn install_ws_proxy_headers(
+    target: &mut reqwest::header::HeaderMap,
+    forwarded: Option<&serde_json::Value>,
+    credential: Option<(&str, &str)>,
+) -> std::result::Result<(), ()> {
+    if let Some(forwarded) = forwarded {
+        let forwarded = forwarded.as_object().ok_or(())?;
+        for (name, value) in forwarded {
+            let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| ())?;
+            let value = proxy_executor::sensitive_header_value(value.as_str().ok_or(())?)
+                .map_err(|_| ())?;
+            target.insert(name, value);
+        }
+    }
+    if let Some((name, value)) = credential {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| ())?;
+        let value = proxy_executor::sensitive_header_value(value).map_err(|_| ())?;
+        target.insert(name, value);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5049,6 +5058,62 @@ mod tests {
         assert!(active_ws_proxies.lock().await.is_empty());
     }
 
+    #[tokio::test]
+    async fn malformed_ws_auth_and_defaults_never_open_downstream_socket() {
+        for (credential_name, credential_value, forwarded) in [
+            ("x-auth", "credential\r\nsecret", serde_json::json!({})),
+            ("x-bad\rname", "credential-secret", serde_json::json!({})),
+            (
+                "x-auth",
+                "credential-secret",
+                serde_json::json!({"x-custom":"default\r\nsecret"}),
+            ),
+            (
+                "x-auth",
+                "credential-secret",
+                serde_json::json!({"x-bad\n":"default-secret"}),
+            ),
+            (
+                "x-auth",
+                "credential-secret",
+                serde_json::json!({"x-custom":123}),
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+            let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".to_owned());
+            config.credentials.insert(
+                "custom".to_owned(),
+                CredentialConfig::new_header(
+                    credential_name.to_owned(),
+                    Some(encryption.encrypt(credential_value).unwrap()),
+                    Some(format!("ws://{addr}")),
+                ),
+            );
+            let credentials = CredentialStore::from_config(&config, &encryption).unwrap();
+            let active: ActiveWsProxyMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+            let (tx, mut rx) = mpsc::channel(4);
+            handle_ws_proxy_open(&serde_json::json!({"session_id":"invalid-headers", "service_slug":"custom", "base_url":format!("ws://{addr}"),"path":"/socket","headers":forwarded}), &credentials, tx, active.clone(), None, replay_guard()).await;
+            let NodeWsMessage::Text(message) = rx.recv().await.unwrap() else {
+                panic!("expected bounded protocol error");
+            };
+            let response: serde_json::Value = serde_json::from_str(&message).unwrap();
+            assert_eq!(response["type"], "ws_proxy_error");
+            assert_eq!(
+                response["error"],
+                "Invalid downstream WS header configuration"
+            );
+            assert!(!message.contains("secret"));
+            assert!(active.lock().await.is_empty());
+            assert_eq!(
+                listener.into_std().unwrap().accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+    }
+
     async fn duplex_websocket_pair() -> (
         WebSocketStream<tokio::io::DuplexStream>,
         WebSocketStream<tokio::io::DuplexStream>,
@@ -5061,7 +5126,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::result_large_err)]
-    async fn node_websocket_injects_elevenlabs_api_key_on_upgrade() {
+    async fn node_websocket_valid_headers_reach_handshake_and_establish_session() {
         use tokio_tungstenite::tungstenite::handshake::server::{
             Request as WsRequest, Response as WsResponse,
         };
@@ -5071,22 +5136,30 @@ mod tests {
             .expect("bind downstream WebSocket");
         let addr = listener.local_addr().expect("downstream address");
         let (header_tx, header_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let server_task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept downstream");
             let socket = tokio_tungstenite::accept_hdr_async(
                 stream,
                 move |request: &WsRequest, response: WsResponse| {
-                    let api_key = request
-                        .headers()
-                        .get("xi-api-key")
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_string);
-                    header_tx.send(api_key).expect("send captured API key");
+                    assert_eq!(
+                        request.uri().path(),
+                        "/v1/text-to-speech/voice-1/stream-input"
+                    );
+                    let values =
+                        ["xi-api-key", "x-forwarded-context", "x-unfamiliar-default"].map(|name| {
+                            request
+                                .headers()
+                                .get(name)
+                                .map(|value| value.as_bytes().to_vec())
+                        });
+                    header_tx.send(values).expect("send captured headers");
                     Ok(response)
                 },
             )
             .await
             .expect("complete downstream handshake");
+            release_rx.await.expect("release downstream socket");
             drop(socket);
         });
 
@@ -5116,7 +5189,11 @@ mod tests {
                 "service_slug": "api-elevenlabs",
                 "base_url": format!("ws://{addr}"),
                 "path": "/v1/text-to-speech/voice-1/stream-input",
-                "headers": {},
+                "headers": {
+                    "x-forwarded-context": "forwarded-wire-value",
+                    "x-unfamiliar-default": "default-wire-secret",
+                    "xi-api-key": "forwarded-auth-must-be-overridden"
+                },
             }),
             &credentials,
             tx.clone(),
@@ -5126,9 +5203,17 @@ mod tests {
         )
         .await;
 
+        let captured = tokio::time::timeout(Duration::from_secs(5), header_rx)
+            .await
+            .expect("handshake completed")
+            .expect("captured headers");
         assert_eq!(
-            header_rx.await.expect("captured API key"),
-            Some("elevenlabs-node-test-key".to_string())
+            captured,
+            [
+                Some(b"elevenlabs-node-test-key".to_vec()),
+                Some(b"forwarded-wire-value".to_vec()),
+                Some(b"default-wire-secret".to_vec()),
+            ]
         );
         let opened: serde_json::Value = serde_json::from_str(&unwrap_text(
             rx.recv().await.expect("ws_proxy_opened acknowledgement"),
@@ -5136,6 +5221,13 @@ mod tests {
         .expect("valid acknowledgement");
         assert_eq!(opened["type"], "ws_proxy_opened");
         assert_eq!(opened["session_id"], "elevenlabs-session");
+
+        assert!(
+            active_ws_proxies
+                .lock()
+                .await
+                .contains_key("elevenlabs-session")
+        );
 
         handle_ws_proxy_close(
             &serde_json::json!({
@@ -5147,7 +5239,13 @@ mod tests {
             &active_ws_proxies,
         )
         .await;
-        server_task.await.expect("downstream server task");
+        release_tx.send(()).expect("release established session");
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("downstream task terminates")
+            .expect("downstream server task");
+        drain_active_ws_proxies(&active_ws_proxies).await;
+        assert!(active_ws_proxies.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -6488,5 +6586,22 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+}
+
+#[cfg(test)]
+mod ws_proxy_header_tests {
+    #[test]
+    fn valid_ws_headers_preserve_exact_wire_bytes_and_sensitive_metadata() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        super::install_ws_proxy_headers(
+            &mut headers,
+            Some(&serde_json::json!({"x-custom":"exact-default"})),
+            Some(("x-auth", "exact-credential")),
+        )
+        .unwrap();
+        assert_eq!(headers["x-custom"].as_bytes(), b"exact-default");
+        assert_eq!(headers["x-auth"].as_bytes(), b"exact-credential");
+        assert!(headers.values().all(|value| value.is_sensitive()));
     }
 }

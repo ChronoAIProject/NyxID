@@ -123,10 +123,11 @@ impl Session {
                     let _ = self
                         .sender
                         .send(NodeOutboundMessage::Text(
-                            json!({
+                            (json!({
                                 "type":"machine_job_finished_ack", "request_id":request.request_id
                             })
-                            .to_string(),
+                            .to_string())
+                            .into(),
                         ))
                         .await;
                 }
@@ -165,13 +166,14 @@ impl Session {
                 let reply = async {
                     self.sender
                         .send(NodeOutboundMessage::Text(
-                            json!({
+                            (json!({
                                 "type":"machine_service_response",
                                 "request_id":id,
                                 "status":status,
                                 "headers":[["content-type","application/json"]]
                             })
-                            .to_string(),
+                            .to_string())
+                            .into(),
                         ))
                         .await
                         .ok()?;
@@ -316,13 +318,14 @@ fn execute_service_response<'a>(
         if session
             .sender
             .send(NodeOutboundMessage::Text(
-                json!({
+                (json!({
                     "type":"machine_service_response",
                     "request_id":id,
                     "status":status,
                     "headers":headers
                 })
-                .to_string(),
+                .to_string())
+                .into(),
             ))
             .await
             .is_ok()

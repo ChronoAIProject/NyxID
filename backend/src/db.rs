@@ -512,6 +512,31 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         )
         .await?;
 
+    // First-factor challenges are physically separate from authenticated sessions,
+    // including while old replicas still ignore additive session purpose fields.
+    let challenges =
+        db.collection::<mongodb::bson::Document>(crate::models::session::MFA_CHALLENGES);
+    challenges
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"token_hash": 1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    challenges
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"expires_at": 1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::ZERO)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // ── mfa_factors ──
     let mfa = db.collection::<mongodb::bson::Document>("mfa_factors");
     mfa.create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
@@ -1173,6 +1198,26 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         )
         .await?;
 
+    // Short-lived authorization state, independent of immutable audit evidence.
+    let delegation = db.collection::<mongodb::bson::Document>(
+        crate::models::oauth_delegation_authority::COLLECTION_NAME,
+    );
+    delegation
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"expires_at":1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::ZERO)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    delegation
+        .create_index(IndexModel::builder().keys(doc! {"user_id":1}).build())
+        .await?;
+
     // ── consents ──
     let consents = db.collection::<mongodb::bson::Document>("consents");
     consents
@@ -1538,6 +1583,18 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
 
     // ── node_registration_tokens ──
     let nrt = db.collection::<mongodb::bson::Document>("node_registration_tokens");
+    nrt.create_index(
+        IndexModel::builder()
+            .keys(doc! {"user_id":1,"issuer_user_id":1,"used":1})
+            .build(),
+    )
+    .await?;
+    nrt.create_index(
+        IndexModel::builder()
+            .keys(doc! {"issuer_user_id":1,"used":1})
+            .build(),
+    )
+    .await?;
     nrt.create_index(IndexModel::builder().keys(doc! { "token_hash": 1 }).build())
         .await?;
     nrt.create_index(
@@ -2917,6 +2974,40 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
+    db.collection::<Document>(crate::services::analytics_dispatch_service::COLLECTION)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"status":1,"created_at":1})
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(crate::services::analytics_dispatch_service::ACCOUNTS)
+        .create_index(IndexModel::builder().keys(doc! {"updated_at":1}).build())
+        .await?;
+    telemetry_erasure_jobs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"status":1,"retry_at":1,"lease_expires_at":1,"created_at":1})
+                .build(),
+        )
+        .await?;
+    // Dispatch uncertainty is retained until supported operator reconciliation;
+    // no TTL may silently turn an uncertain external effect into completion.
+    db.collection::<Document>(crate::services::analytics_dispatch_service::COLLECTION)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"status":1,"_id":1})
+                .build(),
+        )
+        .await?;
+    telemetry_erasure_jobs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"destination_id":1,"inventory_revision":1,"retry_at":1})
+                .build(),
+        )
+        .await?;
+
     // ── oracle_pools ──
     let oracle_pools = db.collection::<Document>(crate::models::oracle_pool::COLLECTION_NAME);
     oracle_pools
@@ -4265,10 +4356,11 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 /// Idempotent: uses source + source_id to skip already-migrated records.
 pub async fn migrate_to_unified_collections(
     db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
 ) -> Result<(), Box<dyn std::error::Error>> {
     cleanup_duplicate_migration_services(db).await?;
-    migrate_provider_tokens(db).await?;
-    migrate_service_connections(db).await?;
+    migrate_provider_tokens(db, keys).await?;
+    migrate_service_connections(db, keys).await?;
     migrate_node_service_bindings(db).await?;
     tracing::info!("Unified collection migration complete");
     Ok(())
@@ -4454,309 +4546,459 @@ async fn resolve_migration_user_service_slug(
 }
 
 /// Migrate UserProviderTokens to the unified UserEndpoint + UserApiKey + UserService model.
-async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
-    let tokens: Vec<UserProviderToken> = db
-        .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
-        .find(doc! {})
-        .await?
-        .try_collect()
-        .await?;
-
+pub(crate) async fn migrate_provider_tokens(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Keyset pages bound memory and make every source a fresh raw snapshot.
+    let mut after: Option<String> = None;
     let mut migrated = 0u64;
-    for token in &tokens {
-        // Check idempotency: skip if already migrated. Both collections are
-        // checked because `cleanup_duplicate_migration_services` can delete a
-        // sibling `user_api_keys` row while leaving the matching
-        // `user_services` row in place, leaving stale state that would
-        // otherwise re-trigger the insert and hit the unique index.
-        let existing_api_key =
-            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-                .find_one(doc! {
-                    "source": "migration_provider_token",
-                    "source_id": &token.id,
-                })
-                .await?;
-        if existing_api_key.is_some() {
-            continue;
-        }
-        let existing_service =
-            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-                .find_one(doc! {
-                    "source": "migration_provider_token",
-                    "source_id": &token.id,
-                })
-                .await?;
-        if existing_service.is_some() {
-            continue;
-        }
-
-        // Load ProviderConfig for name
-        let provider = db
-            .collection::<ProviderConfig>(PROVIDER_CONFIGS)
-            .find_one(doc! { "_id": &token.provider_config_id })
-            .await?;
-
-        // Legacy Google tokens have no product identity. Only the original
-        // api-google service is a valid migration target, regardless of the
-        // insertion order of products sharing its provider. If it is absent,
-        // leave the token alone until that legacy target becomes available.
-        let mut service_filter = doc! {
-            "provider_config_id": &token.provider_config_id, "is_active": true,
-        };
-        let legacy_google = provider.as_ref().is_some_and(|p| p.slug == "google");
-        if legacy_google {
-            service_filter.insert("slug", "api-google");
-        }
-        let service = db
-            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .find_one(service_filter)
-            .await?;
-        if (legacy_google && service.is_none())
-            || service.as_ref().is_some_and(|service| {
-                crate::services::google_workspace::GoogleProduct::from_slug(&service.slug).is_some()
-            })
-        {
-            // Also reject product rows when the provider is missing or renamed.
-            continue;
-        }
-
-        let provider_name = provider
+    loop {
+        let filter = after
             .as_ref()
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "Unknown Provider".to_string());
-        let provider_slug = provider
-            .as_ref()
-            .map(|p| p.slug.clone())
-            .unwrap_or_else(|| format!("provider-{}", token.provider_config_id));
-
-        let now = Utc::now();
-        let endpoint_id = uuid::Uuid::new_v4().to_string();
-        let api_key_id = uuid::Uuid::new_v4().to_string();
-        let service_id = uuid::Uuid::new_v4().to_string();
-
-        // Determine endpoint URL and catalog info
-        let (endpoint_url, catalog_service_id, slug, auth_method, auth_key_name) =
-            if let Some(ref svc) = service {
-                let url = token
-                    .gateway_url
-                    .as_deref()
-                    .filter(|u| !u.is_empty())
-                    .unwrap_or(&svc.base_url);
-                (
-                    url.to_string(),
-                    Some(svc.id.clone()),
-                    svc.slug.clone(),
-                    svc.auth_method.clone(),
-                    svc.auth_key_name.clone(),
-                )
-            } else {
-                let url = token
-                    .gateway_url
-                    .as_deref()
-                    .filter(|u| !u.is_empty())
-                    .unwrap_or("https://placeholder.invalid");
-                (
-                    url.to_string(),
-                    None,
-                    provider_slug,
-                    "bearer".to_string(),
-                    "Authorization".to_string(),
-                )
-            };
-
-        // Skip if a UserService already exists for this user + catalog service
-        // (e.g., created by an earlier token for the same provider)
-        if let Some(ref csid) = catalog_service_id {
-            let already_has_service =
-                crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .map_or_else(|| doc! {}, |after| doc! {"_id":{"$gt":after}});
+        let page: Vec<Document> = db
+            .collection::<Document>(USER_PROVIDER_TOKENS)
+            .find(filter)
+            .sort(doc! {"_id":1})
+            .limit(32)
+            .await?
+            .try_collect()
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        after = page
+            .last()
+            .and_then(|row| row.get_str("_id").ok())
+            .map(str::to_owned);
+        for raw_token in &page {
+            let token: UserProviderToken =
+                bson::from_document(raw_token.clone()).map_err(|_| {
+                    crate::errors::AppError::Internal("Invalid provider credential storage".into())
+                })?;
+            let token = &token;
+            if matches!(
+                token.status.as_str(),
+                "revoked" | "failed" | "refresh_failed"
+            ) {
+                continue;
+            }
+            // Check idempotency: skip if already migrated. Both collections are
+            // checked because `cleanup_duplicate_migration_services` can delete a
+            // sibling `user_api_keys` row while leaving the matching
+            // `user_services` row in place, leaving stale state that would
+            // otherwise re-trigger the insert and hit the unique index.
+            let existing_api_key =
+                crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                     .find_one(doc! {
-                        "user_id": &token.user_id,
-                        "catalog_service_id": csid,
-                        "is_active": true,
+                        "source": "migration_provider_token",
+                        "source_id": &token.id,
                     })
                     .await?;
-            if already_has_service.is_some() {
+            if existing_api_key.is_some() {
                 continue;
             }
-        }
+            let existing_service =
+                crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                    .find_one(doc! {
+                        "source": "migration_provider_token",
+                        "source_id": &token.id,
+                    })
+                    .await?;
+            if existing_service.is_some() {
+                continue;
+            }
 
-        let base_slug = slug;
-        let slug = match resolve_migration_user_service_slug(db, &token.user_id, &base_slug).await {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                tracing::warn!(
+            // Load ProviderConfig for name
+            let provider = db
+                .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .find_one(doc! { "_id": &token.provider_config_id })
+                .await?;
+
+            // Legacy Google tokens have no product identity. Only the original
+            // api-google service is a valid migration target, regardless of the
+            // insertion order of products sharing its provider. If it is absent,
+            // leave the token alone until that legacy target becomes available.
+            let mut service_filter = doc! {
+                "provider_config_id": &token.provider_config_id, "is_active": true,
+            };
+            let legacy_google = provider.as_ref().is_some_and(|p| p.slug == "google");
+            if legacy_google {
+                service_filter.insert("slug", "api-google");
+            }
+            let service = db
+                .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .find_one(service_filter)
+                .await?;
+            if (legacy_google && service.is_none())
+                || service.as_ref().is_some_and(|service| {
+                    crate::services::google_workspace::GoogleProduct::from_slug(&service.slug)
+                        .is_some()
+                })
+            {
+                // Also reject product rows when the provider is missing or renamed.
+                continue;
+            }
+
+            let provider_name = provider
+                .as_ref()
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "Unknown Provider".to_string());
+            let provider_slug = provider
+                .as_ref()
+                .map(|p| p.slug.clone())
+                .unwrap_or_else(|| format!("provider-{}", token.provider_config_id));
+
+            let now = Utc::now();
+            let endpoint_id = uuid::Uuid::new_v4().to_string();
+            let api_key_id = uuid::Uuid::new_v4().to_string();
+            let service_id = uuid::Uuid::new_v4().to_string();
+
+            // Determine endpoint URL and catalog info
+            let (endpoint_url, catalog_service_id, slug, auth_method, auth_key_name) =
+                if let Some(ref svc) = service {
+                    let url = token
+                        .gateway_url
+                        .as_deref()
+                        .filter(|u| !u.is_empty())
+                        .unwrap_or(&svc.base_url);
+                    (
+                        url.to_string(),
+                        Some(svc.id.clone()),
+                        svc.slug.clone(),
+                        svc.auth_method.clone(),
+                        svc.auth_key_name.clone(),
+                    )
+                } else {
+                    let url = token
+                        .gateway_url
+                        .as_deref()
+                        .filter(|u| !u.is_empty())
+                        .unwrap_or("https://placeholder.invalid");
+                    (
+                        url.to_string(),
+                        None,
+                        provider_slug,
+                        "bearer".to_string(),
+                        "Authorization".to_string(),
+                    )
+                };
+
+            // Skip if a UserService already exists for this user + catalog service
+            // (e.g., created by an earlier token for the same provider)
+            if let Some(ref csid) = catalog_service_id {
+                let already_has_service =
+                    crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                        .find_one(doc! {
+                            "user_id": &token.user_id,
+                            "catalog_service_id": csid,
+                            "is_active": true,
+                        })
+                        .await?;
+                if already_has_service.is_some() {
+                    continue;
+                }
+            }
+
+            let base_slug = slug;
+            let slug = match resolve_migration_user_service_slug(db, &token.user_id, &base_slug)
+                .await
+            {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    tracing::warn!(
+                        user_id = %token.user_id,
+                        source_id = %token.id,
+                        base_slug = %base_slug,
+                        "Skipping provider token migration: active user service slug space exhausted"
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if slug != base_slug {
+                tracing::info!(
                     user_id = %token.user_id,
                     source_id = %token.id,
-                    base_slug = %base_slug,
-                    "Skipping provider token migration: active user service slug space exhausted"
+                    original_slug = %base_slug,
+                    resolved_slug = %slug,
+                    "Provider token migration resolved active user service slug collision"
                 );
+            }
+
+            // Create UserEndpoint
+            let endpoint = UserEndpoint {
+                id: endpoint_id.clone(),
+                user_id: token.user_id.clone(),
+                label: provider_name.clone(),
+                url: endpoint_url,
+                catalog_service_id: catalog_service_id.clone(),
+                openapi_spec_url: None,
+                recommended_skills: None,
+                created_at: now,
+                updated_at: now,
+            };
+            // Only the app owner actually recorded on the token can supply BYO
+            // material. An unrelated same-owner Custom App must not change lineage.
+            let raw_creds = if let Some(owner) = token.credential_user_id.as_deref() {
+                db.collection::<Document>(USER_PROVIDER_CREDENTIALS)
+                    .find_one(doc! {"user_id":owner,"provider_config_id":&token.provider_config_id})
+                    .await?
+            } else {
+                None
+            };
+            if token.credential_user_id.is_some() && raw_creds.is_none() {
                 continue;
             }
-            Err(e) => return Err(e.into()),
-        };
-        if slug != base_slug {
-            tracing::info!(
-                user_id = %token.user_id,
-                source_id = %token.id,
-                original_slug = %base_slug,
-                resolved_slug = %slug,
-                "Provider token migration resolved active user service slug collision"
-            );
-        }
+            let user_creds: Option<UserProviderCredentials> = raw_creds
+                .as_ref()
+                .map(|row| bson::from_document(row.clone()))
+                .transpose()
+                .map_err(|_| {
+                    crate::errors::AppError::Internal("Invalid OAuth app credential storage".into())
+                })?;
 
-        // Create UserEndpoint
-        let endpoint = UserEndpoint {
-            id: endpoint_id.clone(),
-            user_id: token.user_id.clone(),
-            label: provider_name.clone(),
-            url: endpoint_url,
-            catalog_service_id: catalog_service_id.clone(),
-            openapi_spec_url: None,
-            recommended_skills: None,
-            created_at: now,
-            updated_at: now,
-        };
-        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-            .insert_one(&endpoint)
+            // Authenticate each producer field and bind it to the reserved target.
+            use crate::services::credential_record_service::{self as records, CredentialRecord};
+            let mut versions = Default::default();
+            let credential_encrypted = records::rebind_optional(
+                keys,
+                &CredentialRecord::token(token),
+                "api_key_encrypted",
+                token.api_key_encrypted.as_deref(),
+                records::FieldDestination {
+                    collection: USER_API_KEYS,
+                    record_id: &api_key_id,
+                    owner_id: &token.user_id,
+                    field: "credential_encrypted",
+                },
+                &mut versions,
+            )
             .await?;
-
-        // Look up user provider credentials for OAuth app credentials
-        let user_creds = db
-            .collection::<UserProviderCredentials>(USER_PROVIDER_CREDENTIALS)
-            .find_one(doc! {
-                "user_id": &token.user_id,
-                "provider_config_id": &token.provider_config_id,
+            let access_token_encrypted = records::rebind_optional(
+                keys,
+                &CredentialRecord::token(token),
+                "access_token_encrypted",
+                token.access_token_encrypted.as_deref(),
+                records::FieldDestination {
+                    collection: USER_API_KEYS,
+                    record_id: &api_key_id,
+                    owner_id: &token.user_id,
+                    field: "access_token_encrypted",
+                },
+                &mut versions,
+            )
+            .await?;
+            let refresh_token_encrypted = records::rebind_optional(
+                keys,
+                &CredentialRecord::token(token),
+                "refresh_token_encrypted",
+                token.refresh_token_encrypted.as_deref(),
+                records::FieldDestination {
+                    collection: USER_API_KEYS,
+                    record_id: &api_key_id,
+                    owner_id: &token.user_id,
+                    field: "refresh_token_encrypted",
+                },
+                &mut versions,
+            )
+            .await?;
+            let user_oauth_client_id_encrypted = match &user_creds {
+                Some(source) => {
+                    records::rebind_optional(
+                        keys,
+                        &CredentialRecord::user_credentials(source),
+                        "client_id_encrypted",
+                        source.client_id_encrypted.as_deref(),
+                        records::FieldDestination {
+                            collection: USER_API_KEYS,
+                            record_id: &api_key_id,
+                            owner_id: &token.user_id,
+                            field: "user_oauth_client_id_encrypted",
+                        },
+                        &mut versions,
+                    )
+                    .await?
+                }
+                None => None,
+            };
+            let user_oauth_client_secret_encrypted = match &user_creds {
+                Some(source) => {
+                    records::rebind_optional(
+                        keys,
+                        &CredentialRecord::user_credentials(source),
+                        "client_secret_encrypted",
+                        source.client_secret_encrypted.as_deref(),
+                        records::FieldDestination {
+                            collection: USER_API_KEYS,
+                            record_id: &api_key_id,
+                            owner_id: &token.user_id,
+                            field: "user_oauth_client_secret_encrypted",
+                        },
+                        &mut versions,
+                    )
+                    .await?
+                }
+                None => None,
+            };
+            // Create UserApiKey -- clean up endpoint on failure
+            let api_key = UserApiKey {
+                secret_context_versions: versions,
+                oauth_app_observation: (token.token_type == "oauth2").then(|| {
+                    crate::services::oauth_app_source::OAuthAppSource::from_credential_owner(
+                        token.credential_user_id.as_deref(),
+                    )
+                    .observation(1)
+                }),
+                credential_source: None,
+                id: api_key_id.clone(),
+                user_id: token.user_id.clone(),
+                label: token.label.clone().unwrap_or(provider_name),
+                credential_type: token.token_type.clone(),
+                credential_encrypted,
+                access_token_encrypted,
+                refresh_token_encrypted,
+                token_scopes: token.token_scopes.clone(),
+                expires_at: token.expires_at,
+                provider_config_id: Some(token.provider_config_id.clone()),
+                connection_id: token.connection_id.clone(),
+                oauth_attempt_nonce: None,
+                user_oauth_client_id_encrypted,
+                user_oauth_client_secret_encrypted,
+                status: token.status.clone(),
+                last_used_at: token.last_used_at,
+                last_authorized_at: None,
+                error_message: token.error_message.clone(),
+                source: Some("migration_provider_token".to_string()),
+                source_id: Some(token.id.clone()),
+                created_at: now,
+                updated_at: now,
+                credential_epoch: 1,
+            };
+            // Create UserService -- clean up endpoint + api_key on failure
+            let inherited_identity = inherited_identity_fields(service.as_ref());
+            let service_type = service
+                .as_ref()
+                .map(|svc| svc.service_type.clone())
+                .unwrap_or_else(|| "http".to_string());
+            let ssh_auth_mode = service
+                .as_ref()
+                .filter(|svc| svc.service_type == "ssh")
+                .and_then(|svc| svc.ssh_config.as_ref().map(|ssh| ssh.ssh_auth_mode))
+                .unwrap_or(SshAuthMode::ProxyOnly);
+            let user_service = UserService {
+                deleted_at: None,
+                created_by: None,
+                last_change: None,
+                id: service_id,
+                user_id: token.user_id.clone(),
+                slug,
+                endpoint_id: endpoint_id.clone(),
+                api_key_id: Some(api_key_id.clone()),
+                credential_binding: None,
+                auth_method,
+                auth_key_name,
+                catalog_service_id,
+                icon_url: None,
+                node_id: None,
+                node_priority: 0,
+                service_type,
+                ssh_auth_mode,
+                admin_only: false,
+                ssh_node_keys_stale: false,
+                identity_propagation_mode: inherited_identity.identity_propagation_mode,
+                identity_include_user_id: inherited_identity.identity_include_user_id,
+                identity_include_email: inherited_identity.identity_include_email,
+                identity_include_name: inherited_identity.identity_include_name,
+                identity_jwt_audience: inherited_identity.identity_jwt_audience,
+                forward_access_token: inherited_identity.forward_access_token,
+                inject_delegation_token: inherited_identity.inject_delegation_token,
+                delegation_token_scope: inherited_identity.delegation_token_scope,
+                custom_user_agent: None,
+                default_request_headers: None,
+                ws_frame_injections: service
+                    .as_ref()
+                    .map(|svc| svc.ws_frame_injections.clone())
+                    .unwrap_or_default(),
+                is_active: true,
+                source: Some("migration_provider_token".to_string()),
+                source_id: Some(token.id.clone()),
+                source_app_id: None,
+                created_at: now,
+                updated_at: now,
+                state_version: 1,
+                rotation_predecessor_id: None,
+            };
+            let transaction_db = db.clone();
+            let source_filter = records::exact_source_filter(USER_PROVIDER_TOKENS, raw_token)?;
+            let source_id = token.id.clone();
+            let token = token.clone();
+            let db = db.clone();
+            let committed = crate::services::service_history::transaction::run_send(&transaction_db, &keys, move |session, _keys| {
+            let db = db.clone();
+            let source_filter = source_filter.clone();
+            let token = token.clone();
+            let raw_creds = raw_creds.clone();
+            let endpoint = endpoint.clone();
+            let api_key = api_key.clone();
+            let user_service = user_service.clone();
+            Box::pin(async move {
+            let operation:crate::errors::AppResult<bool> = async {
+                let source=db.collection::<Document>(USER_PROVIDER_TOKENS).update_one(
+                    source_filter,
+                    doc! {"$inc":{"credential_copy_fence":1_i64}},
+                ).session(&mut **session).await?;
+                if source.matched_count != 1 { return Ok(false) }
+                crate::services::erasure_admission::credential_change_in_session(&db, &token.user_id, session).await?;
+                if let Some(raw) = &raw_creds {
+                    let source = db.collection::<Document>(USER_PROVIDER_CREDENTIALS).update_one(
+                        records::exact_source_filter(USER_PROVIDER_CREDENTIALS, raw)?,
+                        doc! {"$inc":{"credential_copy_fence":1_i64}},
+                    ).session(&mut **session).await?;
+                    if source.matched_count != 1 {
+                        return Err(crate::errors::AppError::Conflict("OAuth app credentials changed during migration".into()));
+                    }
+                    let owner=raw.get_str("user_id").map_err(|_|crate::errors::AppError::Internal("Invalid OAuth app owner".into()))?;
+                    if owner != token.user_id {
+                        crate::services::erasure_admission::credential_change_in_session(&db, owner, session).await?;
+                    }
+                }
+                // Recheck reuse in the source-fenced transaction. No partial
+                // endpoint/key is published, and rollback needs no cleanup writes.
+                let keys_collection=crate::services::service_history::collection::<UserApiKey>(&db,USER_API_KEYS);
+                let services=crate::services::service_history::collection::<UserService>(&db,USER_SERVICES);
+                if keys_collection.find_one(doc! {"source":"migration_provider_token","source_id":&token.id}).session(&mut *session).await?.is_some()
+                    || services.find_one(doc! {"source":"migration_provider_token","source_id":&token.id}).session(&mut *session).await?.is_some() {return Ok(false)}
+                if let Some(catalog) = &user_service.catalog_service_id
+                    && services.find_one(doc! {"user_id":&token.user_id,"catalog_service_id":catalog,"is_active":true}).session(&mut *session).await?.is_some() { return Ok(false) }
+                crate::services::service_history::collection::<UserEndpoint>(&db, USER_ENDPOINTS)
+                    .insert_one(&endpoint).session(&mut *session).await?;
+                keys_collection.insert_one(&api_key).session(&mut *session).await?;
+                services.insert_one(&user_service).session(&mut *session).await?;
+                Ok(true)
+            }.await;
+            crate::services::api_key_mutation_service::transaction_result(operation)
             })
-            .await?;
-
-        // Create UserApiKey -- clean up endpoint on failure
-        let api_key = UserApiKey {
-            oauth_app_observation: (token.token_type == "oauth2").then(|| {
-                crate::services::oauth_app_source::OAuthAppSource::from_credential_owner(
-                    token.credential_user_id.as_deref(),
-                )
-                .observation(1)
-            }),
-            credential_source: None,
-            id: api_key_id.clone(),
-            user_id: token.user_id.clone(),
-            label: token.label.clone().unwrap_or(provider_name),
-            credential_type: token.token_type.clone(),
-            credential_encrypted: token.api_key_encrypted.clone(),
-            access_token_encrypted: token.access_token_encrypted.clone(),
-            refresh_token_encrypted: token.refresh_token_encrypted.clone(),
-            token_scopes: token.token_scopes.clone(),
-            expires_at: token.expires_at,
-            provider_config_id: Some(token.provider_config_id.clone()),
-            connection_id: token.connection_id.clone(),
-            oauth_attempt_nonce: None,
-            user_oauth_client_id_encrypted: user_creds
-                .as_ref()
-                .and_then(|c| c.client_id_encrypted.clone()),
-            user_oauth_client_secret_encrypted: user_creds
-                .as_ref()
-                .and_then(|c| c.client_secret_encrypted.clone()),
-            status: token.status.clone(),
-            last_used_at: token.last_used_at,
-            last_authorized_at: None,
-            error_message: token.error_message.clone(),
-            source: Some("migration_provider_token".to_string()),
-            source_id: Some(token.id.clone()),
-            created_at: now,
-            updated_at: now,
-            credential_epoch: 1,
-        };
-        if let Err(e) =
-            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-                .insert_one(&api_key)
-                .await
-        {
-            // Clean up orphaned endpoint
-            let _ =
-                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-                    .delete_one(doc! { "_id": &endpoint_id })
-                    .await;
-            return Err(e.into());
-        }
-
-        // Create UserService -- clean up endpoint + api_key on failure
-        let inherited_identity = inherited_identity_fields(service.as_ref());
-        let service_type = service
-            .as_ref()
-            .map(|svc| svc.service_type.clone())
-            .unwrap_or_else(|| "http".to_string());
-        let ssh_auth_mode = service
-            .as_ref()
-            .filter(|svc| svc.service_type == "ssh")
-            .and_then(|svc| svc.ssh_config.as_ref().map(|ssh| ssh.ssh_auth_mode))
-            .unwrap_or(SshAuthMode::ProxyOnly);
-        let user_service = UserService {
-            deleted_at: None,
-            created_by: None,
-            last_change: None,
-            id: service_id,
-            user_id: token.user_id.clone(),
-            slug,
-            endpoint_id: endpoint_id.clone(),
-            api_key_id: Some(api_key_id.clone()),
-            credential_binding: None,
-            auth_method,
-            auth_key_name,
-            catalog_service_id,
-            icon_url: None,
-            node_id: None,
-            node_priority: 0,
-            service_type,
-            ssh_auth_mode,
-            admin_only: false,
-            ssh_node_keys_stale: false,
-            identity_propagation_mode: inherited_identity.identity_propagation_mode,
-            identity_include_user_id: inherited_identity.identity_include_user_id,
-            identity_include_email: inherited_identity.identity_include_email,
-            identity_include_name: inherited_identity.identity_include_name,
-            identity_jwt_audience: inherited_identity.identity_jwt_audience,
-            forward_access_token: inherited_identity.forward_access_token,
-            inject_delegation_token: inherited_identity.inject_delegation_token,
-            delegation_token_scope: inherited_identity.delegation_token_scope,
-            custom_user_agent: None,
-            default_request_headers: None,
-            ws_frame_injections: service
-                .as_ref()
-                .map(|svc| svc.ws_frame_injections.clone())
-                .unwrap_or_default(),
-            is_active: true,
-            source: Some("migration_provider_token".to_string()),
-            source_id: Some(token.id.clone()),
-            source_app_id: None,
-            created_at: now,
-            updated_at: now,
-            state_version: 1,
-            rotation_predecessor_id: None,
-        };
-        if let Err(e) =
-            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-                .insert_one(&user_service)
-                .await
-        {
-            // Clean up orphaned endpoint and api_key
-            let _ =
-                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-                    .delete_one(doc! { "_id": &endpoint_id })
-                    .await;
-            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-                .delete_one(doc! { "_id": &api_key_id })
-                .await;
-            if is_duplicate_key_error(&e) {
-                tracing::warn!(
-                    source_id = %token.id,
-                    "Skipping provider token migration: user_service with this source_id already exists"
-                );
-                continue;
+        }).await;
+            match committed {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(error) if is_duplicate_key_error(&error) => continue,
+                Err(error) => {
+                    match crate::services::api_key_mutation_service::map_transaction_error(error) {
+                        crate::errors::AppError::Conflict(_) => {
+                            tracing::info!(source_id = %source_id, reason = "owner_or_source_changed",
+                                "Provider token migration skipped an ineligible source generation");
+                            continue;
+                        }
+                        error => return Err(error.into()),
+                    }
+                }
             }
-            return Err(e.into());
-        }
 
-        migrated += 1;
+            migrated += 1;
+        }
     }
 
     if migrated > 0 {
@@ -4769,238 +5011,295 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
 }
 
 /// Migrate UserServiceConnections to the unified model.
-async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
-    let connections: Vec<UserServiceConnection> = db
-        .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
-        .find(doc! { "is_active": true })
-        .await?
-        .try_collect()
-        .await?;
-
+pub(crate) async fn migrate_service_connections(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut after: Option<String> = None;
     let mut migrated = 0u64;
-    for conn in &connections {
-        // Check idempotency. Both collections are checked because
-        // `cleanup_duplicate_migration_services` can delete a sibling
-        // `user_api_keys` row while leaving the matching `user_services` row
-        // in place, leaving stale state that would otherwise re-trigger the
-        // insert and hit the unique index.
-        let existing_api_key =
-            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-                .find_one(doc! {
-                    "source": "migration_connection",
-                    "source_id": &conn.id,
-                })
-                .await?;
-        if existing_api_key.is_some() {
-            continue;
+    loop {
+        let mut filter = doc! {"is_active":true};
+        if let Some(id) = &after {
+            filter.insert("_id", doc! {"$gt":id});
         }
-        let existing_service =
-            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-                .find_one(doc! {
-                    "source": "migration_connection",
-                    "source_id": &conn.id,
-                })
-                .await?;
-        if existing_service.is_some() {
-            continue;
-        }
-
-        // Load the downstream service
-        let service = match db
-            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .find_one(doc! { "_id": &conn.service_id })
+        let sources: Vec<Document> = db
+            .collection::<Document>(USER_SERVICE_CONNECTIONS)
+            .find(filter)
+            .sort(doc! {"_id":1})
+            .limit(64)
             .await?
-        {
-            Some(s) => s,
-            None => {
-                tracing::warn!(
-                    conn_id = %conn.id,
-                    service_id = %conn.service_id,
-                    "Skipping connection migration: downstream service not found"
-                );
+            .try_collect()
+            .await?;
+        if sources.is_empty() {
+            break;
+        }
+        for source in sources {
+            let source_id = source
+                .get_str("_id")
+                .map_err(|_| {
+                    crate::errors::AppError::Internal(
+                        "Invalid connection migration identity".into(),
+                    )
+                })?
+                .to_owned();
+            after = Some(source_id.clone());
+            let conn: UserServiceConnection =
+                bson::from_document(source.clone()).map_err(|_| {
+                    crate::errors::AppError::Internal("Invalid connection migration source".into())
+                })?;
+            // Check idempotency. Both collections are checked because
+            // `cleanup_duplicate_migration_services` can delete a sibling
+            // `user_api_keys` row while leaving the matching `user_services` row
+            // in place, leaving stale state that would otherwise re-trigger the
+            // insert and hit the unique index.
+            let existing_api_key =
+                crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                    .find_one(doc! {
+                        "source": "migration_connection",
+                        "source_id": &conn.id,
+                    })
+                    .await?;
+            if existing_api_key.is_some() {
                 continue;
             }
-        };
+            let existing_service =
+                crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                    .find_one(doc! {
+                        "source": "migration_connection",
+                        "source_id": &conn.id,
+                    })
+                    .await?;
+            if existing_service.is_some() {
+                continue;
+            }
 
-        // Check if already migrated via provider token path
-        let already_has_service =
-            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-                .find_one(doc! {
-                    "user_id": &conn.user_id,
-                    "catalog_service_id": &service.id,
-                    "is_active": true,
-                })
-                .await?;
-        if already_has_service.is_some() {
-            continue;
-        }
+            // Load the downstream service
+            let raw_service = match db
+                .collection::<Document>(DOWNSTREAM_SERVICES)
+                .find_one(doc! { "_id": &conn.service_id })
+                .await?
+            {
+                Some(s) => s,
+                None => {
+                    tracing::warn!(
+                        conn_id = %conn.id,
+                        service_id = %conn.service_id,
+                        "Skipping connection migration: downstream service not found"
+                    );
+                    continue;
+                }
+            };
 
-        let slug = match resolve_migration_user_service_slug(db, &conn.user_id, &service.slug).await
-        {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                tracing::warn!(
+            let service: DownstreamService =
+                bson::from_document(raw_service.clone()).map_err(|_| {
+                    crate::errors::AppError::Internal("Invalid connection catalog source".into())
+                })?;
+
+            // Check if already migrated via provider token path
+            let already_has_service =
+                crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                    .find_one(doc! {
+                        "user_id": &conn.user_id,
+                        "catalog_service_id": &service.id,
+                        "is_active": true,
+                    })
+                    .await?;
+            if already_has_service.is_some() {
+                continue;
+            }
+
+            let slug = match resolve_migration_user_service_slug(db, &conn.user_id, &service.slug)
+                .await
+            {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    tracing::warn!(
+                        user_id = %conn.user_id,
+                        source_id = %conn.id,
+                        base_slug = %service.slug,
+                        "Skipping service connection migration: active user service slug space exhausted"
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if slug != service.slug {
+                tracing::info!(
                     user_id = %conn.user_id,
                     source_id = %conn.id,
-                    base_slug = %service.slug,
-                    "Skipping service connection migration: active user service slug space exhausted"
+                    original_slug = %service.slug,
+                    resolved_slug = %slug,
+                    "Service connection migration resolved active user service slug collision"
                 );
-                continue;
             }
-            Err(e) => return Err(e.into()),
-        };
-        if slug != service.slug {
-            tracing::info!(
-                user_id = %conn.user_id,
-                source_id = %conn.id,
-                original_slug = %service.slug,
-                resolved_slug = %slug,
-                "Service connection migration resolved active user service slug collision"
-            );
-        }
 
-        let now = Utc::now();
-        let endpoint_id = uuid::Uuid::new_v4().to_string();
-        let api_key_id = uuid::Uuid::new_v4().to_string();
-        let service_id = uuid::Uuid::new_v4().to_string();
+            let now = Utc::now();
+            let endpoint_id = uuid::Uuid::new_v4().to_string();
+            let api_key_id = uuid::Uuid::new_v4().to_string();
+            let service_id = uuid::Uuid::new_v4().to_string();
 
-        // Create UserEndpoint
-        let endpoint = UserEndpoint {
-            id: endpoint_id.clone(),
-            user_id: conn.user_id.clone(),
-            label: service.name.clone(),
-            url: service.base_url.clone(),
-            catalog_service_id: Some(service.id.clone()),
-            openapi_spec_url: service.openapi_spec_url.clone(),
-            recommended_skills: None,
-            created_at: now,
-            updated_at: now,
-        };
-        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-            .insert_one(&endpoint)
-            .await?;
+            // Create UserEndpoint
+            let endpoint = UserEndpoint {
+                id: endpoint_id.clone(),
+                user_id: conn.user_id.clone(),
+                label: service.name.clone(),
+                url: service.base_url.clone(),
+                catalog_service_id: Some(service.id.clone()),
+                openapi_spec_url: service.openapi_spec_url.clone(),
+                recommended_skills: None,
+                created_at: now,
+                updated_at: now,
+            };
 
-        // Create UserApiKey -- clean up endpoint on failure
-        let cred_type = conn
-            .credential_type
-            .clone()
-            .or_else(|| service.auth_type.clone())
-            .unwrap_or_else(|| "api_key".to_string());
-        let api_key = UserApiKey {
-            oauth_app_observation: None,
-            credential_source: None,
-            id: api_key_id.clone(),
-            user_id: conn.user_id.clone(),
-            label: conn
-                .credential_label
+            // Create UserApiKey -- clean up endpoint on failure
+            let cred_type = conn
+                .credential_type
                 .clone()
-                .unwrap_or_else(|| service.name.clone()),
-            credential_type: cred_type,
-            credential_encrypted: conn.credential_encrypted.clone(),
-            access_token_encrypted: None,
-            refresh_token_encrypted: None,
-            token_scopes: None,
-            expires_at: None,
-            provider_config_id: None,
-            connection_id: None,
-            oauth_attempt_nonce: None,
-            user_oauth_client_id_encrypted: None,
-            user_oauth_client_secret_encrypted: None,
-            status: "active".to_string(),
-            last_used_at: None,
-            last_authorized_at: None,
-            error_message: None,
-            source: Some("migration_connection".to_string()),
-            source_id: Some(conn.id.clone()),
-            created_at: now,
-            updated_at: now,
-            credential_epoch: 1,
-        };
-        if let Err(e) =
-            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-                .insert_one(&api_key)
-                .await
-        {
-            let _ =
-                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-                    .delete_one(doc! { "_id": &endpoint_id })
-                    .await;
-            return Err(e.into());
-        }
-
-        // Create UserService -- clean up endpoint + api_key on failure
-        let inherited_identity = inherited_identity_fields(Some(&service));
-        let user_service = UserService {
-            deleted_at: None,
-            created_by: None,
-            last_change: None,
-            id: service_id,
-            user_id: conn.user_id.clone(),
-            slug,
-            endpoint_id: endpoint_id.clone(),
-            api_key_id: Some(api_key_id.clone()),
-            credential_binding: None,
-            auth_method: service.auth_method.clone(),
-            auth_key_name: service.auth_key_name.clone(),
-            catalog_service_id: Some(service.id.clone()),
-            icon_url: None,
-            node_id: None,
-            node_priority: 0,
-            service_type: service.service_type.clone(),
-            ssh_auth_mode: if service.service_type == "ssh" {
-                service
-                    .ssh_config
-                    .as_ref()
-                    .map(|ssh| ssh.ssh_auth_mode)
-                    .unwrap_or(SshAuthMode::ProxyOnly)
-            } else {
-                SshAuthMode::ProxyOnly
-            },
-            admin_only: false,
-            ssh_node_keys_stale: false,
-            identity_propagation_mode: inherited_identity.identity_propagation_mode,
-            identity_include_user_id: inherited_identity.identity_include_user_id,
-            identity_include_email: inherited_identity.identity_include_email,
-            identity_include_name: inherited_identity.identity_include_name,
-            identity_jwt_audience: inherited_identity.identity_jwt_audience,
-            forward_access_token: inherited_identity.forward_access_token,
-            inject_delegation_token: inherited_identity.inject_delegation_token,
-            delegation_token_scope: inherited_identity.delegation_token_scope,
-            custom_user_agent: None,
-            default_request_headers: None,
-            ws_frame_injections: service.ws_frame_injections.clone(),
-            is_active: true,
-            source: Some("migration_connection".to_string()),
-            source_id: Some(conn.id.clone()),
-            source_app_id: None,
-            created_at: now,
-            updated_at: now,
-            state_version: 1,
-            rotation_predecessor_id: None,
-        };
-        if let Err(e) =
-            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-                .insert_one(&user_service)
-                .await
-        {
-            let _ =
-                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-                    .delete_one(doc! { "_id": &endpoint_id })
-                    .await;
-            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-                .delete_one(doc! { "_id": &api_key_id })
-                .await;
-            if is_duplicate_key_error(&e) {
-                tracing::warn!(
-                    source_id = %conn.id,
-                    "Skipping service connection migration: user_service with this source_id already exists"
+                .or_else(|| service.auth_type.clone())
+                .unwrap_or_else(|| "api_key".to_string());
+            let mut versions = std::collections::BTreeMap::new();
+            let credential_encrypted = if conn.credential_encrypted.is_some() {
+                let plaintext =
+                    crate::services::connection_record_service::text(keys, &conn).await?;
+                let ciphertext = crate::services::credential_record_service::encrypt(
+                    keys,
+                    USER_API_KEYS,
+                    &api_key_id,
+                    &conn.user_id,
+                    "credential_encrypted",
+                    plaintext.as_bytes(),
+                )
+                .await?;
+                crate::services::credential_record_service::mark_version(
+                    &mut versions,
+                    keys,
+                    "credential_encrypted",
                 );
-                continue;
+                Some(ciphertext)
+            } else {
+                None
+            };
+            let api_key = UserApiKey {
+                secret_context_versions: versions,
+                oauth_app_observation: None,
+                credential_source: None,
+                id: api_key_id.clone(),
+                user_id: conn.user_id.clone(),
+                label: conn
+                    .credential_label
+                    .clone()
+                    .unwrap_or_else(|| service.name.clone()),
+                credential_type: cred_type,
+                credential_encrypted,
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_attempt_nonce: None,
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                status: "active".to_string(),
+                last_used_at: None,
+                last_authorized_at: None,
+                error_message: None,
+                source: Some("migration_connection".to_string()),
+                source_id: Some(conn.id.clone()),
+                created_at: now,
+                updated_at: now,
+                credential_epoch: 1,
+            };
+            let inherited_identity = inherited_identity_fields(Some(&service));
+            let user_service = UserService {
+                deleted_at: None,
+                created_by: None,
+                last_change: None,
+                id: service_id,
+                user_id: conn.user_id.clone(),
+                slug,
+                endpoint_id: endpoint_id.clone(),
+                api_key_id: Some(api_key_id.clone()),
+                credential_binding: None,
+                auth_method: service.auth_method.clone(),
+                auth_key_name: service.auth_key_name.clone(),
+                catalog_service_id: Some(service.id.clone()),
+                icon_url: None,
+                node_id: None,
+                node_priority: 0,
+                service_type: service.service_type.clone(),
+                ssh_auth_mode: if service.service_type == "ssh" {
+                    service
+                        .ssh_config
+                        .as_ref()
+                        .map(|ssh| ssh.ssh_auth_mode)
+                        .unwrap_or(SshAuthMode::ProxyOnly)
+                } else {
+                    SshAuthMode::ProxyOnly
+                },
+                admin_only: false,
+                ssh_node_keys_stale: false,
+                identity_propagation_mode: inherited_identity.identity_propagation_mode,
+                identity_include_user_id: inherited_identity.identity_include_user_id,
+                identity_include_email: inherited_identity.identity_include_email,
+                identity_include_name: inherited_identity.identity_include_name,
+                identity_jwt_audience: inherited_identity.identity_jwt_audience,
+                forward_access_token: inherited_identity.forward_access_token,
+                inject_delegation_token: inherited_identity.inject_delegation_token,
+                delegation_token_scope: inherited_identity.delegation_token_scope,
+                custom_user_agent: None,
+                default_request_headers: None,
+                ws_frame_injections: service.ws_frame_injections.clone(),
+                is_active: true,
+                source: Some("migration_connection".to_string()),
+                source_id: Some(conn.id.clone()),
+                source_app_id: None,
+                created_at: now,
+                updated_at: now,
+                state_version: 1,
+                rotation_predecessor_id: None,
+            };
+            let transaction_db = crate::services::transaction_service::durable_database(db);
+            let db = transaction_db.clone();
+            let committed=crate::services::service_history::transaction::run_send(&transaction_db,&keys,move |session,_keys| {
+            let db=db.clone();let source=source.clone();let raw_service=raw_service.clone();
+            let conn=conn.clone();let endpoint=endpoint.clone();let api_key=api_key.clone();let user_service=user_service.clone();
+            Box::pin(async move {
+                let operation:crate::errors::AppResult<bool>=async {
+                    let changed=db.collection::<Document>(USER_SERVICE_CONNECTIONS).update_one(
+                        crate::services::record_storage::exact_document_predicate(&source),doc!{"$inc":{"credential_copy_fence":1_i64}}).session(&mut **session).await?;
+                    if changed.matched_count!=1 {return Ok(false);}
+                    let changed=db.collection::<Document>(DOWNSTREAM_SERVICES).update_one(
+                        crate::services::record_storage::exact_document_predicate(&raw_service),doc!{"$inc":{"credential_copy_fence":1_i64}}).session(&mut **session).await?;
+                    if changed.matched_count!=1 {return Err(crate::errors::AppError::Conflict("Connection catalog source changed during migration".into()));}
+                    crate::services::erasure_admission::credential_change_in_session(&db,&conn.user_id,session).await?;
+                    let keys=crate::services::service_history::collection::<UserApiKey>(&db,USER_API_KEYS);
+                    let services=crate::services::service_history::collection::<UserService>(&db,USER_SERVICES);
+                    if keys.find_one(doc!{"source":"migration_connection","source_id":&conn.id}).session(&mut *session).await?.is_some()
+                        || services.find_one(doc!{"source":"migration_connection","source_id":&conn.id}).session(&mut *session).await?.is_some()
+                        || services.find_one(doc!{"user_id":&conn.user_id,"catalog_service_id":&conn.service_id,"is_active":true}).session(&mut *session).await?.is_some(){return Ok(false);}
+                    crate::services::service_history::collection::<UserEndpoint>(&db,USER_ENDPOINTS).insert_one(&endpoint).session(&mut *session).await?;
+                    keys.insert_one(&api_key).session(&mut *session).await?;
+                    services.insert_one(&user_service).session(&mut *session).await?;
+                    Ok(true)
+                }.await;
+                crate::services::api_key_mutation_service::transaction_result(operation)
+            })
+        }).await;
+            match committed {
+                Ok(true) => migrated += 1,
+                Ok(false) => {}
+                Err(error) if is_duplicate_key_error(&error) => {}
+                Err(error) => {
+                    match crate::services::api_key_mutation_service::map_transaction_error(error) {
+                        crate::errors::AppError::Conflict(_) => {
+                            tracing::info!(source_id=%source_id,reason="owner_or_source_changed","Connection migration skipped an ineligible source generation")
+                        }
+                        error => return Err(error.into()),
+                    }
+                }
             }
-            return Err(e.into());
         }
-
-        migrated += 1;
     }
 
     if migrated > 0 {
@@ -5155,6 +5454,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
 
         // Create UserApiKey (placeholder -- node-managed or SSH certificate)
         let api_key = UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: api_key_id.clone(),
@@ -5480,6 +5780,13 @@ mod tests {
         }
         let token_id = uuid::Uuid::new_v4().to_string();
         let owner_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let now = bson::DateTime::now();
         db.collection::<Document>(USER_PROVIDER_TOKENS)
             .insert_one(doc! {
@@ -5488,7 +5795,7 @@ mod tests {
             })
             .await
             .unwrap();
-        migrate_provider_tokens(&db).await.unwrap();
+        migrate_provider_tokens(&db, &enc).await.unwrap();
         for collection in [USER_ENDPOINTS, USER_API_KEYS, USER_SERVICES] {
             assert_eq!(
                 db.collection::<Document>(collection)
@@ -5505,7 +5812,7 @@ mod tests {
         legacy.base_url = "https://www.googleapis.com".into();
         legacy.provider_config_id = Some(provider.id.clone());
         services.insert_one(&legacy).await.unwrap();
-        migrate_provider_tokens(&db).await.unwrap();
+        migrate_provider_tokens(&db, &enc).await.unwrap();
         let migrated = db
             .collection::<UserService>(USER_SERVICES)
             .find_one(doc! {"source_id":&token_id})
@@ -5543,7 +5850,7 @@ mod tests {
                 .unwrap();
             snapshots.push((collection, rows));
         }
-        migrate_provider_tokens(&db).await.unwrap();
+        migrate_provider_tokens(&db, &enc).await.unwrap();
         for (collection, original) in snapshots {
             let rows: Vec<Document> = db
                 .collection::<Document>(collection)
@@ -5633,6 +5940,7 @@ mod tests {
 
     fn sample_downstream_service() -> DownstreamService {
         DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,

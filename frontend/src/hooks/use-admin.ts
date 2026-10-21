@@ -1,3 +1,5 @@
+import { withErasurePreparation } from "@/lib/erasure-preparation";
+import { accountErasureSchema, type AccountErasure } from "@/schemas/account-erasure";
 import {
   keepPreviousData,
   useMutation,
@@ -207,8 +209,8 @@ export function useDeleteUser() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (userId: string): Promise<AdminActionResponse> => {
-      return api.delete<AdminActionResponse>(`/admin/users/${userId}`);
+    mutationFn: async (userId: string): Promise<AccountErasure> => {
+      return accountErasureSchema.parse(await withErasurePreparation(() => api.delete<unknown>(`/admin/users/${userId}`)));
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["admin", "users"] });

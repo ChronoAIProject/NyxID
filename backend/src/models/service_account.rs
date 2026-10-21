@@ -31,7 +31,7 @@ pub struct CurationGrant {
 
 pub const COLLECTION_NAME: &str = "service_accounts";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ServiceAccount {
     /// UUID v4 string, serves as the identity subject (`sub` in JWT claims).
     #[serde(rename = "_id")]
@@ -101,6 +101,12 @@ impl ServiceAccount {
     /// Falls back to `created_by` for records created before `owner_user_id` existed.
     pub fn effective_owner_user_id(&self) -> &str {
         self.owner_user_id.as_deref().unwrap_or(&self.created_by)
+    }
+}
+
+impl std::fmt::Debug for ServiceAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceAccount").finish_non_exhaustive()
     }
 }
 

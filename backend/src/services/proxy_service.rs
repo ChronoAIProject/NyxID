@@ -1,3 +1,4 @@
+use crate::models::default_request_header::SecretHeaders;
 use std::sync::Arc;
 
 use mongodb::bson::doc;
@@ -7,7 +8,9 @@ use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
-use crate::models::default_request_header::{self, DefaultRequestHeader};
+use crate::models::default_request_header::{
+    self, ResolvedDefaultRequestHeader as DefaultRequestHeader,
+};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
 };
@@ -68,7 +71,7 @@ pub struct ProxyTarget {
     pub base_url: String,
     pub auth_method: String,
     pub auth_key_name: String,
-    pub credential: String,
+    pub credential: Zeroizing<String>,
     pub service: DownstreamService,
     /// Admin-configured catalog-level default headers resolved from the
     /// owning `DownstreamService`. Applied to every outbound request in
@@ -111,48 +114,46 @@ impl EffectiveActor {
 
 /// Encrypted bytes for a catalog-owned platform credential. The private
 /// constructor makes authorization the only way to produce this value.
-pub struct AuthorizedMasterCredential(Vec<u8>);
+pub struct AuthorizedMasterCredential {
+    captured: DownstreamService,
+}
 
 impl AuthorizedMasterCredential {
-    fn new(ciphertext: &[u8]) -> Self {
-        Self(ciphertext.to_vec())
+    fn new(service: &DownstreamService) -> Self {
+        Self {
+            captured: service.clone(),
+        }
     }
 
     /// Decrypt a catalog credential only after the authorization wrapper has
     /// been constructed by one of the gate functions.
-    pub async fn decrypt(&self, encryption_keys: &EncryptionKeys) -> AppResult<Vec<u8>> {
-        encryption_keys.decrypt(&self.0).await
+    pub async fn decrypt(&self, encryption_keys: &EncryptionKeys) -> AppResult<Zeroizing<Vec<u8>>> {
+        super::catalog_credential_record_service::bytes(encryption_keys, &self.captured).await
     }
 }
 
 async fn decrypt_authorized_master_credential(
     encryption_keys: &EncryptionKeys,
     credential: &AuthorizedMasterCredential,
-) -> AppResult<Vec<u8>> {
+) -> AppResult<Zeroizing<Vec<u8>>> {
     credential.decrypt(encryption_keys).await
 }
 
 async fn decrypt_user_credential(
     encryption_keys: &EncryptionKeys,
-    encrypted: &[u8],
-) -> AppResult<String> {
-    let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
-    String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-        tracing::error!("Credential UTF-8 decode failed: {e}");
-        AppError::Internal("Failed to decode credential".to_string())
-    })
+    connection: &UserServiceConnection,
+) -> AppResult<Zeroizing<String>> {
+    super::connection_record_service::text(encryption_keys, connection).await
 }
 
 async fn decrypt_master_credential_string(
     encryption_keys: &EncryptionKeys,
     credential: &AuthorizedMasterCredential,
-) -> AppResult<String> {
-    let decrypted_bytes =
-        Zeroizing::new(decrypt_authorized_master_credential(encryption_keys, credential).await?);
-    String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-        tracing::error!("Credential UTF-8 decode failed: {e}");
-        AppError::Internal("Failed to decode credential".to_string())
-    })
+) -> AppResult<Zeroizing<String>> {
+    let decrypted_bytes = decrypt_authorized_master_credential(encryption_keys, credential).await?;
+    std::str::from_utf8(&decrypted_bytes)
+        .map(|value| Zeroizing::new(value.to_owned()))
+        .map_err(|_| AppError::Internal("Failed to decode credential".into()))
 }
 
 /// Catalog master credentials stay on NyxID, including legacy internal rows.
@@ -182,9 +183,7 @@ pub async fn authorize_master_credential(
     if service.platform_key.is_some() {
         super::platform_key_service::require(db, service, &actor.user_id).await?;
         validate_actor_addressed_master_credential_policy(service)?;
-        return Ok(AuthorizedMasterCredential::new(
-            &service.credential_encrypted,
-        ));
+        return Ok(AuthorizedMasterCredential::new(service));
     }
     validate_master_credential_service(service)?;
     validate_actor_addressed_master_credential_policy(service)?;
@@ -233,9 +232,7 @@ pub async fn authorize_master_credential(
         }
     }
 
-    Ok(AuthorizedMasterCredential::new(
-        &service.credential_encrypted,
-    ))
+    Ok(AuthorizedMasterCredential::new(service))
 }
 
 /// Server-selected platform surfaces may serve public rows only.  Private
@@ -284,9 +281,7 @@ pub async fn authorize_master_credential_server_chosen(
     // Server-chosen callers cannot name downstream operations: the server
     // constructs the request. A caller operation allowlist therefore has no
     // meaning on this path, and absent policy remains passthrough by design.
-    Ok(AuthorizedMasterCredential::new(
-        &service.credential_encrypted,
-    ))
+    Ok(AuthorizedMasterCredential::new(service))
 }
 
 /// Validate the platform-credential row shape shared by actor-addressed and
@@ -368,20 +363,38 @@ fn is_valid_master_credential_service(service: &DownstreamService) -> bool {
 pub(crate) struct PreparedDelegatedRequest {
     pub path: String,
     pub query: Option<String>,
-    pub delegated_headers: Vec<(String, String)>,
+    pub delegated_headers: SecretHeaders,
 }
 
 /// Resolve the non-authentication headers that will be sent by either HTTP
 /// transport. Callers supply an already allowlisted base list; this function
 /// applies the shared user-agent, identity, default, delegated, and
 /// server-owned precedence rules.
+pub(crate) fn sensitive_header_value(value: &str) -> AppResult<reqwest::header::HeaderValue> {
+    let mut value = reqwest::header::HeaderValue::from_str(value)
+        .map_err(|_| AppError::Internal("Invalid downstream header value".into()))?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
+fn apply_outbound_headers(
+    mut request: reqwest::RequestBuilder,
+    headers: &SecretHeaders,
+) -> AppResult<reqwest::RequestBuilder> {
+    for (name, value) in headers {
+        request = request.header(name, sensitive_header_value(value)?);
+    }
+    Ok(request)
+}
+
 pub(crate) fn build_effective_outbound_headers(
     target: &ProxyTarget,
-    mut outbound_headers: Vec<(String, String)>,
+    outbound_headers: Vec<(String, String)>,
     identity_headers: &[(String, String)],
     delegated_headers: &[(String, String)],
     extra_outbound_headers: &[(String, String)],
-) -> Vec<(String, String)> {
+) -> SecretHeaders {
+    let mut outbound_headers = SecretHeaders::from(outbound_headers);
     if let Some(ref user_agent) = target.service.custom_user_agent {
         outbound_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("user-agent"));
         outbound_headers.push(("user-agent".to_string(), user_agent.clone()));
@@ -422,9 +435,10 @@ pub(crate) fn build_effective_outbound_headers(
 }
 
 pub(crate) fn apply_server_owned_headers(
-    mut headers: Vec<(String, String)>,
+    headers: impl Into<SecretHeaders>,
     server_owned_headers: &[(String, String)],
-) -> Vec<(String, String)> {
+) -> SecretHeaders {
+    let mut headers = headers.into();
     for (name, value) in server_owned_headers {
         headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
         headers.push((name.clone(), value.clone()));
@@ -1014,7 +1028,11 @@ pub(crate) fn build_forward_path(
         if cred.injection_method == "path" {
             validate_path_injection_prefix(&cred.injection_key)?;
             validate_path_injection_credential(&cred.credential)?;
-            prefix_segments.push(format!("{}{}", cred.injection_key, cred.credential));
+            prefix_segments.push(format!(
+                "{}{}",
+                cred.injection_key,
+                cred.credential.as_str()
+            ));
         }
     }
 
@@ -1036,7 +1054,7 @@ pub(crate) fn prepare_delegated_request(
     query: Option<&str>,
     delegated_credentials: &[DelegatedCredential],
 ) -> AppResult<PreparedDelegatedRequest> {
-    let mut delegated_headers = Vec::new();
+    let mut delegated_headers = SecretHeaders::default();
     let mut forwarded_query = query
         .map(str::to_string)
         .filter(|existing| !existing.is_empty());
@@ -1045,10 +1063,13 @@ pub(crate) fn prepare_delegated_request(
         match cred.injection_method.as_str() {
             "bearer" => delegated_headers.push((
                 cred.injection_key.clone(),
-                format!("Bearer {}", cred.credential),
+                format!("Bearer {}", cred.credential.as_str()),
             )),
             "header" => {
-                delegated_headers.push((cred.injection_key.clone(), cred.credential.clone()));
+                delegated_headers.push((
+                    cred.injection_key.clone(),
+                    cred.credential.as_str().to_owned(),
+                ));
             }
             "query" => {
                 let encoded = form_urlencoded::Serializer::new(String::new())
@@ -1077,7 +1098,7 @@ pub(crate) fn prepare_delegated_request(
 pub(crate) struct PreparedNodeRequest {
     pub path: String,
     pub query: Option<String>,
-    pub headers: Vec<(String, String)>,
+    pub headers: SecretHeaders,
 }
 
 /// Prepare the same URL substitutions and header precedence for REST and MCP
@@ -1187,7 +1208,8 @@ pub async fn resolve_admin_proxy_target(
         )));
     }
 
-    let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
+    let catalog_default_headers =
+        super::default_header_service::catalog(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
 
     if service.auth_method == "none" {
@@ -1198,7 +1220,7 @@ pub async fn resolve_admin_proxy_target(
             base_url: service.base_url.clone(),
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
-            credential: String::new(),
+            credential: Default::default(),
             service,
             catalog_default_headers,
             user_service_default_headers: Vec::new(),
@@ -1214,12 +1236,7 @@ pub async fn resolve_admin_proxy_target(
     // every caller platform-wide, so one user could starve all others — the inverse of
     // what the per-user limit exists to do. Per-user limiting applies on actor-addressed
     // paths only, where there is an actor to key on.
-    let decrypted_bytes =
-        Zeroizing::new(decrypt_authorized_master_credential(encryption_keys, &authorized).await?);
-    let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-        tracing::error!("Credential UTF-8 decode failed: {e}");
-        AppError::Internal("Failed to decode credential".to_string())
-    })?;
+    let credential = decrypt_master_credential_string(encryption_keys, &authorized).await?;
 
     Ok(ProxyTarget {
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
@@ -1273,13 +1290,16 @@ pub async fn resolve_curation_proxy_target(
             "Service account connection is disabled".into(),
         ));
     }
-    let (credential, master_credential) = match connection.and_then(|c| c.credential_encrypted) {
-        Some(encrypted) => (
-            decrypt_user_credential(encryption_keys, &encrypted).await?,
+    let (credential, master_credential) = match connection
+        .as_ref()
+        .filter(|row| row.credential_encrypted.is_some())
+    {
+        Some(connection) => (
+            decrypt_user_credential(encryption_keys, connection).await?,
             false,
         ),
         None if service.auth_method == "none" && !service.requires_user_credential => {
-            (String::new(), false)
+            (Zeroizing::default(), false)
         }
         None if scope_authorized_editor
             && is_valid_master_credential_service(&service)
@@ -1316,7 +1336,11 @@ pub async fn resolve_curation_proxy_target(
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             credential,
-            catalog_default_headers: service.default_request_headers.clone().unwrap_or_default(),
+            catalog_default_headers: super::default_header_service::catalog(
+                Some(encryption_keys),
+                &service,
+            )
+            .await?,
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -1419,7 +1443,8 @@ pub async fn resolve_proxy_target(
         let base_url = resolve_gateway_url_override(db, user_id, &service)
             .await?
             .unwrap_or_else(|| service.base_url.clone());
-        let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
+        let catalog_default_headers =
+            super::default_header_service::catalog(Some(encryption_keys), &service).await?;
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok(ProxyTarget {
             workspace_destinations_pending:
@@ -1428,7 +1453,7 @@ pub async fn resolve_proxy_target(
             base_url,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
-            credential: String::new(),
+            credential: Default::default(),
             service,
             catalog_default_headers,
             user_service_default_headers: Vec::new(),
@@ -1440,16 +1465,16 @@ pub async fn resolve_proxy_target(
 
     // Determine which credential to use
     let credential = if service.requires_user_credential {
-        let credential_encrypted =
-            user_conn
-                .and_then(|c| c.credential_encrypted)
-                .ok_or_else(|| {
-                    AppError::BadRequest(
-                        "Connection is missing credential. Please reconnect with your API key."
-                            .to_string(),
-                    )
-                })?;
-        decrypt_user_credential(encryption_keys, &credential_encrypted).await?
+        let connection = user_conn
+            .as_ref()
+            .filter(|row| row.credential_encrypted.is_some())
+            .ok_or_else(|| {
+                AppError::BadRequest(
+                    "Connection is missing credential. Please reconnect with your API key."
+                        .to_string(),
+                )
+            })?;
+        decrypt_user_credential(encryption_keys, connection).await?
     } else if master_credential_required(&service) {
         let actor = EffectiveActor::from_user_id(user_id.to_string());
         let authorized = authorize_master_credential(db, &service, &actor).await?;
@@ -1462,14 +1487,15 @@ pub async fn resolve_proxy_target(
         .await?;
         decrypt_master_credential_string(encryption_keys, &authorized).await?
     } else {
-        String::new()
+        Zeroizing::default()
     };
 
     let base_url = resolve_gateway_url_override(db, user_id, &service)
         .await?
         .unwrap_or_else(|| service.base_url.clone());
 
-    let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
+    let catalog_default_headers =
+        super::default_header_service::catalog(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok(ProxyTarget {
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
@@ -1506,8 +1532,12 @@ pub(crate) async fn resolve_catalog_platform_target(
             base_url: service.base_url.clone(),
             auth_method: "none".into(),
             auth_key_name: String::new(),
-            credential: String::new(),
-            catalog_default_headers: service.default_request_headers.clone().unwrap_or_default(),
+            credential: Default::default(),
+            catalog_default_headers: super::default_header_service::catalog(
+                Some(encryption_keys),
+                &service,
+            )
+            .await?,
             user_service_default_headers: vec![],
             ws_frame_injections: service.ws_frame_injections.clone(),
             connection_id: None,
@@ -1533,7 +1563,11 @@ pub(crate) async fn resolve_catalog_platform_target(
         auth_method,
         auth_key_name,
         credential,
-        catalog_default_headers: service.default_request_headers.clone().unwrap_or_default(),
+        catalog_default_headers: super::default_header_service::catalog(
+            Some(encryption_keys),
+            &service,
+        )
+        .await?,
         user_service_default_headers: vec![],
         ws_frame_injections: service.ws_frame_injections.clone(),
         connection_id: None,
@@ -1621,7 +1655,8 @@ pub async fn resolve_proxy_target_lenient(
                 Ok(None) => (service.base_url.clone(), true),
                 Err(_) => (String::new(), false),
             };
-        let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
+        let catalog_default_headers =
+            super::default_header_service::catalog(Some(encryption_keys), &service).await?;
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok((
             ProxyTarget {
@@ -1631,7 +1666,7 @@ pub async fn resolve_proxy_target_lenient(
                 base_url,
                 auth_method: service.auth_method.clone(),
                 auth_key_name: service.auth_key_name.clone(),
-                credential: String::new(),
+                credential: Default::default(),
                 service,
                 catalog_default_headers,
                 user_service_default_headers: Vec::new(),
@@ -1661,12 +1696,15 @@ pub async fn resolve_proxy_target_lenient(
     }
 
     let (credential, has_credential) = if service.requires_user_credential {
-        match user_conn.and_then(|c| c.credential_encrypted) {
-            Some(encrypted) => (
-                decrypt_user_credential(encryption_keys, &encrypted).await?,
+        match user_conn
+            .as_ref()
+            .filter(|row| row.credential_encrypted.is_some())
+        {
+            Some(connection) => (
+                decrypt_user_credential(encryption_keys, connection).await?,
                 true,
             ),
-            None => (String::new(), false),
+            None => (Zeroizing::default(), false),
         }
     } else if master_credential_required(&service) {
         let actor = EffectiveActor::from_user_id(user_id.to_string());
@@ -1683,14 +1721,15 @@ pub async fn resolve_proxy_target_lenient(
             true,
         )
     } else {
-        (String::new(), false)
+        (Zeroizing::default(), false)
     };
 
     let base_url = resolve_gateway_url_override(db, user_id, &service)
         .await?
         .unwrap_or_else(|| service.base_url.clone());
 
-    let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
+    let catalog_default_headers =
+        super::default_header_service::catalog(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok((
         ProxyTarget {
@@ -1806,6 +1845,7 @@ struct ProxyCredentialResolution<'a> {
     connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
     platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
     materialize_credentials: bool,
+    resolve_header_values: bool,
 }
 
 impl<'a> ProxyCredentialResolution<'a> {
@@ -1814,6 +1854,7 @@ impl<'a> ProxyCredentialResolution<'a> {
             connection_expiry_notifier: context.connection_expiry_notifier,
             platform_user_rate_limit: context.platform_user_rate_limit,
             materialize_credentials: true,
+            resolve_header_values: true,
         }
     }
 
@@ -1823,6 +1864,7 @@ impl<'a> ProxyCredentialResolution<'a> {
             platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(
             ),
             materialize_credentials: false,
+            resolve_header_values: true,
         }
     }
 }
@@ -2317,8 +2359,10 @@ pub async fn resolve_proxy_target_by_user_service_id(
 }
 
 /// Read-only authority snapshot for approval observation. It follows the same
-/// identity and ownership resolver as execution without decrypting, refreshing,
-/// touching, or rate-limiting credential material.
+/// identity and ownership resolver as execution. After policy/ACL admission it
+/// authenticates only bounded local default-header values to preserve frozen
+/// authority digests. It never refreshes, materializes provider credentials,
+/// touches last-used state, or performs an upstream effect.
 pub async fn read_proxy_authority_snapshot_by_user_service_id(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -2877,7 +2921,12 @@ async fn finish_resolution(
 ) -> AppResult<UserServiceResolution> {
     // Keep catalog/credential resolution state on the heap; callers combine
     // several of these futures when revalidating delegated execution.
-    Box::pin(async move {
+    let resolve_header_values = credential_resolution.resolve_header_values;
+    let header_source = user_service.default_request_headers.clone();
+    let header_record = user_service.id.clone();
+    let header_owner = user_service.user_id.clone();
+    let header_catalog = user_service.catalog_service_id.clone();
+    let mut resolution = Box::pin(async move {
 
     let materialize_credentials = credential_resolution.materialize_credentials;
     let connection_expiry_notifier = credential_resolution.connection_expiry_notifier;
@@ -2902,23 +2951,22 @@ async fn finish_resolution(
     // once up-front; all branches below need them. Empty when the
     // UserService is a custom endpoint (no catalog link) or the catalog
     // entry has no defaults set.
-    let catalog_default_headers =
-        load_catalog_default_headers_for_user_service(db, &user_service).await;
+    // Decode header values only after every local policy/ACL/credential branch
+    // below has admitted this request. Read-only authority mode performs only
+    // this bounded local decode and never provider credential effects.
+    let catalog_default_headers: Vec<DefaultRequestHeader> = Vec::new();
     let catalog_proxy_authorization =
         load_catalog_proxy_authorization_for_user_service(db, &user_service).await?;
     let (catalog_billing, catalog_service_slug) =
         load_catalog_metering_for_user_service(db, &user_service).await;
     let catalog_ws_frame_injections =
-        load_catalog_ws_frame_injections_for_user_service(db, &user_service).await;
+        load_catalog_ws_frame_injections_for_user_service(db, &user_service).await?;
     let effective_ws_frame_injections = if user_service.ws_frame_injections.is_empty() {
         catalog_ws_frame_injections
     } else {
         user_service.ws_frame_injections.clone()
     };
-    let user_service_default_headers = user_service
-        .default_request_headers
-        .clone()
-        .unwrap_or_default();
+    let user_service_default_headers: Vec<DefaultRequestHeader> = Vec::new();
 
     if (super::platform_key_service::binding(&user_service) == "platform"
         && (user_service.auth_method != "none"
@@ -2960,15 +3008,9 @@ async fn finish_resolution(
                 &actor.user_id,
             )
             .await?;
-            let decrypted_bytes = Zeroizing::new(
-                decrypt_authorized_master_credential(encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?, &authorized).await?,
-            );
-            String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-                tracing::error!("Credential UTF-8 decode failed: {e}");
-                AppError::Internal("Failed to decode credential".to_string())
-            })?
+            decrypt_master_credential_string(encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?, &authorized).await?
         } else {
-            String::new()
+            Zeroizing::default()
         };
         let now = chrono::Utc::now();
         let mut minimal_service = build_minimal_downstream_service(
@@ -3044,7 +3086,7 @@ async fn finish_resolution(
                 base_url: endpoint.url.clone(),
                 auth_method: user_service.auth_method.clone(),
                 auth_key_name: user_service.auth_key_name.clone(),
-                credential: String::new(),
+                credential: Default::default(),
                 service: minimal_service,
                 catalog_default_headers: catalog_default_headers.clone(),
                 user_service_default_headers: user_service_default_headers.clone(),
@@ -3124,7 +3166,7 @@ async fn finish_resolution(
         } else {
             credential_is_materializable(db, &api_key)
                 .await?
-                .then(String::new)
+                .then(Zeroizing::default)
         };
         let has_server_credential = credential.is_some();
 
@@ -3190,7 +3232,7 @@ async fn finish_resolution(
         });
         credential
     } else if credential_is_materializable(db, &api_key).await? {
-        String::new()
+        Zeroizing::default()
     } else {
         return Err(missing_user_api_key_credential_error(&api_key));
     };
@@ -3236,7 +3278,25 @@ async fn finish_resolution(
         is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
     })
 
-    }).await
+    }).await?;
+    if !resolve_header_values {
+        return Ok(resolution);
+    }
+    resolution.target.catalog_default_headers = load_catalog_default_headers_for_user_service(
+        db,
+        encryption_keys,
+        header_catalog.as_deref(),
+    )
+    .await?;
+    resolution.target.user_service_default_headers = super::default_header_service::decode(
+        encryption_keys,
+        crate::models::user_service::COLLECTION_NAME,
+        &header_record,
+        &header_owner,
+        header_source.as_deref(),
+    )
+    .await?;
+    Ok(resolution)
 }
 
 async fn load_catalog_service_for_user_service(
@@ -3336,67 +3396,38 @@ fn apply_catalog_proxy_authorization(
     }
 }
 
-/// Load the catalog `DownstreamService.default_request_headers` associated
-/// with the given `UserService` (if any). Returns an empty vec for custom
-/// endpoints (no catalog link), missing catalog rows, or catalog entries
-/// with no defaults configured.
-///
-/// Failures during the lookup are logged and swallowed — a missing catalog
-/// entry should not block a proxy request; we just skip the admin layer.
+/// Load the authoritative catalog defaults. A custom endpoint has no catalog
+/// layer. A configured link that cannot be read must fail closed rather than
+/// execute without the administrator's required headers.
 async fn load_catalog_default_headers_for_user_service(
     db: &mongodb::Database,
-    user_service: &crate::models::user_service::UserService,
-) -> Vec<DefaultRequestHeader> {
-    let catalog_id = match user_service.catalog_service_id.as_deref() {
-        Some(id) => id,
-        None => return Vec::new(),
+    encryption_keys: Option<&EncryptionKeys>,
+    catalog_id: Option<&str>,
+) -> AppResult<Vec<DefaultRequestHeader>> {
+    let Some(catalog_id) = catalog_id else {
+        return Ok(Vec::new());
     };
-    match db
+    let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "_id": catalog_id })
-        .await
-    {
-        Ok(Some(svc)) => svc.default_request_headers.unwrap_or_default(),
-        Ok(None) => Vec::new(),
-        Err(e) => {
-            tracing::warn!(
-                catalog_id,
-                error = %e,
-                "Failed to load catalog default_request_headers; proceeding without"
-            );
-            Vec::new()
-        }
-    }
+        .find_one(doc! {"_id":catalog_id})
+        .await?
+        .ok_or_else(|| AppError::Conflict("Catalog service is unavailable".into()))?;
+    super::default_header_service::catalog(encryption_keys, &service).await
 }
 
-/// Load catalog `DownstreamService.ws_frame_injections` for a catalog-backed
-/// `UserService`. Existing user-service rows usually do not have a snapshot of
-/// newly-added catalog WS auth rules, so target resolution falls back to these
-/// rules when the user-owned list is empty.
 async fn load_catalog_ws_frame_injections_for_user_service(
     db: &mongodb::Database,
     user_service: &crate::models::user_service::UserService,
-) -> Vec<WsFrameInjection> {
-    let catalog_id = match user_service.catalog_service_id.as_deref() {
-        Some(id) => id,
-        None => return Vec::new(),
+) -> AppResult<Vec<WsFrameInjection>> {
+    let Some(catalog_id) = user_service.catalog_service_id.as_deref() else {
+        return Ok(Vec::new());
     };
-    match db
+    let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "_id": catalog_id })
-        .await
-    {
-        Ok(Some(svc)) => svc.ws_frame_injections,
-        Ok(None) => Vec::new(),
-        Err(e) => {
-            tracing::warn!(
-                catalog_id,
-                error = %e,
-                "Failed to load catalog ws_frame_injections; proceeding without"
-            );
-            Vec::new()
-        }
-    }
+        .find_one(doc! {"_id":catalog_id})
+        .await?
+        .ok_or_else(|| AppError::Conflict("Catalog service is unavailable".into()))?;
+    Ok(service.ws_frame_injections)
 }
 
 async fn load_catalog_metering_for_user_service(
@@ -3440,7 +3471,7 @@ pub async fn resolve_agent_credential_override(
     user_service_id: &str,
     target: &ProxyTarget,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<Zeroizing<String>>> {
     Ok(resolve_agent_credential_override_identity(
         db,
         encryption_keys,
@@ -3455,7 +3486,7 @@ pub async fn resolve_agent_credential_override(
 }
 
 pub struct AgentCredentialOverride {
-    pub credential: String,
+    pub credential: Zeroizing<String>,
     pub api_key_id: String,
     pub credential_epoch: i64,
 }
@@ -3686,6 +3717,7 @@ async fn maybe_refresh_provider_backed_api_key(
         Ok(_) => {
             user_api_key_service::sync_refreshed_provider_token_to_api_keys(
                 db,
+                encryption_keys,
                 user_id,
                 provider_config_id,
             )
@@ -3706,7 +3738,7 @@ async fn maybe_refresh_provider_backed_api_key(
 async fn resolve_user_api_key_credential(
     api_key: &UserApiKey,
     encryption_keys: &EncryptionKeys,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<Zeroizing<String>>> {
     let encrypted = match api_key.credential_type.as_str() {
         // Both inject a minted/refreshed access token (kept in
         // `access_token_encrypted`), not the durable seed credential.
@@ -3719,11 +3751,17 @@ async fn resolve_user_api_key_credential(
         return Ok(None);
     };
 
-    let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
-    let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-        tracing::error!("Credential UTF-8 decode failed: {e}");
-        AppError::Internal("Failed to decode credential".to_string())
-    })?;
+    let field = if matches!(
+        api_key.credential_type.as_str(),
+        "oauth2" | "gcp_service_account"
+    ) {
+        "access_token_encrypted"
+    } else {
+        "credential_encrypted"
+    };
+    let credential = super::credential_record_service::CredentialRecord::key(api_key)
+        .text(encryption_keys, field, encrypted)
+        .await?;
 
     if credential.is_empty() {
         Ok(None)
@@ -3865,6 +3903,7 @@ fn build_minimal_downstream_service(
         && user_service.catalog_service_id.is_some();
 
     DownstreamService {
+        secret_context_versions: Default::default(),
         offering_kind: Default::default(),
         topics: Vec::new(),
         supplier: None,
@@ -4044,12 +4083,28 @@ pub async fn forward_request(
     .map_err(ForwardRequestError::into_app_error)
 }
 
-#[derive(Debug)]
 pub(crate) enum ForwardRequestError {
     Application(AppError),
     PreDispatchRejected(AppError),
     Transport(reqwest::Error),
     OutcomeUnknown,
+}
+
+impl std::fmt::Debug for ForwardRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(error) => f
+                .debug_struct("Transport")
+                .field("timeout", &error.is_timeout())
+                .field("connect", &error.is_connect())
+                .finish_non_exhaustive(),
+            Self::Application(error) => f.debug_tuple("Application").field(error).finish(),
+            Self::PreDispatchRejected(error) => {
+                f.debug_tuple("PreDispatchRejected").field(error).finish()
+            }
+            Self::OutcomeUnknown => f.write_str("OutcomeUnknown"),
+        }
+    }
 }
 
 impl ForwardRequestError {
@@ -4082,7 +4137,7 @@ impl From<AppError> for ForwardRequestError {
 
 impl From<reqwest::Error> for ForwardRequestError {
     fn from(error: reqwest::Error) -> Self {
-        Self::Transport(error)
+        Self::Transport(error.without_url())
     }
 }
 
@@ -4328,7 +4383,7 @@ async fn forward_request_with_egress_guard_inner(
             .await
             .map_err(|error| match error {
                 nyxid_service_adapters::ifttt::Error::Transport(error) => {
-                    ForwardRequestError::Transport(error)
+                    ForwardRequestError::from(error)
                 }
                 _ => ForwardRequestError::Application(AppError::BadRequest(error.to_string())),
             });
@@ -4368,7 +4423,7 @@ async fn forward_request_with_egress_guard_inner(
                     ))
                 }
                 nyxid_service_adapters::ifttt_mcp::Error::Transport(error) => {
-                    ForwardRequestError::Transport(error)
+                    ForwardRequestError::from(error)
                 }
                 nyxid_service_adapters::ifttt_mcp::Error::OutcomeUnknown => {
                     ForwardRequestError::OutcomeUnknown
@@ -4380,9 +4435,7 @@ async fn forward_request_with_egress_guard_inner(
                 _ => ForwardRequestError::Application(AppError::Internal(error.to_string())),
             });
     }
-    for (name, value) in &outbound_headers {
-        request = request.header(name, value);
-    }
+    request = apply_outbound_headers(request, &outbound_headers)?;
 
     // Body injection for `body` auth method must happen before the body is
     // attached to the request. We mutate `body` in place; the actual attach
@@ -4439,7 +4492,7 @@ async fn forward_request_with_egress_guard_inner(
             };
             // Headers that have actually been attached to the outgoing
             // request feed the cache key's header digest.
-            let key_headers: Vec<(String, String)> = outbound_headers.to_vec();
+            let key_headers = &outbound_headers;
             let fingerprint = CloudResponseCache::credential_fingerprint(&target.credential);
             let key = CloudResponseCache::key(
                 &target.auth_method,
@@ -4447,7 +4500,7 @@ async fn forward_request_with_egress_guard_inner(
                 &target.base_url,
                 method.as_str(),
                 &path_and_query,
-                &key_headers,
+                key_headers,
                 body_bytes_for_key,
             );
             if let Some(cached) = cloud_response_cache.get(&key) {
@@ -4474,29 +4527,34 @@ async fn forward_request_with_egress_guard_inner(
             // No credential injection
         }
         "header" => {
-            request = request.header(&target.auth_key_name, &target.credential);
+            request = request.header(
+                &target.auth_key_name,
+                sensitive_header_value(&target.credential)?,
+            );
         }
         "bearer" => {
+            let value = Zeroizing::new(super::catalog_auth_scheme::header_value(
+                target.service.auth_scheme.as_deref(),
+                &target.credential,
+            )?);
             request = request.header(
                 reqwest::header::AUTHORIZATION,
-                super::catalog_auth_scheme::header_value(
-                    target.service.auth_scheme.as_deref(),
-                    &target.credential,
-                )?,
+                sensitive_header_value(value.as_str())?,
             );
         }
         "bot_bearer" => {
             // Discord bot tokens use `Authorization: Bot <token>` instead of
             // the standard `Bearer` scheme. Sets the literal header value.
-            request = request.header("Authorization", format!("Bot {}", target.credential));
+            let value = zeroize::Zeroizing::new(format!("Bot {}", target.credential.as_str()));
+            request = request.header("Authorization", sensitive_header_value(value.as_str())?);
         }
         "query" => {
             // Use the request builder's query method to properly URL-encode parameters.
             // This preserves the original HTTP method, headers, and body.
-            request = request.query(&[(&target.auth_key_name, &target.credential)]);
+            request = request.query(&[(&target.auth_key_name, target.credential.as_str())]);
         }
         "github_git" => {
-            request = request.basic_auth(&target.auth_key_name, Some(&target.credential));
+            request = request.basic_auth(&target.auth_key_name, Some(target.credential.as_str()));
         }
         "basic" => {
             // credential format: "username:password"
@@ -4561,7 +4619,7 @@ async fn forward_request_with_egress_guard_inner(
             // exactly the bytes that will be sent. `prepared.delegated_headers`
             // are typically empty for cloud-billing services but signed if
             // present for consistency with the direct-header path.
-            let signed_input: Vec<(String, String)> = outbound_headers.clone();
+            let signed_input = &outbound_headers;
             let body_bytes: &[u8] = match &body {
                 ProxyBody::Buffered(Some(b)) => b.as_ref(),
                 ProxyBody::Buffered(None) => &[][..],
@@ -4579,7 +4637,7 @@ async fn forward_request_with_egress_guard_inner(
                 )
             })?;
             let signed_headers =
-                aws_sigv4::sign_request(method.as_str(), &url, &signed_input, body_bytes, &creds)
+                aws_sigv4::sign_request(method.as_str(), &url, signed_input, body_bytes, &creds)
                     .map_err(|e| {
                         tracing::error!(error = %e, "aws_sigv4 request signing failed");
                         AppError::BadRequest(
@@ -4587,7 +4645,7 @@ async fn forward_request_with_egress_guard_inner(
                         )
                     })?;
             for header in signed_headers {
-                request = request.header(&header.name, &header.value);
+                request = request.header(&header.name, sensitive_header_value(&header.value)?);
             }
         }
         _ => {
@@ -4695,7 +4753,8 @@ fn inject_credential_into_json_body(
 }
 
 /// Reuse the exact execution resolver's live ACL, destination and credential
-/// identity checks without requiring access to encryption keys or refreshing.
+/// identity checks without keys or refresh. This metadata-only result omits
+/// default-header values and must never be used to compute approval digests.
 pub(crate) async fn read_connection_authority(
     db: &mongodb::Database,
     actor: &str,
@@ -4708,7 +4767,10 @@ pub(crate) async fn read_connection_authority(
         id,
         None,
         None,
-        ProxyCredentialResolution::read_only_snapshot(),
+        ProxyCredentialResolution {
+            resolve_header_values: false,
+            ..ProxyCredentialResolution::read_only_snapshot()
+        },
     )
     .await
 }
@@ -4743,6 +4805,194 @@ mod tests {
         },
     };
     use tokio::{net::TcpListener, sync::mpsc};
+
+    #[tokio::test]
+    async fn linked_catalog_frame_rules_fail_closed_before_transport_on_missing_or_unreadable_config()
+     {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
+        let upstream = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&upstream)
+            .await;
+        let db =
+            crate::test_utils::connect_transaction_test_database("catalog_frame_read_closed").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let instance_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user_endpoint::UserEndpoint>(
+            crate::models::user_endpoint::COLLECTION_NAME,
+        )
+        .insert_one(test_user_endpoint(
+            &endpoint_id,
+            &owner,
+            "WS target",
+            &upstream.uri(),
+            None,
+            Some(&catalog_id),
+        ))
+        .await
+        .unwrap();
+        let instance = test_user_service(
+            &instance_id,
+            &owner,
+            "catalog-frame-target",
+            &endpoint_id,
+            Some(&catalog_id),
+            None,
+        );
+        db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+            .insert_one(&instance)
+            .await
+            .unwrap();
+        let keys = test_encryption_keys();
+        assert!(
+            load_catalog_ws_frame_injections_for_user_service(&db, &instance)
+                .await
+                .is_err()
+        );
+        assert!(
+            resolve_proxy_target_by_user_service_id(
+                &db,
+                &keys,
+                &owner,
+                &instance_id,
+                Some("catalog-frame-target"),
+                Some(&catalog_id),
+                ProxyExecutionContext::new(None, disabled_platform_rate_limit()),
+            )
+            .await
+            .is_err()
+        );
+        // A transient DB failure in this specific read must not be translated
+        // to an empty rule set even if a subsequent independent read succeeds.
+        let unreachable = mongodb::Client::with_uri_str(
+            "mongodb://127.0.0.1:1/?directConnection=true&serverSelectionTimeoutMS=50",
+        )
+        .await
+        .unwrap()
+        .database(db.name());
+        assert!(matches!(
+            load_catalog_ws_frame_injections_for_user_service(&unreachable, &instance).await,
+            Err(AppError::DatabaseError(_))
+        ));
+        let mut catalog = dummy_service();
+        catalog.id = catalog_id;
+        catalog.ws_frame_injections = vec![serde_json::from_value(serde_json::json!({"trigger":"first_frame_from_downstream","template":"${credential}"})).unwrap()];
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_catalog_ws_frame_injections_for_user_service(&db, &instance)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut custom = instance;
+        custom.catalog_service_id = None;
+        assert!(
+            load_catalog_ws_frame_injections_for_user_service(&unreachable, &custom)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(upstream.received_requests().await.unwrap().is_empty());
+        db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn actual_http_request_debug_redacts_injected_defaults_and_custom_credentials() {
+        let secret = "distinctive-injected-header-6ac3";
+        let mut target = make_proxy_target("https://example.invalid".into());
+        target.catalog_default_headers = vec![DefaultRequestHeader {
+            name: "x-private-default".into(),
+            value: secret.to_owned().into(),
+            overridable: false,
+            sensitive: true,
+        }];
+        let headers = build_effective_outbound_headers(
+            &target,
+            vec![],
+            &[],
+            &[("x-custom-provider".into(), secret.into())],
+            &[],
+        );
+        let request =
+            apply_outbound_headers(Client::new().get("https://example.invalid"), &headers)
+                .unwrap()
+                .build()
+                .unwrap();
+        for name in ["x-private-default", "x-custom-provider"] {
+            assert_eq!(request.headers()[name].to_str().unwrap(), secret);
+            assert!(request.headers()[name].is_sensitive());
+        }
+        assert!(!format!("{request:?}").contains(secret));
+        assert!(!format!("{headers:?}").contains(secret));
+    }
+
+    #[tokio::test]
+    async fn query_and_path_transport_errors_never_retain_secret_urls() {
+        let secret = "distinctive-query-path-transport-secret-73b2";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        for auth_method in ["query", "path"] {
+            let mut target = make_proxy_target(format!("http://{addr}"));
+            target.auth_method = auth_method.into();
+            target.auth_key_name = if auth_method == "path" {
+                "bot".into()
+            } else {
+                "api_key".into()
+            };
+            target.credential = secret.to_owned().into();
+            let failure = super::forward_request_with_extra_outbound_headers(
+                &Client::new(),
+                &target,
+                reqwest::Method::GET,
+                "/operation",
+                None,
+                HeaderMap::new(),
+                ProxyBody::Buffered(None),
+                vec![],
+                vec![],
+                None,
+                &empty_token_cache(),
+                &empty_response_cache(),
+                vec![],
+                crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                    Some(
+                        crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                            crate::services::billing::BillingIngress::Proxy,
+                        ),
+                    ),
+                    crate::services::billing::BillingIngress::Proxy,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap_err();
+            match &failure {
+                ForwardRequestError::Transport(error) => {
+                    assert!(error.url().is_none());
+                    assert!(error.is_connect());
+                }
+                _ => panic!("expected transport failure"),
+            }
+            assert!(!format!("{failure:?}").contains(secret));
+            let error = failure.into_app_error();
+            assert!(!format!("{error}").contains(secret));
+            assert!(!format!("{error:?}").contains(secret));
+            let response = error.into_response();
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert!(!String::from_utf8_lossy(&body).contains(secret));
+        }
+    }
 
     #[test]
     fn legacy_provider_token_filter_matches_proxy_precedence() {
@@ -5113,7 +5363,7 @@ mod tests {
         let server_target = resolve_admin_proxy_target(&db, &keys, &service.id)
             .await
             .expect("server-chosen resolver should retain the master credential");
-        assert_eq!(server_target.credential, "catalog-secret");
+        assert_eq!(server_target.credential.as_str(), "catalog-secret");
         assert!(server_target.service.inject_delegation_token);
 
         let strict_target = resolve_proxy_target(
@@ -5125,7 +5375,7 @@ mod tests {
         )
         .await
         .expect("strict resolver should retain the master credential");
-        assert_eq!(strict_target.credential, "catalog-secret");
+        assert_eq!(strict_target.credential.as_str(), "catalog-secret");
         assert!(strict_target.service.inject_delegation_token);
 
         let (lenient_target, has_credential) = resolve_proxy_target_lenient(
@@ -5138,7 +5388,7 @@ mod tests {
         .await
         .expect("lenient resolver should retain the master credential");
         assert!(has_credential);
-        assert_eq!(lenient_target.credential, "catalog-secret");
+        assert_eq!(lenient_target.credential.as_str(), "catalog-secret");
         assert!(lenient_target.service.inject_delegation_token);
 
         let endpoint_id = uuid::Uuid::new_v4().to_string();
@@ -5186,7 +5436,7 @@ mod tests {
         .await
         .expect("auto-provision resolver should succeed")
         .expect("auto-provision user service should resolve");
-        assert_eq!(auto_resolution.target.credential, "catalog-secret");
+        assert_eq!(auto_resolution.target.credential.as_str(), "catalog-secret");
         assert!(auto_resolution.target.service.inject_delegation_token);
         assert!(auto_resolution.master_credential);
     }
@@ -5285,7 +5535,7 @@ mod tests {
         }
         let make_default = |name: &str, overridable| DefaultRequestHeader {
             name: name.into(),
-            value: "default".into(),
+            value: "default".to_owned().into(),
             overridable,
             sensitive: false,
         };
@@ -6069,6 +6319,7 @@ mod tests {
         let encrypted = keys.encrypt(override_secret.as_bytes()).await.unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
                 id: override_credential_id.clone(),
@@ -6139,7 +6390,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            override_value.as_deref(),
+            override_value.as_ref().map(|value| value.as_str()),
             Some(override_secret),
             "bound agent must receive the decrypted override credential, not the service default"
         );
@@ -6265,8 +6516,9 @@ mod tests {
             base_url: base_url.clone(),
             auth_method: "none".to_string(),
             auth_key_name: "Authorization".to_string(),
-            credential: String::new(),
+            credential: Default::default(),
             service: DownstreamService {
+                secret_context_versions: Default::default(),
                 offering_kind: Default::default(),
                 topics: Vec::new(),
                 supplier: None,
@@ -6384,7 +6636,7 @@ mod tests {
                     provider_slug: "another".into(),
                     injection_method: "header".into(),
                     injection_key: "x-key".into(),
-                    credential: "fixture".into(),
+                    credential: "fixture".to_owned().into(),
                 }]
             )
             .is_err()
@@ -6448,7 +6700,7 @@ mod tests {
             provider_slug: "other".into(),
             injection_method: "header".into(),
             injection_key: "X-Other-Provider-Key".into(),
-            credential: "private-provider-key".into(),
+            credential: "private-provider-key".to_owned().into(),
         }];
         let error = validate_ifttt_delegation(&target, &delegated).unwrap_err();
         assert!(!error.to_string().contains("private-provider-key"));
@@ -6644,7 +6896,7 @@ mod tests {
         let mut target = make_proxy_target(endpoint);
         target.auth_method = "header".into();
         target.auth_key_name = "apikey".into();
-        target.credential = "sb_secret_test".into();
+        target.credential = "sb_secret_test".to_owned().into();
         let mut headers = reqwest::header::HeaderMap::new();
         for (name, value) in [
             ("authorization", "Bearer caller-nyxid-token"),
@@ -6708,7 +6960,7 @@ mod tests {
         let mut target = make_proxy_target(format!("http://{addr}"));
         target.auth_method = "basic".to_string();
         target.auth_key_name = "Authorization".to_string();
-        target.credential = "AC123:auth_token".to_string();
+        target.credential = "AC123:auth_token".to_string().into();
 
         let response = forward_request(
             &Client::new(),
@@ -7066,7 +7318,7 @@ mod tests {
                 provider_slug: "telegram-bot".to_string(),
                 injection_method: "path".to_string(),
                 injection_key: "bot".to_string(),
-                credential: "123456:ABC-DEF".to_string(),
+                credential: "123456:ABC-DEF".to_string().into(),
             }],
             None,
             &empty_token_cache(),
@@ -7094,19 +7346,19 @@ mod tests {
                     provider_slug: "github".to_string(),
                     injection_method: "bearer".to_string(),
                     injection_key: "Authorization".to_string(),
-                    credential: "user-token".to_string(),
+                    credential: "user-token".to_string().into(),
                 },
                 DelegatedCredential {
                     provider_slug: "custom".to_string(),
                     injection_method: "header".to_string(),
                     injection_key: "X-Provider-Key".to_string(),
-                    credential: "secret".to_string(),
+                    credential: "secret".to_string().into(),
                 },
                 DelegatedCredential {
                     provider_slug: "custom".to_string(),
                     injection_method: "query".to_string(),
                     injection_key: "api_key".to_string(),
-                    credential: "abc 123".to_string(),
+                    credential: "abc 123".to_string().into(),
                 },
             ],
         )
@@ -7145,7 +7397,7 @@ mod tests {
         let mut target = make_proxy_target(vendor.uri());
         target.service.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
         target.auth_method = "bearer".into();
-        target.credential = "fake-local-only".into();
+        target.credential = "fake-local-only".to_owned().into();
         let response = forward_request(
             &Client::new(),
             &target,
@@ -7307,7 +7559,7 @@ mod tests {
                 provider_slug: "telegram-bot".to_string(),
                 injection_method: "path".to_string(),
                 injection_key: "bot".to_string(),
-                credential: "bad/token".to_string(),
+                credential: "bad/token".to_string().into(),
             }],
             None,
             &empty_token_cache(),
@@ -7338,7 +7590,7 @@ mod tests {
                     provider_slug: "telegram-bot".to_string(),
                     injection_method: "path".to_string(),
                     injection_key: "bot".to_string(),
-                    credential: credential.to_string(),
+                    credential: credential.to_string().into(),
                 }],
                 None,
                 &empty_token_cache(),
@@ -7369,7 +7621,7 @@ mod tests {
                 provider_slug: "telegram-bot".to_string(),
                 injection_method: "path".to_string(),
                 injection_key: "bot/".to_string(),
-                credential: "123456:ABC-DEF".to_string(),
+                credential: "123456:ABC-DEF".to_string().into(),
             }],
             None,
             &empty_token_cache(),
@@ -7400,7 +7652,7 @@ mod tests {
                     provider_slug: "telegram-bot".to_string(),
                     injection_method: "path".to_string(),
                     injection_key: injection_key.to_string(),
-                    credential: "123456:ABC-DEF".to_string(),
+                    credential: "123456:ABC-DEF".to_string().into(),
                 }],
                 None,
                 &empty_token_cache(),
@@ -7431,7 +7683,7 @@ mod tests {
                 provider_slug: "telegram-bot".to_string(),
                 injection_method: "path".to_string(),
                 injection_key: "bot".to_string(),
-                credential: "123%2f456".to_string(),
+                credential: "123%2f456".to_string().into(),
             }],
             None,
             &empty_token_cache(),
@@ -7459,7 +7711,7 @@ mod tests {
                 provider_slug: "telegram-bot".to_string(),
                 injection_method: "path".to_string(),
                 injection_key: "bot".to_string(),
-                credential: "123456:ABC-DEF".to_string(),
+                credential: "123456:ABC-DEF".to_string().into(),
             }],
         )
         .expect("delegated request should prepare");
@@ -7487,7 +7739,7 @@ mod tests {
                 provider_slug: "telegram-bot".to_string(),
                 injection_method: "path".to_string(),
                 injection_key: "bot%2f".to_string(),
-                credential: "123456:ABC-DEF".to_string(),
+                credential: "123456:ABC-DEF".to_string().into(),
             }],
             None,
             &empty_token_cache(),
@@ -7648,8 +7900,11 @@ mod tests {
             base_url: base_url.clone(),
             auth_method: "token_exchange".to_string(),
             auth_key_name: String::new(),
-            credential: r#"{"app_id":"cli_test","app_secret":"super-secret"}"#.to_string(),
+            credential: r#"{"app_id":"cli_test","app_secret":"super-secret"}"#
+                .to_string()
+                .into(),
             service: DownstreamService {
+                secret_context_versions: Default::default(),
                 offering_kind: Default::default(),
                 topics: Vec::new(),
                 supplier: None,
@@ -7833,7 +8088,7 @@ mod tests {
     async fn token_exchange_rejects_malformed_credential() {
         let (base_url, _mock, server) = start_lark_mock().await;
         let mut target = make_lark_proxy_target(base_url);
-        target.credential = "not valid json".to_string();
+        target.credential = "not valid json".to_string().into();
 
         let err = forward_request(
             &Client::new(),
@@ -8047,8 +8302,9 @@ mod tests {
             base_url: base_url.clone(),
             auth_method: "body".to_string(),
             auth_key_name: "app_secret".to_string(),
-            credential: "super-secret".to_string(),
+            credential: "super-secret".to_string().into(),
             service: DownstreamService {
+                secret_context_versions: Default::default(),
                 offering_kind: Default::default(),
                 topics: Vec::new(),
                 supplier: None,
@@ -8288,8 +8544,9 @@ mod tests {
             base_url: base_url.clone(),
             auth_method: auth_method.to_string(),
             auth_key_name: String::new(),
-            credential,
+            credential: credential.into(),
             service: DownstreamService {
+                secret_context_versions: Default::default(),
                 offering_kind: Default::default(),
                 topics: Vec::new(),
                 supplier: None,
@@ -8548,6 +8805,7 @@ mod tests {
 
     fn test_minimal_downstream() -> DownstreamService {
         DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,
@@ -8684,7 +8942,7 @@ mod tests {
             provider_slug: String::new(),
             injection_method: "path".to_string(),
             injection_key: "bot".to_string(),
-            credential: "TOKEN".to_string(),
+            credential: "TOKEN".to_string().into(),
         }];
         assert_eq!(
             build_forward_path("v1/send", &creds).unwrap(),
@@ -8698,7 +8956,7 @@ mod tests {
             provider_slug: String::new(),
             injection_method: "path".to_string(),
             injection_key: "bot".to_string(),
-            credential: "T".to_string(),
+            credential: "T".to_string().into(),
         }];
         assert_eq!(build_forward_path("", &creds).unwrap(), "botT");
     }
@@ -8718,7 +8976,7 @@ mod tests {
             base_url: String::new(),
             auth_method: "bearer".to_string(),
             auth_key_name: String::new(),
-            credential: String::new(),
+            credential: Default::default(),
             service: test_minimal_downstream(),
             catalog_default_headers: vec![],
             user_service_default_headers: vec![],
@@ -8739,7 +8997,7 @@ mod tests {
             base_url: String::new(),
             auth_method: "header".to_string(),
             auth_key_name: "X-Api-Key".to_string(),
-            credential: String::new(),
+            credential: Default::default(),
             service: test_minimal_downstream(),
             catalog_default_headers: vec![],
             user_service_default_headers: vec![],
@@ -8760,7 +9018,7 @@ mod tests {
             base_url: String::new(),
             auth_method: "header".to_string(),
             auth_key_name: "  ".to_string(),
-            credential: String::new(),
+            credential: Default::default(),
             service: test_minimal_downstream(),
             catalog_default_headers: vec![],
             user_service_default_headers: vec![],
@@ -8778,7 +9036,7 @@ mod tests {
             base_url: String::new(),
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
-            credential: String::new(),
+            credential: Default::default(),
             service: test_minimal_downstream(),
             catalog_default_headers: vec![],
             user_service_default_headers: vec![],
@@ -8796,7 +9054,7 @@ mod tests {
             base_url: String::new(),
             auth_method: "query".to_string(),
             auth_key_name: "key".to_string(),
-            credential: String::new(),
+            credential: Default::default(),
             service: test_minimal_downstream(),
             catalog_default_headers: vec![],
             user_service_default_headers: vec![],
@@ -8814,7 +9072,7 @@ mod tests {
             base_url: String::new(),
             auth_method: "aws_sigv4".to_string(),
             auth_key_name: String::new(),
-            credential: String::new(),
+            credential: Default::default(),
             service: test_minimal_downstream(),
             catalog_default_headers: vec![],
             user_service_default_headers: vec![],
@@ -8835,7 +9093,7 @@ mod tests {
             provider_slug: "p".into(),
             injection_method: "bearer".into(),
             injection_key: "Authorization".into(),
-            credential: "tok123".into(),
+            credential: "tok123".to_owned().into(),
         }];
         let req = prepare_delegated_request("v1/x", None, &creds).unwrap();
         assert_eq!(
@@ -8850,7 +9108,7 @@ mod tests {
             provider_slug: "p".into(),
             injection_method: "query".into(),
             injection_key: "api_key".into(),
-            credential: "secret".into(),
+            credential: "secret".to_owned().into(),
         }];
         let req = prepare_delegated_request("v1/x", Some("foo=bar"), &creds).unwrap();
         assert!(req.query.unwrap().contains("api_key=secret"));
@@ -8866,7 +9124,7 @@ mod tests {
             base_url: String::new(),
             auth_method: "bearer".to_string(),
             auth_key_name: String::new(),
-            credential: "tok".to_string(),
+            credential: "tok".to_string().into(),
             service: test_minimal_downstream(),
             catalog_default_headers: vec![],
             user_service_default_headers: vec![],
@@ -8886,7 +9144,7 @@ mod tests {
             base_url: String::new(),
             auth_method: "path".to_string(),
             auth_key_name: "bot".to_string(),
-            credential: "TOKEN".to_string(),
+            credential: "TOKEN".to_string().into(),
             service: test_minimal_downstream(),
             catalog_default_headers: vec![],
             user_service_default_headers: vec![],
@@ -8901,6 +9159,7 @@ mod tests {
 
     fn authority_test_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -8980,6 +9239,7 @@ mod tests {
     #[test]
     fn missing_credential_error_oauth2_with_provider() {
         let key = UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: "k".into(),
@@ -9015,6 +9275,7 @@ mod tests {
     #[test]
     fn missing_credential_error_api_key() {
         let key = UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: "k".into(),
@@ -9106,7 +9367,7 @@ mod tests {
             base_url: "https://example.test".into(),
             auth_method: auth_method.into(),
             auth_key_name: auth_key_name.into(),
-            credential: "secret".into(),
+            credential: "secret".to_owned().into(),
             service: ds,
             catalog_default_headers: vec![],
             user_service_default_headers: vec![],
@@ -9151,7 +9412,7 @@ mod tests {
         target.service.forward_access_token = true;
         target.catalog_default_headers = vec![DefaultRequestHeader {
             name: "Authorization".into(),
-            value: "Bearer catalog".into(),
+            value: "Bearer catalog".to_owned().into(),
             overridable: false,
             sensitive: true,
         }];
@@ -9199,7 +9460,7 @@ mod tests {
         let mut target = make_proxy_target_with_auth("none", "");
         target.catalog_default_headers = vec![DefaultRequestHeader {
             name: "X-Amz-Target".to_string(),
-            value: "Catalog.Write".to_string(),
+            value: "Catalog.Write".to_string().into(),
             overridable: false,
             sensitive: false,
         }];
@@ -9224,26 +9485,26 @@ mod tests {
         target.catalog_default_headers = vec![
             DefaultRequestHeader {
                 name: "Content-Type".to_string(),
-                value: "application/octet-stream".to_string(),
+                value: "application/octet-stream".to_string().into(),
                 overridable: true,
                 sensitive: false,
             },
             DefaultRequestHeader {
                 name: "Idempotency-Key".to_string(),
-                value: "catalog-key".to_string(),
+                value: "catalog-key".to_string().into(),
                 overridable: true,
                 sensitive: false,
             },
             DefaultRequestHeader {
                 name: "X-Trace-ID".to_string(),
-                value: "catalog-trace".to_string(),
+                value: "catalog-trace".to_string().into(),
                 overridable: false,
                 sensitive: false,
             },
         ];
         target.user_service_default_headers = vec![DefaultRequestHeader {
             name: "x-trace-id".to_string(),
-            value: "user-service-trace".to_string(),
+            value: "user-service-trace".to_string().into(),
             overridable: false,
             sensitive: false,
         }];
@@ -9346,7 +9607,7 @@ mod tests {
             provider_slug: "openai".into(),
             injection_method: "bearer".into(),
             injection_key: "Authorization".into(),
-            credential: "sk-123".into(),
+            credential: "sk-123".to_owned().into(),
         }];
         let result = prepare_delegated_request("/chat", None, &creds).unwrap();
         assert_eq!(result.path, "chat");
@@ -9362,7 +9623,7 @@ mod tests {
             provider_slug: "custom".into(),
             injection_method: "header".into(),
             injection_key: "X-Api-Key".into(),
-            credential: "key-abc".into(),
+            credential: "key-abc".to_owned().into(),
         }];
         let result = prepare_delegated_request("/api", None, &creds).unwrap();
         assert_eq!(result.delegated_headers.len(), 1);
@@ -9376,7 +9637,7 @@ mod tests {
             provider_slug: "maps".into(),
             injection_method: "query".into(),
             injection_key: "key".into(),
-            credential: "maps-key".into(),
+            credential: "maps-key".to_owned().into(),
         }];
         let result = prepare_delegated_request("/geocode", None, &creds).unwrap();
         assert!(result.delegated_headers.is_empty());
@@ -9389,7 +9650,7 @@ mod tests {
             provider_slug: "maps".into(),
             injection_method: "query".into(),
             injection_key: "key".into(),
-            credential: "maps-key".into(),
+            credential: "maps-key".to_owned().into(),
         }];
         let result = prepare_delegated_request("/geocode", Some("address=NYC"), &creds).unwrap();
         assert_eq!(result.query.as_deref(), Some("address=NYC&key=maps-key"));
@@ -9402,13 +9663,13 @@ mod tests {
                 provider_slug: "a".into(),
                 injection_method: "bearer".into(),
                 injection_key: "Authorization".into(),
-                credential: "tok-a".into(),
+                credential: "tok-a".to_owned().into(),
             },
             DelegatedCredential {
                 provider_slug: "b".into(),
                 injection_method: "query".into(),
                 injection_key: "secret".into(),
-                credential: "sec-b".into(),
+                credential: "sec-b".to_owned().into(),
             },
         ];
         let result = prepare_delegated_request("/multi", None, &creds).unwrap();

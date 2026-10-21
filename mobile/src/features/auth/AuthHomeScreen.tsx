@@ -9,6 +9,9 @@ import type { RootStackParamList } from "../../app/AppNavigator";
 
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
+import { runAuthAttempt } from "../../lib/auth/authAttempt";
+import { MfaChallengeError } from "../../lib/auth/mfaChallenge";
+import { authSessionGeneration } from "../../lib/auth/sessionStore";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { useAuthSession } from "./AuthSessionContext";
@@ -188,6 +191,8 @@ export function AuthHomeScreen({ navigation }: Props) {
   const [toast, setToast] = useState<ToastState | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [mfaChallenge, setMfaChallenge] = useState<MfaChallengeError | null>(null);
+  const [mfaCode, setMfaCode] = useState("");
   const [isEmailAuthPending, setIsEmailAuthPending] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const { signInWithSession } = useAuthSession();
@@ -340,18 +345,31 @@ export function AuthHomeScreen({ navigation }: Props) {
   };
 
   const handleEmailLogin = async () => {
-    if (isEmailAuthPending || !email.trim() || !password) return;
+    if (isEmailAuthPending || (!mfaChallenge && (!email.trim() || !password))) return;
+    const generation = authSessionGeneration();
     setIsEmailAuthPending(true);
     setLoginError(null);
+    const current = () => isMountedRef.current && authSessionGeneration() === generation;
     try {
-      const result = await mobileApi.loginWithPassword({ email: email.trim(), password });
-      await signInWithSession({
-        accessToken: result.accessToken,
-        refreshToken: result.refreshToken,
-        accessTokenExpiresAt: Date.now() + Math.floor(result.expiresIn * 1000),
-      });
-    } catch (error) {
-      setLoginError(resolveErrorMessage(error));
+      await runAuthAttempt(
+        () => mfaChallenge
+          ? mfaChallenge.verify(mfaCode, mobileApi.verifyMfa)
+          : mobileApi.loginWithPassword({ email: email.trim(), password }),
+        current,
+        async (result) => {
+          setMfaChallenge(null); setMfaCode(""); setPassword("");
+          await signInWithSession({
+            accessToken: result.accessToken,
+            refreshToken: result.refreshToken,
+            accessTokenExpiresAt: Date.now() + Math.floor(result.expiresIn * 1000),
+          });
+        },
+        (error) => {
+          if (error instanceof MfaChallengeError) {
+            setMfaChallenge(error); setPassword(""); setMfaCode("");
+          } else { setMfaCode(""); setLoginError(resolveErrorMessage(error)); }
+        },
+      );
     } finally {
       if (isMountedRef.current) {
         setIsEmailAuthPending(false);
@@ -382,7 +400,8 @@ export function AuthHomeScreen({ navigation }: Props) {
             placeholder="Email"
             placeholderTextColor={colors.textMuted}
             value={email}
-            onChangeText={(v) => { setEmail(v); setLoginError(null); }}
+            onChangeText={(v) => { setEmail(v); setMfaChallenge(null); setMfaCode(""); setLoginError(null); }}
+            editable={!isEmailAuthPending && !mfaChallenge}
             keyboardType="email-address"
             autoCapitalize="none"
             autoComplete="email"
@@ -393,14 +412,24 @@ export function AuthHomeScreen({ navigation }: Props) {
             placeholderTextColor={colors.textMuted}
             value={password}
             onChangeText={(v) => { setPassword(v); setLoginError(null); }}
+            editable={!isEmailAuthPending && !mfaChallenge}
             secureTextEntry
             autoComplete="current-password"
           />
+          {mfaChallenge && <View>
+            <Text style={styles.heroTagline}>Enter your authenticator or single-use recovery code.</Text>
+            <TextInput accessibilityLabel="Authenticator or recovery code" style={styles.input} value={mfaCode}
+              onChangeText={setMfaCode} maxLength={32} autoCapitalize="none" autoCorrect={false}
+              autoComplete="one-time-code" editable={!isEmailAuthPending} />
+            <Pressable accessibilityRole="button" disabled={isEmailAuthPending} onPress={() => { setMfaChallenge(null); setMfaCode(""); setPassword(""); }}>
+              <Text style={styles.heroTagline}>Back to password sign-in</Text>
+            </Pressable>
+          </View>}
           {/* DESIGN.md §Buttons: primary CTA uses `nyx-gradient-vivid`. */}
           <Pressable
             onPress={() => void handleEmailLogin()}
-            disabled={isEmailAuthPending || !email.trim() || !password}
-            style={[styles.signInButtonWrap, (isEmailAuthPending || !email.trim() || !password) && styles.buttonDisabled]}
+            disabled={isEmailAuthPending || (mfaChallenge ? !mfaCode : !email.trim() || !password)}
+            style={[styles.signInButtonWrap, (isEmailAuthPending || (mfaChallenge ? !mfaCode : !email.trim() || !password)) && styles.buttonDisabled]}
           >
             <ExpoLinearGradient
               colors={[colors.gradientStart, colors.gradientEnd]}
@@ -412,7 +441,7 @@ export function AuthHomeScreen({ navigation }: Props) {
                 {isEmailAuthPending ? (
                   <ActivityIndicator size="small" color={colors.onPrimary} />
                 ) : null}
-                <Text style={styles.signInButtonText}>{isEmailAuthPending ? "Signing in..." : "Sign In"}</Text>
+                <Text style={styles.signInButtonText}>{isEmailAuthPending ? "Signing in..." : mfaChallenge ? "Verify & sign in" : "Sign In"}</Text>
               </View>
             </ExpoLinearGradient>
           </Pressable>

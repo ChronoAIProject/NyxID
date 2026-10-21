@@ -2137,9 +2137,10 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
         .unwrap()
         .unwrap();
     assert_eq!(saved.outcome.as_deref(), Some("settled"));
-    let text = crate::services::assistant_agent_credential_service::decrypt_runtime_key(
+    let text = crate::services::platform_public_record_service::decrypt_turn(
         &fixture.state.encryption_keys,
-        &saved.reply_ciphertext,
+        &saved,
+        "reply_ciphertext",
     )
     .await
     .unwrap();

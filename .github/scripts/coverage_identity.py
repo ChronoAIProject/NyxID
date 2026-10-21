@@ -9,6 +9,7 @@ import platform
 
 INPUTS = (
     ".github/workflows/ci.yml",
+    ".config/nextest.toml",
     ".github/scripts/coverage_identity.py",
     ".github/scripts/ci_resources.py",
     ".github/scripts/start-test-mongodb.sh",

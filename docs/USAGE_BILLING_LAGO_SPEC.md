@@ -635,7 +635,11 @@ unless the required modules are wired — fail-closed, not honor-system (Hard re
 - **Frontend (P4):** a **new** billing surface (credits, invoices, per-service cost). The existing
   `api-key-usage-dashboard.tsx` is an "Agent Activity" request-count view, not a billing UI — treat
   billing UI as new work.
-- **CLI:** `nyxid billing wallet`, `nyxid billing usage`.
+- **CLI:** `nyxid billing wallet|usage|topup`, `nyxid billing executions list|show`,
+  `nyxid admin billing config|overview|rates|service|ledger`, `nyxid admin usage`,
+  and `nyxid admin credits grant issue|list|revoke`. See the
+  [native command reference](../skills/nyxid/references/billing.md) for exact
+  prices, funding, readiness and execution correlation.
 
 ## 11. Migration / backfill + Lago spike
 

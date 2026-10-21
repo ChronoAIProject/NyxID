@@ -21,13 +21,15 @@ the requested operation and inputs. Same catalog and URL do not establish
 account/resource equivalence. Unknown account equivalence requires the owner to
 choose the exact target, rather than making a model proposal count as selection.
 
-The composer's **Next message connection** and a leading
+The composer's **Add context → Use a connection** and a leading
 `/service <connection UUID or unambiguous slug>` are authenticated owner choices
 for one turn. Channel selectors require a verified owner sender. Guests, webhooks,
 delegated credentials, service accounts and conversation keys cannot promote
 text/flags into human selection. New ordinary turns reset the choice. An allowed
 card continuation inherits only its exact bound target/operation; denied, expired
 or consumed cards cannot install a choice. Selection is separate from consent.
+A removable **This message** chip makes the selected account visible. Saved connection order is managed in **Agent
+Details → Connections** and applies across the owner's agents.
 
 ## Existing permission modes
 

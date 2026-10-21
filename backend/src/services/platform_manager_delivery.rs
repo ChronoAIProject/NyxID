@@ -1662,7 +1662,7 @@ async fn send_telegram_claimed(
     else {
         return Err(refused());
     };
-    let values = super::platform_credential_service::decrypt_snapshot(
+    let values = super::platform_credential_service::decrypt_platform_snapshot(
         &state.encryption_keys,
         Some(credential.as_ref()),
     )

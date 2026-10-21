@@ -53,9 +53,7 @@ impl LocalKeyProvider {
                 let prev_id = derive_key_id(&prev);
                 if current_id == prev_id {
                     panic!(
-                        "ENCRYPTION_KEY and ENCRYPTION_KEY_PREVIOUS produce the same key id (0x{:02x}). \
-                         This is a 1-in-256 hash collision. Generate a different key with: openssl rand -hex 32",
-                        current_id
+                        "ENCRYPTION_KEY and ENCRYPTION_KEY_PREVIOUS produce the same key id; configure distinct noncolliding keys"
                     );
                 }
                 (Some(Zeroizing::new(prev)), Some(prev_id))
@@ -77,28 +75,20 @@ impl LocalKeyProvider {
             .encryption_key
             .as_deref()
             .expect("ENCRYPTION_KEY must be set when KEY_PROVIDER=local");
-        let current_bytes: Zeroizing<[u8; 32]> = Zeroizing::new(
-            hex::decode(current_hex)
-                .expect(
-                    "ENCRYPTION_KEY is not valid hex (should have been caught by validate_encryption_key)",
-                )
-                .try_into()
-                .expect("ENCRYPTION_KEY must decode to 32 bytes"),
-        );
+        let mut current_bytes = Zeroizing::new([0u8; 32]);
+        hex::decode_to_slice(current_hex, current_bytes.as_mut())
+            .unwrap_or_else(|_| panic!("ENCRYPTION_KEY must be exactly 32 hexadecimal bytes"));
 
         let previous_bytes: Option<Zeroizing<[u8; 32]>> = config
             .encryption_key_previous
             .as_ref()
             .filter(|prev| prev.as_str() != current_hex)
             .map(|hex_str| {
-                Zeroizing::new(
-                    hex::decode(hex_str)
-                        .expect(
-                            "ENCRYPTION_KEY_PREVIOUS is not valid hex (should have been caught by validate_encryption_key)",
-                        )
-                        .try_into()
-                        .expect("ENCRYPTION_KEY_PREVIOUS must decode to 32 bytes"),
-                )
+                let mut bytes = Zeroizing::new([0u8; 32]);
+                hex::decode_to_slice(hex_str, bytes.as_mut()).unwrap_or_else(|_| {
+                    panic!("ENCRYPTION_KEY_PREVIOUS must be exactly 32 hexadecimal bytes")
+                });
+                bytes
             });
 
         Self::new(*current_bytes, previous_bytes.map(|z| *z))
@@ -107,6 +97,9 @@ impl LocalKeyProvider {
 
 #[async_trait]
 impl KeyProvider for LocalKeyProvider {
+    fn key_version_retirement_evidence(&self) -> super::key_provider::KeyVersionRetirementEvidence {
+        super::key_provider::KeyVersionRetirementEvidence::ExactCurrentVersion
+    }
     async fn wrap_dek(&self, plaintext_dek: &[u8]) -> Result<WrappedKey, AppError> {
         let cipher = Aes256Gcm::new_from_slice(self.current.as_ref())
             .map_err(|e| AppError::Internal(format!("Failed to create KEK cipher: {e}")))?;
@@ -277,6 +270,7 @@ mod tests {
             environment: "test".to_string(),
             jwt_private_key_path: "keys/private.pem".to_string(),
             jwt_public_key_path: "keys/public.pem".to_string(),
+            jwt_retained_public_key_paths: Vec::new(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
@@ -301,6 +295,8 @@ mod tests {
             smtp_from_address: None,
             encryption_key: Some("aa".repeat(32)),
             encryption_key_previous: Some("bb".repeat(32)),
+            allow_legacy_record_reads: true,
+            contextual_record_writes: true,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             platform_service_rate_limit_per_second: 2,
@@ -310,6 +306,7 @@ mod tests {
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
+            hmac_keyset_path: None,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,

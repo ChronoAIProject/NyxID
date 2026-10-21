@@ -61,6 +61,7 @@ pub struct AuthUser {
     /// JWT ID for online delegated-authority validation. `None` for non-JWT
     /// authentication contexts.
     pub token_jti: Option<String>,
+    pub oauth_lineage: Option<crate::models::oauth_delegation_authority::OauthAuthorityLineage>,
     /// Resource-owner user ID used for approval/notification decisions.
     /// For service-account auth this points to the SA owner; otherwise `None`.
     pub approval_owner_user_id: Option<String>,
@@ -883,6 +884,7 @@ pub(crate) async fn api_key_auth_user(
         acting_client_id: None,
         oauth_client_id: None,
         token_jti: None,
+        oauth_lineage: None,
         approval_owner_user_id: None,
         auth_method: AuthMethod::ApiKey,
         allow_all_services: key.allow_all_services,
@@ -966,6 +968,7 @@ pub(crate) async fn machine_external_gateway_auth_user(
                 acting_client_id: None,
                 oauth_client_id: Some(oauth_client_id.clone()),
                 token_jti: None,
+                oauth_lineage: None,
                 approval_owner_user_id: None,
                 auth_method: AuthMethod::AccessToken,
                 allow_all_services: false,
@@ -1179,6 +1182,7 @@ impl FromRequestParts<AppState> for AuthUser {
                             acting_client_id: None,
                             oauth_client_id: None,
                             token_jti: Some(claims.jti.clone()),
+                            oauth_lineage: None,
                             approval_owner_user_id: Some(sa.effective_owner_user_id().to_string()),
                             auth_method: AuthMethod::ServiceAccount,
                             allow_all_services: true,
@@ -1201,6 +1205,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         .map_err(|_| AppError::Unauthorized("Invalid token subject".to_string()))?;
 
                     let user_id_str = user_id.to_string();
+                    crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims).await?;
 
                     // Verify the user account is still active
                     let user_model = state
@@ -1339,10 +1344,10 @@ impl FromRequestParts<AppState> for AuthUser {
                         if let Some(id) = claims.sid.as_deref() {
                             let id = Uuid::parse_str(id)
                                 .map_err(|_| AppError::Unauthorized("Invalid session".into()))?;
-                            let live = state.db.collection::<Session>(SESSIONS).find_one(doc! {
+                            let live = state.db.collection::<Session>(SESSIONS).find_one(crate::services::session_authority::authenticated(doc! {
                                 "_id": id.to_string(), "user_id": &user_id_str, "revoked": false,
                                 "expires_at": {"$gt": bson::DateTime::from_chrono(chrono::Utc::now())}
-                            }).await?;
+                            })).await?;
                             if live.is_none() {
                                 return Err(AppError::Unauthorized(
                                     "Session expired or revoked".into(),
@@ -1368,6 +1373,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     } else {
                         None
                     };
+                    let oauth_lineage = jwt::authority_lineage(&claims);
                     return Ok(AuthUser {
                         org_agent_access: None,
                         assistant_group_id: None,
@@ -1381,6 +1387,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         acting_client_id: claims.act.map(|a| a.sub),
                         oauth_client_id: claims.client_id.clone(),
                         token_jti: Some(claims.jti.clone()),
+                        oauth_lineage,
                         approval_owner_user_id: None,
                         auth_method,
                         allow_all_services,
@@ -1415,7 +1422,7 @@ impl FromRequestParts<AppState> for AuthUser {
                 let session = state
                     .db
                     .collection::<Session>(SESSIONS)
-                    .find_one(doc! { "token_hash": &token_hash, "revoked": false })
+                    .find_one(crate::services::session_authority::authenticated(doc! { "token_hash": &token_hash, "revoked": false }))
                     .await
                     .map_err(|e| AppError::Internal(format!("Session lookup failed: {e}")))?;
 
@@ -1459,6 +1466,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                     acting_client_id: None,
                                     oauth_client_id: None,
                                     token_jti: None,
+                                    oauth_lineage: None,
                                     approval_owner_user_id: None,
                                     auth_method: AuthMethod::Session,
                                     allow_all_services: true,
@@ -2010,6 +2018,7 @@ mod tests {
             acting_client_id: None,
             oauth_client_id: None,
             token_jti: None,
+            oauth_lineage: None,
             approval_owner_user_id: None,
             auth_method,
             allow_all_services: true,
@@ -2321,6 +2330,8 @@ mod tests {
     #[test]
     fn verified_delegated_claims_must_set_actor_and_flag_together() {
         let mut claims = jwt::Claims {
+            delegation_origin: None,
+            oauth_lineage: None,
             protected_consent: None,
             sub: Uuid::new_v4().to_string(),
             iss: "nyxid".to_string(),
@@ -2789,6 +2800,7 @@ mod tests {
             status: crate::models::node::NodeStatus::Offline,
             auth_token_hash: auth_hash.to_string(),
             signing_secret_encrypted: Some(vec![9, 8, 7, 6]),
+            signing_secret_context_version: None,
             signing_secret_hash: signing_hash.to_string(),
             last_heartbeat_at: None,
             connected_at: None,
@@ -2998,6 +3010,7 @@ mod tests {
             .unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 id: actor_external_key_id.clone(),
                 user_id: actor_id.to_string(),
@@ -3113,6 +3126,7 @@ mod tests {
         let provider_id = Uuid::new_v4().to_string();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(ProviderConfig {
+                secret_context_versions: Default::default(),
                 id: provider_id.clone(),
                 slug: "delegated-provider".to_string(),
                 name: "Delegated provider fixture".to_string(),
@@ -3154,6 +3168,7 @@ mod tests {
             .unwrap();
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
+                secret_context_versions: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: actor_id.to_string(),
                 provider_config_id: provider_id.clone(),
@@ -3180,6 +3195,7 @@ mod tests {
             .unwrap();
         db.collection::<UserProviderCredentials>(USER_PROVIDER_CREDENTIALS)
             .insert_one(UserProviderCredentials {
+                secret_context_versions: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: actor_id.to_string(),
                 provider_config_id: provider_id.clone(),
@@ -3257,6 +3273,7 @@ mod tests {
 
         db.collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
             .insert_one(UserServiceConnection {
+                secret_context_versions: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: actor_id.to_string(),
                 service_id: actor_service_id.clone(),
@@ -3789,6 +3806,7 @@ mod tests {
             acting_client_id: None,
             oauth_client_id: None,
             token_jti: None,
+            oauth_lineage: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::ApiKey,
             allow_all_services: false,

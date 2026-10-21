@@ -1003,6 +1003,13 @@ mod tests {
         state.config.channel_relay_callback_timeout_secs = 1;
         let bot_id = uuid::Uuid::new_v4().to_string();
         let owner_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let api_key_id = uuid::Uuid::new_v4().to_string();
         let (callback_url, received, shutdown_tx) =
             spawn_callback_server_with_outcome(callback_status).await;
@@ -1454,6 +1461,7 @@ mod tests {
             environment: "development".to_string(),
             jwt_private_key_path: key_dir.join("private.pem").display().to_string(),
             jwt_public_key_path: key_dir.join("public.pem").display().to_string(),
+            jwt_retained_public_key_paths: Vec::new(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
@@ -1478,6 +1486,8 @@ mod tests {
             smtp_from_address: None,
             encryption_key: Some(encryption_key.to_string()),
             encryption_key_previous: None,
+            allow_legacy_record_reads: true,
+            contextual_record_writes: true,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             platform_service_rate_limit_per_second: 2,
@@ -1487,6 +1497,7 @@ mod tests {
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
+            hmac_keyset_path: None,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
@@ -1748,6 +1759,13 @@ mod tests {
         let jwt_keys = crate::test_utils::cached_test_jwt_keys();
         let encryption_keys = crate::crypto::aes::EncryptionKeys::from_config(&config);
         let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let bot_id = uuid::Uuid::new_v4().to_string();
         let api_key_id = uuid::Uuid::new_v4().to_string();
         let conversation_id = uuid::Uuid::new_v4().to_string();
@@ -1881,6 +1899,13 @@ mod tests {
         let mut mentioned_bot = bot.clone();
         mentioned_bot.id = uuid::Uuid::new_v4().to_string();
         mentioned_bot.user_id = foreign_key.user_id.clone();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &foreign_key.user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         mentioned_bot.platform_bot_id = if platform == "telegram" {
             "9876"
         } else {
@@ -1915,8 +1940,16 @@ mod tests {
         .await
         .unwrap();
 
-        // No sender identity, OAuth binding, notification link, or user row exists.
-        for collection in ["users", "oauth_broker_bindings", "notification_channels"] {
+        // No sender identity, OAuth binding, notification link, or user row
+        // exists; the only accounts are the two live bot owners.
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(crate::models::user::COLLECTION_NAME)
+                .count_documents(doc! {"_id":{"$nin":[&user_id,&foreign_key.user_id]}})
+                .await
+                .unwrap(),
+            0
+        );
+        for collection in ["oauth_broker_bindings", "notification_channels"] {
             assert_eq!(
                 db.collection::<mongodb::bson::Document>(collection)
                     .count_documents(doc! {})

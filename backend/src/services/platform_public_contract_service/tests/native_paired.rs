@@ -619,10 +619,7 @@ fn real_codex_native_v2_discovery_readiness_faq_search_read_signup_answer_use_ac
                         "public turn must succeed before final delivery; model_callbacks={}",
                         count.load(Ordering::SeqCst),
                     );
-                    let saved_answer = crate::services::assistant_agent_credential_service::decrypt_runtime_key(
-                        &state.encryption_keys,
-                        &saved_turn.reply_ciphertext,
-                    )
+                    let saved_answer = crate::services::platform_public_record_service::decrypt_turn(&state.encryption_keys, &saved_turn, "reply_ciphertext")
                     .await
                     .unwrap();
                     assert!(
@@ -762,9 +759,10 @@ fn real_codex_native_v2_discovery_readiness_faq_search_read_signup_answer_use_ac
                 .unwrap()
                 .unwrap();
             assert_eq!(turn.outcome.as_deref(), Some("settled"));
-            let answer = crate::services::assistant_agent_credential_service::decrypt_runtime_key(
+            let answer = crate::services::platform_public_record_service::decrypt_turn(
                 &state.encryption_keys,
-                &turn.reply_ciphertext,
+                &turn,
+                "reply_ciphertext",
             )
             .await
             .unwrap();

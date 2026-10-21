@@ -21,6 +21,8 @@ use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::services::org_service::{self, OwnerAccess};
 
 mod lifecycle;
+pub(crate) use lifecycle::accept_personal_erasure_in_session;
+pub(crate) use lifecycle::personal_erasure_pass;
 pub use lifecycle::{
     TransferPoolInput, cleanup_deleted_pools, delete_pool, ensure_lifecycle_indexes, transfer_pool,
 };

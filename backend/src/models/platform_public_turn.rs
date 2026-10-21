@@ -18,6 +18,8 @@ pub struct PlatformPublicTurn {
     pub sponsor_owner_user_id: String,
     pub policy_digest: String,
     pub credential_api_key_id: String,
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(with = "crate::models::bson_bytes::required")]
     pub input_ciphertext: Vec<u8>,
     #[serde(with = "crate::models::bson_bytes::required")]

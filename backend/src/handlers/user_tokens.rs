@@ -1169,7 +1169,8 @@ pub async fn disconnect_provider(
             TelemetryEvent::KeyDeleted {
                 source: event.source.clone(),
             },
-        );
+        )
+        .await;
     }
 
     let mut event_data = serde_json::json!({ "provider_id": &provider_id });
@@ -1521,6 +1522,7 @@ async fn sync_refreshed_credentials_to_unified_keys(
 ) -> AppResult<()> {
     user_api_key_service::sync_refreshed_provider_token_to_api_keys(
         &state.db,
+        &state.encryption_keys,
         user_id,
         provider_id,
     )
@@ -1551,13 +1553,19 @@ async fn sync_provider_credentials_to_unified_keys(
     if fresh_authorization {
         user_api_key_service::sync_provider_token_to_api_keys_after_authorization(
             &state.db,
+            &state.encryption_keys,
             user_id,
             provider_id,
         )
         .await?;
     } else {
-        user_api_key_service::sync_provider_token_to_api_keys(&state.db, user_id, provider_id)
-            .await?;
+        user_api_key_service::sync_provider_token_to_api_keys(
+            &state.db,
+            &state.encryption_keys,
+            user_id,
+            provider_id,
+        )
+        .await?;
     }
 
     if push_to_nodes {
@@ -1647,6 +1655,7 @@ mod tests {
             acting_client_id: None,
             oauth_client_id: None,
             token_jti: None,
+            oauth_lineage: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::Session,
             allow_all_services: true,
@@ -1668,6 +1677,7 @@ mod tests {
     fn test_provider_config(provider_id: &str) -> ProviderConfig {
         let now = Utc::now();
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: provider_id.to_string(),
             slug: "github".to_string(),
             name: "GitHub".to_string(),
@@ -1710,6 +1720,7 @@ mod tests {
     fn test_provider_token(token_id: &str, user_id: &str, provider_id: &str) -> UserProviderToken {
         let now = Utc::now();
         UserProviderToken {
+            secret_context_versions: Default::default(),
             id: token_id.to_string(),
             user_id: user_id.to_string(),
             provider_config_id: provider_id.to_string(),
@@ -1763,6 +1774,7 @@ mod tests {
     fn test_pending_oauth_api_key(key_id: &str, user_id: &str, provider_id: &str) -> UserApiKey {
         let now = Utc::now();
         UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: key_id.to_string(),
@@ -3042,11 +3054,24 @@ mod tests {
         let key_id = Uuid::new_v4().to_string();
         let service_id = Uuid::new_v4().to_string();
         let endpoint_id = Uuid::new_v4().to_string();
+        let state = test_app_state(db.clone());
+        let remote = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("DELETE"))
+            .and(wiremock::matchers::path("/applications/test-app/grant"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&remote)
+            .await;
         let mut provider = test_provider_config(&provider_id);
+        provider.client_id_encrypted =
+            Some(state.encryption_keys.encrypt(b"test-app").await.unwrap());
+        provider.client_secret_encrypted =
+            Some(state.encryption_keys.encrypt(b"test-secret").await.unwrap());
         provider.revocation = Some(RevocationConfig {
+            effect_scope: None,
             request_encoding: "form".to_string(),
             style: "github".to_string(),
-            url: "https://api.github.com/applications".to_string(),
+            url: format!("{}/applications", remote.uri()),
             auth: "basic".to_string(),
             revokes_grant: true,
         });
@@ -3054,8 +3079,23 @@ mod tests {
             .insert_one(provider)
             .await
             .unwrap();
+        let mut token = test_provider_token(&token_id, &user_id, &provider_id);
+        token.access_token_encrypted = Some(
+            state
+                .encryption_keys
+                .encrypt(b"provider-access")
+                .await
+                .unwrap(),
+        );
+        token.refresh_token_encrypted = Some(
+            state
+                .encryption_keys
+                .encrypt(b"provider-refresh")
+                .await
+                .unwrap(),
+        );
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
-            .insert_one(test_provider_token(&token_id, &user_id, &provider_id))
+            .insert_one(token)
             .await
             .unwrap();
         let mut key = test_pending_oauth_api_key(&key_id, &user_id, &provider_id);
@@ -3085,8 +3125,6 @@ mod tests {
             .insert_one(service)
             .await
             .unwrap();
-        let state = test_app_state(db.clone());
-
         let err = disconnect_provider(
             State(state.clone()),
             auth_user.clone(),
@@ -3106,7 +3144,7 @@ mod tests {
         );
 
         let Json(response) = disconnect_provider(
-            State(state),
+            State(state.clone()),
             auth_user,
             TelemetryContext::default(),
             Path(provider_id),
@@ -3119,7 +3157,40 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status, "disconnected");
-        assert!(!response.upstream_revocation_scheduled);
+        assert!(response.upstream_revocation_scheduled);
+        let effects = crate::services::personal_erasure_service::provider::EFFECTS;
+        for _ in 0..100 {
+            crate::services::personal_erasure_service::provider::drain_one(
+                &db,
+                &state.encryption_keys,
+            )
+            .await
+            .unwrap();
+            if db
+                .collection::<bson::Document>(effects)
+                .count_documents(doc! {
+                    "user_id":&user_id,"kind":"oauth_disconnect","status":"complete"
+                })
+                .await
+                .unwrap()
+                == 1
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            db.collection::<bson::Document>(effects)
+                .count_documents(doc! {
+                    "user_id":&user_id,"kind":"oauth_disconnect","status":"complete",
+                    "capability_encrypted":{"$exists":false}
+                })
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(remote.received_requests().await.unwrap().len(), 1);
+        remote.verify().await;
         assert!(
             db.collection::<UserApiKey>(USER_API_KEYS)
                 .find_one(doc! { "_id": key_id })
@@ -3539,12 +3610,12 @@ mod tests {
         let mut key = test_pending_oauth_api_key(&key_id, &owner, &provider);
         key.updated_at = Utc::now() - Duration::seconds(10);
         db.collection(USER_API_KEYS).insert_one(key).await.unwrap();
+        let keys = crate::test_utils::test_encryption_keys();
+        let mut token = test_provider_token(&Uuid::new_v4().to_string(), &owner, &provider);
+        token.access_token_encrypted = Some(keys.encrypt(b"recovered-access").await.unwrap());
+        token.refresh_token_encrypted = Some(keys.encrypt(b"recovered-refresh").await.unwrap());
         db.collection(USER_PROVIDER_TOKENS)
-            .insert_one(test_provider_token(
-                &Uuid::new_v4().to_string(),
-                &owner,
-                &provider,
-            ))
+            .insert_one(token)
             .await
             .unwrap();
         let mut service =
@@ -3567,9 +3638,14 @@ mod tests {
             operation: "manual_edit".into(),
         };
         context::scope(human.clone(), async {
-            user_api_key_service::reconcile_pending_oauth_placeholder(&db, &owner, &key_id)
-                .await
-                .unwrap();
+            user_api_key_service::reconcile_pending_oauth_placeholder(
+                &db,
+                &crate::test_utils::test_encryption_keys(),
+                &owner,
+                &key_id,
+            )
+            .await
+            .unwrap();
             assert_eq!(context::current().unwrap().actor.id, owner);
             collection::<bson::Document>(&db, USER_SERVICES)
                 .update_one(

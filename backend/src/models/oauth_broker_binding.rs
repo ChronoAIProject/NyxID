@@ -15,8 +15,10 @@ pub const COLLECTION_NAME: &str = "oauth_broker_bindings";
 pub const BINDING_ID_RANDOM_HEX_LEN: usize = 32;
 pub const BINDING_ID_PREFIX: &str = "bnd_";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OauthBrokerBinding {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     /// SHA-256 hex (lowercase) of the raw binding_id. The raw value never leaves the issuance
     /// response or the holding client.
     #[serde(rename = "_id")]
@@ -31,9 +33,8 @@ pub struct OauthBrokerBinding {
     /// Links to `RefreshToken.jti` so revocation cascades from one to the other.
     pub refresh_token_jti: String,
 
-    /// AES-256-GCM v2 envelope ciphertext of the active refresh_token string.
-    /// AAD is intentionally omitted in v1 to match the existing `UserProviderToken`
-    /// pattern; binding-hash AAD is a v2 hardening.
+    /// Envelope ciphertext of the active refresh token, authenticated with
+    /// the server-resolved binding hash as the legacy AAD contract.
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub refresh_token_encrypted: Option<Vec<u8>>,
 
@@ -96,6 +97,18 @@ pub fn hash_binding_id(binding_id: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+impl std::fmt::Debug for OauthBrokerBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OauthBrokerBinding")
+            .field("id", &self.id)
+            .field("client_id", &self.client_id)
+            .field("user_id", &self.user_id)
+            .field("rotation_version", &self.rotation_version)
+            .field("revoked", &self.revoked)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +160,7 @@ mod tests {
     fn bson_roundtrip_full() {
         let now = Utc::now();
         let binding = OauthBrokerBinding {
+            secret_context_versions: Default::default(),
             id: hash_binding_id("bnd_test"),
             client_id: "client-1".to_string(),
             user_id: "user-1".to_string(),

@@ -37,8 +37,30 @@ pub struct GrantCascadePayload {
     pub token_scope_available: bool,
 }
 
+/// Diagnostics for secret-bearing DTOs expose only the type, never fields.
+macro_rules! redacted_debug {
+    ($($kind:ty),+ $(,)?) => {$(
+        impl std::fmt::Debug for $kind {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($kind), " { [REDACTED] }"))
+            }
+        }
+    )+};
+}
+pub(crate) use redacted_debug;
+
+impl std::fmt::Debug for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppError")
+            .field("kind", &self.error_key())
+            .field("code", &self.error_code())
+            .finish_non_exhaustive()
+    }
+}
+redacted_debug!(ErrorResponse);
+
 /// Structured JSON error response returned by all API error paths.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 pub struct ErrorResponse {
     /// Machine-readable error category (e.g. "unauthorized")
     pub error: String,
@@ -86,7 +108,7 @@ pub enum PoolAttemptTransportKind {
 
 /// Application-level error variants.
 /// Each variant maps to a specific HTTP status code and error payload.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum AppError {
     #[error("Bad request: {0}")]
     BadRequest(String),
@@ -101,6 +123,9 @@ pub enum AppError {
 
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
+
+    #[error("OAuth authority is temporarily unavailable; retry the request")]
+    OAuthAuthorityUnavailable,
 
     #[error("Forbidden: {0}")]
     Forbidden(String),
@@ -765,6 +790,11 @@ pub enum AppError {
     )]
     ManagedExecutionPending(String),
 
+    #[error(
+        "Credential dependency preparation is running; retry deletion while your account remains usable"
+    )]
+    ErasurePreparing,
+
     #[error("Plan entitlement required: {0}")]
     PlanEntitlementRequired(String),
 
@@ -798,12 +828,13 @@ impl AppError {
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
+            Self::OAuthAuthorityUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Forbidden(_)
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
-            Self::AssistantTurnActive => StatusCode::CONFLICT,
+            Self::AssistantTurnActive | Self::ErasurePreparing => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
             Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
@@ -1023,6 +1054,7 @@ impl AppError {
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
+            Self::OAuthAuthorityUnavailable => 12900,
             Self::Forbidden(_)
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => 1002,
@@ -1033,6 +1065,7 @@ impl AppError {
             Self::VoiceProviderUnavailable => 12501,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
+            Self::ErasurePreparing => 12801,
             // 12101 is already the public upload-retention code.
             Self::AssistantTurnRequired => 12102,
             Self::AssistantModelUnavailable => 12103,
@@ -1252,6 +1285,7 @@ impl AppError {
     /// Each variant maps to a standard OAuth error string — no string matching.
     pub(crate) fn oauth_error_code(&self) -> &'static str {
         match self {
+            Self::OAuthAuthorityUnavailable => "temporarily_unavailable",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::PkceVerificationFailed | Self::InvalidRedirectUri => "invalid_grant",
             Self::InvalidDpopProof(_) => "invalid_dpop_proof",
@@ -1272,6 +1306,7 @@ impl AppError {
     /// HTTP status to use when emitting an RFC 6749 §5.2 error response.
     pub(crate) fn oauth_status(&self) -> StatusCode {
         match self {
+            Self::OAuthAuthorityUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unauthorized(_)
             | Self::AuthenticationFailed(_)
             | Self::ServiceAccountNotFound(_)
@@ -1289,11 +1324,13 @@ impl AppError {
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
+            Self::OAuthAuthorityUnavailable => "oauth_authority_unavailable",
             Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
             Self::AssistantMissingAccess(_) => "missing_access",
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
             Self::AssistantTurnActive => "turn_active",
+            Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
@@ -1621,7 +1658,9 @@ impl IntoResponse for AppError {
             _ => tracing::warn!(error = %self, "Client error"),
         }
         let mut response = (self.status_code(), axum::Json(self.response_body())).into_response();
-        if self.error_key() == Self::ServiceConcurrencyLimited.error_key() {
+        if self.error_key() == Self::ServiceConcurrencyLimited.error_key()
+            || matches!(self, Self::OAuthAuthorityUnavailable)
+        {
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
                 axum::http::HeaderValue::from_static("1"),
@@ -1645,6 +1684,23 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use serde_json::Value;
+
+    #[tokio::test]
+    async fn oauth_authority_unavailability_is_retryable_in_app_and_oauth_responses() {
+        let error = AppError::OAuthAuthorityUnavailable;
+        assert_eq!(error.error_code(), 12900);
+        assert_eq!(error.error_key(), "oauth_authority_unavailable");
+        assert_eq!(error.oauth_status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.oauth_error_code(), "temporarily_unavailable");
+        assert!(!error.to_string().contains("authorize again"));
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(body["error_code"], 12900);
+        assert_eq!(body["error"], "oauth_authority_unavailable");
+    }
 
     #[test]
     fn assistant_missing_access_is_forbidden_class_with_contextual_details() {
@@ -2067,6 +2123,7 @@ mod tests {
     fn error_codes_unique() {
         let codes = vec![
             AppError::ManagedExecutionPending("".into()).error_code(),
+            AppError::ErasurePreparing.error_code(),
             AppError::AssistantTurnActive.error_code(),
             AppError::AssistantTurnRequired.error_code(),
             AppError::AssistantModelUnavailable.error_code(),
@@ -2080,6 +2137,7 @@ mod tests {
             }
             .error_code(),
             AppError::Unauthorized("".into()).error_code(),
+            AppError::OAuthAuthorityUnavailable.error_code(),
             AppError::Forbidden("".into()).error_code(),
             AppError::NotFound("".into()).error_code(),
             AppError::Conflict("".into()).error_code(),
@@ -3185,4 +3243,34 @@ mod tests {
         );
         assert_eq!(json["details"]["token_scope_available"], true);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn error_debug_redacts_challenges_and_untrusted_message_details() {
+    let secret = "distinctive-error-secret-c731";
+    for error in [
+        AppError::MfaRequired {
+            session_token: secret.into(),
+        },
+        AppError::Internal(secret.into()),
+        AppError::AuthenticationFailed(secret.into()),
+    ] {
+        assert!(!format!("{error:?}").contains(secret));
+    }
+    let response = ErrorResponse {
+        error: "mfa_required".into(),
+        error_code: 2002,
+        message: secret.into(),
+        session_token: Some(secret.into()),
+        consent_url: None,
+        request_id: None,
+        approve_url: None,
+        details: None,
+    };
+    assert!(!format!("{response:?}").contains(secret));
+    assert_eq!(
+        serde_json::to_value(response).unwrap()["session_token"],
+        secret
+    );
 }

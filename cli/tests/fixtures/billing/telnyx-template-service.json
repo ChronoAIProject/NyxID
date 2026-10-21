@@ -1,0 +1,119 @@
+{
+  "catalog_manager_created": false,
+  "tools_manager_created": false,
+  "tools_manager_eligible": false,
+  "tools_credential_frozen": false,
+  "declared_operations": [],
+  "offering_kind": "ai_service",
+  "topics": [],
+  "supplier": null,
+  "import_source": null,
+  "x_channel_billing": null,
+  "provider_config_id": null,
+  "credential_configured": false,
+  "id": "00000000-0000-4000-8000-000000000001",
+  "name": "Telnyx Platform",
+  "slug": "telnyx-platform",
+  "description": "Verified fixed-model text chat paid with NyxID credits",
+  "base_url": "https://api.telnyx.com/v2",
+  "service_type": "http",
+  "visibility": "public",
+  "auth_method": "bearer",
+  "auth_type": "bearer",
+  "auth_key_name": "Authorization",
+  "is_active": true,
+  "oauth_client_id": null,
+  "openapi_spec_url": null,
+  "api_spec_url": null,
+  "asyncapi_spec_url": null,
+  "streaming_supported": false,
+  "ssh_config": null,
+  "service_category": "internal",
+  "requires_user_credential": false,
+  "identity_propagation_mode": "none",
+  "identity_include_user_id": false,
+  "identity_include_email": false,
+  "identity_include_name": false,
+  "identity_jwt_audience": null,
+  "forward_access_token": false,
+  "inject_delegation_token": false,
+  "delegation_token_scope": "llm:proxy",
+  "homepage_url": null,
+  "billing": {
+    "managed_execution": {
+      "model": "org/model:1",
+      "max_input_tokens": 8192,
+      "max_output_tokens": 1024,
+      "max_request_bytes": 65536,
+      "max_response_bytes": 262144,
+      "tariff_version": "local-synthetic",
+      "tariff_source": "https://telnyx.com/pricing",
+      "tariff_verified_at": {
+        "$date": {
+          "$numberLong": "1792430340449"
+        }
+      }
+    },
+    "platform_billable": true,
+    "platform_charge_nyxid_credentials_only": true,
+    "platform_key_pricing": {
+      "metric": "input_tokens",
+      "credits_per_unit": "0.00000025",
+      "lago_metric_code": "platform_svc_telnyx-platform_pk",
+      "sync_status": "failed",
+      "sync_error": "Lago is not configured; the reconcile sweep will retry",
+      "components": [
+        {
+          "metric": "output_tokens",
+          "credits_per_unit": "0.000001",
+          "lago_metric_code": "platform_svc_telnyx-platform_pk_output_tokens",
+          "sync_status": "failed",
+          "sync_error": "Lago is not configured; the reconcile sweep will retry"
+        },
+        {
+          "metric": "cache_read_tokens",
+          "credits_per_unit": "0.0000001",
+          "lago_metric_code": "platform_svc_telnyx-platform_pk_cache_read_tokens",
+          "sync_status": "failed",
+          "sync_error": "Lago is not configured; the reconcile sweep will retry"
+        }
+      ],
+      "operations": []
+    },
+    "resale_billable": false,
+    "component_cleanup_metric_codes": [],
+    "resale_metric": "tokens"
+  },
+  "inference": null,
+  "platform_key": {
+    "enabled": false,
+    "audience": "restricted",
+    "allowed_owner_ids": []
+  },
+  "legacy_public_master": false,
+  "effective_platform_metric": "input_tokens",
+  "allowance_metrics": [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "requests"
+  ],
+  "skills_revision": 0,
+  "skills_manifest_digest": "fixture-digest",
+  "recommended_skill_refs": null,
+  "ws_frame_injections": [],
+  "anonymous_endpoints": [],
+  "proxy_operation_policy": {
+    "rules": [
+      {
+        "method": "POST",
+        "path_template": "/ai/openai/chat/completions"
+      }
+    ]
+  },
+  "created_by": "00000000-0000-4000-8000-000000000003",
+  "owner_user_id": "00000000-0000-4000-8000-000000000003",
+  "created_at": "2026-10-19T18:18:59.987+00:00",
+  "updated_at": "2026-10-19T18:19:00.734+00:00",
+  "your_binding_count": 0
+}

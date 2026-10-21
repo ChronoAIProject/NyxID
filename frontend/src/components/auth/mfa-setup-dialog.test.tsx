@@ -100,7 +100,7 @@ describe("MfaSetupDialog", () => {
     mockSetupMutateAsync.mockResolvedValue(setupResponse);
     mockApiPost.mockResolvedValue({
       message: "ok",
-      recovery_codes: ["AAAA-1111", "BBBB-2222"],
+      recovery_codes: ["0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"],
     });
 
     renderDialog();
@@ -142,9 +142,12 @@ describe("MfaSetupDialog", () => {
     });
 
     // Step 4: success advances to the recovery-codes step.
-    expect(await screen.findByText("AAAA-1111")).toBeInTheDocument();
-    expect(screen.getByText("BBBB-2222")).toBeInTheDocument();
+    expect(await screen.findByText("0123456789abcdef0123456789abcdef")).toBeInTheDocument();
+    expect(screen.getByText("fedcba9876543210fedcba9876543210")).toBeInTheDocument();
     expect(mockToastSuccess).toHaveBeenCalledWith("MFA enabled successfully");
+    const clipboard = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    await user.click(screen.getByRole("button", { name: "Copy recovery code 1" }));
+    expect(clipboard).toHaveBeenCalledWith("0123456789abcdef0123456789abcdef");
   });
 
   it("invalid-code rejection: confirm rejects -> error shown, dialog stays on verify step", async () => {

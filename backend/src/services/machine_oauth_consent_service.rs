@@ -52,6 +52,7 @@ pub async fn prepare(
         .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let result: AppResult<()> = async {
+                super::erasure_admission::fence_in_session(&db, &user_id, session).await?;
                 let current = preparation_baseline(&db, &user_id, &client_id, session).await?;
                 if baseline
                     .as_ref()

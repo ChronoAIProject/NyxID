@@ -234,7 +234,8 @@ async fn persist_rules(
         catalog_base_url: state.config.base_url.clone(),
     };
     let rules_bson = bson::to_bson(rules).map_err(|e| AppError::Internal(e.to_string()))?;
-    crate::services::catalog_mutation_service::commit_update(&state.db,service,&authority,
+    crate::services::catalog_mutation_service::commit_update(&state.db,
+        service,&authority,
         &doc! {"anonymous_endpoints":rules_bson,"updated_at":bson::DateTime::from_chrono(Utc::now())},
         &doc! {"_id":&service.id},state.audit_chain_hmac_key.as_ref().as_ref()).await?;
     Ok(())
@@ -254,6 +255,7 @@ mod tests {
     /// (identity_propagation_mode != "none" or token forwarding/delegation on).
     fn catalog_service(created_by: &str, identity_propagating: bool) -> DownstreamService {
         DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,

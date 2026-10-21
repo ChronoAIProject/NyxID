@@ -428,13 +428,31 @@ async fn administrative_or_missing_owner_never_authorizes_workspace_erasure() {
                 .await
                 .unwrap();
             if admin_delete {
-                crate::services::admin_user_service::delete_user_cascade(
+                crate::test_utils::init_test_audit_chain_hmac_key();
+                crate::services::personal_erasure_service::ensure_indexes(&db)
+                    .await
+                    .unwrap();
+                let accepted = crate::services::personal_erasure_service::accept(
                     &db,
-                    &uuid::Uuid::new_v4().to_string(),
                     &owner,
+                    &uuid::Uuid::new_v4().to_string(),
+                    None,
                 )
                 .await
                 .unwrap();
+                assert_eq!(
+                    accepted.status,
+                    crate::models::personal_erasure::ErasureStatus::Accepted
+                );
+                assert!(
+                    db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+                        .find_one(
+                            doc! {"_id":&owner,"is_active":false,"platform_personal_deleting":true}
+                        )
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
             } else {
                 db.collection::<Document>(crate::models::user::COLLECTION_NAME)
                     .delete_one(doc! {"_id":&owner})
@@ -571,7 +589,7 @@ async fn wrong_owner_or_unrecognized_deletion_basis_retains_workspace() {
         db.collection::<Document>(MACHINES).update_one(doc! {"_id":id},doc! {"$set":{
             "resource_state":"paused","pvc_uid":"retained-workspace",
             "deletion_basis":{"owner_id":if wrong_owner {uuid::Uuid::new_v4().to_string()} else {owner.clone()},
-                "source":"account_owner","policy_version":if wrong_owner {"machine-data"} else {"unrecognized"},"accepted_at":bson::DateTime::now()}
+                "source":"account_owner","policy_version":if wrong_owner {"machine-data-provider-revocation-v2"} else {"unrecognized"},"accepted_at":bson::DateTime::now()}
         }}).await.unwrap();
         db.collection::<Document>(crate::models::user::COLLECTION_NAME)
             .delete_one(doc! {"_id":&owner})
@@ -619,19 +637,30 @@ async fn account_deletion_cascade_queues_cleanup_for_an_already_paused_workspace
         .insert_one(doc! {"_id":&job_id,"user_id":&owner,"node_id":machine_id,"status":"running"})
         .await
         .unwrap();
-    crate::services::admin_user_service::delete_current_user_cascade(
+    crate::test_utils::init_test_audit_chain_hmac_key();
+    crate::services::personal_erasure_service::ensure_indexes(&db)
+        .await
+        .unwrap();
+    let accepted = crate::services::personal_erasure_service::accept(
         &db,
         &owner,
-        crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+        &owner,
+        Some(crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION),
     )
     .await
     .unwrap();
+    // Acceptance fences the account and records owner consent. The user source
+    // remains until the Machine lifecycle supplies actual cleanup evidence.
+    assert_eq!(
+        accepted.status,
+        crate::models::personal_erasure::ErasureStatus::Accepted
+    );
     assert!(
         db.collection::<Document>(crate::models::user::COLLECTION_NAME)
-            .find_one(doc! {"_id":&owner})
+            .find_one(doc! {"_id":&owner,"is_active":false,"platform_personal_deleting":true})
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
     assert!(
         db.collection::<Document>(crate::models::machine_job::COLLECTION_NAME)
@@ -1928,7 +1957,7 @@ async fn individual_delete_requires_current_owner_ack_and_preserves_original_bas
     for patch in [
         json!({"data_policy_version":null}),
         json!({"data_policy_version":"remote-machine-data-v1"}),
-        json!({"data_policy_version":"machine-data"}),
+        json!({"data_policy_version":"machine-data-provider-revocation-v2"}),
         json!({"acknowledge_data_loss":false}),
     ] {
         let mut denied = accepted.clone();

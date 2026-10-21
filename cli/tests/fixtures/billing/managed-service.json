@@ -1,0 +1,69 @@
+{
+  "id": "00000000-0000-4000-8000-000000000001",
+  "slug": "telnyx-platform",
+  "name": "Telnyx Platform",
+  "is_active": true,
+  "service_type": "http",
+  "auth_method": "bearer",
+  "base_url": "https://api.telnyx.com/v2",
+  "service_category": "internal",
+  "requires_user_credential": false,
+  "credential_configured": true,
+  "platform_key": {
+    "enabled": false,
+    "audience": "restricted",
+    "allowed_owner_ids": []
+  },
+  "billing": {
+    "platform_billable": true,
+    "platform_charge_nyxid_credentials_only": true,
+    "managed_execution": {
+      "model": "org/model:1",
+      "max_input_tokens": 8192,
+      "max_output_tokens": 1024,
+      "max_request_bytes": 65536,
+      "max_response_bytes": 262144,
+      "tariff_version": "verified-test-tariff",
+      "tariff_source": "https://telnyx.com/pricing",
+      "tariff_verified_at": {
+        "$date": {
+          "$numberLong": "1792368000000"
+        }
+      }
+    },
+    "platform_key_pricing": {
+      "metric": "input_tokens",
+      "credits_per_unit": "0.00000025",
+      "components": [
+        {
+          "metric": "output_tokens",
+          "credits_per_unit": "0.000001",
+          "lago_metric_code": "platform_svc_telnyx-platform_pk_output_tokens",
+          "sync_status": "synced",
+          "sync_error": null
+        },
+        {
+          "metric": "cache_read_tokens",
+          "credits_per_unit": "0.0000001",
+          "lago_metric_code": "platform_svc_telnyx-platform_pk_cache_read_tokens",
+          "sync_status": "synced",
+          "sync_error": null
+        }
+      ],
+      "lago_metric_code": "platform_svc_telnyx-platform_pk",
+      "sync_status": "synced",
+      "sync_error": null
+    },
+    "resale_billable": false,
+    "byok_pricing": null,
+    "platform_pricing": null
+  },
+  "proxy_operation_policy": {
+    "rules": [
+      {
+        "method": "POST",
+        "path_template": "/ai/openai/chat/completions"
+      }
+    ]
+  }
+}

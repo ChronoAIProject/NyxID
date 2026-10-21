@@ -62,7 +62,7 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct SendMessageRequest {
     chat_id: i64,
     text: String,
@@ -71,18 +71,18 @@ struct SendMessageRequest {
     reply_markup: Option<InlineKeyboardMarkup>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct InlineKeyboardMarkup {
     inline_keyboard: Vec<Vec<InlineKeyboardButton>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct InlineKeyboardButton {
     text: String,
     callback_data: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct EditMessageTextRequest {
     chat_id: i64,
     message_id: i64,
@@ -90,20 +90,20 @@ struct EditMessageTextRequest {
     parse_mode: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct AnswerCallbackQueryRequest {
     callback_query_id: String,
     text: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct SetWebhookRequest {
     url: String,
     secret_token: String,
     allowed_updates: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct GetUpdatesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     offset: Option<i64>,
@@ -111,19 +111,19 @@ struct GetUpdatesRequest {
     allowed_updates: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct TelegramResponse {
     ok: bool,
     #[serde(default)]
-    description: Option<String>,
+    error_code: Option<u16>,
     result: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct GetUpdatesResponse {
     ok: bool,
     #[serde(default)]
-    description: Option<String>,
+    error_code: Option<u16>,
     #[serde(default)]
     result: Vec<TelegramUpdate>,
 }
@@ -225,15 +225,15 @@ pub async fn send_approval_message(
         .json(&body)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Telegram API request failed: {e}")))?
+        .map_err(|_| AppError::Internal("Telegram API request failed".into()))?
         .json()
         .await
-        .map_err(|e| AppError::Internal(format!("Telegram API response parse failed: {e}")))?;
+        .map_err(|_| AppError::Internal("Telegram API response parse failed".into()))?;
 
     if !resp.ok {
         return Err(AppError::Internal(format!(
-            "Telegram sendMessage failed: {}",
-            resp.description.unwrap_or_default()
+            "Telegram sendMessage failed (code {:?})",
+            resp.error_code
         )));
     }
 
@@ -276,16 +276,13 @@ pub async fn edit_message_after_decision(
         .json(&body)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Telegram editMessageText failed: {e}")))?
+        .map_err(|_| AppError::Internal("Telegram editMessageText failed".into()))?
         .json()
         .await
-        .map_err(|e| AppError::Internal(format!("Telegram response parse failed: {e}")))?;
+        .map_err(|_| AppError::Internal("Telegram response parse failed".into()))?;
 
     if !resp.ok {
-        tracing::warn!(
-            "Telegram editMessageText failed: {}",
-            resp.description.unwrap_or_default()
-        );
+        tracing::warn!(error_code = ?resp.error_code, "Telegram editMessageText failed");
     }
 
     Ok(())
@@ -309,9 +306,8 @@ pub async fn answer_callback_query(
         .json(&body)
         .send()
         .await
-        .map_err(|e| {
-            tracing::warn!("Telegram answerCallbackQuery failed: {e}");
-            e
+        .map_err(|_| {
+            tracing::warn!("Telegram answerCallbackQuery transport failed");
         });
 
     Ok(())
@@ -332,21 +328,26 @@ pub async fn send_text_message(
     };
 
     let url = format!("{TELEGRAM_API_BASE}{bot_token}/sendMessage");
+    send_text_message_request(http_client, &url, &body).await
+}
+
+async fn send_text_message_request(
+    http_client: &Client,
+    url: &str,
+    body: &SendMessageRequest,
+) -> AppResult<()> {
     let resp: TelegramResponse = http_client
-        .post(&url)
+        .post(url)
         .json(&body)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Telegram sendMessage failed: {e}")))?
+        .map_err(|_| AppError::Internal("Telegram sendMessage failed".into()))?
         .json()
         .await
-        .map_err(|e| AppError::Internal(format!("Telegram response parse failed: {e}")))?;
+        .map_err(|_| AppError::Internal("Telegram response parse failed".into()))?;
 
     if !resp.ok {
-        tracing::warn!(
-            "Telegram sendMessage failed: {}",
-            resp.description.unwrap_or_default()
-        );
+        tracing::warn!(error_code = ?resp.error_code, "Telegram sendMessage failed");
     }
 
     Ok(())
@@ -371,15 +372,15 @@ pub async fn set_webhook(
         .json(&body)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Telegram setWebhook failed: {e}")))?
+        .map_err(|_| AppError::Internal("Telegram setWebhook failed".into()))?
         .json()
         .await
-        .map_err(|e| AppError::Internal(format!("Telegram response parse failed: {e}")))?;
+        .map_err(|_| AppError::Internal("Telegram response parse failed".into()))?;
 
     if !resp.ok {
         return Err(AppError::Internal(format!(
-            "Telegram setWebhook failed: {}",
-            resp.description.unwrap_or_default()
+            "Telegram setWebhook failed (code {:?})",
+            resp.error_code
         )));
     }
 
@@ -392,16 +393,16 @@ pub async fn is_webhook_healthy(http_client: &Client, bot_token: &str, expected_
     let url = format!("{TELEGRAM_API_BASE}{bot_token}/getWebhookInfo");
     let resp = match http_client.get(&url).send().await {
         Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("Telegram getWebhookInfo request failed: {e}");
+        Err(_) => {
+            tracing::warn!("Telegram getWebhookInfo transport failed");
             return false;
         }
     };
 
     let body: serde_json::Value = match resp.json().await {
         Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("Telegram getWebhookInfo parse failed: {e}");
+        Err(_) => {
+            tracing::warn!("Invalid Telegram getWebhookInfo response");
             return false;
         }
     };
@@ -414,9 +415,7 @@ pub async fn is_webhook_healthy(http_client: &Client, bot_token: &str, expected_
     let registered_url = result.get("url").and_then(|v| v.as_str()).unwrap_or("");
 
     if registered_url != expected_url {
-        tracing::warn!(
-            "Telegram webhook URL mismatch: expected {expected_url}, got {registered_url}"
-        );
+        tracing::warn!("Telegram webhook URL mismatch");
         return false;
     }
 
@@ -426,15 +425,8 @@ pub async fn is_webhook_healthy(http_client: &Client, bot_token: &str, expected_
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
-    let last_error = result
-        .get("last_error_message")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
     if pending_count > 50 {
-        tracing::warn!(
-            "Telegram webhook has {pending_count} pending updates, last error: {last_error}"
-        );
+        tracing::warn!(pending_count, "Telegram webhook delivery backlog");
         return false;
     }
 
@@ -448,15 +440,15 @@ pub async fn delete_webhook(http_client: &Client, bot_token: &str) -> AppResult<
         .post(&url)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Telegram deleteWebhook failed: {e}")))?
+        .map_err(|_| AppError::Internal("Telegram deleteWebhook failed".into()))?
         .json()
         .await
-        .map_err(|e| AppError::Internal(format!("Telegram response parse failed: {e}")))?;
+        .map_err(|_| AppError::Internal("Telegram response parse failed".into()))?;
 
     if !resp.ok {
         return Err(AppError::Internal(format!(
-            "Telegram deleteWebhook failed: {}",
-            resp.description.unwrap_or_default()
+            "Telegram deleteWebhook failed (code {:?})",
+            resp.error_code
         )));
     }
 
@@ -485,15 +477,15 @@ pub async fn get_updates(
         .timeout(std::time::Duration::from_secs(timeout_secs as u64 + 10))
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Telegram getUpdates failed: {e}")))?
+        .map_err(|_| AppError::Internal("Telegram getUpdates failed".into()))?
         .json()
         .await
-        .map_err(|e| AppError::Internal(format!("Telegram getUpdates parse failed: {e}")))?;
+        .map_err(|_| AppError::Internal("Telegram getUpdates parse failed".into()))?;
 
     if !resp.ok {
         return Err(AppError::Internal(format!(
-            "Telegram getUpdates failed: {}",
-            resp.description.unwrap_or_default()
+            "Telegram getUpdates failed (code {:?})",
+            resp.error_code
         )));
     }
 
@@ -531,6 +523,86 @@ pub fn parse_callback_data(data: &str) -> Option<(bool, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn actual_telegram_transport_and_provider_errors_do_not_disclose_secrets() {
+        use tracing::instrument::WithSubscriber;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+        let secret = "distinctive-telegram-bot-and-description-2e79";
+        let capture = tempfile::NamedTempFile::new().unwrap();
+        let writer = capture.reopen().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.try_clone().unwrap())
+            .finish();
+        let client = Client::builder().no_proxy().build().unwrap();
+        let request = SendMessageRequest {
+            chat_id: 42,
+            text: "Recovery code used".into(),
+            parse_mode: "HTML".into(),
+            reply_markup: None,
+        };
+        async {
+            let server = MockServer::start().await;
+            let url = format!("{}/bot{secret}/sendMessage", server.uri());
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                    "ok": false, "error_code": 403, "description": secret
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            // Best-effort text delivery retains its existing result contract,
+            // but diagnostics contain only the numeric protocol code.
+            send_text_message_request(&client, &url, &request)
+                .await
+                .unwrap();
+            server.verify().await;
+            server.reset().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ok": secret, "description": secret
+                })))
+                .mount(&server)
+                .await;
+            let malformed = send_text_message_request(&client, &url, &request)
+                .await
+                .err()
+                .unwrap();
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let unavailable = format!(
+                "http://{}/bot{secret}/sendMessage?token={secret}",
+                listener.local_addr().unwrap()
+            );
+            drop(listener);
+            let transport = send_text_message_request(&client, &unavailable, &request)
+                .await
+                .err()
+                .unwrap();
+            for error in [malformed, transport] {
+                // Notification callers log Display, so redacted Debug alone
+                // cannot establish containment.
+                let display = error.to_string();
+                assert!(!display.contains(secret));
+                tracing::warn!(error = %error, "Telegram fixture notification failed");
+                let response = axum::response::IntoResponse::into_response(error);
+                let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .unwrap();
+                assert!(!String::from_utf8_lossy(&body).contains(secret));
+            }
+        }
+        .with_subscriber(subscriber)
+        .await;
+        let logs = std::fs::read_to_string(capture.path()).unwrap();
+        assert!(logs.contains("403"));
+        assert!(logs.contains("Telegram fixture notification failed"));
+        assert!(!logs.contains(secret));
+    }
 
     #[test]
     fn parse_approve_callback() {

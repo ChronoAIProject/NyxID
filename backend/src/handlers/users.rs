@@ -10,7 +10,7 @@ use crate::models::user::{
     ServiceViewType, User,
 };
 use crate::mw::auth::AuthUser;
-use crate::services::{admin_user_service, audit_service, role_service, telemetry_erasure_service};
+use crate::services::{admin_user_service, role_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
@@ -274,10 +274,56 @@ pub struct UpdateProfileResponse {
     pub message: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DeleteAccountResponse {
-    pub status: String,
-    pub deleted_at: String,
+    pub job_id: String,
+    pub status: crate::models::personal_erasure::ErasureStatus,
+    pub accepted_at: String,
+    pub completed_at: Option<String>,
+    pub domains: Vec<ErasureDomainResponse>,
+    pub effects: Vec<super::admin::ErasureEffectResponse>,
+    pub next_effect_after: Option<String>,
+}
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ErasureDomainResponse {
+    pub retry_generation: i64,
+    pub domain: String,
+    pub status: crate::models::personal_erasure::DomainStatus,
+    pub reason: Option<String>,
+    pub completed_at: Option<String>,
+}
+impl DeleteAccountResponse {
+    pub(crate) async fn from_job(
+        db: &mongodb::Database,
+        job: crate::models::personal_erasure::PersonalErasureJob,
+    ) -> AppResult<Self> {
+        let effects =
+            crate::services::personal_erasure_service::issuance::outcomes(db, &job.user_id, None)
+                .await?;
+        let next_effect_after = (effects.len() == 64).then(|| effects.last().unwrap().id.clone());
+        Ok(Self {
+            effects: effects
+                .into_iter()
+                .map(super::admin::ErasureEffectResponse::from)
+                .collect(),
+            next_effect_after,
+            job_id: job.id,
+            status: job.status,
+            accepted_at: job.accepted_at.to_rfc3339(),
+            completed_at: job.completed_at.map(|v| v.to_rfc3339()),
+            domains: job
+                .domains
+                .into_iter()
+                .map(|d| ErasureDomainResponse {
+                    retry_generation: d.retry_generation,
+                    domain: d.domain,
+                    status: d.status,
+                    reason: d.reason,
+                    completed_at: d.completed_at.map(|v| v.to_rfc3339()),
+                })
+                .collect(),
+        })
+    }
 }
 
 // --- Handlers ---
@@ -510,61 +556,17 @@ pub async fn delete_me(
     admin_user_service::validate_account_deletion_policy(deletion_policy)?;
     let user_id = auth_user.user_id.to_string();
 
-    // GDPR erasure: when telemetry is on, enqueue the PostHog
-    // person-delete job BEFORE the user row is removed. Once the user
-    // row is gone we cannot re-enqueue on failure, and emitting a
-    // `user.deleted` event without a corresponding delete job would
-    // leave dangling telemetry we could never reconcile. So: if
-    // telemetry is enabled AND enqueue fails, we abort the whole
-    // delete with an internal error rather than create that dangling
-    // state. User retries the operation once the transient issue
-    // clears.
-    //
-    // The enqueue step is skipped entirely when telemetry is hard-off
-    // (no DSN configured), keeping the default-off path identical to
-    // the pre-telemetry delete flow.
-    let telemetry_on = state.telemetry.is_some();
-    if telemetry_on {
-        telemetry_erasure_service::enqueue(&state.db, &user_id)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    user_id = %user_id,
-                    error = %e,
-                    "telemetry erasure enqueue failed; aborting delete to avoid dangling events"
-                );
-                e
-            })?;
-    }
-
-    admin_user_service::delete_current_user_cascade(&state.db, &user_id, deletion_policy).await?;
-
-    let deleted_at = chrono::Utc::now().to_rfc3339();
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "user.account.deleted",
-        Some(serde_json::json!({ "self_service": true })),
-    );
-
-    // Telemetry: emit user.deleted AFTER the DB cascade so the event's
-    // distinct_id is still resolvable server-side when PostHog processes
-    // it. The erasure worker will cascade the delete on PostHog's side.
-    // No-op when `state.telemetry` is None.
-    emit_event(
-        state.telemetry.as_deref(),
+    let job = crate::services::personal_erasure_service::accept(
+        &state.db,
         &user_id,
-        auth_user.api_key_id.as_deref(),
-        &tele,
-        TelemetryEvent::UserDeleted {
-            reason: Some("self_service".to_string()),
-        },
-    );
-
-    Ok(Json(DeleteAccountResponse {
-        status: "DELETED".to_string(),
-        deleted_at,
-    }))
+        &user_id,
+        Some(deletion_policy),
+    )
+    .await?;
+    // Acceptance closes authority immediately. Remote/local work continues
+    // durably; analytics must not describe this transition as completed.
+    let _ = tele;
+    Ok(Json(DeleteAccountResponse::from_job(&state.db, job).await?))
 }
 
 #[cfg(test)]
@@ -1340,13 +1342,19 @@ mod tests {
     #[test]
     fn delete_account_response_serialization() {
         let resp = DeleteAccountResponse {
-            status: "DELETED".to_string(),
-            deleted_at: "2025-06-15T14:00:00+00:00".to_string(),
+            job_id: uuid::Uuid::new_v4().to_string(),
+            status: crate::models::personal_erasure::ErasureStatus::Accepted,
+            accepted_at: "2025-06-15T14:00:00+00:00".to_string(),
+            completed_at: None,
+            domains: vec![],
+            effects: vec![],
+            next_effect_after: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
 
-        assert_eq!(json["status"], "DELETED");
-        assert_eq!(json["deleted_at"], "2025-06-15T14:00:00+00:00");
+        assert_eq!(json["status"], "accepted");
+        assert!(json["completed_at"].is_null());
+        assert_eq!(json["accepted_at"], "2025-06-15T14:00:00+00:00");
     }
 
     // --- Deserialization tests: UpdateProfileRequest ---
@@ -1472,3 +1480,284 @@ mod tests {
 #[cfg(test)]
 #[path = "account_deletion_policy_tests.rs"]
 mod account_deletion_policy_tests;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsConsentRequest {
+    pub account_id: String,
+    pub enabled: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct AnalyticsConsentResponse {
+    pub account_id: String,
+    pub policy_version: Option<String>,
+    pub revision: String,
+    pub enabled: bool,
+    pub changed_at: Option<String>,
+}
+
+fn analytics_consent_response(
+    account_id: &str,
+    value: crate::models::user::AnalyticsConsent,
+) -> (HeaderMap, Json<AnalyticsConsentResponse>) {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        "no-store".parse().unwrap(),
+    );
+    (
+        headers,
+        Json(AnalyticsConsentResponse {
+            account_id: account_id.to_owned(),
+            policy_version: value.policy_version,
+            revision: value.revision,
+            enabled: value.enabled,
+            changed_at: value.changed_at.map(|time| time.to_rfc3339()),
+        }),
+    )
+}
+
+pub async fn get_analytics_consent(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<(HeaderMap, Json<AnalyticsConsentResponse>)> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    let actor = auth_user.user_id.to_string();
+    Ok(analytics_consent_response(
+        &actor,
+        crate::services::analytics_consent_service::read(&state.db, &actor).await?,
+    ))
+}
+
+pub async fn set_analytics_consent(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AnalyticsConsentRequest>,
+) -> AppResult<(HeaderMap, Json<AnalyticsConsentResponse>)> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    let actor = auth_user.user_id.to_string();
+    if body.account_id != actor {
+        return Err(AppError::Forbidden(
+            "Account changed; reload before changing analytics permission".into(),
+        ));
+    }
+    Ok(analytics_consent_response(
+        &actor,
+        crate::services::analytics_consent_service::set(&state.db, &actor, body.enabled).await?,
+    ))
+}
+
+#[cfg(test)]
+mod analytics_tests {
+    use super::*;
+    use crate::services::analytics_consent_service as consent;
+    use crate::{models::user::UserType, test_utils::*};
+
+    #[tokio::test]
+    async fn mismatched_subject_cannot_change_either_account_and_agent_cannot_opt_in() {
+        let db = connect_test_database("analytics_intent")
+            .await
+            .expect("MongoDB required");
+        let first = uuid::Uuid::new_v4().to_string();
+        let second = uuid::Uuid::new_v4().to_string();
+        for id in [&first, &second] {
+            db.collection::<User>(USERS)
+                .insert_one(test_user(id, UserType::Person))
+                .await
+                .unwrap();
+        }
+        let a = consent::set(&db, &first, false).await.unwrap();
+        let b = consent::set(&db, &second, false).await.unwrap();
+        let state = test_app_state(db.clone());
+        assert!(
+            set_analytics_consent(
+                State(state.clone()),
+                test_auth_user(&second),
+                Json(AnalyticsConsentRequest {
+                    account_id: first.clone(),
+                    enabled: true
+                })
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(consent::read(&db, &first).await.unwrap(), a);
+        assert_eq!(consent::read(&db, &second).await.unwrap(), b);
+        let mut agent = test_auth_user(&first);
+        agent.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+        agent.api_key_id = Some(uuid::Uuid::new_v4().to_string());
+        assert!(
+            set_analytics_consent(
+                State(state.clone()),
+                agent,
+                Json(AnalyticsConsentRequest {
+                    account_id: first.clone(),
+                    enabled: true
+                })
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(consent::read(&db, &first).await.unwrap(), a);
+        let (headers, Json(saved)) = set_analytics_consent(
+            State(state),
+            test_auth_user(&first),
+            Json(AnalyticsConsentRequest {
+                account_id: first.clone(),
+                enabled: true,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(saved.enabled);
+        assert_eq!(saved.account_id, first);
+        assert_eq!(
+            saved.policy_version.as_deref(),
+            Some(consent::POLICY_VERSION)
+        );
+        assert!(!saved.revision.is_empty());
+        assert_eq!(headers.get("cache-control").unwrap(), "no-store");
+        assert_eq!(consent::read(&db, &second).await.unwrap(), b);
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientAnalyticsRequest {
+    pub account_id: String,
+    pub revision: String,
+    pub event: crate::telemetry::client_event::ClientEvent,
+}
+
+/// Limits the raw relay body before Json buffers/deserializes it. The event
+/// itself has a stricter 4KiB limit after decoding; this includes its envelope.
+pub fn analytics_body_limit() -> axum::extract::DefaultBodyLimit {
+    axum::extract::DefaultBodyLimit::max(8 * 1024)
+}
+
+/// The authenticated subject and captured revision fence cross-tab cookie
+/// switches and queued work. Device headers never grant account permission.
+pub async fn capture_analytics(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    Json(body): Json<ClientAnalyticsRequest>,
+) -> AppResult<axum::http::StatusCode> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    let actor = auth_user.user_id.to_string();
+    if body.account_id != actor {
+        return Err(AppError::Forbidden("Analytics account changed".into()));
+    }
+    if body.revision.len() > 64 || body.revision.is_empty() {
+        return Err(AppError::ValidationError(
+            "Analytics revision missing or invalid".into(),
+        ));
+    }
+    body.event.properties()?;
+    emit_event(
+        state.telemetry.as_deref(),
+        &actor,
+        None,
+        &tele,
+        TelemetryEvent::ClientOriginated {
+            event: body.event,
+            revision: body.revision,
+        },
+    )
+    .await;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod analytics_ingress_tests {
+    use super::*;
+    use axum::{
+        Router,
+        body::Body,
+        http::{Request, StatusCode},
+        routing::post,
+    };
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn relay_json_ingress_bounds_body_and_rejects_vendor_controls() {
+        // The same DTO, validator and pre-deserialization limit used by the
+        // authenticated route, isolated here from authentication for ingress.
+        let app = Router::new().route(
+            "/",
+            post(|Json(body): Json<ClientAnalyticsRequest>| async move {
+                body.event.properties().map(|_| StatusCode::NO_CONTENT)
+            })
+            .layer(analytics_body_limit()),
+        );
+        let send = |body: String| {
+            app.clone().oneshot(
+                Request::post("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+        };
+        let envelope = |event: serde_json::Value| {
+            serde_json::json!({
+            "account_id": uuid::Uuid::new_v4().to_string(), "revision": "revision", "event": event
+        }).to_string()
+        };
+        assert_eq!(
+            send(envelope(
+                serde_json::json!({"name":"ui.docs_opened", "props":{"page":"encryption"}})
+            ))
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        for event in [
+            serde_json::json!({"name":"$identify", "props":{}}),
+            serde_json::json!({"name":"ui.docs_opened", "props":{}, "distinct_id":"other"}),
+        ] {
+            assert_eq!(
+                send(envelope(event)).await.unwrap().status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+        for key in ["$set", "$set_once", "$groups", "$process_person_profile"] {
+            let mut props = serde_json::Map::new();
+            props.insert(
+                key.into(),
+                serde_json::json!({"secret":"distinctive-value"}),
+            );
+            assert_eq!(
+                send(envelope(
+                    serde_json::json!({"name":"ui.docs_opened", "props": props})
+                ))
+                .await
+                .unwrap()
+                .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let oversized = envelope(
+            serde_json::json!({"name":"ui.docs_opened", "props":{"page":"x".repeat(9000)}}),
+        );
+        assert_eq!(
+            send(oversized).await.unwrap().status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        // Chunked streams with no Content-Length are bounded too.
+        let stream = futures::stream::iter(
+            (0..10).map(|_| Ok::<_, std::io::Error>(bytes::Bytes::from(vec![b' '; 1024]))),
+        );
+        let response = app
+            .oneshot(
+                Request::post("/")
+                    .header("content-type", "application/json")
+                    .body(Body::from_stream(stream))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+}

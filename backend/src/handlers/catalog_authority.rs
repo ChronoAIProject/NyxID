@@ -308,8 +308,14 @@ async fn reenters_current_client(
     ) else {
         return Ok(false);
     };
-    let stored_id = zeroize::Zeroizing::new(encryption_keys.decrypt(stored_id).await?);
-    let stored_secret = zeroize::Zeroizing::new(encryption_keys.decrypt(stored_secret).await?);
+    let stored_id =
+        crate::services::credential_record_service::CredentialRecord::provider(provider)
+            .decrypt(encryption_keys, "client_id_encrypted", stored_id)
+            .await?;
+    let stored_secret =
+        crate::services::credential_record_service::CredentialRecord::provider(provider)
+            .decrypt(encryption_keys, "client_secret_encrypted", stored_secret)
+            .await?;
     if stored_secret.iter().all(u8::is_ascii_whitespace) {
         return Ok(false);
     }

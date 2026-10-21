@@ -368,6 +368,7 @@ pub async fn poll_for_browser(
     };
     let now = Utc::now();
     let browser = Session {
+        purpose: Some(crate::models::session::SessionPurpose::Authenticated),
         id: Uuid::new_v4().to_string(),
         user_id: delivery.user_id.clone(),
         token_hash: cookie_hash.to_owned(),

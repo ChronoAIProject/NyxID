@@ -1,9 +1,9 @@
 //! Public keys and disposable encrypted transcripts, separate from owner state.
 use super::platform_entry_scope as scope;
 use super::{
-    api_key_mutation_service as tx, assistant_agent_credential_service as crypto,
-    platform_manager_contract::*, platform_public_budget_service as budget,
-    platform_public_policy as policy,
+    api_key_mutation_service as tx, platform_manager_contract::*,
+    platform_public_budget_service as budget, platform_public_policy as policy,
+    platform_public_record_service as records,
 };
 use crate::{
     AppState,
@@ -184,11 +184,23 @@ pub(crate) async fn issue_context(
     } else {
         let absolute = now + Duration::hours(24);
         let (key, credential) = new_key(&evidence.sponsor_owner_user_id, absolute, None);
-        let cipher =
-            crypto::encrypt_runtime_key(&state.encryption_keys, &credential.raw_key).await?;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let cipher = records::encrypt_session(
+            &state.encryption_keys,
+            &session_id,
+            &evidence.sponsor_owner_user_id,
+            &key.id,
+            "credential_ciphertext",
+            credential.raw_key.as_bytes(),
+        )
+        .await?;
         (
             PlatformPublicSession {
-                id: uuid::Uuid::new_v4().to_string(),
+                secret_context_versions: records::initial_versions(
+                    &state.encryption_keys,
+                    "credential_ciphertext",
+                ),
+                id: session_id,
                 profile_id: manager.profile_id.clone(),
                 manager_bot_id: manager.manager_bot_id.clone(),
                 entry: manager.entry.clone(),
@@ -424,7 +436,7 @@ async fn load_credential(
         .await?
         .ok_or_else(denied)?;
     let raw =
-        crypto::decrypt_runtime_key(&state.encryption_keys, &row.credential_ciphertext).await?;
+        records::decrypt_session(&state.encryption_keys, &row, "credential_ciphertext").await?;
     let (owner, key, child) = super::key_service::validate_api_key(&state.db, &raw).await?;
     if child.is_some()
         || owner != context.sponsor_owner_user_id
@@ -456,9 +468,18 @@ impl PublicRuntime {
             return Err(denied());
         }
         let credential = load_credential(&self.state, context).await?;
-        let ciphertext = crypto::encrypt_runtime_key(
+        let ciphertext = records::encrypt_turn(
             &self.state.encryption_keys,
-            &Zeroizing::new(input.text.clone()),
+            records::TurnIdentity {
+                id: &context.turn.turn_id,
+                owner: &context.sponsor_owner_user_id,
+                session: &context.public_session_id,
+                conversation: &context.turn.conversation_id,
+                receipt: &context.ingress.ingress.receipt_id,
+                claim: &context.ingress.ingress.claim_id,
+            },
+            "input_ciphertext",
+            input.text.as_bytes(),
         )
         .await?;
         if context.model_operations.is_empty() || context.limits.max_model_calls == 0 {
@@ -484,6 +505,10 @@ impl PublicRuntime {
         let outer = super::platform_public_proxy_service::load_outer_catalog(db).await?;
         let outer_digest = super::platform_public_proxy_service::catalog_digest(&outer)?;
         let row = PlatformPublicTurn {
+            secret_context_versions: records::initial_versions(
+                &self.state.encryption_keys,
+                "input_ciphertext",
+            ),
             proof_record_id: context.proof_record_id.clone(),
             id: context.turn.turn_id.clone(),
             public_session_id: context.public_session_id.clone(),
@@ -593,14 +618,22 @@ impl PublicNyxAgentRuntime for PublicRuntime {
             row.expires_at,
             Some(expected_key_id.into()),
         );
-        let cipher =
-            crypto::encrypt_runtime_key(&self.state.encryption_keys, &credential.raw_key).await?;
+        let cipher = records::encrypt_session(
+            &self.state.encryption_keys,
+            &row.id,
+            &row.sponsor_owner_user_id,
+            &key.id,
+            "credential_ciphertext",
+            credential.raw_key.as_bytes(),
+        )
+        .await?;
+        let contextual = self.state.encryption_keys.contextual_record_writes();
         let mut session = db.client().start_session().await?;
         session
             .start_transaction()
             .and_run(
-                (db.clone(), context.clone(), expected_key_id.to_owned(), key, cipher),
-                |session, (db, context, old, key, cipher)| {
+                (db.clone(), context.clone(), expected_key_id.to_owned(), key, cipher, contextual),
+                |session, (db, context, old, key, cipher, contextual)| {
                     Box::pin(async move {
                         let result: AppResult<_> = async {
                             policy::verified_context_in_session(db, session, context).await?;
@@ -615,11 +648,7 @@ impl PublicNyxAgentRuntime for PublicRuntime {
                             if revoked.matched_count != 1 {
                                 return Err(denied());
                             }
-                            let replaced = db.collection::<PlatformPublicSession>(SESSIONS)
-                                .update_one(
-                                    doc! {"_id": &context.public_session_id,
-                                        "credential_api_key_id": &*old, "upstream_may_exist": false},
-                                    doc! {"$set": {
+                            let mut replacement_update = doc! {"$set": {
                                         "credential_api_key_id": &key.id,
                                         "credential_ciphertext": bson::Binary {
                                             subtype: bson::spec::BinarySubtype::Generic, bytes: cipher.clone(),
@@ -627,7 +656,13 @@ impl PublicNyxAgentRuntime for PublicRuntime {
                                         "upstream_binding_ciphertext": bson::Binary {
                                             subtype: bson::spec::BinarySubtype::Generic, bytes: vec![],
                                         },
-                                    }},
+                                    }};
+                            records::mark_update(*contextual,&mut replacement_update,"credential_ciphertext")?;
+                            let replaced = db.collection::<PlatformPublicSession>(SESSIONS)
+                                .update_one(
+                                    doc! {"_id": &context.public_session_id,
+                                        "credential_api_key_id": &*old, "upstream_may_exist": false},
+                                    replacement_update,
                                 ).session(&mut *session).await?;
                             if replaced.matched_count != 1 {
                                 return Err(denied());
@@ -669,43 +704,52 @@ impl PublicNyxAgentRuntime for PublicRuntime {
         binding: &ObservedUpstreamBinding,
     ) -> AppResult<()> {
         policy::verified_context(db, context).await?;
-        if binding.session_id.is_none() && binding.response_id.is_none() {
-            return Err(denied());
+        records::validate_binding_handles(
+            binding.session_id.as_deref(),
+            binding.response_id.as_deref(),
+        )
+        .map_err(|_| denied())?;
+        #[derive(serde::Serialize)]
+        struct Binding<'a> {
+            session_id: Option<&'a str>,
+            response_id: Option<&'a str>,
         }
-        for handle in [&binding.session_id, &binding.response_id]
-            .into_iter()
-            .flatten()
-        {
-            if handle.is_empty()
-                || handle.len() > 256
-                || !handle
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-            {
-                return Err(denied());
-            }
-        }
-        let encoded=Zeroizing::new(serde_json::to_string(&serde_json::json!({"session_id":binding.session_id,"response_id":binding.response_id})).map_err(|_|denied())?);
-        let cipher = crypto::encrypt_runtime_key(&self.state.encryption_keys, &encoded).await?;
+        let encoded = crate::crypto::secret_json::to_secret_string(&Binding {
+            session_id: binding.session_id.as_deref(),
+            response_id: binding.response_id.as_deref(),
+        })
+        .map_err(|_| denied())?;
+        let cipher = records::encrypt_session(
+            &self.state.encryption_keys,
+            &context.public_session_id,
+            &context.sponsor_owner_user_id,
+            key_id,
+            "upstream_binding_ciphertext",
+            encoded.as_bytes(),
+        )
+        .await?;
+        let contextual = self.state.encryption_keys.contextual_record_writes();
         let mut session = db.client().start_session().await?;
         session
             .start_transaction()
             .and_run(
-                (db.clone(), context.clone(), key_id.to_owned(), cipher),
-                |session, (db, context, key, cipher)| {
+                (db.clone(), context.clone(), key_id.to_owned(), cipher, contextual),
+                |session, (db, context, key, cipher, contextual)| {
                     Box::pin(async move {
                         let result: AppResult<_> = async {
                             policy::verified_context_in_session(db, session, context).await?;
                             budget::fence_context(db, session, context, key).await?;
-                            db.collection::<PlatformPublicSession>(SESSIONS)
-                                .update_one(
-                                    doc! {"_id": &context.public_session_id, "credential_api_key_id": &*key},
-                                    doc! {"$set": {
+                            let mut binding_update = doc! {"$set": {
                                         "upstream_may_exist": true,
                                         "upstream_binding_ciphertext": bson::Binary {
                                             subtype: bson::spec::BinarySubtype::Generic, bytes: cipher.clone(),
                                         },
-                                    }},
+                                    }};
+                            records::mark_update(*contextual,&mut binding_update,"upstream_binding_ciphertext")?;
+                            db.collection::<PlatformPublicSession>(SESSIONS)
+                                .update_one(
+                                    doc! {"_id": &context.public_session_id, "credential_api_key_id": &*key},
+                                    binding_update,
                                 ).session(session).await?;
                             Ok(())
                         }.await;
@@ -735,8 +779,21 @@ impl PublicNyxAgentRuntime for PublicRuntime {
         };
         let text_bytes = text.len();
         let digest = reply_digest(&self.state, &text)?;
-        let cipher =
-            crypto::encrypt_runtime_key(&self.state.encryption_keys, &Zeroizing::new(text)).await?;
+        let cipher = records::encrypt_turn(
+            &self.state.encryption_keys,
+            records::TurnIdentity {
+                id: &context.turn.turn_id,
+                owner: &context.sponsor_owner_user_id,
+                session: &context.public_session_id,
+                conversation: &context.turn.conversation_id,
+                receipt: &context.ingress.ingress.receipt_id,
+                claim: &context.ingress.ingress.claim_id,
+            },
+            "reply_ciphertext",
+            text.as_bytes(),
+        )
+        .await?;
+        let contextual = self.state.encryption_keys.contextual_record_writes();
         let reply = ReplyRef {
             turn: context.turn.clone(),
             reply_id: message_id.into(),
@@ -753,19 +810,16 @@ impl PublicNyxAgentRuntime for PublicRuntime {
                     text_bytes,
                     result.error.is_some(),
                     digest,
+                    contextual,
                 ),
-                |session, (db, context, reply, cipher, text_bytes, failed, digest)| {
+                |session, (db, context, reply, cipher, text_bytes, failed, digest, contextual)| {
                     Box::pin(async move {
                         let result: AppResult<_> = async {
-                            let cleared = settle_reply_in_session(
-                                db,
-                                session,
-                                context,
-                                reply,
-                                cipher,
-                                *text_bytes,
-                                digest,
-                            )
+                            let cleared = settle_reply_in_session(db,
+session,
+context,
+reply,
+ReplyPayload { ciphertext: cipher, text_bytes: *text_bytes, digest, contextual: *contextual },)
                             .await?;
                             if *failed && cleared {
                                 db.collection::<PlatformPublicTurn>(TURNS)
@@ -909,7 +963,7 @@ pub(crate) async fn load_public_reply(
         Some(&row.proof_record_id),
     )
     .await?;
-    let text = crypto::decrypt_runtime_key(&state.encryption_keys, &row.reply_ciphertext).await?;
+    let text = records::decrypt_turn(&state.encryption_keys, &row, "reply_ciphertext").await?;
     if row.reply_digest != reply_digest(state, &text)? {
         return Err(denied());
     }
@@ -985,15 +1039,8 @@ pub(crate) async fn fence_public_reply_body_in_session(
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RetainedBinding {
-    session_id: Option<String>,
-    response_id: Option<String>,
-}
-fn valid_handle(handle: &str) -> bool {
-    !handle.is_empty()
-        && handle.len() <= 256
-        && handle
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    session_id: Option<Zeroizing<String>>,
+    response_id: Option<Zeroizing<String>>,
 }
 async fn retained_session_handle(
     state: &AppState,
@@ -1007,32 +1054,38 @@ async fn retained_session_handle(
         };
     }
     let encoded =
-        crypto::decrypt_runtime_key(&state.encryption_keys, &row.upstream_binding_ciphertext)
+        records::decrypt_session(&state.encryption_keys, row, "upstream_binding_ciphertext")
             .await?;
     let binding: RetainedBinding = serde_json::from_str(&encoded).map_err(|_| denied())?;
-    if binding
+    records::validate_binding_handles(
+        binding.session_id.as_ref().map(|value| value.as_str()),
+        binding.response_id.as_ref().map(|value| value.as_str()),
+    )
+    .map_err(|_| denied())?;
+    Ok(binding
         .session_id
-        .as_deref()
-        .is_none_or(|s| !valid_handle(s))
-        || binding
-            .response_id
-            .as_deref()
-            .is_some_and(|s| !valid_handle(s))
-    {
-        return Err(denied());
-    }
-    Ok(binding.session_id)
+        .map(|mut value| std::mem::take(&mut *value)))
 }
 
+struct ReplyPayload<'a> {
+    ciphertext: &'a [u8],
+    text_bytes: usize,
+    digest: &'a str,
+    contextual: bool,
+}
 async fn settle_reply_in_session(
     db: &Database,
     session: &mut ClientSession,
     context: &PublicExecutionContext,
     reply: &ReplyRef,
-    ciphertext: &[u8],
-    text_bytes: usize,
-    digest: &str,
+    payload: ReplyPayload<'_>,
 ) -> AppResult<bool> {
+    let ReplyPayload {
+        ciphertext,
+        text_bytes,
+        digest,
+        contextual,
+    } = payload;
     let row=db.collection::<PlatformPublicTurn>(TURNS).find_one(doc! {
         "_id":&context.turn.turn_id,"public_session_id":&context.public_session_id,
         "conversation_id":&context.turn.conversation_id,"receipt_id":&context.ingress.ingress.receipt_id,
@@ -1054,11 +1107,22 @@ async fn settle_reply_in_session(
     if text_bytes > row.max_output_bytes as usize {
         return Err(denied());
     }
-    if db.collection::<PlatformPublicTurn>(TURNS).update_one(
-        doc! {"_id":&row.id,"reply_id":bson::Bson::Null},
-        doc! {"$set":{"reply_id":&reply.reply_id,"reply_ciphertext":bson::Binary {
-            subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext.to_vec()},"outcome":"settled","reply_digest":digest}},
-    ).session(&mut *session).await?.matched_count!=1 {return Err(denied());}
+    let mut reply_update = doc! {"$set":{"reply_id":&reply.reply_id,"reply_ciphertext":bson::Binary {
+    subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext.to_vec()},"outcome":"settled","reply_digest":digest}};
+    records::mark_update(contextual, &mut reply_update, "reply_ciphertext")?;
+    if db
+        .collection::<PlatformPublicTurn>(TURNS)
+        .update_one(
+            doc! {"_id":&row.id,"reply_id":bson::Bson::Null},
+            reply_update,
+        )
+        .session(&mut *session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(denied());
+    }
     ManagerIngressTurnStore::settle_public_execution(
         &super::platform_manager_ingress_service::IngressTurnStore,
         db,
@@ -1414,6 +1478,7 @@ pub(crate) mod tests {
         let expires = now + Duration::hours(24);
         let (key, _) = new_key("sponsor", expires, None);
         let row = PlatformPublicSession {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             profile_id: "profile".into(),
             manager_bot_id: "99".into(),
@@ -1698,6 +1763,7 @@ pub(crate) mod tests {
             expires_at: context.expires_at,
         });
         let retained = PlatformPublicTurn {
+            secret_context_versions: Default::default(),
             proof_record_id: "test-proof".into(),
             id: context.turn.turn_id.clone(),
             public_session_id: row.id.clone(),
@@ -1784,9 +1850,12 @@ pub(crate) mod tests {
                 &mut session,
                 &context,
                 &reply,
-                &[2],
-                6,
-                "local-test-digest"
+                ReplyPayload {
+                    ciphertext: &[2],
+                    text_bytes: 6,
+                    digest: "local-test-digest",
+                    contextual: false
+                },
             )
             .await
             .is_err()
@@ -1798,9 +1867,12 @@ pub(crate) mod tests {
             &mut session,
             &context,
             &reply,
-            &[2],
-            5,
-            "local-test-digest",
+            ReplyPayload {
+                ciphertext: &[2],
+                text_bytes: 5,
+                digest: "local-test-digest",
+                contextual: false,
+            },
         )
         .await
         .unwrap();
@@ -1820,9 +1892,12 @@ pub(crate) mod tests {
             &mut session,
             &context,
             &reply,
-            &[2],
-            5,
-            "local-test-digest",
+            ReplyPayload {
+                ciphertext: &[2],
+                text_bytes: 5,
+                digest: "local-test-digest",
+                contextual: false,
+            },
         )
         .await
         .unwrap();
@@ -1833,9 +1908,12 @@ pub(crate) mod tests {
             &mut session,
             &context,
             &reply,
-            &[3],
-            5,
-            "local-test-digest",
+            ReplyPayload {
+                ciphertext: &[3],
+                text_bytes: 5,
+                digest: "local-test-digest",
+                contextual: false,
+            },
         )
         .await
         .unwrap();
@@ -1897,6 +1975,7 @@ pub(crate) mod tests {
         let (row, context) = recovery_fixture(db).await;
         db.collection::<PlatformPublicTurn>(TURNS)
             .insert_one(PlatformPublicTurn {
+                secret_context_versions: Default::default(),
                 proof_record_id: "test-proof".into(),
                 id: context.turn.turn_id.clone(),
                 public_session_id: row.id.clone(),
@@ -2018,9 +2097,12 @@ pub(crate) mod tests {
                 &mut session,
                 &context,
                 &reply,
-                &[2],
-                1,
-                "local-test-digest"
+                ReplyPayload {
+                    ciphertext: &[2],
+                    text_bytes: 1,
+                    digest: "local-test-digest",
+                    contextual: false
+                },
             )
             .await
             .unwrap()
@@ -2101,10 +2183,13 @@ pub(crate) mod tests {
             .await
             .unwrap()
             .unwrap();
-        let text =
-            crypto::decrypt_runtime_key(&runtime.state.encryption_keys, &retained.reply_ciphertext)
-                .await
-                .unwrap();
+        let text = crate::services::platform_public_record_service::decrypt_turn(
+            &runtime.state.encryption_keys,
+            &retained,
+            "reply_ciphertext",
+        )
+        .await
+        .unwrap();
         assert_eq!(
             text.as_str(),
             "The public guide could not finish this turn. Send /link to use your own NyxBot."
@@ -2313,10 +2398,13 @@ pub(crate) mod tests {
             .await
             .unwrap()
             .unwrap();
-        let text =
-            crypto::decrypt_runtime_key(&runtime.state.encryption_keys, &retained.reply_ciphertext)
-                .await
-                .unwrap();
+        let text = crate::services::platform_public_record_service::decrypt_turn(
+            &runtime.state.encryption_keys,
+            &retained,
+            "reply_ciphertext",
+        )
+        .await
+        .unwrap();
         assert_eq!(text.as_str(), "safe reply");
         assert_eq!(
             retained.reply_digest,

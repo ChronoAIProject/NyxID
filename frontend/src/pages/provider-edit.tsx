@@ -120,6 +120,8 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
       payload.revocation = {
         ...provider.revocation,
         url: patch.revocation_url,
+        // Endpoint edits require a new privileged review of effect semantics.
+        effect_scope: null,
       };
     }
     if (patch.revocation_url === "") {
@@ -759,7 +761,8 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     Revocation: {provider.revocation.style},{" "}
                     {provider.revocation.url}; authentication:{" "}
                     {provider.revocation.auth}; revokes grant:{" "}
-                    {provider.revocation.revokes_grant ? "Yes" : "No"}
+                    {provider.revocation.revokes_grant ? "Yes" : "No"}; reviewed effect scope:{" "}
+                    {provider.revocation.effect_scope ?? "Unknown (remote token revocation withheld)"}
                   </p>
                 )}
               </div>
