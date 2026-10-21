@@ -284,6 +284,17 @@ that it exists there, and attempt retrieval from every worker identity. Probe
 entries use `{node_id}/object/v1/custody/*`; they contain no node secret and are
 retired after the observation. The helper never reads actual credential values.
 
+File custody checks the complete supplied path before resolving aliases: every
+directory traversed, including parents inside intermediate symlink targets, must
+belong to root or the supervisor UID and disallow group/other writes unless
+sticky. The selected node directory must belong to the supervisor and disallow
+other writers; config/key files must be private regular files. Trusted platform
+aliases such as macOS `/var` and `/tmp` remain supported. A private destination
+does not make an alias under a writable non-sticky parent safe. Custody retains
+the same path spelling as later config readers and revalidates that traversal;
+canonicalizing only the custody path would hide those parents. Root and processes
+sharing the supervisor UID remain trusted and can change accepted paths.
+
 Only an expected OS permission error establishes denial. Successful access is
 reported as accessible; missing paths/objects, unavailable services, unfamiliar
 provider errors, invalid identities and timeouts remain unknown. Diagnostics contain

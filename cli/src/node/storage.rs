@@ -8,6 +8,9 @@ use std::path::Path;
 
 use super::error::{Error, Result};
 
+#[cfg(unix)]
+use crate::trusted_directory;
+
 pub(crate) const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 
 fn invalid() -> Error {
@@ -30,31 +33,18 @@ impl Directory {
     fn open_with_policy(path: &Path, final_component: bool) -> Result<Self> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-            // O_NOFOLLOW rejects a final-component symlink, even if its target
-            // would otherwise pass custody checks. Opening has no write effect.
-            let initial = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
-                .open(path)?;
-            validate_directory(&initial, final_component)?;
-            // Resolve platform aliases such as macOS /var, then walk without
-            // following any further symlinks. Compare identities so a path swap
-            // during validation cannot silently select a different directory.
-            let canonical = std::fs::canonicalize(path)?;
-            let mut directory = File::open("/")?;
-            validate_directory(&directory, false)?;
-            for component in canonical.components() {
-                if let std::path::Component::Normal(name) = component {
-                    directory = open_at(&directory, name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
-                    validate_directory(&directory, false)?;
+            let absolute = if path.is_absolute() {
+                path.to_owned()
+            } else {
+                std::env::current_dir()?.join(path)
+            };
+            let directory = trusted_directory::open(&absolute, false).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    invalid()
+                } else {
+                    error.into()
                 }
-            }
-            let first = initial.metadata()?;
-            let last = directory.metadata()?;
-            if first.dev() != last.dev() || first.ino() != last.ino() {
-                return Err(invalid());
-            }
+            })?;
             validate_directory(&directory, final_component)?;
             Ok(Self(directory))
         }
@@ -221,6 +211,32 @@ mod tests {
         assert!(Directory::open(&alias).is_err());
         std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o770)).unwrap();
         assert!(Directory::open(&child).is_err());
+    }
+
+    #[test]
+    fn supplied_alias_traversal_requires_trusted_parents() {
+        let fixture = tempfile::tempdir().unwrap();
+        let trusted = fixture.path().join("trusted");
+        let node = trusted.join("node");
+        mk_private_dir(&trusted);
+        mk_private_dir(&node);
+        let parent = fixture.path().join("alias-parent");
+        mk_private_dir(&parent);
+        symlink(&trusted, parent.join("alias")).unwrap();
+        let supplied = parent.join("alias/node");
+        let pinned = Directory::open(&supplied).unwrap();
+        pinned.check_path(&supplied).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(Directory::open(&supplied).is_err());
+        assert!(pinned.check_path(&supplied).is_err());
+        // Also inspect traversal inside a symlink target, before a second link
+        // or '..' could erase the untrusted directory from the canonical path.
+        symlink(parent.join("alias"), trusted.join("nested")).unwrap();
+        assert!(Directory::open(&trusted.join("nested/node")).is_err());
+        symlink(parent.join("../trusted"), trusted.join("dotdot")).unwrap();
+        assert!(Directory::open(&trusted.join("dotdot/node")).is_err());
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        assert!(Directory::open(&supplied).is_ok());
     }
 
     #[test]

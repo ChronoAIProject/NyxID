@@ -87,6 +87,10 @@ pub(crate) struct Custody {
 
 impl Custody {
     pub(crate) fn new(directory: &Path) -> Self {
+        // Retain the spelling used by later configuration readers. Resolving it
+        // here would hide alias parents from observation. The storage walk
+        // checks every supplied/expanded parent, so only root or the supervisor
+        // UID can redirect an accepted alias (outside this custody boundary).
         Self {
             directory: directory.into(),
             cached: RwLock::new(None),
@@ -705,6 +709,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn custom_directory_alias_with_writable_parent_cannot_verify_custody() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let mk_private_dir = |path: &Path| {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        let fixture = tempfile::tempdir().unwrap();
+        let selected = fixture.path().join("selected");
+        mk_private_dir(&selected);
+        NodeConfig::new("wss://example.test".into(), "node".into(), "file".into())
+            .save(&selected.join("config.toml"))
+            .unwrap();
+        let mutable = fixture.path().join("mutable");
+        mk_private_dir(&mutable);
+        symlink(fixture.path(), mutable.join("alias")).unwrap();
+        let custody = Custody::new(&mutable.join("alias/selected"));
+        let identities = [None, None, None];
+        custody.observe_uncached(&identities).await.unwrap();
+        std::fs::set_permissions(&mutable, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(custody.observe_uncached(&identities).await.is_err());
+        custody.observe(&identities).await;
+        assert_eq!(custody.status(), Status::default());
+        assert!(custody.require(true).is_err());
+    }
+
+    #[tokio::test]
     async fn actual_open_success_and_missing_file_are_distinct() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sentinel");
@@ -863,6 +893,16 @@ mod tests {
                 .unwrap()
                 .all_denied()
         );
+        // A custom alias must not inherit the private destination's successful
+        // claim when a different identity can replace its alias parent entry.
+        let mutable = root.join("mutable");
+        mk_private_dir(&mutable);
+        std::os::unix::fs::symlink(root.join("profiles"), mutable.join("alias")).unwrap();
+        std::fs::set_permissions(&mutable, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let alias_custody = Custody::new(&mutable.join("alias/selected"));
+        alias_custody.observe(&identities).await;
+        assert_eq!(alias_custody.status(), Status::default());
+        assert!(alias_custody.require(true).is_err());
         let files = targets(&selected).unwrap();
         assert!(
             files.contains(&selected.join(".keyfile")) && files.contains(&sibling.join(".keyfile"))
