@@ -57,7 +57,7 @@ const MINTED_KEY: ApiKeyCreateResponse = {
   scopes: ["proxy"],
   allow_all_services: false,
   allowed_service_ids: ["svc-1"],
-  allow_all_nodes: true,
+  allow_all_nodes: false,
   allowed_node_ids: [],
   created_at: "2026-01-01T00:00:00Z",
   rate_limit_per_second: null,
@@ -126,9 +126,9 @@ describe("ConnectVerifyStep — initial phase (connected)", () => {
     expect(screen.getByRole("button", { name: /Maybe later/i })).toBeEnabled();
   });
 
-  it("REGRESSION (silent CTA): clicking 'Create Agent Key' fires the mutation", async () => {
+  it.each([false, true])("creates a restricted key without implicit node authority (node routed: %s)", async (isNodeRouted) => {
     const user = userEvent.setup();
-    renderStep();
+    renderStep({ isNodeRouted });
 
     await user.click(screen.getByRole("button", { name: /Create Agent Key/i }));
 
@@ -141,7 +141,8 @@ describe("ConnectVerifyStep — initial phase (connected)", () => {
         scopes: ["proxy"],
         allow_all_services: false,
         allowed_service_ids: ["svc-1"],
-        allow_all_nodes: true,
+        allow_all_nodes: false,
+        allowed_node_ids: [],
       },
       expect.objectContaining({
         onSuccess: expect.any(Function),

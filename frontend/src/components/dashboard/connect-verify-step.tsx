@@ -103,7 +103,8 @@ export function ConnectVerifyStep({
         scopes: ["proxy"],
         allow_all_services: false,
         allowed_service_ids: [createdKey.id],
-        allow_all_nodes: true,
+        allow_all_nodes: false,
+        allowed_node_ids: [],
       },
       {
         onSuccess: (key) => {
