@@ -123,6 +123,12 @@ requires both changed findings to remain unresolved. A separate immutable-histor
 record covers a sequential mock-keychain test value from the excluded node
 migration work. Neither record covers operational credential material.
 
+The bundle's guard refresh and its detector regression add three exact monthly
+records: the public source-integrity digest for the JWT material module and the
+two test-source lines that reproduce those same fixed directory names. These
+records retain the full source-line binding; a changed digest, added credential
+or changed test line requires another review.
+
 ## Exact dependency dispositions
 
 The initial twelve-root audit found twelve Cargo advisory occurrences and six
