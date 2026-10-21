@@ -128,13 +128,8 @@ pub async fn update_settings(
     auth_user: AuthUser,
     Json(body): Json<UpdateNotificationSettingsRequest>,
 ) -> AppResult<Json<NotificationSettingsResponse>> {
-    if let (Some(legacy), Some(mode)) = (body.approval_required, body.global_approval_mode)
-        && mode.stored() != Some(legacy)
-    {
-        return Err(AppError::ValidationError(
-            "approval_required conflicts with global_approval_mode".to_string(),
-        ));
-    }
+    let requested_mode =
+        GlobalApprovalMode::from_update(body.approval_required, body.global_approval_mode)?;
     let user_id = auth_user.user_id.to_string();
     let channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
 
@@ -176,11 +171,7 @@ pub async fn update_settings(
     if let Some(v) = body.telegram_enabled {
         update_doc.insert("telegram_enabled", v);
     }
-    if let Some(v) = body
-        .global_approval_mode
-        .and_then(GlobalApprovalMode::stored)
-        .or(body.approval_required)
-    {
+    if let Some(v) = requested_mode.and_then(GlobalApprovalMode::stored) {
         update_doc.insert("approval_required", v);
     }
     if let Some(v) = body.approval_timeout_secs {

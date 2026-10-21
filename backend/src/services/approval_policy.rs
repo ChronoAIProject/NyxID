@@ -19,6 +19,21 @@ pub enum GlobalApprovalMode {
 }
 
 impl GlobalApprovalMode {
+    /// Normalize update intent without confusing an omitted update with Writes only.
+    pub fn from_update(
+        legacy: Option<bool>,
+        mode: Option<Self>,
+    ) -> crate::errors::AppResult<Option<Self>> {
+        if let (Some(legacy), Some(mode)) = (legacy, mode)
+            && mode.stored() != Some(legacy)
+        {
+            return Err(crate::errors::AppError::ValidationError(
+                "approval_required conflicts with global_approval_mode".to_string(),
+            ));
+        }
+        Ok(mode.or_else(|| legacy.map(|value| Self::from_stored(Some(value)))))
+    }
+
     pub fn from_stored(preference: Option<bool>) -> Self {
         match preference {
             Some(true) => Self::All,
