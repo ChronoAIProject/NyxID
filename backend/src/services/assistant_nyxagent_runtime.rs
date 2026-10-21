@@ -1331,12 +1331,23 @@ async fn execute_turn_inner(
     } else {
         ""
     };
+    let mut guidance = guidance.to_owned();
+    if let Some(agent) = agent.as_ref()
+        && crate::services::agent_skill_preload::enabled(agent, row.guest_turn)
+    {
+        let preloaded =
+            tokio::time::timeout(Duration::from_secs(30), egress.preload_skills(row, agent)).await;
+        guidance.push_str(&match preloaded {
+            Ok(Ok(content)) => content,
+            _ => "\nPreloaded skills are unavailable for this turn. Continue with available information or another authorized source; do not assume their contents.\n".into(),
+        });
+    }
     let prepared = crate::services::assistant_instruction_context::Prepared::with_guidance(
         state.audit_chain_hmac_key.as_ref().as_ref(),
         row,
         agent.as_ref(),
         &history,
-        guidance,
+        &guidance,
     )
     .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
     *instruction_context = Some(prepared);

@@ -75,9 +75,10 @@ impl ManagerTransportProducer for Transport {
 pub fn compose(
     state: AppState,
     settled_hook: Arc<dyn super::assistant_nyxagent_runtime::OwnerTurnSettledHook>,
+    skills: Arc<dyn super::agent_skill_preload::ContextProvider>,
 ) -> Arc<PlatformManagerProducers> {
     let identity = bindings::producer(state.clone());
-    let egress = super::assistant_nyxagent_egress::producer(state.clone(), identity);
+    let egress = super::assistant_nyxagent_egress::producer(state.clone(), identity, skills);
     let public_runtime = super::platform_public_credential_service::producer(state.clone());
     let execution =
         super::assistant_nyxagent_runtime::producer(state.clone(), egress.clone(), public_runtime);

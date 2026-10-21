@@ -179,8 +179,11 @@ impl Fixture {
         let request = json!({"stream":true,"conversation":partition,"input":exported["input"],
             "event_context":{"schema_version":1,"channel_id":exported["channel_id"],
                 "conversation_id":partition,"activity":exported["activity"]}});
-        let producers =
-            crate::services::platform_manager_transport::compose(state.clone(), Arc::new(Settled));
+        let producers = crate::services::platform_manager_transport::compose(
+            state.clone(),
+            Arc::new(Settled),
+            crate::handlers::agent_skills::preload_context(state.clone()),
+        );
         let router = Router::new()
             .route(
                 "/bindings/{binding}",

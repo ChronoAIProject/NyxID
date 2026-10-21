@@ -6,6 +6,7 @@ pub mod admin_user_service;
 pub mod agent_binding_service;
 pub mod agent_key_introspection;
 pub mod agent_operation_scope_service;
+pub mod agent_skill_preload;
 pub mod analytics_consent_service;
 pub mod analytics_dispatch_service;
 pub mod anonymous_endpoint_service;

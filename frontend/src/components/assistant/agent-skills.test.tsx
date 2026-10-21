@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("@/hooks/use-agent-skills", () => ({
   useAgentSkills: mocks.current,
+  useSetSkillPreload: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   useSetAgentSkills: () => ({ mutate: mocks.save, isPending: false }),
   useSkillSearch: mocks.search,
   useSkillVersions: mocks.versions,
@@ -92,7 +93,7 @@ it("still marks a disabled pin when the toggle is hidden", () => {
     data: { revision: 4, skills: [{ ...pin, disabled: true }], metadata: {} },
   });
   render(<AgentSkills agentId="agent" />);
-  expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  expect(screen.queryByRole("switch", { name: "Use Research" })).not.toBeInTheDocument();
   expect(screen.getByText("Disabled")).toBeInTheDocument();
 });
 it("toggles a pin and sends disabled true in the PUT body", () => {

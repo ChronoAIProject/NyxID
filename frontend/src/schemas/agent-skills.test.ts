@@ -2,12 +2,35 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "@/lib/api-client";
 import {
   agentSkillSchema,
+  agentSkillsSchema,
   learningProposalSchema,
   skillDraftDiagnostics,
   skillDraftRemediation,
 } from "./agent-skills";
 
 describe("agent skill schema", () => {
+  it("keeps preload settings and defaults older responses to on-demand loading", () => {
+    const response = {
+      revision: 1,
+      skills: [],
+      metadata: { s: { description: "FAQ", size_bytes: 1000 } },
+    };
+    expect(agentSkillsSchema.parse(response).metadata.s!.preload_paths).toEqual(
+      [],
+    );
+    expect(
+      agentSkillsSchema.parse({
+        ...response,
+        metadata: {
+          s: {
+            ...response.metadata.s,
+            preload_paths: ["SKILL.md"],
+            preload_bytes: 900,
+          },
+        },
+      }).metadata.s!.preload_bytes,
+    ).toBe(900);
+  });
   it("defaults disabled pins to false and preserves true", () => {
     const base = { source: "ornn", skill_id: "s", name: "Skill", version: "1.0", sha256: "a".repeat(64) };
     expect(agentSkillSchema.parse(base).disabled).toBe(false);

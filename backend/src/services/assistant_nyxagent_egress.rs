@@ -38,10 +38,12 @@ use crate::{
 pub fn producer(
     state: AppState,
     identity: Arc<dyn ManagerIdentityProducer>,
+    skills: Arc<dyn super::agent_skill_preload::ContextProvider>,
 ) -> Arc<dyn NyxAgentEgress> {
     Arc::new(Egress {
         state,
         identity: Some(identity),
+        skills: Some(skills),
         channel: None,
         #[cfg(test)]
         dispatch_boundary: None,
@@ -56,6 +58,8 @@ pub(crate) fn channel(
         state,
         identity: None,
         channel: Some(session),
+        // Phone-channel sessions are guest turns and never preload private skills.
+        skills: None,
         #[cfg(test)]
         dispatch_boundary: None,
     })
@@ -78,6 +82,7 @@ pub(crate) fn channel_at_dispatch_boundary(
         identity: None,
         channel: Some(session),
         dispatch_boundary: Some(boundary),
+        skills: None,
     })
 }
 
@@ -87,6 +92,7 @@ struct Egress {
     channel: Option<crate::models::channel_adapter::CallSession>,
     #[cfg(test)]
     dispatch_boundary: Option<Arc<DispatchBoundary>>,
+    skills: Option<Arc<dyn super::agent_skill_preload::ContextProvider>>,
 }
 
 /// Validate server-built operations again at the egress boundary. Handles are
@@ -132,6 +138,20 @@ fn valid_handle(handle: &str) -> bool {
 
 #[async_trait]
 impl NyxAgentEgress for Egress {
+    async fn preload_skills(
+        &self,
+        row: &AssistantConversation,
+        agent: &crate::models::assistant_agent::AssistantAgent,
+    ) -> AppResult<String> {
+        self.skills
+            .as_ref()
+            .ok_or_else(|| {
+                AppError::Forbidden("Skill preloading unavailable for this transport".into())
+            })?
+            .prepare(row, agent)
+            .await
+    }
+
     async fn request(
         &self,
         authority: &NyxAgentExecutionContext,
