@@ -15,6 +15,7 @@ pub mod authorization_code;
 pub mod billing_ledger;
 pub mod billing_rate_cache;
 pub mod billing_target;
+pub mod billing_tax_profile;
 pub mod billing_topup_session;
 pub mod billing_wallet;
 pub mod bson_bytes;

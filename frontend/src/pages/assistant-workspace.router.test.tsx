@@ -65,6 +65,9 @@ const query = (data: unknown) => ({
   refetch: vi.fn(),
 });
 vi.mock("@/hooks/use-billing", () => ({
+  BILLING_INVOICES_PAGE_SIZE: 10,
+  useCurrentBill: () => query(undefined),
+  useBillingInvoices: () => query({ invoices: [], total: 0 }),
   useBillingWallet: () => ({ ...query(state.walletPending ? undefined : billingWallet()), isLoading: state.walletPending }),
   useBillingUsage: () => query(billingUsage()),
   useTopUpHistory: () => query({ topups: [], total: 0 }),

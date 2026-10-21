@@ -212,7 +212,7 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 | `LAGO_PAYMENT_PROVIDER_CODE` | *(empty)* | Code of the Lago Stripe payment provider connection. When set, newly created Lago customers are linked to it (`sync_with_provider: true`) so `POST /api/v1/billing/topup` can generate checkout URLs. Unset leaves customers unlinked and top-ups fail with `no_linked_payment_provider`; existing customers must be linked manually in the Lago dashboard. |
 | `LAGO_WEBHOOK_SECRET` | *(empty)* | Lago webhook verification secret for `POST /api/v1/webhooks/lago`; redacted from config debug output. Required to accept Lago-originated wallet/subscription updates. |
 | `BILLING_RECONCILE_INTERVAL_SECS` | `300` | Reconcile sweep interval. Set `0` to disable event push/reconcile sweeps. |
-| `BILLING_RATE_CACHE_TTL_SECS` | `900` | Maximum age of a read-only rate used for reservation sizing. A missing or older rate rejects a billable request before forwarding. The reconcile sweep mirrors the Lago plan's standard charges into the cache each cycle (and once at startup), so the default works when the sweep is enabled; raise it only when `BILLING_RECONCILE_INTERVAL_SECS=0`. |
+| `BILLING_RATE_CACHE_TTL_SECS` | `900` | Maximum age of read-only price and per-owner tax profiles used for reservation sizing. A missing or older rate rejects a billable request before forwarding. The reconcile sweep mirrors the Lago plan's standard charges into the cache each cycle (and once at startup), so the default works when the sweep is enabled; raise it only when `BILLING_RECONCILE_INTERVAL_SECS=0`. |
 | `BILLING_RESERVATION_ABANDON_SECS` | `600` | Grace before never-forwarded reserved rows are marked `abandoned`. |
 | `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS` | `0` | Default overdraft cap copied to newly provisioned wallets unless an admin sets the global default on `/admin/billing` (Settings), which then wins. Existing wallets keep their cap. The shared-store reservation gate enforces the wallet's cap atomically. |
 | `BILLING_FAIL_CLOSED` | `false` | Incident kill switch. When `BILLING_ENABLED=true`, rejects billable forwarding even when Lago is healthy; when billing is disabled it has no effect. |
@@ -233,6 +233,38 @@ Each lane owns `platform_svc_{slug}_byok` or `platform_svc_{slug}_pk` on
 `LAGO_PLAN_CODE`; clearing persists cleanup until both charge and cache are removed.
 Resale is unchanged and independently gated by `BILLING_RESALE_ENABLED`.
 See [platform keys and inference](PLATFORM_KEYS_AND_INFERENCE.md).
+
+### Merchant tax configuration and bills
+
+Lago owns taxes; NyxID reads a per-owner `billing_tax_profiles` cache containing
+resolved charge/plan/customer/billing-entity rates. `BILLING_RATE_CACHE_TTL_SECS`
+also controls tax freshness; no additional environment variable is required.
+Provisioning, customer/subscription notifications, plan/price invalidation and
+the bounded reconcile sweep keep it current. A missing/stale profile triggers
+one inline refresh with a five-second total provider timeout outside admission
+transactions. Failed attempts are persisted and suppress inline retries for 30 seconds,
+including cold profiles. Provisioning, webhook and reconcile refreshes bypass this
+backoff. After a failed refresh, wallet-funded
+admission fails closed. Fully allowance/grant-funded admission needs no profile.
+Verified empty taxes mean zero tax; failure-only cache records never do.
+For duplicate plan charges sharing a metric, NyxID conservatively uses the
+highest summed tax rate; provider refresh reconciles the difference. Percentage rates use exact decimal parsing
+with up to 12 fractional digits, matching `Credits` precision; negative,
+malformed or more precise rates fail closed rather than being rounded silently.
+
+Wallet holds and settlement include tax on the pre-tax wallet share; Lago events
+retain only pre-tax quantities. Half-up settlement and upward admission rounding
+use exact picocredits. Provider fee/tax cent rounding is trued up by existing
+`external:lago` refresh adjustments. Top-up invoices remain untaxed; grants and
+allowances never reach Lago and are not taxed.
+
+Deploy all replicas **before** ops assign customer taxes. Existing rows without
+tax fields settle pre-tax; there is no backfill or tax migration fence.
+[Billing operations](BILLING_OPERATIONS.md) documents manual merchant organization
+flag overrides, precedence and personal-vs-org resolution, and the customer-level
+Singapore GST / overseas 0% procedure. The personal Billing page reads Lago's
+current bill and finalized subscription invoices through `/billing/bill` and
+`/billing/invoices`; both APIs also accept an authorized `owner_id`.
 
 ### Billing flag matrix
 

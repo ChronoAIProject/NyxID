@@ -1406,6 +1406,8 @@ async fn admitted_funded_call_settles_frozen_usage_once_after_price_and_credenti
             reserved_credits: hold,
             allowance_reservations: vec![],
             grant_reservations: vec![],
+            tax_cache_ttl_secs: 900,
+            applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
         }],
     };
     let meter = meter::open(&f.state.db, &ctx, Some(&reservation))
@@ -1927,6 +1929,13 @@ async fn concurrent_prepare_retries_distinct_calls_and_deduplicates_same_call() 
 struct FundedLago;
 #[async_trait::async_trait]
 impl crate::services::billing::lago_client::LagoApi for FundedLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        Ok(crate::services::billing::taxes::zero_config())
+    }
     async fn ensure_customer(
         &self,
         o: &crate::services::billing::lago_client::OwnerProvisionInput,

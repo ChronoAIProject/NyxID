@@ -3208,6 +3208,15 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    db.collection::<Document>(crate::models::billing_tax_profile::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // ── billing_wallet ──
     let billing_wallet = db.collection::<Document>(crate::models::billing_wallet::COLLECTION_NAME);
     billing_wallet

@@ -343,6 +343,22 @@ impl BillingService {
         let wallet = self.runtime_prerequisites(owner_id, &rate).await?;
         let candidates =
             funding::prepare_machine_window_funding(&self.db, owner_id, None, SKU, now).await?;
+        if !candidates
+            .benefits_cover(&self.db, seconds, rate.credits_per_second)
+            .await?
+        {
+            let lago = self
+                .lago
+                .as_deref()
+                .ok_or_else(|| unavailable("billing provider is not configured"))?;
+            super::taxes::ensure_fresh(
+                &self.db,
+                lago,
+                &wallet,
+                self.config.billing_rate_cache_ttl_secs,
+            )
+            .await?;
+        }
         Ok(PreparedRuntimeWindow {
             owner_id: owner_id.into(),
             wallet,
@@ -670,6 +686,8 @@ impl BillingService {
                 reserved_credits: Credits::ZERO,
                 allowance_reservations: vec![],
                 grant_reservations: vec![],
+                tax_cache_ttl_secs: self.config.billing_rate_cache_ttl_secs,
+                applied_tax: None,
             },
             Utc::now(),
         )
@@ -725,6 +743,8 @@ impl BillingService {
                 credits_per_unit_micros: layer.credits_per_unit_micros,
                 credits_per_unit_pico: layer.credits_per_unit_pico,
                 settlement_rate: Some(run.rate.credits_per_second),
+                tax_accounting: true,
+                applied_tax: layer.applied_tax.clone(),
                 allowance_reservations: layer.allowance_reservations.clone(),
                 grant_reservations: layer.grant_reservations.clone(),
                 ..Default::default()

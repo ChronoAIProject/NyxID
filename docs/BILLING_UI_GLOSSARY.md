@@ -616,3 +616,32 @@ Both are excluded. Scope details show excluded orchestration, tool, and
 unclassified requests/costs. Recent activity is included alongside summaries;
 validation status indicates whether the reporting journal was stable for the
 read. Existing activity/outcome/feedback sections keep their own semantics.
+
+## Current bill, taxes and usage invoices
+
+The personal Billing tab includes **Current bill** and **Past usage invoices**.
+The current bill is the open calendar billing period in Lago: each wallet-funded
+charge shows its name, units and pre-tax amount, followed by subtotal, named tax
+rates/amounts, total tax and total so far. Lago's aggregate amounts are
+authoritative. Computed tax rows can differ because Lago rounds fees/taxes to
+cents; **Tax rounding** makes differences up to one cent per displayed tax row
+plus one cent explicit. If the difference exceeds that tolerance, the bill shows
+only Lago's aggregate **Tax**, omitting potentially outdated names and rates.
+The bill uses the current cached tax configuration and remains provisional until
+invoiced. Currency amounts use two decimals, dates use UTC, and invoice payment
+statuses appear as **Paid**, **Pending** or **Failed**.
+
+Past usage invoices are finalized subscription invoices. **Invoice total** is
+before prepaid credits. **Prepaid credits applied** explains how much the wallet
+paid; **Amount due** is the remaining payable balance. Each invoice includes its
+historical named tax rows and a **Download receipt** action. Top-up history
+continues to show the separate untaxed invoices for buying credits.
+
+Grant- and allowance-funded quantities never reach Lago, are not taxed and are
+intentionally absent from these bills. Usage remains the place to inspect those
+benefits. Wallet availability, reservations, pending debits and overdraft checks
+include tax on the wallet-funded share. The Usage funding split retains the
+pre-tax wallet share; the settlement ledger separately records tax.
+
+See [billing operations](BILLING_OPERATIONS.md) for manual merchant enablement,
+flag and owner resolution, Lago tax setup, and deployment order.

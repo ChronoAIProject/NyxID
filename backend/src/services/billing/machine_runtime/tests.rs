@@ -43,6 +43,14 @@ impl LocalLago {
 
 #[async_trait]
 impl LagoApi for LocalLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        self.check()?;
+        Ok(crate::services::billing::taxes::zero_config())
+    }
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
         Ok(owner.external_customer_id.clone())
     }
@@ -1864,3 +1872,66 @@ async fn runtime_profile_rate_binding_rejects_foreign_quote_before_writes() {
 
 #[path = "profile_binding_tests.rs"]
 mod profile_binding;
+
+#[tokio::test]
+async fn runtime_preflight_wallet_seconds_use_gross_per_second_price() {
+    let f = fixture("machine_preflight_gst").await;
+    let mut config = super::super::taxes::zero_config();
+    config.customer["taxes"] = serde_json::json!([{"code":"gst","name":"GST","rate":"9"}]);
+    let profile =
+        super::super::taxes::resolve_config(&f.owner, "local-subscription", &config).unwrap();
+    f.db.collection::<crate::models::billing_tax_profile::BillingTaxProfile>(
+        crate::models::billing_tax_profile::COLLECTION_NAME,
+    )
+    .insert_one(profile)
+    .await
+    .unwrap();
+    let funds = f
+        .billing
+        .runtime_funds_estimate(&f.owner, &f.rate)
+        .await
+        .unwrap();
+    let gross = super::super::taxes::gross_ceiling(f.rate.credits_per_second, "9".parse().unwrap())
+        .unwrap();
+    assert_eq!(
+        funds.estimated_seconds,
+        (Credits::from_whole(10).pico() / gross.pico()).to_string()
+    );
+    assert_eq!(funds.estimated_seconds, "229357");
+    assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
+    let now = bson::DateTime::now();
+    f.db.collection::<Document>("credit_grants").insert_one(doc! {
+        "_id":Uuid::new_v4().to_string(), "batch_id":"batch", "recipient_user_id":&f.owner,
+        "target_kind":"selected_users", "amount_credits":1_i64,
+        "amount":Credits::from_whole(1), "remaining":Credits::from_whole(1), "reserved":Credits::ZERO,
+        "scope":{"all_services":true,"service_ids":[],"service_slugs":[]}, "status":"active",
+        "issued_ledgered_at":now, "granted_by":"admin", "terminal_amount":Credits::ZERO,
+        "created_at":now,"updated_at":now,
+    }).await.unwrap();
+    let funds = f
+        .billing
+        .runtime_funds_estimate(&f.owner, &f.rate)
+        .await
+        .unwrap();
+    // The extra grant buys 25,000 untaxed seconds, independently of the wallet.
+    assert_eq!(funds.estimated_seconds, "254357");
+    f.db.collection::<Document>(WALLETS)
+        .update_one(
+            doc! {"owner_id":&f.owner},
+            doc! {"$set":{"balance_credits":Credits::ZERO}},
+        )
+        .await
+        .unwrap();
+    f.db.collection::<Document>(crate::models::billing_tax_profile::COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    f.lago.available.store(false, Ordering::SeqCst);
+    let funds = f
+        .billing
+        .runtime_funds_estimate(&f.owner, &f.rate)
+        .await
+        .unwrap();
+    assert_eq!(funds.estimated_seconds, "25000");
+    f.db.drop().await.unwrap();
+}

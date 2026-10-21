@@ -238,12 +238,29 @@ impl BillingService {
                 .checked_add(available)
                 .ok_or_else(|| invalid("allowance estimate overflow"))?;
         }
-        let money = wallet
-            .available_credits()?
-            .max(Credits::ZERO)
-            .checked_add(grant_funds)?;
-        let estimated = (money.pico() / rate.credits_per_second.pico())
-            .checked_add(i128::from(allowance_seconds))
+        let wallet_funds = wallet.available_credits()?.max(Credits::ZERO);
+        let wallet_seconds = if wallet_funds > Credits::ZERO {
+            let lago = self
+                .lago
+                .as_deref()
+                .ok_or_else(|| unavailable("billing provider is not configured"))?;
+            let profile = super::super::taxes::ensure_fresh(
+                &self.db,
+                lago,
+                &wallet,
+                self.config.billing_rate_cache_ttl_secs,
+            )
+            .await?;
+            let applied = super::super::taxes::snapshot(&profile, &rate.lago_metric_code)?;
+            wallet_funds.pico()
+                / super::super::taxes::gross_ceiling(rate.credits_per_second, applied.rate_percent)?
+                    .pico()
+        } else {
+            0
+        };
+        let estimated = (grant_funds.pico() / rate.credits_per_second.pico())
+            .checked_add(wallet_seconds)
+            .and_then(|n| n.checked_add(i128::from(allowance_seconds)))
             .ok_or_else(|| invalid("runtime estimate overflow"))?;
         Ok(RuntimeFundsEstimate {
             wallet_available: wallet.available_credits()?,

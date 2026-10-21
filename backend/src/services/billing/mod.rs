@@ -1,5 +1,6 @@
 pub mod allowances;
 pub mod amounts;
+pub mod bill;
 pub mod config;
 pub mod funding;
 pub mod grants;
@@ -20,6 +21,7 @@ pub mod route_context;
 pub mod route_inventory;
 pub mod schedules;
 mod targets;
+pub mod taxes;
 pub mod topup_expiry;
 pub mod usage_rollup;
 pub mod webhook;
@@ -1564,6 +1566,9 @@ mod tests {
         let mut config = test_app_config();
         config.billing_enabled = true;
         let billing = BillingService::new_with_lago(db.clone(), Arc::new(config), lago);
+        // Price sync invalidates profiles. Supply the reconcile result before
+        // this benefit-only estimate spills into wallet funding at settlement.
+        super::taxes::seed_test_profiles(&db).await;
         for credential in [
             CredentialClass::UserOwned,
             CredentialClass::NyxidManagedMaster,
@@ -1757,6 +1762,8 @@ mod tests {
         let mut config = test_app_config();
         config.billing_enabled = true;
         let billing = BillingService::new_with_lago(db.clone(), Arc::new(config), lago.clone());
+        // Recovery runs after the regular sweep refreshes invalidated profiles.
+        super::taxes::seed_test_profiles(&db).await;
         let ctx = BillingRouteContext::new(
             BillingIngress::Proxy,
             Uuid::new_v4().to_string(),
@@ -2124,6 +2131,14 @@ mod tests {
 
     #[async_trait]
     impl crate::services::billing::lago_client::LagoApi for FakeLago {
+        async fn tax_config(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig>
+        {
+            Ok(crate::services::billing::taxes::zero_config())
+        }
         async fn sync_standard_charge(
             &self,
             _plan: &str,
@@ -2347,6 +2362,7 @@ mod tests {
             })
             .await
             .expect("insert wallet");
+        crate::services::billing::taxes::seed_test_profiles(db).await;
     }
 }
 

@@ -1864,6 +1864,13 @@ async fn tools_manager_admin_contract_updates_demote_and_noops_preserve_publicat
 struct LocalLago;
 #[async_trait::async_trait]
 impl crate::services::billing::lago_client::LagoApi for LocalLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        Ok(crate::services::billing::taxes::zero_config())
+    }
     async fn ensure_customer(
         &self,
         o: &crate::services::billing::lago_client::OwnerProvisionInput,
