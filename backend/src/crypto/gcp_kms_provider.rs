@@ -85,7 +85,7 @@ impl std::fmt::Debug for GcpKmsKeyMetadata {
 }
 
 pub struct GcpKmsProvider {
-    client: google_cloud_kms::client::Client,
+    client: google_cloud_kms::grpc::apiv1::kms_client::Client,
     keys: GcpKmsKeyMetadata,
 }
 
@@ -121,7 +121,10 @@ impl GcpKmsProvider {
             "GCP Cloud KMS provider initialized"
         );
 
-        Self { client, keys }
+        Self {
+            client: (*client).clone(),
+            keys,
+        }
     }
 }
 
@@ -136,7 +139,6 @@ impl KeyProvider for GcpKmsProvider {
     async fn wrap_dek(&self, plaintext_dek: &[u8]) -> Result<WrappedKey, AppError> {
         use google_cloud_kms::grpc::kms::v1::EncryptRequest;
 
-        let mut last_err = None;
         for attempt in 0..GCP_KMS_MAX_RETRIES {
             if attempt > 0 {
                 let backoff = std::time::Duration::from_millis(
@@ -160,15 +162,13 @@ impl KeyProvider for GcpKmsProvider {
                         ciphertext: Zeroizing::new(response.ciphertext),
                     });
                 }
-                Err(e) => {
+                Err(_) => {
                     tracing::warn!(attempt = attempt + 1, "GCP KMS encrypt transient failure");
-                    last_err = Some(e);
                 }
             }
         }
 
-        let e = last_err.unwrap();
-        tracing::error!("GCP KMS encrypt failed after {GCP_KMS_MAX_RETRIES} attempts: {e}");
+        tracing::error!("GCP KMS encrypt failed after {GCP_KMS_MAX_RETRIES} attempts");
         Err(AppError::Internal("GCP KMS encrypt failed".to_string()))
     }
 
@@ -177,7 +177,6 @@ impl KeyProvider for GcpKmsProvider {
 
         let key_name = self.keys.key_name_for(wrapped.key_id)?;
 
-        let mut last_err = None;
         for attempt in 0..GCP_KMS_MAX_RETRIES {
             if attempt > 0 {
                 let backoff = std::time::Duration::from_millis(
@@ -194,15 +193,13 @@ impl KeyProvider for GcpKmsProvider {
 
             match self.client.decrypt(request, None).await {
                 Ok(response) => return Ok(Zeroizing::new(response.plaintext)),
-                Err(e) => {
+                Err(_) => {
                     tracing::warn!(attempt = attempt + 1, "GCP KMS decrypt transient failure");
-                    last_err = Some(e);
                 }
             }
         }
 
-        let e = last_err.unwrap();
-        tracing::error!("GCP KMS decrypt failed after {GCP_KMS_MAX_RETRIES} attempts: {e}");
+        tracing::error!("GCP KMS decrypt failed after {GCP_KMS_MAX_RETRIES} attempts");
         Err(AppError::Internal("GCP KMS decrypt failed".to_string()))
     }
 
@@ -293,3 +290,7 @@ mod tests {
         assert!(!debug_output.contains(TEST_KEY_PREV));
     }
 }
+
+#[cfg(test)]
+#[path = "gcp_kms_provider_tests.rs"]
+mod transport_tests;

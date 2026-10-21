@@ -4,7 +4,7 @@ import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
-import { useMachineAccess } from "./use-machine-access";
+import { useMachineAccess, useRequestMachineContext } from "./use-machine-access";
 const { read } = vi.hoisted(() => ({ read: vi.fn() }));
 vi.mock("@/lib/assistant/assistant-http", () => ({ assistantJson: read }));
 const off = { shell: false, files: false, browser: false, computer: false, developer_browser: false };
@@ -68,4 +68,21 @@ it("does not poll a hidden page or a settled machine", async () => {
   await advance(60_000);
   expect(read).toHaveBeenCalledTimes(calls);
   next.unmount();
+});
+
+it("parses actionable missing selection alongside old nodes without capability reports", async () => {
+  read.mockResolvedValue([{ ...machine, mode:"selection_required", selection_required:true, selection_reason:"Choose a supported mode or explicitly approve legacy.", separation_choice:null, separated:null }]);
+  const {result,unmount}=setup();
+  await advance(10);
+  expect(result.current.data?.[0]).toMatchObject({ mode:"selection_required", selection_required:true, separation_choice:null });
+  unmount();
+});
+it("binds a legacy owner-card request to the account that reviewed the warning", async () => {
+  const wrapper = ({children}:PropsWithChildren) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const {result,unmount}=renderHook(() => useRequestMachineContext("agent"),{wrapper});
+  const reviewed=result.current.mutateAsync;
+  act(() => useAuthStore.setState({user:{id:"other-owner"} as User}));
+  await expect(reviewed({node:"node",selection:{mode:"shared_legacy",expected_revision:3,capabilities:off,saved_login_ids:[]}})).rejects.toThrow(/account changed/i);
+  expect(read).not.toHaveBeenCalled();
+  unmount();
 });

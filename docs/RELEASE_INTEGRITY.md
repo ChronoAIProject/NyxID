@@ -53,6 +53,40 @@ script artifacts have matching `sha384-*` SRI attributes in the HTML, and emits
 a strict CSP. The backend does not read credential plaintext and does not
 perform remote credential cryptography.
 
+The backend image packages this standalone output at `/app/frontend/dist/`;
+its Node builder and the frontend builder share the exact npm lockfile,
+`SOURCE_COMMIT` and `SOURCE_DATE_EPOCH` inputs. The build plugin honors the
+source commit and produces deterministic manifest time when the epoch is set.
+Both builds require those inputs for release fingerprint parity. Publication
+must validate the actual image-extracted manifest and script hashes, rather
+than trusting a separate build of the same source. The backend emits
+`Referrer-Policy: no-referrer`, and frontend nginx preserves its strict CSP
+without adding the SPA policy. See [Production browser policy](BROWSER_SECURITY_POLICY.md).
+
+The required `Artifact Packaging` PR workflow builds both runtime images on
+native amd64 and arm64 runners. `scripts/check-credential-image.py` extracts
+files from stopped containers resolved to immutable image IDs; it never starts
+the images. It rejects links, unsafe paths, missing or extra files, manifest
+hash/size/SRI drift, a different source commit/version/epoch, a different
+credential fingerprint, and a stale composition inventory or lock binding.
+The complete extracted credential file sets must match between the backend
+and frontend images. The weekly run uses the same checks. The publication
+workflow repeats parity against its actual per-architecture image digests and
+requires success before multi-architecture tag promotion.
+
+For a local Docker check after building both images from a verified export:
+
+```sh
+python3 scripts/check-credential-image.py --image nyxid-backend:local \
+  --component backend --compare-image nyxid-frontend:local \
+  --source-root /path/to/export/source --commit "$SOURCE_COMMIT" \
+  --epoch "$SOURCE_DATE_EPOCH"
+```
+
+This packaging check establishes the exact manifest bytes to sign. It does not
+create or verify a release signature; the mandatory official release signing
+and publication gate is a separate control.
+
 In split deployments where a reverse proxy sends the SPA/static frontend and
 backend to different upstreams, route these accept paths and
 `/credential-accept/assets/*` to the backend upstream, not the SPA/static
@@ -155,41 +189,20 @@ Org owners can opt out at:
 The flag is effective only for `user_type=Org`. Missing `profile_config`,
 missing `release_integrity`, and missing flag values default to `false`.
 
-## Release Workflow
+## Release workflow
 
-The release workflow builds and uploads the generated manifest as a workflow
-artifact. Signing and publication are disabled unless
-`RELEASE_INTEGRITY_SIGNING_ENABLED=true`.
+Official release signing and verification are mandatory in both publishers.
+The generated `releases.json` is a named signed subject alongside the final
+archives, SBOMs and `official-release-manifest.json`. The CLI publisher requires
+successful verification with the unchanged W6 verifier before release hosting
+and again before creating the GitHub Release. The image publisher signs and
+verifies its actual platform/index subjects before each registry write and
+requires a signed complete-set manifest before tag promotion.
 
-When enabled, maintainers must provide:
-
-- `RELEASE_INTEGRITY_SIGN_CMD`
-- `RELEASE_INTEGRITY_PUBLISH_CMD`
-- `RELEASE_INTEGRITY_MANIFEST_URL`
-
-Optional secret material can be provided via:
-
-- `RELEASE_INTEGRITY_SIGNING_KEY`
-- `RELEASE_INTEGRITY_PUBLISH_TOKEN`
-
-Signing workflow behavior is:
-
-- Disabled or unset `RELEASE_INTEGRITY_SIGNING_ENABLED`: warn and skip signing
-  and publication.
-- Enabled with all required command and URL configuration: sign and publish.
-- Enabled with missing required configuration: fail fast and name the missing
-  variables. This surfaces a deployment misconfiguration instead of silently
-  publishing an unsigned manifest that an operator expected to be signed.
-
-No default release origin, CDN, signing key, or rotation policy is assumed.
-
-## Maintainer Runbook TBD
-
-- [ ] TBD, owner Infra: signing key custody and storage.
-- [ ] TBD, owner Security: signing key rotation and authority policy.
-- [ ] TBD, owner Infra: independent release origin DNS, CDN, and TLS
-  ownership.
-- [ ] TBD, owner Security: final signature scheme and verification procedure.
-- [ ] TBD, owner Release-eng: manifest signing and publish process.
-- [ ] TBD, owner Release-eng: manifest validity, expiry, and stale-manifest
-  handling.
+There is no `RELEASE_INTEGRITY_SIGNING_ENABLED` switch or arbitrary signing/publish
+command. The protected `official-release` environment must provide the exact
+policy acknowledgement described in [RELEASE_SIGNING.md](RELEASE_SIGNING.md).
+That runbook specifies administrator custody, permissions, failure behavior,
+verification, and independently hosting the verified credential manifest.
+The nonpublishing PR/weekly OIDC path and its distinct identity are documented
+in [RELEASE_REHEARSAL.md](RELEASE_REHEARSAL.md).

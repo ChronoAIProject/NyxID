@@ -1,0 +1,13 @@
+# distro codename suite components snapshot-url signed-InRelease-sha256
+ubuntu	focal	focal	main,universe	https://snapshot.ubuntu.com/ubuntu/20261020T000000Z	cc9be89a0984aeca9e3ca40ae0e6decff75aa32653a5925b04956a7c12487e99
+ubuntu	focal	focal-updates	main,universe	https://snapshot.ubuntu.com/ubuntu/20261020T000000Z	219d49ae03f522640a27aa7251ebe6f1a3d44605d30ca032df87c152fbd69bab
+ubuntu	focal	focal-security	main,universe	https://snapshot.ubuntu.com/ubuntu/20261020T000000Z	7da6f7926e5fbead8a9af26ccf1fd0f301be45dd031d6aff8495ed77d16ea82a
+ubuntu	noble	noble	main,universe	https://snapshot.ubuntu.com/ubuntu/20261020T000000Z	cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0
+ubuntu	noble	noble-updates	main,universe	https://snapshot.ubuntu.com/ubuntu/20261020T000000Z	52bb7e89f40f411a401f8b1954098b5775a7d0d497dec182f323f4bc009612d0
+ubuntu	noble	noble-security	main,universe	https://snapshot.ubuntu.com/ubuntu/20261020T000000Z	7f81a77abbf23458062d0bc98e868e00b4392de0c78d339e58f548e8ff64245b
+debian	bookworm	bookworm	main	https://snapshot.debian.org/archive/debian/20261020T000000Z	77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa
+debian	bookworm	bookworm-updates	main	https://snapshot.debian.org/archive/debian/20261020T000000Z	fb5ccff7febeb90f812ca9aa7d8348acac1eeb53791e1c2c68661717b12fdd4c
+debian	bookworm	bookworm-security	main	https://snapshot.debian.org/archive/debian-security/20261020T000000Z	debdb23d9224f88d20a26b1f9876ece2f3112edc94f37f1618bac2fe41f4408f
+debian	trixie	trixie	main	https://snapshot.debian.org/archive/debian/20261020T000000Z	0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675
+debian	trixie	trixie-updates	main	https://snapshot.debian.org/archive/debian/20261020T000000Z	3ea800baec602255b1b450a0434052c05cf9eb72636eaf0b0144e0bd0a181080
+debian	trixie	trixie-security	main	https://snapshot.debian.org/archive/debian-security/20261020T000000Z	a2adb375ee0ba03cf8b9c707ba780ddf37cd6d91b069c36fcd28e07466cfae5f

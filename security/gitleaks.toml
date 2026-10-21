@@ -1,0 +1,8 @@
+title = "NyxID secret discovery: upstream detectors, no local suppressions"
+
+[extend]
+useDefault = true
+
+# Dispositions live in secret-exceptions.json. The wrapper requires exact
+# rule, normalized path, complete source lines and match/secret identities.
+# Inline gitleaks:allow comments and .gitleaksignore are deliberately ignored.

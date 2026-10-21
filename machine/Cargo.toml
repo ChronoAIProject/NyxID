@@ -25,4 +25,11 @@ aes = { version = "0.8", features = ["zeroize"] }
 ghash = { version = "0.5.1", features = ["zeroize"] }
 polyval = { version = "0.6.2", features = ["zeroize"] }
 rand = "0.8.5"
+aws-lc-rs = "1.18.2"
+# Borrowed DER structure validation only; no RustCrypto private operations.
+pkcs1 = { version = "0.7", default-features = false, features = ["pkcs8"] }
+pkcs8 = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+# Cross-provider wire/persistence interoperability and malformed-key fixtures.
 rsa = "0.9.10"

@@ -22,6 +22,40 @@ fn entry(tag: u16, perm: u16, id: u32) -> [u8; 8] {
     bytes[4..].copy_from_slice(&id.to_le_bytes());
     bytes
 }
+/// Browser contexts share a policy-reading group with their legacy role. That
+/// group must never confer home access. Replace any old ACL with one exact UID
+/// grant, while the supervisor owns the directory and can prevent chmod.
+pub(super) fn legacy_home(file: &File, uid: u32) -> Result<()> {
+    let meta = file.metadata()?;
+    ensure!(
+        uid != 0 && meta.is_dir() && meta.uid() == 0 && meta.mode() & 0o077 == 0,
+        "context_legacy_home_gate_invalid"
+    );
+    let mut bytes = 2u32.to_le_bytes().to_vec();
+    for e in [
+        entry(1, 7, UNDEFINED),
+        entry(2, 7, uid),
+        entry(4, 0, UNDEFINED),
+        entry(16, 7, UNDEFINED),
+        entry(32, 0, UNDEFINED),
+    ] {
+        bytes.extend_from_slice(&e);
+    }
+    ensure!(
+        unsafe {
+            libc::fsetxattr(
+                file.as_raw_fd(),
+                ATTRIBUTE.as_ptr(),
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                0,
+            )
+        } == 0,
+        "context_legacy_home_acl_unavailable"
+    );
+    file.sync_all()?;
+    Ok(())
+}
 fn named_access(file: &File, uid: u32, allow: u16) -> Result<()> {
     let meta = file.metadata()?;
     ensure!(
@@ -102,7 +136,7 @@ fn open(path: &Path) -> Result<File> {
         .open(path)
         .context("context_policy_unavailable")
 }
-pub fn prepare(root: &Path, dev_uid: u32) -> Result<()> {
+pub fn prepare(root: &Path, layout: super::browser_layout::Layout, dev_uid: u32) -> Result<()> {
     ensure!(
         unsafe { libc::geteuid() } == 0 && dev_uid >= nyxid_machine::context::FIRST_UID,
         "context_policy_supervisor_required"
@@ -127,7 +161,7 @@ pub fn prepare(root: &Path, dev_uid: u32) -> Result<()> {
     );
     // Private dev policy is installed before the new UID can launch Chromium.
     // Existing secure users cannot read it; their system policy stays intact.
-    let directory = root.join("etc/chromium/policies/managed");
+    let directory = root.join(layout.policies());
     super::browser::protected_runtime_parent(&directory)?;
     let path = directory.join("nyxid-context-dev.json");
     let expected = serde_json::to_vec(&super::browser::dev_policy())?;
@@ -146,8 +180,8 @@ pub fn prepare(root: &Path, dev_uid: u32) -> Result<()> {
     );
     named_access(&policy, dev_uid, 4)?;
     for path in [
-        "etc/chromium/policies/managed/nyxid.json",
-        "etc/chromium/native-messaging-hosts/dev.nyxid.machine_filler.json",
+        &format!("{}/nyxid.json", layout.policies()),
+        &format!("{}/dev.nyxid.machine_filler.json", layout.native_hosts()),
         "opt/nyxid/machine-browser/native-host",
         "opt/nyxid/machine-browser/nyxid-native-host",
     ] {
@@ -196,13 +230,28 @@ mod tests {
             command.output().unwrap().status.success()
         };
         for uid in [65534, 65532, 65534] {
-            prepare(root.path(), uid).unwrap();
+            prepare(
+                root.path(),
+                super::super::browser_layout::Layout::DebianChromium,
+                uid,
+            )
+            .unwrap();
         }
+        let binary = root.path().join("test-cli");
+        std::fs::write(&binary, b"test executable").unwrap();
+        super::super::browser::install(
+            root.path(),
+            &binary,
+            "http://127.0.0.1:12345/update.xml",
+            false,
+            super::super::browser_layout::Layout::DebianChromium,
+        )
+        .unwrap();
         for name in protected {
             let path = root.path().join(name);
             assert!(readable(65533, &path), "legacy/secure reader retained");
-            assert!(!readable(65534, &path), "first developer denied");
-            assert!(!readable(65532, &path), "second developer denied");
+            assert!(!readable(65534, &path), "first developer denied: {name}");
+            assert!(!readable(65532, &path), "second developer denied: {name}");
         }
         let dev = root
             .path()

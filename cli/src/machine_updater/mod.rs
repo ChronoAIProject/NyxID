@@ -596,6 +596,15 @@ async fn bootstrap_locked(
 }
 
 #[cfg(test)]
+fn private_test_directory() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{
@@ -610,7 +619,7 @@ mod tests {
     #[test]
     fn trust_store_is_private_reusable_and_cannot_follow_a_symlink() {
         use std::os::unix::fs::{PermissionsExt, symlink};
-        let root = tempfile::tempdir().unwrap();
+        let root = private_test_directory();
         let guard = lock(root.path()).unwrap();
         let path = trust_datastore(root.path()).unwrap();
         assert_eq!(path, root.path().join("tuf"));
@@ -628,15 +637,27 @@ mod tests {
         drop(guard);
         let _next = relock_eventually(root.path());
         std::fs::remove_dir_all(&path).unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let outside = private_test_directory();
         symlink(outside.path(), &path).unwrap();
         assert!(trust_datastore(root.path()).is_err());
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
     #[test]
+    fn existing_group_writable_mailbox_is_rejected_without_repair() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = private_test_directory();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(lock(root.path()).is_err());
+        assert_eq!(
+            std::fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
+            0o770
+        );
+    }
+
+    #[test]
     fn failure_output_and_progress_contain_only_fixed_diagnostics() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_test_directory();
         for (error, expected) in [
             (
                 anyhow::anyhow!("SECRET_DOCKER_ENV_AND_CREDENTIAL"),
@@ -695,6 +716,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tagged_digest_bootstrap_and_replace_preserve_premutation_fences() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        for (suffix, target, rollback, expected) in [
+            (format!("0.41.0@{digest}"), "0.41.1", false, None),
+            (
+                format!("0.41.0@{digest}"),
+                "0.40.0",
+                false,
+                Some("downgrade_refused"),
+            ),
+            (format!("0.41.0@{digest}"), "0.40.0", true, None),
+            (
+                format!("latest@{digest}"),
+                "0.41.1",
+                false,
+                Some("source_version_unknown"),
+            ),
+            (
+                "0.41.0@".into(),
+                "0.41.1",
+                false,
+                Some("source_version_unknown"),
+            ),
+            (
+                format!("0.41.0@sha256:{}", "g".repeat(64)),
+                "0.41.1",
+                false,
+                Some("source_version_unknown"),
+            ),
+            (
+                format!("0.41.0@{digest}@{digest}"),
+                "0.41.1",
+                false,
+                Some("source_version_unknown"),
+            ),
+        ] {
+            for bootstrap in [false, true] {
+                // Migration never accepts a rollback override.
+                if bootstrap && rollback {
+                    continue;
+                }
+                let root = private_test_directory();
+                let server = MockServer::start().await;
+                let mut source = original();
+                source["Config"]["Image"] = json!(format!("{}:{suffix}", update::MACHINE_IMAGE));
+                // A label must not rescue malformed tags or content pins.
+                source["Config"]["Labels"]["dev.nyxid.machine.version"] = json!("0.41.0");
+                Mock::given(method("GET"))
+                    .and(path("/v1.45/containers/test-machine/json"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(source))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path("/v1.45/containers/test-machine-updater/json"))
+                    .respond_with(ResponseTemplate::new(404))
+                    .mount(&server)
+                    .await;
+                let api = docker::Docker::fixture(
+                    server.uri(),
+                    Err("verification intentionally refused"),
+                );
+                let error = if bootstrap {
+                    bootstrap_with_api(
+                        root.path().into(),
+                        "test-machine".into(),
+                        target.into(),
+                        api,
+                    )
+                    .await
+                    .unwrap_err()
+                } else {
+                    replace(&api, root.path(), "test-machine", target, rollback, false)
+                        .await
+                        .unwrap_err()
+                };
+                let expected = expected
+                    .map(|reason| format!("bootstrap:{reason}"))
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{}:image_resolution_failed",
+                            if bootstrap {
+                                "verify_updater_image"
+                            } else {
+                                "verify_machine_image"
+                            }
+                        )
+                    });
+                assert_eq!(Failure::classify(&error, "bootstrap").code(), expected);
+                let requests = server.received_requests().await.unwrap();
+                assert!(!requests.is_empty());
+                assert!(requests.iter().all(|request| request.method == "GET"));
+                assert!(!root.path().join("journal.json").exists());
+                server.verify().await;
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn bootstrap_checks_persist_actionable_codes_before_any_mutation() {
         for reason in [
             "invalid_container_name",
@@ -709,7 +829,7 @@ mod tests {
             "invalid_target_version",
             "operation_failed",
         ] {
-            let root = tempfile::tempdir().unwrap();
+            let root = private_test_directory();
             let server = MockServer::start().await;
             let mut source = original();
             let mut name = "test-machine";
@@ -787,7 +907,7 @@ mod tests {
         let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = socket.local_addr().unwrap();
         drop(socket);
-        let root = tempfile::tempdir().unwrap();
+        let root = private_test_directory();
         let api = docker::Docker::fixture(format!("http://{address}"), Err("must not verify"));
         let error = bootstrap_with_api(root.path().into(), "machine".into(), "0.41.1".into(), api)
             .await
@@ -806,7 +926,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_preflight_failure_is_reported_before_replacement() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_test_directory();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1.45/containers/test-machine/json"))
@@ -898,7 +1018,7 @@ mod tests {
     }
     #[tokio::test]
     async fn replacement_waits_for_health_and_reconnect_and_preserves_identity_configuration() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_test_directory();
         let server = MockServer::start().await;
         fixtures(&server, root.path(), true).await;
         let api = docker::Docker::fixture(server.uri(), Ok(format!("sha256:{}", "a".repeat(64))));
@@ -925,7 +1045,7 @@ mod tests {
     }
     #[tokio::test]
     async fn failed_replacement_restores_retained_container_without_removing_volumes() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_test_directory();
         let server = MockServer::start().await;
         fixtures(&server, root.path(), false).await;
         let api = docker::Docker::fixture(server.uri(), Ok(format!("sha256:{}", "a".repeat(64))));
@@ -954,7 +1074,7 @@ mod tests {
             ("0.41.0", Err("invalid attestation")),
             ("0.39.0", Ok(format!("sha256:{}", "a".repeat(64)))),
         ] {
-            let root = tempfile::tempdir().unwrap();
+            let root = private_test_directory();
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path("/v1.45/containers/test-machine/json"))
@@ -975,7 +1095,7 @@ mod tests {
     #[tokio::test]
     async fn committed_crash_recovery_never_rolls_back_or_replays_the_request() {
         for old_exists in [true, false] {
-            let root = tempfile::tempdir().unwrap();
+            let root = private_test_directory();
             let server = MockServer::start().await;
             Mock::given(method("DELETE"))
                 .and(path("/v1.45/containers/old"))
@@ -1013,7 +1133,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_installs_a_restricted_companion_for_the_verified_machine() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_test_directory();
         let server = MockServer::start().await;
         let mut source = original();
         source["Config"]["Image"] = json!(format!("{}:0.41.0", update::MACHINE_IMAGE));

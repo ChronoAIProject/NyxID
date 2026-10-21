@@ -19,11 +19,39 @@ From the NyxID repository root, build the hosted target with a BuildKit named
 context for the local CMA checkout:
 
 ```sh
-docker build \
+python3 scripts/build-local-image.py \
   --file cli/Dockerfile.machine-hosted \
   --build-context cma="$HOME/Work/Project/aevatarAI/cma" \
-  --tag nyxid-machine:hosted-local .
+  --tag nyxid-machine:hosted-local
 ```
+
+The NyxID checkout must be clean and committed. The wrapper builds from a
+verified raw export, supplies its full commit/epoch, and retains the source and
+execution receipts. It builds without a tag and resolves the resulting immutable
+image ID. It then builds the locked executable inspector from that same export
+and runs the mandatory final image extraction/identity check on the complete
+`hosted` image, including all private tool layers. Only a passing check permits
+the requested tag to be applied and the wrapper to return success. A failed or
+missing checker/inspector returns non-zero and does not create or replace the
+requested tag. There is no verification opt-out or alternate checker flag.
+Named contexts remain separate inputs and must satisfy the target's pinned
+source/output checks described below.
+
+Retain the evidence directory printed by the wrapper, or select a new directory
+outside the checkout with `--destination /tmp/nyxid-hosted-reviewed-build`.
+Its `image-build-execution.json` must show all of:
+
+- `exit_code: 0` and `post_build_source_verified: true`;
+- `identity_check.status: "passed"` and `identity_check.exit_code: 0`;
+- `image.component: "machine-hosted"`, the checked immutable `image.id`, and
+  `image.tagged: true` for the requested tag and platform.
+
+The same wrapper now requires a final filesystem/executable SBOM and records `sbom_check.status = passed` before tagging. Retain `scanned-image/sbom` with the receipt; see [RELEASE_SBOMS.md](RELEASE_SBOMS.md). The operator needs Python 3.9+ with venv support and Node at the repository version, in addition to Docker and the existing build prerequisites.
+
+A raw `docker build` of this target is unsupported for deployment. The wrapper
+also gates the other reviewed application image targets. Its explicit updater
+`e2e` test target has a distinct test-only receipt and cannot qualify as a
+deployment image.
 
 The target contains its own CLI builder, full desktop stage and tool stages;
 there is no `MACHINE_BASE_IMAGE` build argument or prerequisite base-image build.
@@ -39,9 +67,16 @@ selects the original release URL. This is a public build input, not runtime
 configuration or account authentication.
 
 
-Pin the resulting image digest in the managed deployment. Artifact paths and
-checksums exist for `linux/amd64` and `linux/arm64`; only architectures with
-recorded actual runtime tests may be described as verified.
+The digest pinned in the managed deployment must come from a wrapper run whose
+receipt records that final identity check passed. Push the exact checked image
+under the wrapper's requested tag and pin its resulting registry manifest
+digest. The local `image.id` is the configuration identity checked by the
+wrapper; it is not interchangeable with that registry manifest digest. Retain
+the successful wrapper receipt with the deployment's digest record. Artifact
+paths and checksums exist for `linux/amd64` and `linux/arm64`; only architectures
+with recorded actual runtime tests may be described as verified. Public PR CI
+executes the same wrapper/gate/tag sequence on the real `desktop` stage on both
+architectures; it does not possess the private CMA context for the final image.
 
 The reviewed CMA source is commit
 `ab789bde158b864d5db467fb2677ef72c3545cfc`. Its Codex adapter directory is mounted
@@ -70,9 +105,10 @@ model catalogue. Source and output hashes enforce the reviewed upstream and
 patched bridge bytes. Native Codex binaries, the Codex launcher, Heca archives
 and Node archives also have explicit checksum checks. Updating a version
 requires reviewing the corresponding hashes and patches; overriding a version
-argument alone is insufficient. The npm provider install follows CMA's pinned
-package versions and selected artifact checks; it does not introduce a lockfile
-for the full transitive npm dependency graph.
+argument alone is insufficient. The npm provider install uses the committed
+`security/hosted-tools/package-lock.json`, `npm ci --ignore-scripts`, and the
+reviewed native/output hashes. The complete locked transitive dependency tree
+is copied into the final image.
 
 Node.js is upgraded in the hosted image for the provider runtime. The desktop
 stage's npm package manager remains installed; the build-stage npm toolchain

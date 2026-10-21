@@ -117,7 +117,10 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
             if file.size() > remaining {
                 return Err(bad("DOCX exceeds the 40 MiB decompression limit."));
             }
-            let name = file.name().to_owned();
+            // zip 9's CP437 fallback accepts invalid UTF-8 flagged names.
+            // DOCX part names must be UTF-8 rather than silently reinterpreted.
+            std::str::from_utf8(file.name_raw()).map_err(|_| malformed())?;
+            let name = file.name().map_err(|_| malformed())?.into_owned();
             let mut expanded = Vec::new();
             (&mut file)
                 .take(remaining + 1)
@@ -475,6 +478,29 @@ mod tests {
         assert!(parse(b"{no}", "json").is_err());
         assert!(parse(b"<svg/>", "svg").is_err());
     }
+    #[test]
+    fn non_utf8_zip_entry_name_returns_sanitized_error_without_panicking() {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "word/document.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer.write_all(b"<w:document/>").unwrap();
+        let mut bytes = writer.finish().unwrap().into_inner();
+        // Preserve a valid ZIP structure but corrupt each UTF-8 flagged name.
+        for (signature, flags, name) in [(b"PK\x03\x04", 6, 30), (b"PK\x01\x02", 8, 46)] {
+            let offset = bytes.windows(4).position(|w| w == signature).unwrap();
+            bytes[offset + flags + 1] |= 0x08;
+            bytes[offset + name] = 0xff;
+        }
+        let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+        assert!(std::str::from_utf8(archive.by_index(0).unwrap().name_raw()).is_err());
+        let error = parse(&bytes, "docx").err().expect("malformed DOCX");
+        assert!(matches!(error, AppError::BadRequest(_)));
+        assert_eq!(error.to_string(), malformed().to_string());
+    }
     #[tokio::test]
     async fn isolated_extraction_and_timeout_release_worker() {
         assert_eq!(
@@ -491,6 +517,40 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+    #[tokio::test]
+    async fn unencrypted_pdf_text_and_page_sections_survive_isolated_extraction() {
+        use lopdf::{Document, Object, Stream, dictionary};
+        let mut pdf = Document::with_version("1.5");
+        let pages = pdf.new_object_id();
+        let font = pdf.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let resources = pdf.add_object(dictionary! { "Font" => dictionary! { "F1" => font } });
+        let content = pdf.add_object(Stream::new(
+            dictionary! {},
+            b"BT /F1 12 Tf 20 40 Td (NyxID PDF fixture) Tj ET".to_vec(),
+        ));
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Resources" => resources,
+            "Contents" => content, "MediaBox" => vec![0.into(), 0.into(), 200.into(), 100.into()],
+        });
+        pdf.objects.insert(
+            pages,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+            }),
+        );
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        pdf.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes).unwrap();
+        let result = extract(bytes, "pdf".into()).await.unwrap();
+        assert_eq!(result.content_type, "application/pdf");
+        assert!(result.text.contains("NyxID PDF fixture"));
+        assert_eq!(result.sections.len(), 1);
+        assert_eq!(result.sections[0].offset, 0);
+        assert_eq!(result.sections[0].label, "Page 1");
     }
     #[test]
     fn encrypted_pdf_and_malformed_pdf_are_rejected() {

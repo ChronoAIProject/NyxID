@@ -166,18 +166,19 @@ describe("ApiKeyCreateConfirm", () => {
     // proves the panel didn't bypass it and call api.post directly.
     expect(mockRewind).toHaveBeenCalledWith(pairingId, expect.any(Function));
     const body = bodyForCall("/api-keys");
-    // Default access scope (no allowed_*_csv in prefill) → allow-all,
+    // Omitted grants remain restricted,
     // and the scopes string is space-joined from the prefilled set.
     expect(body).toMatchObject({
       name: "coding-agent",
       scopes: "read write",
       platform: "claude-code",
-      allow_all_services: true,
-      allow_all_nodes: true,
+      allow_all_services: false,
+      allow_all_nodes: false,
     });
-    // allow-all means we do NOT pin specific ids.
-    expect(body).not.toHaveProperty("allowed_service_ids");
-    expect(body).not.toHaveProperty("allowed_node_ids");
+    expect(body.allowed_service_ids).toEqual([]);
+    expect(body.allowed_node_ids).toEqual([]);
+    expect(body).not.toHaveProperty("never_expires");
+    expect(screen.getByText(/Key expiry: 90 days \(default\)/)).toBeInTheDocument();
 
     await waitFor(() => {
       expect(onSuccess).toHaveBeenCalledWith({
@@ -201,12 +202,12 @@ describe("ApiKeyCreateConfirm", () => {
       <ApiKeyCreateConfirm
         pairingId={pairingId}
         onSuccess={vi.fn()}
-        prefill={{ name: "ci-key", expires_in_days: 7 }}
+        prefill={{ name: "ci-key", expires_in_days: 7, org_id: "org-uuid-1" }}
       />,
       { wrapper: createWrapper() },
     );
 
-    await user.selectOptions(screen.getByLabelText("Owner"), "org-uuid-1");
+    expect(screen.getByLabelText("Owner")).toHaveValue("org-uuid-1");
     await user.click(screen.getByRole("button", { name: /Create Key/i }));
 
     await waitFor(() => expect(mockPost).toHaveBeenCalled());
@@ -217,6 +218,44 @@ describe("ApiKeyCreateConfirm", () => {
     expect(Date.parse(body.expires_at as string)).toBeGreaterThan(Date.now());
     // platform was never set → omitted.
     expect(body).not.toHaveProperty("platform");
+  });
+
+  it("preserves explicit nonexpiry prefill and reports authoritative response expiry", async () => {
+    const user = userEvent.setup();
+    mockPost.mockResolvedValue({ id: "key", full_key: "fixture", expires_at: null });
+    const success = vi.fn();
+    render(<ApiKeyCreateConfirm pairingId={pairingId} onSuccess={success}
+      prefill={{ name: "explicit", expires_in_days: 0, never_expires: true }} />, { wrapper: createWrapper() });
+    expect(screen.getByText(/No expiry \(explicitly selected\)/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Create Key/i }));
+    await waitFor(() => expect(success).toHaveBeenCalledWith(expect.objectContaining({ expires_at: null })));
+    expect(bodyForCall("/api-keys")).toMatchObject({ never_expires: true, allow_all_nodes: false });
+    expect(bodyForCall("/api-keys")).not.toHaveProperty("expires_at");
+  });
+
+  it.each([0, 7])("resets prefilled lifetime %s on each owner change and permits a fresh explicit choice", async (days) => {
+    const user = userEvent.setup();
+    mockUseOrgs.mockReturnValue({ data: [{ id: "org", display_name: "Organization", your_role: "admin" }] });
+    mockPost.mockResolvedValue({ id: "key", full_key: "fixture", expires_at: "2099-01-01T00:00:00Z" });
+    render(<ApiKeyCreateConfirm pairingId={pairingId} onSuccess={vi.fn()}
+      prefill={{ name: "owner-reset", expires_in_days: days, allow_all_services: true, allow_all_nodes: true }} />,
+      { wrapper: createWrapper() });
+    await user.selectOptions(screen.getByLabelText("Owner"), "org");
+    expect(screen.getByLabelText("Key expiry")).toHaveValue("default");
+    await user.selectOptions(screen.getByLabelText("Key expiry"), "never");
+    await user.selectOptions(screen.getByLabelText("Owner"), "");
+    expect(screen.getByLabelText("Key expiry")).toHaveValue("default");
+    await user.click(screen.getByRole("button", { name: /Create Key/i }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    expect(bodyForCall("/api-keys")).not.toHaveProperty("never_expires");
+    expect(bodyForCall("/api-keys")).not.toHaveProperty("expires_at");
+    expect(bodyForCall("/api-keys")).toMatchObject({ allow_all_services: false, allow_all_nodes: false });
+    await waitFor(() => expect(screen.getByRole("button", { name: /Create Key/i })).toBeEnabled());
+    mockPost.mockClear();
+    await user.selectOptions(screen.getByLabelText("Key expiry"), "never");
+    await user.click(screen.getByRole("button", { name: /Create Key/i }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    expect(bodyForCall("/api-keys")).toHaveProperty("never_expires", true);
   });
 
   it("keeps Create disabled when the name is empty (validation-error path) and never calls the API", async () => {

@@ -7,6 +7,32 @@ use crate::crypto::aes::EncryptionDecryptStats;
 use crate::errors::AppResult;
 use crate::services::feature_flag_service;
 
+/// GET /api/v1/admin/security-readiness. Process observations and an explicit
+/// serving roster are prerequisites, not an automatic rollout controller.
+pub async fn security_readiness(
+    State(state): State<AppState>,
+    auth: crate::mw::auth::AuthUser,
+) -> AppResult<
+    Json<
+        std::collections::BTreeMap<String, crate::services::security_readiness_service::Readiness>,
+    >,
+> {
+    crate::handlers::admin_helpers::require_admin_or_operator(
+        &state,
+        &auth,
+        "admin.security_readiness.get",
+    )
+    .await?;
+    let mut reports = std::collections::BTreeMap::new();
+    for capability in crate::services::security_readiness_service::CAPABILITIES {
+        reports.insert(
+            (*capability).to_owned(),
+            crate::services::security_readiness_service::report(&state.db, capability).await?,
+        );
+    }
+    Ok(Json(reports))
+}
+
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: String,

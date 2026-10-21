@@ -7,9 +7,14 @@
     "demo-react"
   ],
   "scripts": {
-    "build": "npm run -ws build",
+    "build": "npm run --workspaces build",
     "test": "npm run -w @nyxids/oauth-core test",
-    "clean": "npm run -ws clean",
-    "prepublish:all": "npm run -ws prepublishOnly"
+    "clean": "npm run --workspaces clean",
+    "prepublish:all": "npm run --workspaces prepublishOnly"
+  },
+  "packageManager": "npm@11.21.1",
+  "allowScripts": {
+    "esbuild": false,
+    "fsevents": false
   }
 }

@@ -410,6 +410,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
         allowed_node_ids: [],
         allow_all_services: false,
         allow_all_nodes: false,
+        never_expires: hints.expiry_days === "none",
         expires_at:
           hints.expiry_days === "none"
             ? null
@@ -951,10 +952,10 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                   <>
                                     <AgentKeyPermissions apiKey={chosen.key} />
                                     <label className="block space-y-2 text-12">
-                                      Login credential expiry (optional)
+                                      Login credential expiry (blank: 90 days, bounded by key expiry)
                                       <Input
                                         type="datetime-local"
-                                        aria-label="Login credential expiry (optional)"
+                                        aria-label="Login credential expiry (blank: 90 days, bounded by key expiry)"
                                         value={credentialExpiry}
                                         disabled={blocked}
                                         onChange={(e) =>

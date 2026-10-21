@@ -45,14 +45,17 @@ export function AgentKeyCreateForm({
   onReview: (data: CreateApiKeyFormData) => void;
 }) {
   const [expiryChoice, setExpiryChoice] = useState(
-    initialValues ? (initialValues.expires_at ? "custom" : "none") : "90",
+    initialValues?.never_expires ? "none" : initialValues?.expires_at ? "custom" : "90",
   );
   const [defaultExpiry] = useState(() =>
     new Date(Date.now() + 90 * 86400000).toISOString(),
   );
   const form = useAppForm<CreateApiKeyFormData>({
     resolver: zodResolver(createApiKeySchema),
-    defaultValues: initialValues ?? {
+    defaultValues: initialValues ? {
+      ...initialValues,
+      expires_at: initialValues.never_expires ? null : initialValues.expires_at || defaultExpiry,
+    } : {
       name: label,
       scopes: ["read", "proxy"],
       allow_all_services: false,
@@ -80,6 +83,9 @@ export function AgentKeyCreateForm({
                     value={field.value ?? "personal"}
                     onValueChange={(value) => {
                       field.onChange(value === "personal" ? undefined : value);
+                      form.setValue("never_expires", false);
+                      form.setValue("expires_at", new Date(Date.now() + 90 * 86400000).toISOString());
+                      setExpiryChoice("90");
                       form.setValue("allow_auto_connected_services", false);
                       form.setValue("allowed_service_ids", []);
                       form.setValue("allowed_node_ids", []);
@@ -129,6 +135,7 @@ export function AgentKeyCreateForm({
               value={expiryChoice}
               onValueChange={(value) => {
                 setExpiryChoice(value);
+                form.setValue("never_expires", value === "none");
                 if (value !== "custom")
                   form.setValue(
                     "expires_at",
@@ -154,7 +161,7 @@ export function AgentKeyCreateForm({
               </SelectContent>
             </Select>
           </div>
-          {expiryChoice === "custom" && <ApiKeyExpiryField form={form} />}
+          {expiryChoice === "custom" && <ApiKeyExpiryField form={form} allowNeverExpires={false} />}
           <div className="grid gap-3 sm:grid-cols-2">
             {(["rate_limit_per_second", "rate_limit_burst"] as const).map(
               (name) => (

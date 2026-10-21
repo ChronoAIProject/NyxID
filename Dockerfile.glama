@@ -1,31 +1,39 @@
 # Reference Dockerfile for the Glama directory listing.
 #
 # This file is documentation, not a build artifact: Glama's UI does not
-# auto-read it from the repo. Paste the build step (the `RUN` body) and
-# CMD into Glama's admin Dockerfile page to keep the deployed config in
-# sync with this file.
+# auto-read it from the repo. Supply this full Dockerfile and its repository
+# context at an immutable source revision in Glama's admin build configuration.
 #
 # Builds the standalone `nyxid-mcp-demo` crate (just serde_json + std)
-# instead of the full `nyxid` backend so the cargo build finishes in
+# instead of the full `nyxid` backend so the cargo build --locked finishes in
 # under a minute on a constrained CI runner. The full backend speaks
 # the same MCP surface over Streamable HTTP at /mcp on a real NyxID
 # deployment — see the `mcp-demo` crate's main.rs for the parity notes.
 
-FROM debian:trixie-slim
+# Resolve the already pinned static cargo-auditable tool with Python, then copy
+# only that executable into the musl builder. No new distro packages are needed.
+FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS tools
+COPY scripts/bootstrap-build-tool.py /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py
+COPY security/build-tools.json /opt/nyxid-build-inputs/security/build-tools.json
+RUN python3 /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py cargo-auditable --bin-dir /out
 
-RUN set -eu \
- && apt-get update \
- && apt-get install -y --no-install-recommends build-essential ca-certificates curl git \
- && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain 1.93.0 --profile minimal \
- && git clone --depth 1 --branch main https://github.com/ChronoAIProject/NyxID /src \
- && cd /src \
- && /root/.cargo/bin/cargo build --release -p nyxid-mcp-demo \
- && strip target/release/nyxid-mcp-demo \
- && install -m0755 target/release/nyxid-mcp-demo /usr/local/bin/nyxid-mcp-demo \
- && cd / \
- && rm -rf /src /root/.cargo /root/.rustup /root/.cache \
- && apt-get purge -y --auto-remove build-essential curl git \
- && rm -rf /var/lib/apt/lists/*
+FROM rust:1.98.1-alpine@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f AS builder
+WORKDIR /src
+COPY --from=tools /out/cargo-auditable /usr/local/cargo/bin/cargo-auditable
+# Build only the reviewed checkout at the supplied immutable source identity.
+COPY . .
+ARG NYXID_GIT_HASH
+ARG SOURCE_DATE_EPOCH
+ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+RUN cargo auditable build --locked --release -p nyxid-mcp-demo \
+ && strip target/release/nyxid-mcp-demo
 
-CMD ["nyxid-mcp-demo"]
+FROM scratch
+ARG NYXID_GIT_HASH
+ARG SOURCE_DATE_EPOCH
+LABEL org.opencontainers.image.revision=${NYXID_GIT_HASH} \
+      io.nyxid.source-date-epoch=${SOURCE_DATE_EPOCH}
+COPY --from=builder /src/target/release/nyxid-mcp-demo /usr/local/bin/nyxid-mcp-demo
+
+CMD ["/usr/local/bin/nyxid-mcp-demo"]

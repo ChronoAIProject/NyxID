@@ -1,0 +1,38 @@
+[
+  {
+    "file": "facebook-sdk.js",
+    "source": "https://connect.facebook.net/en_US/sdk.js",
+    "size": 12459,
+    "sha256": "79def755066df6140389df062b7eb4487e7dbb4426fa7884dda2667f257593be"
+  },
+  {
+    "file": "facebook-sdk-bundle.js",
+    "source": "https://connect.facebook.net/en_US/bundle/sdk.js/",
+    "size": 268950,
+    "sha256": "e4a6792e49aef8983d55ca92c1d9b4c41809dd8e93905a3a280cf4db7ad8c314"
+  },
+  {
+    "file": "telegram-widget-v22.js",
+    "source": "https://telegram.org/js/telegram-widget.js?22",
+    "size": 20474,
+    "sha256": "3c8c27bf6f51a778ed94f452cf6b501f54703b67ef162551f677171916fbcd99"
+  },
+  {
+    "file": "unicornstudio-v2.1.4.js",
+    "source": "https://cdn.jsdelivr.net/gh/hiunicornstudio/unicornstudio.js@v2.1.4/dist/unicornStudio.umd.js",
+    "size": 123327,
+    "sha256": "28892da7fbec4f7704f335936672d4fce6f43483f3dc506beba7543d0c3ec4d1"
+  },
+  {
+    "file": "unicorn-scene.json",
+    "source": "https://assets.unicorn.studio/embeds/sqyz3r4WjVjdLal6IHvt",
+    "size": 25462,
+    "sha256": "706cbe09a17ca5fa2d5a3d562cf7c41a8c374241b3d76daf72f4405798da8e9d"
+  },
+  {
+    "file": "jetbrainsmono-v24.ttf",
+    "source": "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxjPQ.ttf",
+    "size": 112172,
+    "sha256": "44ce4a84f20d60f24539bd0cef11f79c29e38609e0f8adf18551c9794a5d9dc3"
+  }
+]

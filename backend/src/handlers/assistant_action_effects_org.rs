@@ -501,6 +501,7 @@ pub struct AssistantNotificationsUpdateRequest {
     pub action_request_id: String,
     pub telegram_enabled: Option<bool>,
     pub approval_required: Option<bool>,
+    pub global_approval_mode: Option<crate::services::approval_policy::GlobalApprovalMode>,
     pub approval_timeout_secs: Option<u32>,
     pub grant_expiry_days: Option<u32>,
     pub push_enabled: Option<bool>,
@@ -1548,6 +1549,8 @@ enum Wave4Fingerprint<'a> {
     NotificationsUpdate {
         telegram_enabled: Option<bool>,
         approval_required: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        global_approval_mode: Option<crate::services::approval_policy::GlobalApprovalMode>,
         approval_timeout_secs: Option<u32>,
         grant_expiry_days: Option<u32>,
         push_enabled: Option<bool>,
@@ -3045,6 +3048,7 @@ async fn update_notifications_action(
     let fp = wave4_fingerprint(&Wave4Fingerprint::NotificationsUpdate {
         telegram_enabled: body.telegram_enabled,
         approval_required: body.approval_required,
+        global_approval_mode: body.global_approval_mode,
         approval_timeout_secs: body.approval_timeout_secs,
         grant_expiry_days: body.grant_expiry_days,
         push_enabled: body.push_enabled,
@@ -3076,6 +3080,9 @@ async fn update_notifications_action(
                     .approval_required
                     .is_none_or(|value| current.approval_required == value)
                 && body
+                    .global_approval_mode
+                    .is_none_or(|value| current.global_approval_mode == value)
+                && body
                     .approval_timeout_secs
                     .is_none_or(|value| current.approval_timeout_secs == value)
                 && body
@@ -3103,6 +3110,7 @@ async fn update_notifications_action(
         Json(notifications::UpdateNotificationSettingsRequest {
             telegram_enabled: body.telegram_enabled,
             approval_required: body.approval_required,
+            global_approval_mode: body.global_approval_mode,
             approval_timeout_secs: body.approval_timeout_secs,
             grant_expiry_days: body.grant_expiry_days,
             push_enabled: body.push_enabled,
@@ -5145,6 +5153,7 @@ mod wave4_effect_tests {
             action_request_id: "notifications-update-interrupted".to_string(),
             telegram_enabled: None,
             approval_required: None,
+            global_approval_mode: None,
             approval_timeout_secs: Some(75),
             grant_expiry_days: None,
             push_enabled: None,
@@ -5557,6 +5566,7 @@ mod wave4_effect_tests {
             Wave4Fingerprint::NotificationsUpdate {
                 telegram_enabled: Some(true),
                 approval_required: Some(true),
+                global_approval_mode: None,
                 approval_timeout_secs: Some(60),
                 grant_expiry_days: Some(30),
                 push_enabled: Some(false),

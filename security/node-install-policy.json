@@ -1,0 +1,80 @@
+{
+  "schema": "nyxid.node-install-policy.v1",
+  "roots": [
+    {
+      "path": "frontend",
+      "install_scripts": [
+        {
+          "lock_path": "node_modules/core-js",
+          "name": "core-js",
+          "version": "3.49.0",
+          "integrity": "sha512-es1U2+YTtzpwkxVLwAFdSpaIMyQaq0PBgm3YD1W3Qpsn1NAmO3KSgZfu+oGSWVu6NvLHoHCV/aYcsE5wiB7ALg==",
+          "allow": false,
+          "reason": "Deny its optional funding/notification postinstall; installed runtime files need no generation."
+        },
+        {
+          "lock_path": "node_modules/fsevents",
+          "name": "fsevents",
+          "version": "2.3.3",
+          "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+          "allow": false,
+          "reason": "Deny native compilation and lifecycle hooks; integrity-locked prebuilt optional watcher bytes are sufficient, and release builds do not require a watcher."
+        },
+        {
+          "lock_path": "node_modules/playwright/node_modules/fsevents",
+          "name": "fsevents",
+          "version": "2.3.2",
+          "integrity": "sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA==",
+          "allow": false,
+          "reason": "Deny native compilation and lifecycle hooks; integrity-locked prebuilt optional watcher bytes are sufficient, and release builds do not require a watcher."
+        }
+      ]
+    },
+    {
+      "path": "sdk",
+      "install_scripts": [
+        {
+          "lock_path": "node_modules/esbuild",
+          "name": "esbuild",
+          "version": "0.28.2",
+          "integrity": "sha512-HKVLS8dvII+xoKW9kmqxbRKrnWEXfJJr/FZhhJmiqIB0e053QNYFqOBouTMO/k5sID4MvCiUCvv8b9M4h32wIA==",
+          "allow": false,
+          "reason": "Deny install.js download/repair fallback; use the integrity-locked platform optional package directly. SDK build/test acceptance must work with scripts disabled."
+        },
+        {
+          "lock_path": "node_modules/fsevents",
+          "name": "fsevents",
+          "version": "2.3.3",
+          "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+          "allow": false,
+          "reason": "Deny native compilation and lifecycle hooks; integrity-locked prebuilt optional watcher bytes are sufficient, and release builds do not require a watcher."
+        }
+      ]
+    },
+    {
+      "path": ".github/tools/claude",
+      "install_scripts": [
+        {
+          "lock_path": "node_modules/@anthropic-ai/claude-code",
+          "name": "@anthropic-ai/claude-code",
+          "version": "2.1.284",
+          "integrity": "sha512-IuENsoLa+Y5fx5VaP0Md3n5UO7aYxjbFE/iydSDw6tMo2171oaxaaBa9oIepPG9NILd1owSx74ozsqAkTbEOjw==",
+          "allow": false,
+          "reason": "Deny the native installer/downloader; the repository offline validator launcher resolves the integrity-locked platform optional package without an installer."
+        }
+      ]
+    },
+    {
+      "path": "security/npm-tools",
+      "install_scripts": []
+    },
+    {
+      "path": "cli/tests/updater-npm",
+      "install_scripts": []
+    },
+    {
+      "path": "security/hosted-tools",
+      "install_scripts": []
+    }
+  ]
+}

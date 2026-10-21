@@ -4,7 +4,7 @@ NyxID device-code binding is an RFC 8628-flavored provisioning flow for headless
 
 - a scoped NyxID API key with platform `device-code`
 - a NyxID node id
-- a one-time refresh token for device credential refresh flows
+- a one-time refresh token reserved for future device credential refresh work; no endpoint currently redeems it
 
 The first server-side consumer is the ESP32-P4 Home Assistant camera work tracked in the Voice Presence repository. The original roadmap is in the Voice Presence design, section 13: https://github.com/ChronoAIProject/voice-presence/blob/feat/home-assistant-integration/docs/superpowers/specs/2026-05-13-ha-camera-node-design.md
 
@@ -264,7 +264,7 @@ The device continues polling with the same signed request shape. The first succe
   "status": "approved",
   "api_key": "nyxid_ag_...",
   "node_id": "1d16ddfe-89f1-4ec1-a316-4a5c8960d55f",
-  "refresh_token": "1fb20ca9a1fd9b10ddfc7d2a5b7d5f54f326e2e6a2ef8e70b8a4fd9e0bd41c47",
+  "refresh_token": "<refresh_token_returned_on_delivery>",
   "expires_in": 86400
 }
 ```

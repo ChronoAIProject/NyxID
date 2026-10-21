@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { OutputAsset, OutputBundle, OutputChunk } from "rollup";
 import type { Plugin } from "vite";
+import { frontendSourceIdentity } from "../scripts/source-identity.ts";
 import {
   CREDENTIAL_ACCEPT_FINGERPRINT_PREFIX,
   CREDENTIAL_ACCEPT_HTML_ROLE,
@@ -10,7 +11,7 @@ import {
   RELEASE_INTEGRITY_SCHEMA_VERSION,
   type ReleaseIntegrityArtifact,
   type ReleaseIntegrityManifest,
-} from "../src/lib/release-integrity/manifest";
+} from "../src/lib/release-integrity/manifest.ts";
 
 interface ScriptArtifactBytes {
   readonly path: string;
@@ -169,6 +170,7 @@ function assertHtmlScriptsCovered(html: string, expectedScripts: Iterable<string
 }
 
 export function releaseIntegrityPlugin(): Plugin {
+  const identity = frontendSourceIdentity();
   return {
     name: "nyxid-release-integrity",
     enforce: "post",
@@ -215,12 +217,9 @@ export function releaseIntegrityPlugin(): Plugin {
         htmlBytes,
         scripts: scriptBytes,
         appVersion: process.env.npm_package_version ?? "0.0.0",
-        gitCommit:
-          process.env.GITHUB_SHA ??
-          process.env.NYXID_GIT_COMMIT ??
-          process.env.VITE_GIT_COMMIT ??
-          "unknown",
-        generatedAt: new Date().toISOString(),
+        gitCommit: identity.commit ?? "unknown",
+        generatedAt: identity.source_date_epoch === null ? new Date().toISOString() :
+          new Date(identity.source_date_epoch * 1000).toISOString(),
       });
 
       this.emitFile({

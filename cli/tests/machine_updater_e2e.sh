@@ -27,11 +27,16 @@ cleanup() {
     docker image rm "$local_image" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
-docker image inspect ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:0.40.0 >/dev/null 2>&1 || docker pull ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:0.40.0
+old_machine=$(python3 scripts/test-image.py migration_old_machine)
+docker image inspect "$old_machine" >/dev/null 2>&1 || docker pull "$old_machine"
+# The cfg(test) adapter asserts this historical image identity. Its local alias
+# always names the independently pinned bytes, never a tag fetched remotely.
+docker tag "$old_machine" ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:0.40.0
 docker build --build-arg "MACHINE_IMAGE=$machine_image" -f cli/tests/Dockerfile.updater-browser -t "$local_image" .
 updater_image="${UPDATER_E2E_IMAGE:-nyxid-machine-updater-e2e:local}"
 if [ -z "${UPDATER_E2E_IMAGE:-}" ]; then
-    docker build --target e2e -f cli/Dockerfile.machine-updater -t "$updater_image" .
+    python3 scripts/build-local-image.py --target e2e \
+        --file cli/Dockerfile.machine-updater --tag "$updater_image"
 fi
 for variant in old new bad; do
     printf 'FROM %s\nLABEL dev.nyxid.test.companion=%s\n' "$updater_image" "$variant" | docker build -t "$companion_image-$variant" -

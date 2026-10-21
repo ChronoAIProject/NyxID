@@ -102,20 +102,75 @@ fn write_owned(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     file.write_all(bytes)?;
     file.as_file()
         .set_permissions(std::fs::Permissions::from_mode(mode))?;
+    preserve_access_acl(path, file.as_file())?;
     file.as_file().sync_all()?;
     file.persist(path)?;
+    Ok(())
+}
+
+fn preserve_access_acl(path: &Path, replacement: &std::fs::File) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = (path, replacement);
+    #[cfg(target_os = "linux")]
+    if std::fs::symlink_metadata(path).is_ok() {
+        // Reinstallation must retain named developer denials for live contexts.
+        // Replacing the inode without its ACL would silently restore access.
+        use std::os::fd::AsRawFd;
+        let previous = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        let meta = previous.metadata()?;
+        anyhow::ensure!(
+            meta.is_file() && meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o022 == 0,
+            "managed_browser_existing_file_untrusted"
+        );
+        let mut acl = vec![0u8; 32768];
+        let count = unsafe {
+            libc::fgetxattr(
+                previous.as_raw_fd(),
+                c"system.posix_acl_access".as_ptr(),
+                acl.as_mut_ptr().cast(),
+                acl.len(),
+            )
+        };
+        if count >= 0 {
+            anyhow::ensure!(
+                unsafe {
+                    libc::fsetxattr(
+                        replacement.as_raw_fd(),
+                        c"system.posix_acl_access".as_ptr(),
+                        acl.as_ptr().cast(),
+                        count as usize,
+                        0,
+                    )
+                } == 0,
+                "managed_browser_acl_preservation_failed"
+            );
+        } else {
+            anyhow::ensure!(
+                std::io::Error::last_os_error().raw_os_error() == Some(libc::ENODATA),
+                "managed_browser_acl_unavailable"
+            );
+        }
+    }
     Ok(())
 }
 
 /// Docker's AppArmor profile forbids bwrap policy mounts. Chromium reads only
 /// its own group's policy file; both files remain supervisor-owned and immutable
 /// to either browser. Native Linux continues using the private bwrap policy mount.
-pub fn install_container_policies(root: &Path, secure_gid: u32, dev_gid: u32) -> Result<()> {
+pub fn install_container_policies(
+    root: &Path,
+    layout: super::browser_layout::Layout,
+    secure_gid: u32,
+    dev_gid: u32,
+) -> Result<()> {
     anyhow::ensure!(
         secure_gid != dev_gid,
         "Browser policy groups must be distinct"
     );
-    let policies = owned_directory(root, Path::new("etc/chromium/policies/managed"))?;
+    let policies = owned_directory(root, Path::new(layout.policies()))?;
     write_owned(
         &policies.join("nyxid-dev.json"),
         &serde_json::to_vec(&dev_policy())?,
@@ -125,7 +180,8 @@ pub fn install_container_policies(root: &Path, secure_gid: u32, dev_gid: u32) ->
         (policies.join("nyxid.json"), secure_gid, 0o640),
         (policies.join("nyxid-dev.json"), dev_gid, 0o640),
         (
-            root.join("etc/chromium/native-messaging-hosts/dev.nyxid.machine_filler.json"),
+            root.join(layout.native_hosts())
+                .join("dev.nyxid.machine_filler.json"),
             secure_gid,
             0o640,
         ),
@@ -198,7 +254,13 @@ pub(super) fn protected_runtime_parent(directory: &Path) -> Result<()> {
 }
 
 /// Called only by the privileged setup helper. Installs no credentials.
-pub fn install(system_root: &Path, binary: &Path, update_url: &str, macos: bool) -> Result<()> {
+pub fn install(
+    system_root: &Path,
+    binary: &Path,
+    update_url: &str,
+    macos: bool,
+    layout: super::browser_layout::Layout,
+) -> Result<()> {
     if hex::encode(Sha256::digest(PACKAGE)) != pin()["sha256"].as_str().unwrap_or_default() {
         bail!("filler package checksum mismatch");
     }
@@ -218,6 +280,7 @@ pub fn install(system_root: &Path, binary: &Path, update_url: &str, macos: bool)
     executable_file
         .as_file()
         .set_permissions(std::fs::Permissions::from_mode(0o755))?;
+    preserve_access_acl(&executable_path, executable_file.as_file())?;
     executable_file.as_file().sync_all()?;
     executable_file.persist(&executable_path)?;
     write_owned(&resources.join("filler.crx"), PACKAGE, 0o644)?;
@@ -268,18 +331,17 @@ pub fn install(system_root: &Path, binary: &Path, update_url: &str, macos: bool)
             0o644,
         )?;
     } else {
-        owned_directory(system_root, Path::new("etc/chromium/policies/managed"))?;
-        owned_directory(
-            system_root,
-            Path::new("etc/chromium/native-messaging-hosts"),
-        )?;
+        owned_directory(system_root, Path::new(layout.policies()))?;
+        owned_directory(system_root, Path::new(layout.native_hosts()))?;
         write_owned(
-            &system_root.join("etc/chromium/policies/managed/nyxid.json"),
+            &system_root.join(layout.policies()).join("nyxid.json"),
             &serde_json::to_vec(&policy(update_url))?,
             0o644,
         )?;
         write_owned(
-            &system_root.join("etc/chromium/native-messaging-hosts/dev.nyxid.machine_filler.json"),
+            &system_root
+                .join(layout.native_hosts())
+                .join("dev.nyxid.machine_filler.json"),
             &serde_json::to_vec(&manifest(&launcher))?,
             0o644,
         )?;
@@ -1515,31 +1577,45 @@ mod tests {
     }
     #[test]
     fn installed_policy_package_and_host_are_not_writable_by_agent() {
-        let root = tempfile::tempdir().unwrap();
-        let executable = root.path().join("test-cli");
-        std::fs::write(&executable, b"test executable").unwrap();
-        install(
-            root.path(),
-            &executable,
-            "http://127.0.0.1:47821/update.xml",
-            false,
-        )
-        .unwrap();
-        for file in [
-            "opt/nyxid/machine-browser/filler.crx",
-            "opt/nyxid/machine-browser/native-host",
-            "opt/nyxid/machine-browser/nyxid-native-host",
-            "etc/chromium/policies/managed/nyxid.json",
-            "etc/chromium/native-messaging-hosts/dev.nyxid.machine_filler.json",
+        use super::super::browser_layout::Layout;
+        for layout in [
+            Layout::DebianChromium,
+            Layout::SnapChromium,
+            Layout::GoogleChrome,
         ] {
-            assert_eq!(
-                std::fs::metadata(root.path().join(file))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o022,
-                0
-            );
+            let root = tempfile::tempdir().unwrap();
+            let executable = root.path().join("test-cli");
+            std::fs::write(&executable, b"test executable").unwrap();
+            install(
+                root.path(),
+                &executable,
+                "http://127.0.0.1:47821/update.xml",
+                false,
+                layout,
+            )
+            .unwrap();
+            for file in [
+                "opt/nyxid/machine-browser/filler.crx".to_owned(),
+                "opt/nyxid/machine-browser/native-host".to_owned(),
+                "opt/nyxid/machine-browser/nyxid-native-host".to_owned(),
+                format!("{}/nyxid.json", layout.policies()),
+                format!("{}/dev.nyxid.machine_filler.json", layout.native_hosts()),
+            ] {
+                assert_eq!(
+                    std::fs::metadata(root.path().join(file))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o022,
+                    0
+                );
+            }
+            let policy: Value = serde_json::from_slice(
+                &std::fs::read(root.path().join(layout.policies()).join("nyxid.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(policy["RemoteDebuggingAllowed"], false);
+            assert_eq!(policy["NativeMessagingUserLevelHosts"], false);
         }
     }
 }

@@ -141,14 +141,22 @@ pub async fn run(command: Commands, config: Option<&str>, profile: Option<&str>)
         Commands::Status => {
             // Never construct a Runtime or probe drivers here: a separate
             // process must not bind the daemon's socket or launch Chromium.
-            let cached = read_status(&directory);
-            let identity = super::process::Identity::resolve(config.machine.agent_user.as_deref())?;
-            let commands_isolated = identity
-                .commands_isolated(&[
-                    directory.clone(),
-                    dirs::home_dir().unwrap_or_default().join(".nyxid-node"),
-                ])
-                .await;
+            let mut cached = read_status(&directory);
+            let fresh = cached.as_ref().is_some_and(|row| {
+                let age = chrono::Utc::now()
+                    .timestamp_millis()
+                    .saturating_sub(row.observed_at_ms);
+                (0..=100_000).contains(&age)
+            });
+            let custody = cached
+                .as_ref()
+                .filter(|_| fresh)
+                .and_then(|row| row.credential_custody)
+                .unwrap_or_default();
+            if let Some(row) = cached.as_mut() {
+                row.apply_custody(custody);
+            }
+            let commands_isolated = custody.command == crate::node::custody::Observation::Denied;
             let mut status = match cached.as_ref() {
                 Some(row) => serde_json::to_value(row)?,
                 None => serde_json::json!({
@@ -158,10 +166,32 @@ pub async fn run(command: Commands, config: Option<&str>, profile: Option<&str>)
                 }),
             };
             status["commands_isolated"] = serde_json::json!(commands_isolated);
+            status["credential_custody"] = serde_json::to_value(custody)?;
+            if !fresh {
+                status["browser_isolated"] = serde_json::json!(false);
+                status["readiness"] =
+                    serde_json::json!("unknown; cached custody observation expired");
+            }
+            status["separation_choice"] = serde_json::json!(config.machine.separation_choice);
             println!("{}", serde_json::to_string_pretty(&status)?);
             eprintln!(
                 "Read-only status: cached daemon observation; no browsers or live probes started."
             );
+            if let Some(reason) = cached
+                .as_ref()
+                .and_then(|row| row.profile.separated.as_ref())
+                .and_then(|support| support.reason.as_deref())
+            {
+                eprintln!(
+                    "{reason}: {}",
+                    nyxid_machine::context::unavailable_message(reason)
+                );
+            }
+            if config.machine.separation_choice.is_none() {
+                eprintln!(
+                    "No intent recorded for new assignments. Existing assignments keep their stored mode. Rerun node setup with --separation automatic, require-separated or shared-legacy to choose."
+                );
+            }
             if config.machine.agent_user.is_none() {
                 eprintln!(
                     "Saved logins require managed browser policies and owner opt-in on the Assistant → Machines page. Commands run as the browser user, so a misbehaving or prompt-injected agent could read typed values. Prefer the machine container or a separated VM."
@@ -195,8 +225,27 @@ pub async fn run(command: Commands, config: Option<&str>, profile: Option<&str>)
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedStatus {
     observed_at_ms: i64,
+    #[serde(default)]
+    credential_custody: Option<crate::node::custody::Status>,
     #[serde(flatten)]
     profile: nyxid_machine::MachineProfile,
+}
+impl CachedStatus {
+    fn apply_custody(&mut self, custody: crate::node::custody::Status) {
+        use crate::node::custody::Observation::Denied;
+        self.profile.commands_isolated = Some(custody.command == Denied);
+        self.profile.browser_isolated &= custody.browser == Denied && custody.developer == Denied;
+        if let Some(evidence) = self.profile.separation_evidence.as_mut() {
+            evidence.credential_custody = Some(custody.all_denied());
+            self.profile.separated = Some(evidence.support());
+        } else {
+            self.profile.separated = Some(nyxid_machine::context::Support {
+                available: false,
+                landlock_abi: self.profile.separated.as_ref().and_then(|s| s.landlock_abi),
+                reason: Some("separated_capabilities_not_reported".into()),
+            });
+        }
+    }
 }
 fn read_status(directory: &std::path::Path) -> Option<CachedStatus> {
     use std::io::Read;
@@ -211,4 +260,71 @@ fn read_status(directory: &std::path::Path) -> Option<CachedStatus> {
         .read_to_end(&mut bytes)
         .ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::custody::{Observation, Status};
+
+    #[test]
+    fn status_never_retains_browser_or_separation_claims_without_current_custody() {
+        for custody in [
+            Status::default(),
+            Status {
+                command: Observation::Denied,
+                browser: Observation::Denied,
+                developer: Observation::Accessible,
+            },
+        ] {
+            let mut row = CachedStatus {
+                observed_at_ms: 0,
+                credential_custody: None,
+                profile: nyxid_machine::MachineProfile {
+                    commands_isolated: Some(true),
+                    browser_isolated: true,
+                    separation_evidence: Some(nyxid_machine::context::Evidence {
+                        version: nyxid_machine::context::EVIDENCE_VERSION,
+                        credential_custody: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            };
+            row.apply_custody(custody);
+            assert!(!row.profile.browser_isolated);
+            assert!(!row.profile.separated.as_ref().unwrap().available);
+            assert_eq!(
+                row.profile.separation_evidence.unwrap().credential_custody,
+                Some(false)
+            );
+            assert_eq!(
+                row.profile.commands_isolated,
+                Some(custody.command == Observation::Denied)
+            );
+        }
+    }
+
+    #[test]
+    fn status_without_evidence_cannot_retain_an_old_support_advertisement() {
+        let mut row = CachedStatus {
+            observed_at_ms: 0,
+            credential_custody: None,
+            profile: nyxid_machine::MachineProfile {
+                separated: Some(nyxid_machine::context::Support {
+                    available: true,
+                    landlock_abi: Some(6),
+                    reason: None,
+                }),
+                ..Default::default()
+            },
+        };
+        row.apply_custody(Status::default());
+        let support = row.profile.separated.unwrap();
+        assert!(!support.available);
+        assert_eq!(
+            support.reason.as_deref(),
+            Some("separated_capabilities_not_reported")
+        );
+    }
 }

@@ -4,7 +4,8 @@ import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import { viteSingleFile } from "vite-plugin-singlefile"
 import path from "path"
-import { wizardManifest } from "./vite-plugins/wizard-manifest"
+import { wizardManifest } from "./vite-plugins/wizard-manifest.ts"
+import { shippedComposition } from "./vite-plugins/shipped-composition.ts"
 
 /**
  * Separate Vite build for the CLI's locally-served wizard (Mode A).
@@ -23,17 +24,18 @@ import { wizardManifest } from "./vite-plugins/wizard-manifest"
  * dashboard at port 3000 — this file only governs the wizard bundle build.
  */
 export default defineConfig({
-  plugins: [react(), tailwindcss(), viteSingleFile(), wizardManifest()],
+  plugins: [react(), tailwindcss(), viteSingleFile(), wizardManifest(), shippedComposition("wizard")],
   resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-    },
+    alias: [
+      { find: /^zod$/, replacement: path.resolve(import.meta.dirname, "./src/lib/zod-csp.ts") },
+      { find: "@", replacement: path.resolve(import.meta.dirname, "./src") },
+    ],
   },
   build: {
     outDir: "dist-wizard",
     emptyOutDir: true,
     rollupOptions: {
-      input: path.resolve(__dirname, "wizard.html"),
+      input: path.resolve(import.meta.dirname, "wizard.html"),
     },
     // `viteSingleFile` relies on these being inlined. Keep explicit.
     cssCodeSplit: false,

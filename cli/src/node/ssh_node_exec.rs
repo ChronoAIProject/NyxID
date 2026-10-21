@@ -124,8 +124,17 @@ impl client::Handler for HostKeyVerifier {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
+        // Configured pins/TOFU bind raw host keys. They do not establish a
+        // host-certificate CA/principal policy; reject that distinct authority.
+        let russh::keys::PublicKeyOrCertificate::PublicKey {
+            key: server_public_key,
+            ..
+        } = server_key
+        else {
+            return Ok(false);
+        };
         let fingerprint = host_key_sha256(server_public_key);
         *self.observed_sha256.lock().expect("host key lock poisoned") = Some(fingerprint.clone());
 
@@ -613,7 +622,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     fn test_entry_with_cert(certificate_openssh: Option<String>) -> SshKeyEntry {
-        let mut rng = rand::rngs::OsRng;
+        let mut rng = rand10::rng();
         let private_key =
             russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("private key");
         let private_key_pem = private_key.to_openssh(LineEnding::LF).expect("openssh");
@@ -633,8 +642,24 @@ mod tests {
         }
     }
 
+    fn test_entry_copy(entry: &SshKeyEntry) -> SshKeyEntry {
+        SshKeyEntry {
+            service_slug: entry.service_slug.clone(),
+            principal: entry.principal.clone(),
+            private_key_pem: entry.private_key_pem.clone(),
+            passphrase: entry.passphrase.clone(),
+            certificate_openssh: entry.certificate_openssh.clone(),
+            target_host: entry.target_host.clone(),
+            target_port: entry.target_port,
+            host_key_sha256: entry.host_key_sha256.clone(),
+            cert_host_key_store: entry.cert_host_key_store.clone(),
+            algorithms: entry.algorithms.clone(),
+            created_at: entry.created_at,
+        }
+    }
+
     fn user_certificate_for_entry(entry: &SshKeyEntry) -> String {
-        let mut rng = rand::rngs::OsRng;
+        let mut rng = rand10::rng();
         let subject_key = decode_secret_key(entry.private_key_pem.as_str(), None).unwrap();
         let ca_key = russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("ca key");
         let mut builder = certificate::Builder::new_with_random_nonce(
@@ -654,6 +679,291 @@ mod tests {
             .expect("signed cert")
             .to_openssh()
             .expect("openssh cert")
+    }
+
+    #[derive(Clone)]
+    struct LocalSshServer {
+        allowed_key: russh::keys::ssh_key::PublicKey,
+        allowed_certificate: Option<Certificate>,
+        authenticated: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl russh::server::Server for LocalSshServer {
+        type Handler = Self;
+        fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self {
+            self.clone()
+        }
+    }
+
+    impl russh::server::Handler for LocalSshServer {
+        type Error = russh::Error;
+        async fn auth_publickey(
+            &mut self,
+            user: &str,
+            key: &russh::keys::ssh_key::PublicKey,
+        ) -> Result<russh::server::Auth, Self::Error> {
+            if self.allowed_certificate.is_none() && user == "ubuntu" && key == &self.allowed_key {
+                self.authenticated
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(russh::server::Auth::Accept)
+            } else {
+                Ok(russh::server::Auth::reject())
+            }
+        }
+        async fn auth_openssh_certificate(
+            &mut self,
+            user: &str,
+            certificate: &Certificate,
+        ) -> Result<russh::server::Auth, Self::Error> {
+            // Only the exact locally issued fixture certificate is trusted.
+            if user == "ubuntu" && self.allowed_certificate.as_ref() == Some(certificate) {
+                self.authenticated
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(russh::server::Auth::Accept)
+            } else {
+                Ok(russh::server::Auth::reject())
+            }
+        }
+        async fn channel_open_session(
+            &mut self,
+            _: russh::Channel<russh::server::Msg>,
+            reply: russh::server::ChannelOpenHandle,
+            _: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
+        }
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            command: &[u8],
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            // This fixture never invokes a shell or any supplied command.
+            assert_eq!(command, b"fixture-command");
+            session.channel_success(channel)?;
+            session.data(channel, b"fixture stdout".to_vec())?;
+            session.extended_data(channel, 1, b"fixture stderr".to_vec())?;
+            session.exit_status_request(channel, 7)?;
+            session.eof(channel)?;
+            session.close(channel)?;
+            Ok(())
+        }
+    }
+
+    async fn local_ssh_server(
+        entry: &SshKeyEntry,
+        host_certificate: bool,
+    ) -> (
+        u16,
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use russh::server::Server;
+        let host_entry = test_entry_with_cert(None);
+        let host_key = decode_secret_key(host_entry.private_key_pem.as_str(), None).unwrap();
+        let fingerprint = host_key_sha256(host_key.public_key());
+        let certificates = if host_certificate {
+            let ca = decode_secret_key(entry.private_key_pem.as_str(), None).unwrap();
+            let mut builder = certificate::Builder::new_with_random_nonce(
+                &mut rand10::rng(),
+                host_key.public_key().key_data().clone(),
+                0,
+                4_102_444_800,
+            )
+            .unwrap();
+            builder.cert_type(certificate::CertType::Host).unwrap();
+            builder.valid_principal("127.0.0.1").unwrap();
+            vec![builder.sign(&ca).unwrap()]
+        } else {
+            Vec::new()
+        };
+        let config = Arc::new(russh::server::Config {
+            keys: vec![host_key],
+            certificates,
+            inactivity_timeout: Some(Duration::from_secs(5)),
+            auth_rejection_time: Duration::ZERO,
+            ..Default::default()
+        });
+        let authenticated = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut server = LocalSshServer {
+            allowed_key: decode_secret_key(entry.private_key_pem.as_str(), None)
+                .unwrap()
+                .public_key()
+                .clone(),
+            allowed_certificate: entry
+                .certificate_openssh
+                .as_ref()
+                .map(|value| Certificate::from_openssh(value).unwrap()),
+            authenticated: authenticated.clone(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            server.run_on_socket(config, &listener).await.unwrap();
+        });
+        (port, fingerprint, authenticated, task)
+    }
+
+    #[tokio::test]
+    async fn local_ssh_exec_enforces_pins_and_persisted_tofu_before_authentication() {
+        use std::sync::atomic::Ordering;
+        let mut entry = test_entry_with_cert(None);
+        let (port, fingerprint, authenticated, server) = local_ssh_server(&entry, false).await;
+        entry.target_host = "127.0.0.1".into();
+        entry.target_port = port;
+        entry.host_key_sha256 = Some(fingerprint.clone());
+        let result = exec_command(test_entry_copy(&entry), "fixture-command".into(), 5)
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 7);
+        assert_eq!(result.stdout, b"fixture stdout");
+        assert_eq!(result.stderr, b"fixture stderr");
+        assert!(!result.timed_out);
+        assert_eq!(authenticated.load(Ordering::SeqCst), 1);
+        entry.host_key_sha256 = Some("SHA256:wrong-key".into());
+        assert_eq!(
+            test_connection(test_entry_copy(&entry), 5)
+                .await
+                .unwrap_err()
+                .code,
+            1012
+        );
+        assert_eq!(authenticated.load(Ordering::SeqCst), 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        entry.cert_host_key_store = Some(Arc::new(Mutex::new(
+            CertHostKeyStore::load(dir.path()).unwrap(),
+        )));
+        test_connection(test_entry_copy(&entry), 5).await.unwrap();
+        // A fresh store instance must accept the persisted host pin.
+        entry.cert_host_key_store = Some(Arc::new(Mutex::new(
+            CertHostKeyStore::load(dir.path()).unwrap(),
+        )));
+        test_connection(test_entry_copy(&entry), 5).await.unwrap();
+        let mut external = CertHostKeyStore::load(dir.path()).unwrap();
+        assert_eq!(
+            external.get("127.0.0.1", port).unwrap().host_key_sha256,
+            fingerprint
+        );
+        let other = test_entry_with_cert(None);
+        let other_key = decode_secret_key(other.private_key_pem.as_str(), None).unwrap();
+        external
+            .set_explicit_pin("127.0.0.1", port, &host_key_sha256(other_key.public_key()))
+            .unwrap();
+        assert_eq!(test_connection(entry, 5).await.unwrap_err().code, 1012);
+        assert_eq!(authenticated.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn local_ssh_user_certificate_authentication_executes_with_a_pinned_raw_host_key() {
+        let mut entry = test_entry_with_cert(None);
+        entry.certificate_openssh = Some(Zeroizing::new(user_certificate_for_entry(&entry)));
+        let (port, fingerprint, authenticated, server) = local_ssh_server(&entry, false).await;
+        entry.target_host = "127.0.0.1".into();
+        entry.target_port = port;
+        entry.host_key_sha256 = Some(fingerprint);
+        // The server rejects raw user-key authentication for this entry.
+        let mut raw = test_entry_copy(&entry);
+        raw.certificate_openssh = None;
+        assert!(test_connection(raw, 5).await.is_err());
+        test_connection(test_entry_copy(&entry), 5).await.unwrap();
+        let result = exec_command(entry, "fixture-command".into(), 5)
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 7);
+        assert_eq!(result.stdout, b"fixture stdout");
+        assert_eq!(authenticated.load(std::sync::atomic::Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn local_ssh_negotiated_host_certificate_cannot_substitute_for_raw_pin() {
+        struct ObserveCertificate {
+            verifier: HostKeyVerifier,
+            observed: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl client::Handler for ObserveCertificate {
+            type Error = SshClientError;
+            async fn check_server_key(
+                &mut self,
+                key: &russh::keys::PublicKeyOrCertificate,
+            ) -> Result<bool, Self::Error> {
+                self.observed.store(
+                    matches!(key, russh::keys::PublicKeyOrCertificate::Certificate(_)),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                self.verifier.check_server_key(key).await
+            }
+        }
+        let entry = test_entry_with_cert(None);
+        let (port, fingerprint, authenticated, server) = local_ssh_server(&entry, true).await;
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let verifier = HostKeyVerifier {
+            policy: HostKeyPolicy::StaticExpected(Some(fingerprint)),
+            observed_sha256: Arc::new(Mutex::new(None)),
+        };
+        let mut config =
+            Arc::try_unwrap(build_client_config(Duration::from_secs(5), None).unwrap())
+                .expect("fresh client config has one owner");
+        // Production offers raw host keys. Explicitly negotiate a certificate
+        // here to exercise the newly widened upstream callback over the wire.
+        config.preferred.host_key_certificates = vec![Algorithm::Ed25519].into();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client::connect(
+                Arc::new(config),
+                ("127.0.0.1", port),
+                ObserveCertificate {
+                    verifier,
+                    observed: observed.clone(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            Err(SshClientError::Russh(russh::Error::UnknownKey))
+        ));
+        assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(authenticated.load(std::sync::atomic::Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn host_key_callback_preserves_pins_and_rejects_certificate_authority_substitution() {
+        use russh::client::Handler;
+        let entry = test_entry_with_cert(None);
+        let key = decode_secret_key(entry.private_key_pem.as_str(), None).unwrap();
+        let fingerprint = host_key_sha256(key.public_key());
+        let mut verifier = HostKeyVerifier {
+            policy: HostKeyPolicy::StaticExpected(Some(fingerprint)),
+            observed_sha256: Arc::new(Mutex::new(None)),
+        };
+        assert!(
+            verifier
+                .check_server_key(&key.public_key().clone().into())
+                .await
+                .unwrap()
+        );
+        let other = test_entry_with_cert(None);
+        let other_key = decode_secret_key(other.private_key_pem.as_str(), None).unwrap();
+        assert!(matches!(
+            verifier
+                .check_server_key(&other_key.public_key().clone().into())
+                .await,
+            Err(SshClientError::HostKeyMismatch { .. })
+        ));
+        let certificate = Certificate::from_openssh(&user_certificate_for_entry(&entry)).unwrap();
+        assert!(
+            !verifier
+                .check_server_key(&certificate.into())
+                .await
+                .unwrap()
+        );
     }
 
     #[test]

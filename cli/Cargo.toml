@@ -35,7 +35,7 @@ uuid = { workspace = true }
 
 anyhow = "1"
 regex = "1"
-tough = { version = "0.21", default-features = false }
+tough = { version = "0.22", default-features = false }
 clap = { version = "4.6", features = ["derive", "env"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 dirs = "6"
@@ -57,7 +57,7 @@ jpeg-encoder = { version = "0.7", features = ["simd"] }
 
 # SSH subcommand + node agent WebSocket
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
-russh = "0.58.0"
+russh = "0.63.3"
 
 # Node agent dependencies
 toml = "1.0"
@@ -71,7 +71,7 @@ zeroize = { version = "1", features = ["derive", "serde"] }
 # Telemetry (first-run consent TTY detection)
 is-terminal = "0.4"
 directories = "6"
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
 thiserror = "2"
 libc = "0.2"
 nix = { version = "0.31.2", features = ["process", "signal"] }
@@ -87,8 +87,10 @@ rustls-native-certs = "0.8"
 webpki-roots = "1"
 pki-types = { package = "rustls-pki-types", version = "1.11" }
 self-replace = "1.5"
-self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls", "compression-flate2", "archive-tar", "archive-zip"] }
-sigstore = { version = "0.13", default-features = false, features = ["bundle", "cosign", "sigstore-trust-root", "rustls-tls"] }
+self_update = { version = "1.3.1", default-features = false, features = ["reqwest", "rustls", "compression-tar-gz", "archive-tar", "archive-zip"] }
+# Consumer performs the full bundle checks in update_attestation; it uses
+# Sigstore's crypto/trust types, with no Fulcio signing/registry client.
+sigstore = { version = "0.14", default-features = false, features = ["cert", "sigstore-trust-root", "rustls-tls"] }
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
 x509-cert = "0.2"
 
@@ -110,6 +112,7 @@ rust-embed = { version = "8", features = ["include-exclude"] }
 constant_time_eq = "=0.4.2"
 
 [dev-dependencies]
+rand10 = { package = "rand", version = "0.10" }
 rcgen = "0.14"
 tokio-rustls = "0.26"
 nyxid-service-adapters = { path = "../service-adapters", features = ["test-support"] }

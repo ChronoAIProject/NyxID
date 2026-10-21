@@ -198,11 +198,11 @@ async fn metadata_acquisition_includes_mutex_wait_and_conservative_elapsed_lifet
 async fn shared_file_source_rotates_and_protects_reads_without_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("token");
-    std::fs::write(&path, "first\n").unwrap();
+    write_private_token_fixture(&path, "first\n");
     let credentials = KubernetesCredentials::token_file(path.clone()).unwrap();
     assert_eq!(authorization(&credentials).await.unwrap(), "Bearer first");
     let replacement = dir.path().join("new");
-    std::fs::write(&replacement, "second").unwrap();
+    write_private_token_fixture(&replacement, "second");
     std::fs::rename(replacement, &path).unwrap();
     assert_eq!(authorization(&credentials).await.unwrap(), "Bearer second");
     for value in [

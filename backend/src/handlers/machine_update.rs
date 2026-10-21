@@ -23,8 +23,9 @@ use nyxid_machine::Operation;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-static UPDATER: std::sync::LazyLock<nyxid_machine_updater::release_image::VerifiedUpdater> =
-    std::sync::LazyLock::new(Default::default);
+static UPDATER: std::sync::LazyLock<
+    anyhow::Result<nyxid_machine_updater::release_image::VerifiedUpdater>,
+> = std::sync::LazyLock::new(nyxid_machine_updater::release_image::VerifiedUpdater::for_server);
 
 #[cfg(test)]
 tokio::task_local! { static TEST_UPDATER_IMAGE: String; }
@@ -34,7 +35,16 @@ async fn verified_updater_image() -> Option<String> {
     if let Ok(image) = TEST_UPDATER_IMAGE.try_with(Clone::clone) {
         return Some(image);
     }
-    UPDATER.image(updates::TARGET).await
+    let updater = match UPDATER.as_ref() {
+        Ok(updater) => updater,
+        Err(_) => {
+            tracing::error!(
+                "Machine updater trust storage configuration invalid; NYXID_SERVER_TUF_STATE_DIR requires an absolute private durable path"
+            );
+            return None;
+        }
+    };
+    updater.image(updates::TARGET).await
 }
 
 pub async fn updater_image(auth: AuthUser) -> AppResult<Json<Value>> {

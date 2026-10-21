@@ -15,9 +15,7 @@
 
 name: Release
 permissions:
-  "attestations": "write"
-  "contents": "write"
-  "id-token": "write"
+  contents: read
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -47,7 +45,19 @@ on:
       - '**[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
-  # Run 'dist plan' (or host) to determine what tasks we need to do
+  release-signing:
+    name: Release Signing Policy
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-signing.yml
+
+  security-gate:
+    name: Release Security Scans
+    permissions:
+      contents: read
+    uses: ./.github/workflows/security-scans.yml
+
+  # Plan without creating a remote release.
   plan:
     runs-on: "ubuntu-24.04"
     outputs:
@@ -55,22 +65,29 @@ jobs:
       tag: ${{ !github.event.pull_request && github.ref_name || '' }}
       tag-flag: ${{ !github.event.pull_request && format('--tag={0}', github.ref_name) || '' }}
       publishing: ${{ !github.event.pull_request }}
+      source-commit: ${{ steps.source.outputs.commit }}
+      source-epoch: ${{ steps.source.outputs.epoch }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
-      - name: Install dist
-        # we specify bash to get pipefail; it guards against the `curl` command
-        # failing. otherwise `sh` won't catch that `curl` returned non-0
-        shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-installer.sh | sh"
+      - name: Resolve exact release source
+        id: source
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/plan-source" --commit "$(git rev-parse HEAD)"
+      - name: Install checksummed dist
+        run: |
+          python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
+          python3 scripts/bootstrap-build-tool.py cargo-auditable --bin-dir "$HOME/.cargo/bin"
       - name: Cache dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/dist
@@ -80,11 +97,18 @@ jobs:
       # (PRs run on the *source* but secrets are usually on the *target* -- that's *good*
       # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
+        env:
+          DIST_TAG: ${{ !github.event.pull_request && github.ref_name || '' }}
         run: |
-          dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
+          tag_args=()
+          if [ -n "$DIST_TAG" ]; then tag_args+=("--tag=$DIST_TAG"); fi
+          python3 scripts/run-exported-build.py --export "$RUNNER_TEMP/plan-source" \
+            --commit "${{ steps.source.outputs.commit }}" --receipt "$RUNNER_TEMP/plan-execution.json" \
+            --generated target -- dist plan "${tag_args[@]}" --output-format=json > "$RUNNER_TEMP/plan-dist-manifest.json"
+          python3 scripts/check-build-inputs.py --dist-plan "$RUNNER_TEMP/plan-dist-manifest.json"
+          python3 scripts/make-publication-plan.py cli --dist-plan "$RUNNER_TEMP/plan-dist-manifest.json" --output "$RUNNER_TEMP/publication-plan.json"
           echo "dist ran successfully"
-          cat plan-dist-manifest.json
-          echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+          echo "manifest=$(jq -c "." "$RUNNER_TEMP/plan-dist-manifest.json")" >> "$GITHUB_OUTPUT"
       # Hand-added; reapply if dist init regenerates. Release Build Cache runs
       # `dist build` on main without a tag, which needs every dist-able package
       # at one version. `dist plan` does not check that; `dist manifest` matches
@@ -93,10 +117,16 @@ jobs:
         if: ${{ github.event.pull_request }}
         run: dist manifest --output-format=json --artifacts=local --target=x86_64-unknown-linux-gnu > /dev/null
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: artifacts-plan-dist-manifest
-          path: plan-dist-manifest.json
+          path: ${{ runner.temp }}/plan-dist-manifest.json
+      - name: Upload complete expected publication plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: expected-publication-plan
+          path: ${{ runner.temp }}/publication-plan.json
+          if-no-files-found: error
 
   # Build and packages all the platform-specific things
   build-local-artifacts:
@@ -123,84 +153,86 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
+      NYXID_GIT_HASH: ${{ needs.plan.outputs.source-commit }}
+      SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source-epoch }}
     steps:
       - name: enable windows longpaths
         run: |
           git config --global core.longpaths true
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           submodules: recursive
-      - name: Install Rust non-interactively if not already installed
+      - name: Export exact committed release inputs
+        run: python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/release-source" --commit "${{ needs.plan.outputs.source-commit }}"
+      - name: Install reviewed release dependencies
+        run: sh scripts/install-release-dependencies.sh
+      - name: Install checksummed Rust bootstrap in container
         if: ${{ matrix.container }}
         run: |
-          if ! command -v cargo > /dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          fi
+          python3 scripts/bootstrap-build-tool.py rustup --bin-dir "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Select exact Rust toolchain
+        if: ${{ !matrix.container }}
+        uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
       # Added by hand (allow-dirty = ["ci"]); reapply if dist init regenerates.
       # Tag runs cannot share caches with each other, only with `main`, so this
       # restores the dependency cache that release-cache.yml warms on `main`.
       # Keep the key inputs in sync with that workflow.
       - name: Restore Rust build cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: dist-${{ join(matrix.targets, '-') }}
+          # The producer removes directory-only restored staging residue and
+          # rejects/preserves any stale artifact or symlink before dist runs.
+          workspaces: ${{ runner.temp }}/release-source/source -> target
           save-if: false
-      - name: Install dist
-        run: ${{ matrix.install_dist.run }}
-      # Get the dist-manifest
-      - name: Fetch local artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: artifacts-*
-          path: target/distrib/
-          merge-multiple: true
-      - name: Install dependencies
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      - name: Install checksummed dist
         run: |
-          # cargo-dist 0.30.0 emits `apt-get install …` without `-y`, which
-          # aborts in the aarch64-linux buildpack-deps:focal container because
-          # stdin is non-interactive. Pre-configure apt to assume yes; no-op on
-          # macOS targets and unprivileged host runners (no write access to
-          # /etc/apt/apt.conf.d).
-          if [ -d /etc/apt/apt.conf.d ] && [ -w /etc/apt/apt.conf.d ]; then
-            echo 'APT::Get::Assume-Yes "true";' > /etc/apt/apt.conf.d/99-noninteractive
-          fi
-          ${{ matrix.packages_install }}
+          python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
+          python3 scripts/bootstrap-build-tool.py cargo-auditable --bin-dir "$HOME/.cargo/bin"
+      - name: Fetch complete expected publication plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: expected-publication-plan
+          path: ${{ runner.temp }}/release-plan
       - name: Build artifacts
+        env:
+          TARGET: ${{ matrix.targets[0] }}
+          TARGET_COUNT: ${{ toJSON(matrix.targets) }}
         shell: bash
         run: |
-          if [[ ",${{ join(matrix.targets, ',') }}," == *",aarch64-unknown-linux-gnu,"* ]]; then
+          jq -e 'length == 1' <<< "$TARGET_COUNT"
+          if [[ "$TARGET" == aarch64-unknown-linux-gnu ]]; then
             export CC=clang
             export CXX=clang++
           fi
-
-          # Actually do builds and make zips and whatnot
-          dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
-          echo "dist ran successfully"
-      - id: cargo-dist
-        name: Post-build
-        # We force bash here just because github makes it really hard to get values up
-        # to "real" actions without writing to env-vars, and writing to env-vars has
-        # inconsistent syntax between shell and powershell.
-        shell: bash
+          python3 scripts/run-dist-build.py --export "$RUNNER_TEMP/release-source" \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --mode local --target "$TARGET" \
+            --evidence "$RUNNER_TEMP/build-evidence/$TARGET"
+      - name: Require final stripped CLI archive source identity
+        env:
+          TARGET: ${{ matrix.targets[0] }}
         run: |
-          # Parse out what we just built and upload it to scratch storage
-          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-          cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+          CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
+          python3 scripts/check-cli-archive-identity.py --plan "$RUNNER_TEMP/release-plan/publication-plan.json" \
+            --artifacts "$RUNNER_TEMP/build-evidence/$TARGET/artifacts" --target "$TARGET" \
+            --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: artifacts-build-local-${{ join(matrix.targets, '_') }}
-          path: |
-            ${{ steps.cargo-dist.outputs.paths }}
-            ${{ env.BUILD_MANIFEST_NAME }}
+          path: ${{ runner.temp }}/build-evidence/${{ matrix.targets[0] }}/artifacts/
+          if-no-files-found: error
+      - name: Upload actual required child build evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-evidence-${{ matrix.targets[0] }}
+          path: ${{ runner.temp }}/build-evidence/
+          if-no-files-found: error
 
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
@@ -211,44 +243,60 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
+      NYXID_GIT_HASH: ${{ needs.plan.outputs.source-commit }}
+      SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source-epoch }}
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Export exact committed global inputs
+        run: python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/release-source" --commit "${{ needs.plan.outputs.source-commit }}"
+      - name: Fetch complete expected publication plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: expected-publication-plan
+          path: ${{ runner.temp }}/release-plan
       - name: Install cached dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       # Get all the local artifacts for the global tasks to use (for e.g. checksums)
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: artifacts-*
-          path: target/distrib/
+          pattern: artifacts-build-local-*
+          path: ${{ runner.temp }}/local-artifacts
           merge-multiple: true
-      - id: cargo-dist
+      - name: Fetch required local build evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: build-evidence-*
+          path: ${{ runner.temp }}/local-evidence
+          merge-multiple: true
+      - name: Package all global artifacts from verified source and completed local builds
         shell: bash
         run: |
-          dist build ${{ needs.plan.outputs.tag-flag }} --output-format=json "--artifacts=global" > dist-manifest.json
-          echo "dist ran successfully"
-
-          # Parse out what we just built and upload it to scratch storage
-          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          jq --raw-output ".upload_files[]" dist-manifest.json >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-          cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+          python3 scripts/run-dist-build.py --export "$RUNNER_TEMP/release-source" \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --mode global \
+            --local-artifacts "$RUNNER_TEMP/local-artifacts" --local-evidence "$RUNNER_TEMP/local-evidence" \
+            --evidence "$RUNNER_TEMP/global-evidence"
+          cp "$RUNNER_TEMP/global-evidence/dist-manifest.json" "$RUNNER_TEMP/global-evidence/artifacts/global-dist-manifest.json"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: artifacts-build-global
-          path: |
-            ${{ steps.cargo-dist.outputs.paths }}
-            ${{ env.BUILD_MANIFEST_NAME }}
+          path: ${{ runner.temp }}/global-evidence/artifacts/
+          if-no-files-found: error
+      - name: Upload global source and build evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-evidence-global
+          path: ${{ runner.temp }}/global-evidence/
+          if-no-files-found: error
 
   release-integrity-manifest:
     name: Release Integrity Manifest
@@ -256,92 +304,183 @@ jobs:
       - plan
     runs-on: "ubuntu-24.04"
     env:
-      RELEASE_INTEGRITY_SIGNING_ENABLED: ${{ vars.RELEASE_INTEGRITY_SIGNING_ENABLED || 'false' }}
-      RELEASE_INTEGRITY_SIGN_CMD: ${{ secrets.RELEASE_INTEGRITY_SIGN_CMD || vars.RELEASE_INTEGRITY_SIGN_CMD }}
-      RELEASE_INTEGRITY_PUBLISH_CMD: ${{ secrets.RELEASE_INTEGRITY_PUBLISH_CMD || vars.RELEASE_INTEGRITY_PUBLISH_CMD }}
-      RELEASE_INTEGRITY_MANIFEST_URL: ${{ vars.RELEASE_INTEGRITY_MANIFEST_URL }}
-      RELEASE_INTEGRITY_SIGNING_KEY: ${{ secrets.RELEASE_INTEGRITY_SIGNING_KEY }}
-      RELEASE_INTEGRITY_PUBLISH_TOKEN: ${{ secrets.RELEASE_INTEGRITY_PUBLISH_TOKEN }}
+      SOURCE_COMMIT: ${{ needs.plan.outputs.source-commit }}
+      SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source-epoch }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
-      - uses: actions/setup-node@v5
+      - name: Export exact committed credential inputs
+        run: python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/credential-source" --commit "$SOURCE_COMMIT"
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: Install reviewed npm
+        run: |
+          python3 scripts/bootstrap-build-tool.py npm --bin-dir "$RUNNER_TEMP/build-tools"
+          echo "$RUNNER_TEMP/build-tools" >> "$GITHUB_PATH"
       - name: Build standalone credential accept bundle
-        working-directory: frontend
         run: |
-          npm ci
-          npm run build:credential-accept
-      - name: Upload release integrity manifest
-        uses: actions/upload-artifact@v4
+          python3 scripts/run-exported-build.py --export "$RUNNER_TEMP/credential-source" \
+            --commit "$SOURCE_COMMIT" --receipt "$RUNNER_TEMP/credential-install-execution.json" \
+            --generated frontend/node_modules --cwd frontend -- npm ci
+          python3 scripts/run-exported-build.py --export "$RUNNER_TEMP/credential-source" \
+            --commit "$SOURCE_COMMIT" --receipt "$RUNNER_TEMP/wizard-seal-execution.json" \
+            --generated frontend/node_modules -- node frontend/scripts/seal-shipped-composition.mjs wizard verify
+          python3 scripts/run-exported-build.py --export "$RUNNER_TEMP/credential-source" \
+            --commit "$SOURCE_COMMIT" --receipt "$RUNNER_TEMP/credential-build-execution.json" \
+            --generated frontend/node_modules --generated frontend/dist --cwd frontend -- npm run build:credential-accept
+      - name: Require standalone final credential composition SBOM
+        run: |
+          sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-asset-sbom.py \
+            --root "$RUNNER_TEMP/credential-source/source/frontend/dist" --source-root "$RUNNER_TEMP/credential-source/source" \
+            --commit "$SOURCE_COMMIT" --epoch "$SOURCE_DATE_EPOCH" --output "$RUNNER_TEMP/credential.cdx.json"
+      - name: Preserve verified standalone credential SBOM for release closure
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-integrity-manifest
-          path: frontend/dist/release-integrity/releases.json
+          name: credential-sbom-evidence
+          path: ${{ runner.temp }}/credential.cdx.json
           if-no-files-found: error
-      - name: Sign and publish release integrity manifest
-        shell: bash
-        run: |
-          if [ "${{ needs.plan.outputs.publishing }}" != "true" ]; then
-            echo "::warning::Release integrity signing skipped because this is not a publishing run."
-            exit 0
-          fi
-          if [ "${RELEASE_INTEGRITY_SIGNING_ENABLED:-false}" != "true" ]; then
-            echo "::warning::Release integrity signing disabled; set RELEASE_INTEGRITY_SIGNING_ENABLED=true and provide command env vars to publish a signed manifest."
-            exit 0
-          fi
-
-          missing=()
-          [ -n "${RELEASE_INTEGRITY_SIGN_CMD:-}" ] || missing+=("RELEASE_INTEGRITY_SIGN_CMD")
-          [ -n "${RELEASE_INTEGRITY_PUBLISH_CMD:-}" ] || missing+=("RELEASE_INTEGRITY_PUBLISH_CMD")
-          [ -n "${RELEASE_INTEGRITY_MANIFEST_URL:-}" ] || missing+=("RELEASE_INTEGRITY_MANIFEST_URL")
-          if [ "${#missing[@]}" -gt 0 ]; then
-            printf '::error::Release integrity signing enabled but missing required env: %s\n' "${missing[*]}"
-            exit 1
-          fi
-
-          export RELEASE_INTEGRITY_MANIFEST_PATH="$PWD/frontend/dist/release-integrity/releases.json"
-          bash -c "$RELEASE_INTEGRITY_SIGN_CMD"
-          bash -c "$RELEASE_INTEGRITY_PUBLISH_CMD"
+      - name: Upload release integrity manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: artifacts-release-integrity-manifest
+          path: ${{ runner.temp }}/credential-source/source/frontend/dist/release-integrity/releases.json
+          if-no-files-found: error
   # Determines if we should publish/announce
+  sbom-gate:
+    name: Complete Release SBOM Closure
+    needs: [plan, build-local-artifacts, build-global-artifacts, release-integrity-manifest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - run: sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: expected-publication-plan
+          path: ${{ runner.temp }}/release-plan
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: artifacts-*
+          path: ${{ runner.temp }}/release-artifacts
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: credential-sbom-evidence
+          path: ${{ runner.temp }}/credential-sbom
+      - name: Extract compiled metadata and retained wizard membership from every final archive
+        run: |
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/sbom-source" --commit '${{ needs.plan.outputs.source-commit }}'
+          CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-dist-artifacts.py \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts "$RUNNER_TEMP/release-artifacts" \
+            --evidence "$RUNNER_TEMP/archive-sboms" --source-root "$RUNNER_TEMP/sbom-source/source" \
+            --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info" --syft "$RUNNER_TEMP/sbom-tools/bin/syft"
+      - name: Require complete release subject digest and composition closure
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-release-sboms.py \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts "$RUNNER_TEMP/release-artifacts" \
+            --evidence "$RUNNER_TEMP/archive-sboms" --credential-sbom "$RUNNER_TEMP/credential-sbom/credential.cdx.json" \
+            --output "$RUNNER_TEMP/release-sboms"
+      - name: Preserve validated release SBOMs (PR runs do not publish)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: artifacts-sboms
+          path: ${{ runner.temp }}/release-sboms/
+          if-no-files-found: error
+
   host:
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    environment: official-release
     needs:
+      - release-signing
+      - sbom-gate
+      - security-gate
       - plan
       - build-local-artifacts
       - build-global-artifacts
       - release-integrity-manifest
-    # Only run if we're "publishing", and only if local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.outputs.publishing == 'true' && needs.release-integrity-manifest.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    # Every required build must succeed, independently of artifact presence.
+    if: ${{ always() && needs.plan.outputs.publishing == 'true' && needs.sbom-gate.result == 'success' && needs.release-signing.result == 'success' && needs.security-gate.result == 'success' && needs.release-integrity-manifest.result == 'success' && needs.build-global-artifacts.result == 'success' && needs.build-local-artifacts.result == 'success' }}
     env:
+      OFFICIAL_RELEASE_AUTHORIZATION: ${{ vars.OFFICIAL_RELEASE_AUTHORIZATION }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-24.04"
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
       - name: Install cached dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       # Fetch artifacts from scratch-storage
       - name: Fetch artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
+      - name: Fetch complete expected release plan before publication
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: expected-publication-plan
+          path: ${{ runner.temp }}/release-plan
+      - name: Require unchanged complete release SBOM digest closure before any publication
+        run: |
+          sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-release-sboms.py \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts target/distrib --evidence target/distrib
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: w6-release-verifier-amd64
+          path: ${{ runner.temp }}/verifier
+      - name: Prepare mandatory official release manifest from complete final bytes
+        run: |
+          chmod 755 "$RUNNER_TEMP/verifier/release-verifier"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py prepare --scope release \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts target/distrib --evidence target/distrib \
+            --proof "$RUNNER_TEMP/official-release"
+      - name: Sign official manifest, credential manifest, archives and SBOM subjects
+        id: official-signature
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-checksums: ${{ runner.temp }}/official-release/subjects.sha256
+          push-to-registry: false
+      - name: Require W6-verified signing before any release hosting
+        env:
+          SIGNED_BUNDLE: ${{ steps.official-signature.outputs.bundle-path }}
+        run: |
+          cp "$SIGNED_BUNDLE" "$RUNNER_TEMP/official-release/official-release-manifest.sigstore.json"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py verify --scope release \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts target/distrib --evidence target/distrib \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
       - id: host
         shell: bash
         run: |
@@ -350,14 +489,14 @@ jobs:
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
       # Create a GitHub Release while uploading all files to it
       - name: "Download GitHub Artifacts"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: artifacts-*
           path: artifacts
@@ -366,10 +505,17 @@ jobs:
         run: |
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json artifacts/dist-manifest.json
-      - name: Attest release artifacts
-        uses: actions/attest-build-provenance@v1
-        with:
-          subject-path: artifacts/*
+      - name: Recheck final release upload bytes and SBOM closure
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-release-sboms.py \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts artifacts --evidence artifacts
+      - name: Require W6-verified unchanged official subjects before GitHub Release publication
+        run: |
+          cp "$RUNNER_TEMP/official-release/official-release-manifest.json" artifacts/
+          cp "$RUNNER_TEMP/official-release/official-release-manifest.sigstore.json" artifacts/
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py verify --scope release \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts artifacts --evidence artifacts \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier" --final-upload
       - name: Generate changelog
         id: changelog
         shell: bash
@@ -432,7 +578,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           submodules: recursive

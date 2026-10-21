@@ -9,7 +9,7 @@ Images on main and tags fail with `startup_failure`. Check it on PRs instead.
 import sys
 from pathlib import Path
 
-import yaml
+from workflow_yaml import load_unique
 
 LEVELS = {"none": 0, "read": 1, "write": 2}
 WORKFLOWS = Path(".github/workflows")
@@ -34,8 +34,8 @@ def permissions(block, where):
 def main():
     failures = []
     callers = 0
-    for caller_path in sorted(WORKFLOWS.glob("*.yml")):
-        caller = yaml.safe_load(caller_path.read_text())
+    for caller_path in sorted(path for path in WORKFLOWS.iterdir() if path.suffix in (".yml", ".yaml")):
+        caller = load_unique(caller_path.read_text())
         workflow_grant = permissions(caller.get("permissions"), caller_path)
         for job_name, job in (caller.get("jobs") or {}).items():
             uses = job.get("uses", "")
@@ -50,7 +50,7 @@ def main():
                 # Inheriting the repository default is not checkable here.
                 continue
             called_path = Path(uses.removeprefix("./"))
-            called = yaml.safe_load(called_path.read_text())
+            called = load_unique(called_path.read_text())
             requests = [(f"{called_path} (workflow)", called.get("permissions"))]
             requests += [
                 (f"{called_path}:{name}", nested.get("permissions"))

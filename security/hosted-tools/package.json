@@ -1,0 +1,10 @@
+{
+  "name": "nyxid-hosted-build-tools",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "@openai/codex": "0.147.0",
+    "@agentclientprotocol/codex-acp": "1.4.0"
+  },
+  "allowScripts": {}
+}

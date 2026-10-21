@@ -1005,7 +1005,7 @@ fn intersect_effects(
 /// Effects of a raw call on a service without a saved scope. Stored endpoint
 /// rows are catalog contracts; with no matching row the method decides, which
 /// never treats a POST as a read.
-async fn unscoped_effects(
+pub(crate) async fn unscoped_effects(
     db: &Database,
     service: &str,
     catalog: Option<&str>,

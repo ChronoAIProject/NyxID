@@ -1,0 +1,273 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "enabledManagers": [
+    "custom.regex"
+  ],
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "timezone": "Etc/UTC",
+  "automerge": false,
+  "prConcurrentLimit": 5,
+  "labels": [
+    "dependencies",
+    "build-inputs"
+  ],
+  "dependencyDashboard": true,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
+        "\"cargo-nextest\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "nextest-rs/nextest",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^cargo-nextest-(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
+        "\"cargo-dist\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "axodotdev/cargo-dist",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
+        "\"rustup\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "rust-lang/rustup",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
+        "\"cargo-auditable\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "rust-secure-code/cargo-auditable",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
+        "\"syft\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "anchore/syft",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
+        "\"npm\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "npm",
+      "datasourceTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^cli/Dockerfile\\.machine-hosted$/"
+      ],
+      "matchStrings": [
+        "ARG NODE_VERSION=(?<currentValue>[^\\s]+)"
+      ],
+      "depNameTemplate": "node",
+      "datasourceTemplate": "node-version"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^cli/Dockerfile\\.machine-hosted$/"
+      ],
+      "matchStrings": [
+        "ARG CODEX_VERSION=(?<currentValue>[^\\s]+)"
+      ],
+      "depNameTemplate": "@openai/codex",
+      "datasourceTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^cli/Dockerfile\\.machine-hosted$/"
+      ],
+      "matchStrings": [
+        "ARG CODEX_ACP_VERSION=(?<currentValue>[^\\s]+)"
+      ],
+      "depNameTemplate": "@agentclientprotocol/codex-acp",
+      "datasourceTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^cli/Dockerfile\\.machine-hosted$/"
+      ],
+      "matchStrings": [
+        "ARG HECA_VERSION=(?<currentValue>[^\\s]+)"
+      ],
+      "depNameTemplate": "getheca/heca-artifacts",
+      "datasourceTemplate": "github-tags"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^rust-toolchain\\.toml$/"
+      ],
+      "matchStrings": [
+        "channel = \"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "rust",
+      "datasourceTemplate": "rust"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.node-version$/"
+      ],
+      "matchStrings": [
+        "^(?<currentValue>[0-9.]+)\\s*$"
+      ],
+      "depNameTemplate": "node",
+      "datasourceTemplate": "node-version"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^cli/resources/cua/release\\.json$/"
+      ],
+      "matchStrings": [
+        "\"tag\":\\s*\"cua-driver-rs-v(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "trycua/cua",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^cua-driver-rs-v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/hosted-context\\.tsv$/"
+      ],
+      "matchStrings": [
+        "# source-commit (?<currentDigest>[0-9a-f]{40})"
+      ],
+      "currentValueTemplate": "main",
+      "depNameTemplate": "https://github.com/ChronoAIProject/cma.git",
+      "datasourceTemplate": "git-refs",
+      "versioningTemplate": "git"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
+        "\"gitleaks\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "gitleaks/gitleaks",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
+        "\"trivy\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "aquasecurity/trivy",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
+        "\"cargo-audit\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "rustsec/rustsec",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^cargo-audit/v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
+        "\"regctl\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "regclient/regclient",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
+        "\"actionlint\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "rhysd/actionlint",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
+        "\"gh\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "cli/cli",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchDepNames": [
+        "getheca/heca-artifacts"
+      ],
+      "ignoreUnstable": false
+    },
+    {
+      "matchDepNames": [
+        "https://github.com/ChronoAIProject/cma.git"
+      ],
+      "pinDigests": true
+    }
+  ],
+  "prBodyNotes": [
+    "This is a version proposal. Refresh the matching official archive URLs, checksums and reviewed output identities before merging. Existing checksum, signature, lock and package-inventory gates remain mandatory."
+  ]
+}

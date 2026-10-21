@@ -20,12 +20,17 @@ mod tls;
 mod update_check;
 mod wizard;
 
+mod build_identity {
+    include!(concat!(env!("OUT_DIR"), "/nyxid_build_identity.rs"));
+}
+
 use anyhow::Result;
 use clap::Parser;
 
 use crate::cli::{Cli, Commands};
 
 fn main() {
+    build_identity::retain();
     // rustls-native-certs 0.8 treats empty SSL_CERT_FILE as a selected path.
     // Normalize empty CA variables before Tokio or any other worker starts.
     for name in ["NYXID_CA_CERT", "SSL_CERT_FILE", "SSL_CERT_DIR"] {
@@ -59,6 +64,15 @@ async fn run_main() {
     // and duration after dispatch returns, regardless of success.
     let start = std::time::Instant::now();
     let cli = Cli::parse();
+    // Local observation must precede telemetry, update checks and skill repair.
+    if matches!(
+        cli.command,
+        Commands::Node {
+            command: cli::NodeCommands::CustodyProbe
+        }
+    ) {
+        node::custody::worker();
+    }
     let profile = extract_profile(&cli.command);
 
     // Telemetry is hard-off by default: if no DSN is configured and

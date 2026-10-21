@@ -5,6 +5,8 @@
 pub mod config;
 #[path = "node/credential_store.rs"]
 pub mod credential_store;
+#[path = "node/custody.rs"]
+pub(crate) mod custody;
 #[path = "node/encryption.rs"]
 pub mod encryption;
 #[path = "node/error.rs"]
@@ -105,5 +107,6 @@ mod test_support {
 }
 
 pub mod node {
+    pub(crate) use crate::custody;
     pub use crate::{config, machine, managed_config, managed_deadline, proxy_upload, ws_client};
 }

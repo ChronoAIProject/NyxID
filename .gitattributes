@@ -1,0 +1,3 @@
+
+# Preserve the authenticated upstream license bytes, including CRLF.
+vendor/proc-macro-error2-2.0.1/LICENSE-APACHE -text whitespace=cr-at-eol

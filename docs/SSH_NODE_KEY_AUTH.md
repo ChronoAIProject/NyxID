@@ -10,6 +10,10 @@ NyxID SSH services support three auth modes:
 
 `node_key` keeps the target SSH private key on the node host. The NyxID server forwards only the service slug, SSH principal, command or shell request, and signed routing metadata over the node WebSocket. The node agent looks up a local encrypted entry keyed by `(service_slug, principal)` and authenticates to the downstream SSH target with `russh`.
 
+Prefer Ed25519 for node SSH keys. RSA client signing remains supported for
+the owner-selected host whose configured fingerprint is verified before
+authentication; Ed25519 avoids the RustCrypto RSA timing advisory.
+
 ## Breaking Change for Node Operators
 
 This feature branch widens the HMAC envelopes for cert-mode `ssh exec` and SSH browser terminal open frames. After deploying a backend that includes this change, node operators must upgrade the node binary before cert-mode `ssh exec` and SSH web terminal sessions will work:

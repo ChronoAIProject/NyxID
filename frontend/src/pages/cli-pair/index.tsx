@@ -1104,7 +1104,10 @@ function SecretPanel({
         return (
           <DisplayOncePanel
             title="API key created"
-            description="Copy this key into your CLI / agent environment. NyxID will never show it again."
+            description={`Copy this key into your CLI / agent environment. NyxID will never show it again. ${result.expires_at === undefined
+              ? "Refresh the key details to confirm its expiry."
+              : result.expires_at === null ? "This key has no expiry."
+              : `Expires ${new Date(result.expires_at).toLocaleString()}.`}`}
             secret={result.full_key}
             ackButtonLabel="Close — I've saved the key"
             onAcknowledge={onAcknowledged}

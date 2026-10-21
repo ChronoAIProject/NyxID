@@ -500,7 +500,9 @@ pub(crate) async fn create_gateway_agent_key(
         owner,
         &format!("NyxBot gateway agent {}", identifier(label)),
         "read proxy",
-        None,
+        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
+            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
+        ),
         Some("Authenticates the Agent Event Gateway to NyxBot. Managed by NyxBot."),
         Some(&[]),
         Some(&[]),
@@ -654,7 +656,9 @@ async fn connect_inner(
         &bot_owner_id,
         &format!("NyxBot channel route {}", identifier(&label)),
         "read proxy",
-        None,
+        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
+            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
+        ),
         Some("NyxBot channel route key. Managed by NyxBot; disconnect NyxBot to remove."),
         Some(&[]),
         Some(&[]),
@@ -1369,7 +1373,9 @@ async fn new_route_key(
         key_owner,
         &format!("NyxBot channel route {}", identifier(label)),
         "read proxy",
-        None,
+        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
+            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
+        ),
         Some("NyxBot channel route key. Managed by NyxBot; disconnect NyxBot to remove."),
         Some(&[]),
         Some(&[]),
@@ -5132,6 +5138,24 @@ async fn machine_setup_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult
             )
         } else if profile.computer && !profile.computer_ready {
             ("permissions_missing", "The machine connected, but computer use is unavailable. Ask the owner to check Screen Recording/Accessibility or the Linux display using nyxid node machine status.".to_owned())
+        } else if let Some(reason) = Box::pin(
+            crate::services::machine_setup_service::setup_selection_reason(&state.db, &row, node),
+        )
+        .await?
+        {
+            (
+                "selection_required",
+                format!(
+                    "Machine {} ({}) connected, but owner separation selection is required before new access. {} Owner settings: {}. Do not retry execution or select legacy on the owner's behalf. Existing legacy assignments remain usable.",
+                    node.name,
+                    node.id,
+                    crate::services::machine_access_service::selection_message(reason),
+                    crate::services::assistant_links::AssistantPage::MachineSettings {
+                        node: &node.id
+                    }
+                    .path()
+                ),
+            )
         } else {
             (
                 "connected",

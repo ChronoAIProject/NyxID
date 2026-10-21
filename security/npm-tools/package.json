@@ -1,0 +1,10 @@
+{
+  "name": "nyxid-locked-node-tools",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "pnpm": "10.34.7",
+    "npm": "11.21.1"
+  },
+  "allowScripts": {}
+}

@@ -79,7 +79,9 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
           MFA verification
         </h1>
         <p className="text-12 text-muted-foreground">
-          Enter the 6-digit code from your authenticator app
+          {verifyMutation.sessionConfirmationPending
+            ? "Verification was submitted. Confirm your session to continue."
+            : "Enter the 6-digit code from your authenticator app"}
         </p>
       </div>
 
@@ -106,6 +108,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
                     maxLength={6}
                     autoComplete="one-time-code"
                     inputMode="numeric"
+                    disabled={verifyMutation.sessionConfirmationPending}
                     aria-label="Enter 6-digit verification code"
                     className="text-center font-mono text-lg tracking-widest"
                     {...field}
@@ -124,7 +127,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
               className="w-full"
               isLoading={verifyMutation.isPending}
             >
-              Verify
+              {verifyMutation.sessionConfirmationPending ? "Retry session check" : "Verify"}
             </Button>
             <Button
               type="button"

@@ -1,5 +1,6 @@
 [workspace]
 members = ["backend", "cli", "cloud-auth", "mcp-demo", "nyxid-crypto", "service-adapters", "machine", "machine-updater", "permissions"]
+exclude = ["vendor/proc-macro-error2-2.0.1"]
 resolver = "3"
 
 [workspace.package]
@@ -10,7 +11,7 @@ rust-version = "1.93"
 [workspace.dependencies]
 axum = { version = "0.8.8", features = ["macros", "ws"] }
 tokio = { version = "1.51", features = ["full"] }
-mongodb = "3.5.2"
+mongodb = "3.9.1"
 bson = { version = "2.15", features = ["uuid-1", "chrono-0_4"] }
 futures = "0.3.31"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -22,6 +23,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 
 [workspace.metadata.dist]
 cargo-dist-version = "0.30.0"
+cargo-auditable = true
+precise-builds = true
 allow-dirty = ["ci"]
 ci = "github"
 # Windows is intentionally omitted: nix/libc-based node daemon process checks
@@ -39,10 +42,15 @@ packages = ["nyxid-cli"]
 install-path = "~/.local/bin"
 hosting = "github"
 install-updater = false
+# The official build uses a verified raw committed export without .git.
+# cargo-dist's built-in source task invokes attribute-sensitive `git archive`.
+# Keep the source subject through its supported explicit-artifact hook instead.
+source-tarball = false
+extra-artifacts = [{ build = ["python3", "scripts/build-release-source.py"], artifacts = ["target/release-source/source.tar.gz", "target/release-source/source.tar.gz.sha256"] }]
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-apple-darwin = "macos-latest"
-aarch64-unknown-linux-gnu = { runner = "ubuntu-24.04-arm", container = { image = "buildpack-deps:focal", host = "aarch64-unknown-linux-gnu", package-manager = "apt" } }
+aarch64-unknown-linux-gnu = { runner = "ubuntu-24.04-arm", container = { image = "buildpack-deps:focal@sha256:2de32588f72f63229c83e3f08529cc15db231b2d95412ab4c30ad49d7cd99591", host = "aarch64-unknown-linux-gnu", package-manager = "apt" } }
 x86_64-apple-darwin = "macos-latest"
 x86_64-unknown-linux-gnu = "ubuntu-24.04"
 global = "ubuntu-24.04"
@@ -52,7 +60,6 @@ aarch64-unknown-linux-gnu = "2.31"
 
 [workspace.metadata.dist.dependencies.apt]
 clang = { version = "*", targets = ["aarch64-unknown-linux-gnu"] }
-libdbus-1-dev = "*"
 pkg-config = "*"
 
 # Pure-Rust RSA keygen and big-int math are catastrophically slow when compiled
@@ -79,3 +86,7 @@ opt-level = 3
 inherits = "release"
 lto = "thin"
 strip = true
+
+[patch.crates-io]
+# E0365 correction; original authenticated archive/one-line patch in vendor.
+proc-macro-error2 = { path = "vendor/proc-macro-error2-2.0.1" }

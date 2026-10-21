@@ -1,0 +1,13 @@
+{
+  "name": "@nyxid/release-signing-tools",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "@sigstore/bundle": "3.0.0",
+    "@sigstore/sign": "3.0.0"
+  },
+  "overrides": {
+    "@sigstore/core": "3.2.1",
+    "@sigstore/protobuf-specs": "0.3.2"
+  }
+}
