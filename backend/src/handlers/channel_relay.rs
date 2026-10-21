@@ -4012,6 +4012,7 @@ mod tests {
         };
 
         let bot = ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
@@ -4070,6 +4071,7 @@ mod tests {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
+            original_message: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4102,6 +4104,7 @@ mod tests {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
+            original_message: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4308,6 +4311,7 @@ mod tests {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
+            original_message: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4547,6 +4551,7 @@ mod tests {
         let db = fixture.state.db.clone();
         let now = Utc::now();
         let other_bot = ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
@@ -4921,6 +4926,7 @@ mod tests {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
+            original_message: None,
             id: Uuid::new_v4().to_string(),
             platform_conversation_id: Some("chat_a".into()),
             reply_to_message_id,
@@ -5217,6 +5223,7 @@ mod tests {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
+            original_message: None,
             id: Uuid::new_v4().to_string(),
             platform: "whatsapp".into(),
             platform_conversation_id: Some("chat_a".into()),

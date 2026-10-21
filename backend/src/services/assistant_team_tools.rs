@@ -403,7 +403,7 @@ pub fn schema(name: &str) -> Value {
             json!({"chat_id": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "A chat id from nyxid__list_channel_chats (or the chat \
                     id NyxID named in your instructions)"},
-                "text": {"type": "string", "minLength": 1, "maxLength": 4000,
+                "text": {"type": "string", "minLength": 1, "maxLength": super::assistant_nyxagent::MAX_MESSAGE_CHARS,
                     "description": "The message to post, as plain text"},
                 "include_images": {"type": "boolean", "default": false,
                     "description": "Also send the tool images of this turn only (verified \

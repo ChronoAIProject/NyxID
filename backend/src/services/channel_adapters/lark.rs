@@ -1553,6 +1553,7 @@ mod tests {
 
     fn make_test_bot(platform: &str) -> ChannelBot {
         ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,

@@ -8572,6 +8572,44 @@ Request responses expose `auto_connect` (false for legacy requests) and nullable
 
 The connect body uses a decimal string for `telegram_bot_id` and an integer for `revision`, for example `{"telegram_bot_id":"900","revision":6}`. Manager credentials use the existing admin platform-credentials routes with provider `telegram-new`. Neither manager nor child bot tokens are returned to customers.
 
+### Manager registry and shared BotFather help
+
+The following routes are relative to `/api/v1/admin` and require a first-party
+human administrator with a current admin role. Responses containing management
+state use `Cache-Control: no-store`. Manager tokens are write-only. The original
+`telegram-new` Platform Credentials entry remains the default manager; additional
+managers use their verified numeric Telegram bot identity. The registry allows
+at most 100 managers, including the default.
+
+| Method | Route | Request and result |
+| --- | --- | --- |
+| GET | `/telegram-managers` | List `{manager_bot_id, username, ready, legacy_default}` records. |
+| POST | `/telegram-managers` | Configure `{token}` after Telegram identity verification; returns the configured manager's metadata. |
+| POST | `/telegram-managers/clear` | Remove an additional manager with `{manager_bot_id}`; returns 204. Live dependencies prevent removal. Manage the default through Platform Credentials. |
+| GET | `/platform-help` | List libraries with `{id, name, version, published_revision, draft, updated_at}`. |
+| POST | `/platform-help` | Create `{name}`, seeded with the built-in published help. |
+| PUT | `/platform-help/{id}` | Save `{version, content}` as a draft. |
+| POST | `/platform-help/{id}/publish` | Publish `{version}` or republish a historical version with `{version, rollback_revision}`. Returns the updated library; rollback appends a revision. |
+| GET | `/platform-help/{id}/history` | Read up to 50 revisions, newest first; `?before={revision}` pages backward. Each entry includes `{revision, content, published_at, published_by}`. |
+| GET | `/platform-bots/{id}/help-library` | Read `{profile_id, library_id, version}`; an unassigned profile uses the shared default library. |
+| PUT | `/platform-bots/{id}/help-library` | Assign `{generation, version, library_id}` using the current profile generation and assignment version. |
+
+`content` contains `articles: [{id, title, body, tags}]` and
+`use_cases: [{id, title, description, example_prompts}]`. IDs are unique lowercase
+hyphenated slugs across both lists. Libraries allow 1–30 articles, up to 20 use
+cases and 16 KiB of serialized content. Invalid content returns 400; stale edit,
+publication or assignment versions return 409. Saving a draft leaves published
+content available. Publishing affects new turns on every assigned bot, while
+an in-flight turn retains its first selected library revision.
+
+Additional manager webhooks use
+`POST /api/v1/webhooks/channel/telegram-new/manager/{id}` and verify the
+selected manager's own webhook secret. The existing default-manager webhook is
+retained. After browser approval, the pairing response provides a `confirmation_command`;
+the page also constructs a Telegram return link for the selected manager.
+Polling and `/check` report
+status; completion still requires proof from the originating Telegram account.
+
 ---
 
 ## Webhooks

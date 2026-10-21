@@ -125,13 +125,27 @@ async fn callback_as(
     text: &str,
     kind: ThreadSenderKind,
 ) {
+    callback_with_provenance(state, row, n, topic, sender, addressed, text, (kind, true)).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn callback_with_provenance(
+    state: &AppState,
+    row: &NyxbotChannel,
+    n: u32,
+    topic: &str,
+    sender: &str,
+    addressed: bool,
+    text: &str,
+    (kind, original): (ThreadSenderKind, bool),
+) {
     let raw = if kind == ThreadSenderKind::Bot {
         json!({"message":{"message_id":n,"message_thread_id":topic.parse::<i64>().unwrap(),"is_topic_message":true,
             "from":{"id":sender.parse::<i64>().unwrap(),"is_bot":true},
             "chat":{"id":-100,"type":"supergroup"},"text":text,
             "entities":[{"type":"mention","offset":0,"length":11}]}})
     } else {
-        json!({"message":{"from":{"is_bot":false}}})
+        json!({"message":{"message_id":original.then_some(n),"text":text,"from":{"is_bot":false}}})
     };
     let inbound = InboundMessage {
         embedded_attachments: Vec::new(),
@@ -311,6 +325,11 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].follow.follow_state.as_deref(), Some("active"));
     assert_eq!(calls.lock().await.len(), 2);
+    for call in calls.lock().await.iter() {
+        let input = call.to_string();
+        assert!(input.contains("Destination: Telegram."));
+        assert!(input.contains("4,096 characters"));
+    }
     let conversation = first[0].conversation_id.clone();
     assert!(calls.lock().await[0].to_string().contains("body_available"));
     let messages = engine::messages(
@@ -324,6 +343,25 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
     .unwrap();
     assert!(messages.iter().all(|m| !m.text.contains("body_available")
         && !m.text.contains("History body must never be retained")));
+    callback_with_provenance(
+        &state,
+        &row,
+        110,
+        "7",
+        "human",
+        false,
+        "stop following",
+        (ThreadSenderKind::Human, false),
+    )
+    .await;
+    assert_eq!(calls.lock().await.len(), 2);
+    let retained = children()
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(retained[0].follow.follow_state.as_deref(), Some("active"));
     callback(&state, &row, 103, "7", "guest", true, "stop following").await;
     assert_eq!(calls.lock().await.len(), 2);
     callback(&state, &row, 104, "7", "human", false, "stop following").await;

@@ -409,6 +409,10 @@ Automation turns share the engine and team pool, with admission fenced inside `b
 
 ## Channel Bot Notes
 
+Chat reply-length advice belongs in turn-only context and must use `channel_text::TextLimit` budgets. Route it by the actual primary/additional/manager/automation destination; app-only turns receive none. Prefer one message unless long/complete output is requested; never truncate, and retain multipart delivery. Chat-list tool results carry the same guidance for `post_to_chat`.
+
+Telegram forwarding carries provider-authenticated original-message eligibility separately from reference content. Only an original message may decide action cards or consume pairing/control proofs; absent gateway or legacy metadata fails closed. Raw relay text and the callback attachment list must match Telegram’s own top-level fields for CMA verification. Stored inbound attachments preserve that exact own-file prefix, then append unique external-reply handles for NyxBot; never shift callback download indexes. NyxID creates Telegram gateway channels with nyxid_relay sources. Native-source gateway events without sealed telegram_input stay plain text and cannot decide cards, pairing or controls; richer native forwarding is an optional CMA follow-up. Direct NyxID delivery extracts rich text, quotations and hidden links. Current nyxid_relay gateway channels supply gateway plain text plus original-message eligibility and own/quoted file handles only; forward-origin names, quote/external_reply text and hidden link URLs are unavailable (owner-accepted demo limitation; see the CMA follow-up doc). inbound files bind encrypted into the exact owner turn. Manager proof/setup material stays outside model input. Additional managers resolve encrypted credentials by identity through `telegram_manager_registry`, with distinct webhook routes/secrets and the legacy default preserved. Shared BotFather help uses immutable publications, version-fenced drafts/assignments and a revision pinned per turn; publishing grants no execution authority. The older onboarding flow requires fresh browser-only return proof. Upgrade all writers/readers before using additional managers or fresh onboarding proofs; see `docs/TELEGRAM_NEW.md` and `docs/PLATFORM_BOTFATHER.md`.
+
 Channel health (`services/channel_bot_health.rs`): one recommendation function keyed on stable failure codes serves Health, the `channel_bot_failed` audit and the best-effort failure notice (owner, or every admin of an org bot; once per transition via `notify_failure`). Only authenticated deliveries write bot diagnostics; unauthenticated signature/target rejections are throttled per-platform counters in `channel_webhook_rejections`. Every send path records `last_outbound_*` through `record_outbound_outcome`. See `docs/CHANNEL_BOT_RELAY.md#x-channel-workflow-health-and-recovery`.
 
 Platform Credentials is an adapter-described provider inventory: `Stored` backing keeps encrypted fields in `platform_credentials` (Meta); `ProviderOAuth { provider_slug }` reads/writes the provider config's encrypted client credentials (X shares `twitter`). Admin API, CLI and forms consume those descriptors. Managed UI components are selected through the `meta_embedded_signup` / `oauth_connection` flow registry.
@@ -791,3 +795,13 @@ no-op discovery/planning must not mutate state. Tool icons reuse static-SVG
 validation and recheck authority on attachment. Keep manifest/wizard credentials
 in zeroizing memory, env names only in saved manifests, no credential reads in
 dry-run/validate, no redirects on shared-credential transport. See docs/TOOLS.md.
+
+NyxBot saved manager replies and proactive text posts use the shared
+`channel_reply_plan`/`channel_text` planner (64 parts) and metadata-only
+`channel_text_deliveries` per-part receipts. Never replace long content with an app
+link or replay a sending/uncertain part. Revalidate live authority between effects;
+retain confirmed prefix IDs on partial outcomes. Pin action-card identities and
+numeric media notice inputs so retries reproduce the plan without storing bodies.
+Manager attachments use v2 image claims with the existing legacy read gate. Drain
+these writers for upgrade/rollback; old workers must not resume multipart rows.
+See `docs/TELEGRAM_NEW.md#full-saved-reply-delivery`.

@@ -215,15 +215,21 @@ pub(crate) fn inbound_metadata(
     agent_api_key_id: &str,
     message_id: &str,
 ) -> ChannelMessage {
+    let is_telegram = super::channel_platform::canonical_platform(platform) == "telegram";
+    let telegram_attachments =
+        is_telegram.then(|| super::telegram_input::relay_attachments(inbound));
+    let attachments = telegram_attachments
+        .as_deref()
+        .unwrap_or(&inbound.attachments);
     ChannelMessage {
         embedded_attachments: inbound.embedded_attachments.clone(),
         embedded_attachments_omitted: inbound.embedded_attachments_omitted,
         duplicate_of_media_key: None,
+        original_message: is_telegram.then(|| super::telegram_input::original(&inbound.raw_data)),
         thread_context: None,
         activity: None,
         platform_send: None,
-        attachments: inbound
-            .attachments
+        attachments: attachments
             .iter()
             .map(|a| crate::models::channel_message::StoredAttachment {
                 content_type: a.content_type.clone(),
@@ -285,6 +291,7 @@ pub async fn store_outbound_message(
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
+        original_message: None,
         thread_context: None,
         activity: None,
         platform_send,
@@ -358,6 +365,7 @@ pub async fn store_device_event_message(
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
+        original_message: None,
         thread_context: None,
         activity: None,
         platform_send: None,
@@ -1421,6 +1429,7 @@ mod tests {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
+            original_message: None,
             thread_context: None,
             activity: None,
             platform_send: None,

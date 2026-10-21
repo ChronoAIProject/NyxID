@@ -1469,6 +1469,7 @@ mod tests {
         seed_person(&db, &owner, "base-owner@example.com").await;
         for collection in [
             crate::models::lark_base_write::COLLECTION_NAME,
+            crate::models::channel_text_delivery::COLLECTION_NAME,
             crate::models::lark_base_write_photo::COLLECTION_NAME,
             crate::models::assistant_attachment::COLLECTION_NAME,
             crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
@@ -1498,6 +1499,7 @@ mod tests {
             .unwrap();
         for collection in [
             crate::models::lark_base_write::COLLECTION_NAME,
+            crate::models::channel_text_delivery::COLLECTION_NAME,
             crate::models::lark_base_write_photo::COLLECTION_NAME,
             crate::models::assistant_attachment::COLLECTION_NAME,
             crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,

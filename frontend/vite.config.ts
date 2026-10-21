@@ -18,7 +18,8 @@ function telegramClaimReferrer(): Plugin {
     name: "telegram-claim-referrer",
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
-        if (new URL(req.url ?? "/", "http://localhost").searchParams.has("claim"))
+        const url = new URL(req.url ?? "/", "http://localhost")
+        if (url.searchParams.has("claim") || url.pathname === "/onboarding/link")
           res.setHeader("Referrer-Policy", "no-referrer")
         next()
       })

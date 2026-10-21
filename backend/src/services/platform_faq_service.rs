@@ -1,28 +1,38 @@
 //! Public help is served from approved content without an account or model call.
 use crate::errors::{AppError, AppResult};
-use serde::Deserialize;
 
-#[derive(Deserialize)]
-struct Article {
-    id: String,
-    title: String,
-    body: String,
-}
-
+use crate::models::platform_help::{HelpArticle as Article, HelpContent};
+#[cfg(test)]
 fn articles() -> AppResult<Vec<Article>> {
-    serde_json::from_str(include_str!("../../content/platform-public-faq.json"))
-        .map_err(|_| AppError::Internal("Public help is unavailable".into()))
+    Ok(super::platform_help_service::seed_content()?.articles)
 }
 
+pub(crate) fn all_articles(content: &HelpContent) -> Vec<Article> {
+    let mut articles = content.articles.clone();
+    articles.extend(content.use_cases.iter().map(|c| Article {
+        id: c.id.clone(),
+        title: c.title.clone(),
+        body: format!(
+            "{}\n\nExample prompts:\n{}",
+            c.description,
+            c.example_prompts.join("\n")
+        ),
+        tags: vec!["use case".into()],
+    }));
+    articles
+}
+#[cfg(test)]
 pub(crate) fn select(text: &str) -> AppResult<Vec<String>> {
+    Ok(select_from(text, articles()?))
+}
+pub(crate) fn select_from(text: &str, articles: Vec<Article>) -> Vec<String> {
     let query = text.trim().to_lowercase();
     let query = query.strip_prefix("/faq").unwrap_or(&query).trim();
-    let articles = articles()?;
     if query.is_empty() || matches!(query, "/start" | "/help" | "help" | "hello" | "hi") {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     if let Some(article) = articles.iter().find(|article| article.id == query) {
-        return Ok(vec![article.id.clone()]);
+        return vec![article.id.clone()];
     }
     let words: std::collections::BTreeSet<_> = query
         .split(|ch: char| !ch.is_alphanumeric())
@@ -52,22 +62,26 @@ pub(crate) fn select(text: &str) -> AppResult<Vec<String>> {
         .filter_map(|article| {
             let title = article.title.to_lowercase();
             let body = article.body.to_lowercase();
+            let tags = article.tags.join(" ").to_lowercase();
             let score: usize = words
                 .iter()
                 .map(|word| {
-                    usize::from(title.contains(word)) * 3 + usize::from(body.contains(word))
+                    usize::from(title.contains(word)) * 3
+                        + usize::from(tags.contains(word)) * 2
+                        + usize::from(body.contains(word))
                 })
                 .sum();
             (score > 0).then_some((score, article.id))
         })
         .collect();
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    Ok(ranked.into_iter().take(2).map(|(_, id)| id).collect())
+    ranked.into_iter().take(2).map(|(_, id)| id).collect()
 }
 
 /// Only menu and mode instructions are composed per provider. Approved article
 /// bodies retain their original bytes, including examples for other platforms.
-pub(crate) fn render_for(
+pub(crate) fn render_content(
+    articles: Vec<Article>,
     reference: &crate::models::platform_manager_delivery::DeliveryReference,
     entry: &super::platform_manager_contract::EntryIdentity,
 ) -> AppResult<String> {
@@ -86,7 +100,6 @@ pub(crate) fn render_for(
         ));
     }
     let chat = ChatPresentation::for_entry(entry)?;
-    let articles = articles()?;
     let navigation = match chat {
         ChatPresentation::Telegram => "Send /faq to browse help, or /faq followed by a topic.",
         ChatPresentation::Native(
@@ -141,10 +154,33 @@ pub(crate) fn render_for(
         }
     }
     body.push_str(&suffix);
-    if body.encode_utf16().count() > chat.text_limit() {
-        return Err(AppError::Internal("FAQ menu exceeds channel limit".into()));
-    }
     Ok(body)
+}
+
+pub(crate) async fn render_saved(
+    db: &mongodb::Database,
+    reference: &crate::models::platform_manager_delivery::DeliveryReference,
+    entry: &super::platform_manager_contract::EntryIdentity,
+) -> AppResult<String> {
+    let content = match reference {
+        crate::models::platform_manager_delivery::DeliveryReference::Faq {
+            help: Some(reference),
+            ..
+        } => {
+            super::platform_help_service::revision(db, reference)
+                .await?
+                .content
+        }
+        _ => super::platform_help_service::seed_content()?,
+    };
+    render_content(all_articles(&content), reference, entry)
+}
+#[cfg(test)]
+fn render_for(
+    reference: &crate::models::platform_manager_delivery::DeliveryReference,
+    entry: &super::platform_manager_contract::EntryIdentity,
+) -> AppResult<String> {
+    render_content(articles()?, reference, entry)
 }
 
 #[cfg(test)]
@@ -191,6 +227,7 @@ mod tests {
             for ids in &selections {
                 for linking in [false, true] {
                     let reference = DeliveryReference::Faq {
+                        help: None,
                         article_ids: ids.clone(),
                         linking_enabled: linking,
                         public_policy_revision: 1,
@@ -222,6 +259,7 @@ mod tests {
             assert!(
                 render_for(
                     &DeliveryReference::Faq {
+                        help: None,
                         article_ids: vec![articles[0].id.clone(); 2],
                         linking_enabled: true,
                         public_policy_revision: 1,

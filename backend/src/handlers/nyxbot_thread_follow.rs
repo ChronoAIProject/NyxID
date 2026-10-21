@@ -161,11 +161,18 @@ async fn inbound_impl(
         return Ok(Some(Inbound::Silent));
     }
     let sender = Sender {
+        media: crate::services::telegram_input::stored_attachments(&source.attachments),
+        original_message: canonical_platform(&row.platform) != "telegram"
+            || source.original_message == Some(true),
         kind: facts.sender_kind,
         owner_eligible: facts.sender_kind == ThreadSenderKind::Human,
         id: sender_id,
         display_name: payload["sender"]["display_name"].as_str(),
     };
+    let stop_requested = sender.kind == ThreadSenderKind::Human && text.trim() == "stop following";
+    if stop_requested && !sender.original_message {
+        return Ok(Some(Inbound::Silent));
+    }
     if sender.kind == ThreadSenderKind::Human
         && let Some(linked) = link_owner(state, row, &sender, text, false).await?
     {
@@ -440,7 +447,7 @@ async fn inbound_impl(
         message,
         sender_id,
         addressed,
-        sender.kind == ThreadSenderKind::Human && text.trim() == "stop following",
+        stop_requested,
         &agent_id,
         on,
     )

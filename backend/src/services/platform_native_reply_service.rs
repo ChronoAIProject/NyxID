@@ -274,13 +274,6 @@ pub(crate) enum NativeSendOutcome {
     Uncertain,
 }
 
-pub(crate) fn text_limit(platform: EntryPlatform) -> usize {
-    match platform {
-        EntryPlatform::Discord => 2000,
-        _ => 4096,
-    }
-}
-
 #[cfg(test)]
 pub(crate) struct NativeTestTransport {
     pub adapter: std::sync::Arc<dyn PlatformAdapter>,
@@ -333,9 +326,27 @@ async fn send_claimed_impl(
     body: Zeroizing<String>,
     adapter: &dyn PlatformAdapter,
 ) -> AppResult<NativeSendOutcome> {
+    send_part(state, &authority, body, adapter, None).await
+}
+
+pub(crate) async fn send_part(
+    state: &AppState,
+    authority: &NativeSendAuthority,
+    body: Zeroizing<String>,
+    adapter: &dyn PlatformAdapter,
+    metadata: Option<&serde_json::Value>,
+) -> AppResult<NativeSendOutcome> {
     #[cfg(test)]
     if let Ok(transport) = TEST_NATIVE_TRANSPORT.try_with(std::sync::Arc::clone) {
-        return send_claimed_at(state, authority, body, adapter, &transport.discord_base).await;
+        return send_claimed_at(
+            state,
+            authority,
+            body,
+            adapter,
+            &transport.discord_base,
+            metadata,
+        )
+        .await;
     }
     send_claimed_at(
         state,
@@ -343,6 +354,7 @@ async fn send_claimed_impl(
         body,
         adapter,
         super::platform_entry_discord_controls::DISCORD_BASE,
+        metadata,
     )
     .await
 }
@@ -355,15 +367,16 @@ pub(super) async fn send_claimed_for_test(
     adapter: &dyn PlatformAdapter,
     discord_base: &str,
 ) -> AppResult<NativeSendOutcome> {
-    send_claimed_at(state, authority, body, adapter, discord_base).await
+    send_claimed_at(state, &authority, body, adapter, discord_base, None).await
 }
 
 async fn send_claimed_at(
     state: &AppState,
-    authority: NativeSendAuthority,
+    authority: &NativeSendAuthority,
     body: Zeroizing<String>,
     adapter: &dyn PlatformAdapter,
     discord_base: &str,
+    metadata: Option<&serde_json::Value>,
 ) -> AppResult<NativeSendOutcome> {
     let attempted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let remaining = match (authority.deadline - Utc::now()).to_std() {
@@ -382,6 +395,7 @@ async fn send_claimed_at(
                 adapter,
                 discord_base,
                 attempted.as_ref(),
+                metadata,
             ),
         ),
     )
@@ -398,16 +412,24 @@ async fn send_claimed_at(
 
 async fn materialize_and_send(
     state: &AppState,
-    authority: NativeSendAuthority,
+    authority: &NativeSendAuthority,
     body: Zeroizing<String>,
     adapter: &dyn PlatformAdapter,
     discord_base: &str,
     attempted: &std::sync::atomic::AtomicBool,
+    metadata: Option<&serde_json::Value>,
 ) -> AppResult<NativeSendOutcome> {
     if Utc::now() >= authority.deadline
         || body.trim().is_empty()
-        || body.encode_utf16().count()
-            > text_limit(authority.receipt.configuration.identity.platform)
+        || super::channel_text::TextLimit::for_platform(
+            super::platform_chat_presentation::ChatPresentation::Native(
+                authority.receipt.configuration.identity.platform,
+            )
+            .platform(),
+        )
+        .chunks(body.as_str())
+        .count()
+            > 1
         || state
             .db
             .collection::<mongodb::bson::Document>(DELIVERIES)
@@ -511,7 +533,7 @@ async fn materialize_and_send(
         attachments: vec![],
         text: Some(body.as_str().into()),
         reply_to_platform_message_id: None,
-        metadata: None,
+        metadata: metadata.cloned(),
     };
     // X retains its ordinary reservation -> provider -> settlement/uncertainty
     // path through BotCredentials.billing. One bounded text reply means one send.

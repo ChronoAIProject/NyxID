@@ -176,6 +176,10 @@ pub enum AppError {
     #[error("Rate limited")]
     RateLimited,
 
+    /// A confirmed provider refusal with a bounded retry delay; preserves 1005.
+    #[error("Rate limited")]
+    RateLimitedWithRetry { retry_after: u64 },
+
     #[error("Service concurrency limit reached; retry after an in-flight request completes")]
     ServiceConcurrencyLimited,
 
@@ -846,7 +850,7 @@ impl AppError {
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
-            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::RateLimited | Self::RateLimitedWithRetry { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
             | Self::InvalidDpopProof(_)
@@ -1076,7 +1080,7 @@ impl AppError {
             Self::AssistantModelUnavailable => 12103,
             Self::AssistantAttachmentExpired => 12101,
             Self::ServiceConcurrencyLimited => 12600,
-            Self::RateLimited => 1005,
+            Self::RateLimited | Self::RateLimitedWithRetry { .. } => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
             Self::DatabaseError(_) => 1007,
             Self::ValidationError(_) | Self::SkillDraftValidation(_) => 1008,
@@ -1346,7 +1350,7 @@ impl AppError {
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::ServiceConcurrencyLimited => "service_concurrency_limited",
-            Self::RateLimited => "rate_limited",
+            Self::RateLimited | Self::RateLimitedWithRetry { .. } => "rate_limited",
             Self::Internal(_) | Self::PoolAttemptTransport(_) => "internal_error",
             Self::DatabaseError(_) => "database_error",
             Self::ValidationError(_) | Self::SkillDraftValidation(_) => "validation_error",
@@ -1566,6 +1570,14 @@ impl AppError {
 }
 
 impl AppError {
+    pub fn retry_after_seconds(&self) -> Option<u64> {
+        match self {
+            Self::RateLimited => Some(1),
+            Self::RateLimitedWithRetry { retry_after } => Some((*retry_after).clamp(1, 86400)),
+            _ => None,
+        }
+    }
+
     /// The same client-safe payload for JSON responses and streaming errors.
     pub fn response_body(&self) -> ErrorResponse {
         if let Self::VoiceStartFailed(failure) = self {
@@ -1673,6 +1685,13 @@ impl IntoResponse for AppError {
                 axum::http::HeaderValue::from_static("1"),
             );
         }
+        if let Some(retry_after) = self.retry_after_seconds() {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_str(&retry_after.to_string())
+                    .expect("bounded numeric retry delay"),
+            );
+        }
         response
     }
 }
@@ -1688,6 +1707,24 @@ impl From<crate::models::credits::CreditsError> for AppError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rate_refusal_preserves_bounded_retry_after_without_changing_the_error_contract() {
+        use axum::response::IntoResponse;
+        for (delay, expected) in [(0, "1"), (23, "23"), (u64::MAX, "86400")] {
+            let error = super::AppError::RateLimitedWithRetry { retry_after: delay };
+            assert_eq!(
+                error.error_code(),
+                super::AppError::RateLimited.error_code()
+            );
+            assert_eq!(error.error_key(), "rate_limited");
+            let response = error.into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(
+                response.headers()[axum::http::header::RETRY_AFTER],
+                expected
+            );
+        }
+    }
     use super::*;
     use axum::body::to_bytes;
     use serde_json::Value;

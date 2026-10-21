@@ -456,6 +456,9 @@ async fn server_main() {
         tracing::info!("Existing HMAC domain keys exported to a restricted file");
         return;
     }
+    services::platform_help_service::ensure(&db)
+        .await
+        .expect("Failed to initialize public help");
     services::assistant_nyxagent::warn_at_startup(&db).await;
     services::assistant_access_policy::ensure_cutover(&db)
         .await
@@ -1460,6 +1463,7 @@ async fn server_main() {
             loop {
                 interval.tick().await;
                 let service = services::telegram_new_service::TelegramNewService {
+                    manager_id: None,
                     db: &creation_state.db,
                     keys: &creation_state.encryption_keys,
                     config: &creation_state.config,

@@ -210,7 +210,7 @@ async fn check_manager_in_session(
     let mut receipt_epoch = None;
     match entry {
         EntryIdentity::TelegramV1 { .. } => {
-            let mut credential_filter = doc! {"provider":"telegram-new","fields.manager_bot_id":manager_id,"fields.webhook_ready":"true"};
+            let mut credential_filter = doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", manager_id)]}, "fields.manager_bot_id": manager_id,"fields.webhook_ready":"true"};
             if let Some(value) = observation {
                 credential_filter.insert("fields.observation_id", value);
             }
@@ -649,7 +649,7 @@ pub async fn update(
                             if native {
                                 if !check_native_transport(db,session,&live,NativeTransportCheck::RuntimeControls).await? {return Err(changed());}
                             } else if db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
-                                .update_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&live.manager_bot_id,"fields.webhook_ready":"true"},doc! {"$inc":{"runtime_configuration_revision":1_i64}})
+                                .update_one(doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &live.manager_bot_id)]}, "fields.manager_bot_id": &live.manager_bot_id,"fields.webhook_ready":"true"},doc! {"$inc":{"runtime_configuration_revision":1_i64}})
                                 .session(&mut *session).await?.matched_count != 1 {
                                 return Err(changed());
                             }

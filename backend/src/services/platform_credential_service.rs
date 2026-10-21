@@ -236,11 +236,16 @@ fn validate_plain_fields(row: &PlatformCredential) -> AppResult<()> {
                 })
                 .collect()
         });
+    let descriptor_provider = if row.provider.starts_with("telegram-new/") {
+        "telegram-new"
+    } else {
+        row.provider.as_str()
+    };
     if row.fields.keys().any(|name| {
         name == VERIFY_TOKEN_FIELD
             || row.secrets.contains_key(name)
             || SECRET_FIELDS
-                .get(row.provider.as_str())
+                .get(descriptor_provider)
                 .is_some_and(|fields| fields.contains(&name.as_str()))
     }) {
         return Err(AppError::Internal(
@@ -305,7 +310,7 @@ async fn decrypt_platform_field(
         )),
     }
 }
-async fn encrypt_platform_field(
+pub(crate) async fn encrypt_platform_field(
     keys: &EncryptionKeys,
     id: &str,
     name: &str,
@@ -845,6 +850,14 @@ mod storage_tests {
         };
         row.fields
             .insert("manager_bot_token".into(), "misplaced-token".into());
+        row.provider = "telegram-new/200".into();
+        assert!(decrypt_platform_snapshot(&keys, Some(&row)).await.is_err());
+        assert!(
+            verify_current_storage_snapshot(&keys, &bson::to_document(&row).unwrap())
+                .await
+                .is_err()
+        );
+        row.provider = "telegram-new".into();
         let source = bson::to_document(&row).unwrap();
         assert!(decrypt_platform_snapshot(&keys, Some(&row)).await.is_err());
         assert!(

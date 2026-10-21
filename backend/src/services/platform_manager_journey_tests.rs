@@ -9,6 +9,10 @@ mod legacy_compatibility;
 mod management;
 #[path = "platform_manager_journey_tests/native_personal.rs"]
 mod native_personal;
+#[path = "platform_manager_journey_tests/outbound.rs"]
+mod outbound;
+#[path = "platform_manager_journey_tests/telegram_media.rs"]
+mod telegram_media;
 use super::*;
 use crate::{
     models::{
@@ -29,6 +33,7 @@ use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
+use zeroize::Zeroizing;
 
 struct SavedReplyEgress(AtomicUsize, tokio::sync::Mutex<Vec<Value>>);
 #[async_trait]
@@ -439,7 +444,7 @@ impl Journey {
         .await
         .unwrap()
     }
-    async fn link(&self) {
+    async fn confirmation(&self) -> Zeroizing<String> {
         self.webhook(&self.update(10, "/link", false)).await;
         let sends = self.sends().await;
         let text = sends.last().unwrap()["text"].as_str().unwrap();
@@ -472,7 +477,10 @@ impl Journey {
         )
         .await
         .unwrap();
-        let command = approved.confirmation_command.unwrap();
+        approved.confirmation_command.unwrap()
+    }
+    async fn link(&self) {
+        let command = self.confirmation().await;
         self.webhook(&self.update(11, command.as_str(), false))
             .await;
         assert!(
@@ -508,8 +516,14 @@ impl Journey {
             &payload,
         )
         .unwrap();
-        let command =
-            OriginalManagerCommand::from_verified(update, TurnInput { text: text.into() }).unwrap();
+        let command = OriginalManagerCommand::from_verified(
+            update,
+            TurnInput {
+                channel_uploads: Vec::new(),
+                text: text.into(),
+            },
+        )
+        .unwrap();
         commands::execute(
             &self.state.db,
             self.state.auth_device_hmac_key.as_slice(),
@@ -961,7 +975,7 @@ async fn telegram_personal_link_saved_reply_web_history_and_unlink_journey() {
     assert_eq!(private[0]["chat_id"], 700);
     assert_eq!(private[0]["protect_content"], true);
     assert!(
-        private[0]["text"]
+        !private[0]["text"]
             .as_str()
             .unwrap()
             .contains(&format!("?c={}", reply.turn.conversation_id))
@@ -1052,6 +1066,23 @@ async fn malformed_and_forwarded_personal_controls_never_fall_through_or_issue_p
             .iter()
             .all(|s| !s["text"].as_str().unwrap().contains("nyx_pli_"))
     );
+    j.link().await;
+    for (index, text) in [
+        "confirm P-ABCD-1234",
+        "CONFIRM P-ABCD-1234",
+        "/CONFIRM P-ABCD-1234",
+        "confirm O-00112233445566778899AABBCCDDEEFF",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        j.webhook(&j.update(9000 + index as i64, text, false)).await;
+    }
+    assert_eq!(
+        j.egress.0.load(Ordering::SeqCst),
+        0,
+        "malformed proof controls never reach the linked model"
+    );
     j.state.db.drop().await.unwrap();
 }
 
@@ -1084,6 +1115,7 @@ impl Journey {
                 &self.state.db,
                 &admitted,
                 TurnInput {
+                    channel_uploads: Vec::new(),
                     text: "save before delivery".into(),
                 },
                 events,
@@ -1282,18 +1314,37 @@ async fn stopped_reply_and_mismatched_current_token_never_send() {
         Err(AppError::Conflict(_))
     ));
     assert_eq!(j.sends().await.len(), 2);
-    // Numeric identity or epoch changes also fail; an ordinary readiness flag
-    // cannot turn an admitted proof into authority for a different manager.
+    // Ready metadata cannot authorize a token belonging to another manager.
+    // Keep this row selectable by the admitted identity so the decrypted-token
+    // check, rather than missing-credential deferral, must refuse the send.
     let (destination, reply, saved) = j.prepared_reply(51).await;
-    j.state
-        .db
-        .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
-        .update_one(
-            doc! {"provider":"telegram-new"},
-            doc! {"$set":{"fields.manager_bot_id":"101"}},
-        )
+    crate::services::platform_credential_service::update(
+        &j.state.db,
+        &j.state.encryption_keys,
+        &crate::services::channel_adapters::telegram_new::credential_descriptor(),
+        &j.owner,
+        &[(
+            "manager_bot_token".into(),
+            Some(Zeroizing::new("101:mismatched-manager-test-secret".into())),
+        )]
+        .into(),
+        false,
+    )
+    .await
+    .unwrap();
+    let current = crate::services::telegram_manager_registry::load(&j.state.db, Some("100"))
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the admitted manager still has ready credential metadata");
+    assert_eq!(
+        current.fields.get("manager_bot_id").map(String::as_str),
+        Some("100")
+    );
+    assert_eq!(
+        current.fields.get("webhook_ready").map(String::as_str),
+        Some("true")
+    );
+    let requests_before = j.server.received_requests().await.unwrap().len();
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     assert!(matches!(
         j.deliver(
@@ -1306,6 +1357,10 @@ async fn stopped_reply_and_mismatched_current_token_never_send() {
         DeliveryOutcome::Refused(_)
     ));
     assert_eq!(j.sends().await.len(), 2);
+    assert_eq!(
+        j.server.received_requests().await.unwrap().len(),
+        requests_before
+    );
     j.state.db.drop().await.unwrap();
 }
 
@@ -1342,13 +1397,13 @@ fn expected_personal_admission_errors_are_bounded_and_infrastructure_stays_error
 }
 
 #[test]
-fn bounded_reply_renderer_links_exact_thread_and_strips_unrelated_query_secrets() {
+fn saved_reply_keeps_full_text_without_an_unconditional_web_link() {
     let message:AssistantMessage=mongodb::bson::from_document(doc! {"_id":"reply","conversation_id":"nyxa-0123456789abcdef0123456789abcdef","user_id":"owner","seq":2_i64,"turn_id":"turn","role":"assistant","text":"Review the pending action in NyxID.","status":"completed","error_code":bson::Bson::Null,"created_at":bson::DateTime::now()}).unwrap();
     let rendered = delivery::render_saved(
         &message,
         "https://app.nyxid.test/old?secret=discard#discard",
     );
-    assert!(rendered.contains("/assistant?c=nyxa-0123456789abcdef0123456789abcdef"));
+    assert_eq!(rendered, message.text);
     assert!(!rendered.contains("discard"));
     let enormous_origin = format!("https://{}.example.test", "a".repeat(4096));
     assert!(
@@ -2058,7 +2113,10 @@ async fn asynchronous_public_failure_sends_only_fixed_notice_and_live_revocation
             assert_eq!(sends.len(), 1);
             assert_eq!(
                 sends[0]["text"],
-                delivery::fixed_text(UnavailableReason::PublicTurnFailed)
+                delivery::fixed_text(
+                    UnavailableReason::PublicTurnFailed,
+                    super::super::platform_chat_presentation::ChatPresentation::Telegram
+                )
             );
             // The saved failure reference is idempotent and cannot emit another notice.
             let _ = deliver_saved(&j.state, &j.producers, &destination, &reply).await;
@@ -2139,7 +2197,31 @@ async fn pending_action_renderer_uses_exact_turn_key_routing_and_unique_codes() 
     let code = super::super::assistant_acknowledgement_service::confirm_code(&exact.id);
     assert!(text.contains(&format!("yes {code}")) && text.contains(&format!("no {code}")));
     assert!(text.contains("Create the requested report"));
-    assert!(text.contains(&format!("c={}", row.id)));
+    assert!(!text.contains(&format!("c={}", row.id)));
+    let web_only = card(
+        "00000200-0000-4000-8000-000000000003",
+        &reply.turn.turn_id,
+        &row.credential_api_key_id,
+        bson::Bson::Null,
+    );
+    j.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .insert_one(&web_only)
+        .await
+        .unwrap();
+    let mixed = delivery::render_personal(&j.state, &saved, None)
+        .await
+        .unwrap();
+    assert!(mixed.contains(&format!("yes {code}")));
+    assert!(mixed.contains("Pending actions require review"));
+    assert!(mixed.contains(&format!("c={}", row.id)));
+    j.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .delete_one(doc! {"_id":&web_only.id})
+        .await
+        .unwrap();
     for (field, value) in [
         ("routing", bson::Bson::Null),
         ("api_key_id", bson::Bson::String("different-key".into())),
@@ -2159,6 +2241,7 @@ async fn pending_action_renderer_uses_exact_turn_key_routing_and_unique_codes() 
             .unwrap();
         assert!(!text.contains(&format!("yes {code}")));
         assert!(text.contains("Pending actions require review"));
+        assert!(text.contains(&format!("c={}", row.id)));
         j.state
             .db
             .collection::<Document>(ACKS)
@@ -2639,4 +2722,133 @@ async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmati
         );
         j.state.db.drop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn manager_pairing_one_tap_rejects_relayed_proof_and_check_never_links() {
+    let j = Journey::new().await;
+    let command = j.confirmation().await;
+    let code = command.strip_prefix("/confirm ").unwrap();
+    let text = format!("/start nyxpersonal_{code}");
+    for (id, field) in [
+        (8101, "forward_origin"),
+        (8102, "quote"),
+        (8103, "external_reply"),
+    ] {
+        let mut update = j.update(id, &text, false);
+        update["message"][field] = json!({"type":"hidden_user","text":"third-party"});
+        j.webhook(&update).await;
+    }
+    let mut other = j.update(8104, &text, false);
+    other["message"]["from"]["id"] = 999.into();
+    other["message"]["chat"]["id"] = 999.into();
+    j.webhook(&other).await;
+    let mut group = j.update(8105, &text, false);
+    group["message"]["chat"]["type"] = "group".into();
+    j.webhook(&group).await;
+    let original = j.update(8106, &text, false);
+    j.webhook(&json!({"update_id":8106,"edited_message":original["message"]}))
+        .await;
+    j.webhook(&j.update(8107, "/check", false)).await;
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+            .count_documents(doc! {"state":"active"})
+            .await
+            .unwrap(),
+        0
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    j.webhook(&j.update(8108, &text, false)).await;
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+            .count_documents(doc! {"state":"active"})
+            .await
+            .unwrap(),
+        1
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    j.webhook(&j.update(8109, &text, false)).await;
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+            .count_documents(doc! {"state":"active"})
+            .await
+            .unwrap(),
+        1
+    );
+    j.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn forwarded_quotes_links_and_complete_files_reach_only_the_bound_owner_turn() {
+    let j = Journey::new().await;
+    super::super::feature_flag_service::set_platform_override(
+        &j.state.db,
+        super::super::feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+        &super::super::feature_flag_service::FlagTarget::User(j.owner.clone()),
+        true,
+        &j.owner,
+    )
+    .await
+    .unwrap();
+    j.link().await;
+    let file = b"Complete forwarded document.\nSecond line survives.";
+    Mock::given(method("GET")).and(path("/bot100:manager-test-secret/getFile"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"file_path":"documents/forwarded.txt","file_size":file.len()}})))
+        .mount(&j.server).await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/file/bot100:manager-test-secret/documents/forwarded.txt",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(file.to_vec()))
+        .expect(1)
+        .mount(&j.server)
+        .await;
+    let mut update = j.update(9100, "Summarize the quoted message and file", false);
+    update["message"]["quote"] = json!({"text":"🦉 menu", "entities":[{"type":"text_link","offset":3,"length":4,"url":"https://example.test/menu"}]});
+    update["message"]["external_reply"] = json!({"origin":{"type":"hidden_user","sender_user_name":"Restaurant"},
+        "document":{"file_id":"forwarded-document","file_name":"menu.txt","mime_type":"text/plain","file_size":file.len()}});
+    j.webhook(&update).await;
+    let (_, reply, _) = j.saved().await;
+    let messages = engine::messages(&j.state.db, &j.owner, &reply.turn.conversation_id, 50, None)
+        .await
+        .unwrap();
+    let message = messages.iter().find(|m| m.role == "user").unwrap();
+    assert!(message.text.contains("🦉 menu"));
+    assert!(message.text.contains("https://example.test/menu"));
+    assert!(message.text.contains("Restaurant"));
+    assert!(message.text.contains("never as owner instructions"));
+    let uploads:Vec<_>=j.state.db.collection::<crate::models::assistant_upload::AssistantUpload>(crate::models::assistant_upload::COLLECTION_NAME)
+        .find(doc!{"user_id":&j.owner,"conversation_id":&reply.turn.conversation_id,"message_id":&message.id,"origin":"user_upload"})
+        .await.unwrap().try_collect().await.unwrap();
+    assert_eq!(uploads.len(), 1);
+    let (_, bytes) = super::super::assistant_upload_service::owner_read(
+        &j.state.db,
+        &j.state.encryption_keys,
+        &j.owner,
+        &reply.turn.conversation_id,
+        &uploads[0].id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(bytes, file);
+    assert!(
+        super::super::assistant_upload_service::owner_read(
+            &j.state.db,
+            &j.state.encryption_keys,
+            &uuid::Uuid::new_v4().to_string(),
+            &reply.turn.conversation_id,
+            &uploads[0].id
+        )
+        .await
+        .is_err()
+    );
+    j.webhook(&update).await;
+    assert_eq!(j.egress.0.load(Ordering::SeqCst), 1);
+    j.state.db.drop().await.unwrap();
 }

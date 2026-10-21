@@ -2267,3 +2267,84 @@ manager/child identity, funding, quotas and activation. In-flight replies and
 creation workers carry exact revision/digest/generation fences. Previous gateway
 cleanup retains the captured remote version; admin recovery can preserve a changed
 binding without deleting it. See [Platform BotFather](PLATFORM_BOTFATHER.md).
+
+### Assistant multipart text receipts
+
+NyxBot manager replies, explicit posts and automation results share the ordinary
+relay's platform-aware boundary machinery and 64-message bound. Assistant Markdown
+is planned into independently valid fragments; Telegram uses explicit UTF-16
+entities. Long replies retain their text. Only explicit overflow, web-only action
+review and unavailable media add app links. See [Full saved reply delivery](TELEGRAM_NEW.md#full-saved-reply-delivery)
+for the send, attachment and rollout contract.
+
+The separate metadata-only `channel_text_deliveries` journal binds an immutable
+plan to its owner and logical source. Each part has a fresh CAS attempt, confirmed
+provider receipt, and pending/sending/sent/refused state. An accepted prefix is
+retained on failure; sending without a receipt is permanently uncertain. A
+confirmed Telegram rate refusal returns only that part to pending. Every later
+provider effect rechecks live authority and target. Proactive `text_delivery`
+counts expose partial outcomes without exposing text. Stable automation run IDs
+and authored turn-post identities prevent repeated calls from replaying accepted
+parts; distinct authored posts in the same turn remain independent. Changed
+content under the same automation run is rejected. These journals have no TTL
+and are purged on owner deletion. They do not replace ordinary relay receipts or
+the legacy/v2 image migration checks.
+
+### Channel reply length
+
+NyxBot and specialist turns destined for a chat receive turn-only length guidance
+from the same per-platform limits as the delivery planner: Telegram 4,096 UTF-16
+code units, Discord 2,000, and each other adapter's own budget. The model is asked
+to fit one message unless the user explicitly requests long or complete output.
+This is a preference: content is never truncated or discarded, and longer output
+still uses the lossless multipart planner. The guidance follows direct/gateway
+replies, followed threads, additional chat recipients, manager personal replies
+and automation result destinations. Assigned specialists inherit their reporting
+turn's chat guidance. `list_channel_chats` tool results supply destination-specific
+`reply_length_guidance` before `post_to_chat` drafting; explicit posts accept up
+to the existing 32,768-character turn-input bound and still split for delivery.
+App-only turns receive no channel-length guidance. Stable instructions stay
+independent of the destination.
+
+### Telegram forwarded input and approval provenance
+
+On direct NyxID delivery, NyxBot extracts visible text/captions, hidden link URLs
+(using Telegram UTF-16 offsets), forward origin and quotes as third-party reference
+data. Current `nyxid_relay` gateway delivery supplies only gateway plain text plus
+authenticated original-message eligibility and own/quoted file handles; it loses
+forward-origin names, quote/external-reply text and hidden link URLs. The product
+owner accepted this demo limitation; no body persistence or CMA change is included. The relay envelope retains the exact provider text
+for gateway verification. Opaque file handles resolve with the selected channel's
+current token. Manager setup/proof material is scrubbed before model input.
+`ChannelMessage.original_message` is optional boolean metadata. Only `true` from
+the authenticated original event permits owner linking or action-card decisions;
+missing legacy metadata fails closed. Followed-thread dispatch uses the same
+stored eligibility, exact owner and route checks.
+
+NyxID creates Telegram NyxBot gateway channels exclusively with `nyxid_relay`
+sources. Relay callback text and attachments describe only the sending message's
+own top-level fields, as required by the existing CMA verifier. Stored inbound
+attachment metadata preserves the exact callback list as a prefix and appends
+unique `external_reply` handles. Every gateway download index therefore still
+selects the same stored file. NyxBot resolves the complete list and eligibility
+using the exact message/channel/route-key/sender binding; no gateway change or
+`telegram_input` envelope is required for that recovery. An external-reply-only
+file leaves a text-only callback with no envelope attachments and remains
+compatible with both existing gateway media modes. Top-level media still uses
+the gateway's existing media-enabled setting.
+
+For native gateway activity, the optional additive `telegram_input` contract is
+`{"version":1,"original":false,"message":{...}}`. Its selected text, entities,
+captions, forward origin, quotes and media handles must be derived at
+authenticated ingress and bound into the activity digest/seal, without nested
+setup messages or keyboards. NyxID bounds this envelope to 64 KiB. Native-source
+events without it remain plain text and cannot decide actions, pair an owner or
+run controls. NyxID does not provision native Telegram gateway sources. Richer
+forwarding for both relay and native sources and gateway rendering of quoted
+files are separate, optional [CMA follow-up work](plans/2026-10-21-cma-telegram-forwarding-followup.md).
+
+The owner turn atomically binds encrypted inbound files with its message, checks
+owner isolation and applies existing upload retention. Unsupported binary media
+is retained without fabricated extracted text. Aggregate downloaded bytes are
+bounded by the configured limit and 20 MiB; all new and retry-carried attachments
+count against the ten-file turn limit.

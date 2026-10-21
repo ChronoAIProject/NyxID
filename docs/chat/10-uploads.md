@@ -38,8 +38,10 @@ Removing an unsent attachment deletes it.
 The per-person `assistant:channel-media` flag defaults off. When enabled, verified
 owners can send images, files and rich `post` messages to a linked Lark/Feishu
 NyxBot or specialist through NyxID's relay or the Agent Event Gateway, including
-admitted followed threads. Other adapters, native Telegram input and Lark
-audio/video retain their existing behavior. Guests never download media or
+admitted followed threads. Telegram owner files use the same flag and shared
+byte budget; their preparation before turn admission and per-file fallback are
+described in [Telegram forwarding](../TELEGRAM_NEW.md#telegram-forwarding-and-secure-pairing).
+Other adapters and Lark audio/video retain their existing behavior. Guests never download media or
 create uploads; their admitted turn receives the fixed note
 `attachments from guests are not shared with the assistant`. Media-bearing messages cannot answer
 approval cards or text decisions and do not enter duplicate-question coalescing.

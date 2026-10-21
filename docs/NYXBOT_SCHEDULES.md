@@ -363,6 +363,14 @@ metadata and outcome only. The complete answer lives in the assistant transcript
 and delivery, through the existing post-to-chat path. Long replies respect the
 destination platform limit and explicitly say they were shortened, with a full
 thread link. Push has a concise preview and thread ID.
+A run whose saved `deliver_to` targets a chat receives that platform’s one-message
+length guidance in turn-only context, including confirmation continuations and
+specialist reports. Telegram prefers one 4,096-character message; an explicit
+request for long or complete output permits multiple parts. The delivery planner
+keeps all content and splits longer replies. Thread-only runs receive no channel
+length guidance. `list_channel_chats` supplies the same per-destination guidance
+for explicit `post_to_chat` calls.
+
 Successful `deliver_to: {"type":"chat"}` results send retained tool images,
 one per message, before the result text. Images use the same prepared target and
 live agent, org, bot and `allow_posts` checks. The text consumes one initiate

@@ -146,7 +146,9 @@ pub fn unconfirmed() -> AppError {
 /// duplicate an accepted prefix; keep the original numeric code in the journal.
 pub fn failure_after_dispatch(error: AppError) -> AppError {
     match error {
-        AppError::RateLimited | AppError::ServiceConcurrencyLimited => unconfirmed(),
+        AppError::RateLimited
+        | AppError::RateLimitedWithRetry { .. }
+        | AppError::ServiceConcurrencyLimited => unconfirmed(),
         other => other,
     }
 }
@@ -267,7 +269,11 @@ mod tests {
 
     #[test]
     fn dispatched_rate_limit_cannot_invite_a_whole_reply_retry() {
-        for error in [AppError::RateLimited, AppError::ServiceConcurrencyLimited] {
+        for error in [
+            AppError::RateLimited,
+            AppError::RateLimitedWithRetry { retry_after: 3 },
+            AppError::ServiceConcurrencyLimited,
+        ] {
             assert!(matches!(
                 failure_after_dispatch(error),
                 AppError::ChannelPlatformError(_)
