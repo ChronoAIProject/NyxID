@@ -1,3 +1,4 @@
+import { SHARED_LEGACY_WARNING } from "@/schemas/machines";
 import { useId, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNodes } from "@/hooks/use-nodes";
@@ -29,7 +30,7 @@ export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submi
   const [defaultExpiry] = useState(() => new Date(Date.now() + 30 * 86400000).toISOString());
   const form = useAppForm<MachineGrantSelection>({
     resolver: zodResolver(machineGrantSelectionSchema),
-    defaultValues: initial ?? { assignments: {}, expires_at: defaultExpiry },
+    defaultValues: { ...(initial ?? { assignments: {}, expires_at: defaultExpiry }), separation: "shared_legacy", legacy_warning_acknowledged: false },
   });
   const assignments = form.watch("assignments");
   const expiry = form.watch("expires_at");
@@ -51,8 +52,14 @@ export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submi
         <p>Shared OS and workspace: file roots constrain file tools and working directories, not what shell commands can access. Clients are not secret-isolated.</p>
         <p>On a self-hosted Node, non-isolated shell can access Node tokens, signing secrets and stored credentials under the command user’s OS permissions. Use the container or deploy with <code>--separate-users</code> to separate command access from Node identity.</p>
         <p>On managed Machines, Node identity protection depends on verified supervisor and command-user separation and protected mounts. This does not isolate clients or their workspace secrets.</p>
+        <p>{SHARED_LEGACY_WARNING}</p>
+        <p>External OAuth clients and API keys support shared legacy access only. They cannot use separated agent contexts.</p>
         <p>Browser, desktop and saved-login tools are excluded. Excluding these tools does not protect their underlying files from shell access.</p>
       </div>
+      <label className="flex items-start gap-2 text-12">
+        <Checkbox checked={form.watch("legacy_warning_acknowledged") === true} disabled={busy} onCheckedChange={(checked) => { onSelectionChange?.(); form.setValue("legacy_warning_acknowledged", checked === true); }} />
+        I explicitly allow shared legacy access and acknowledge access to node tokens, signing secrets and stored credentials.
+      </label>
       {nodes.isLoading && <p role="status">Loading owned Machines…</p>}
       {nodes.error && <ErrorBanner message="Could not load owned Machines." onRetry={() => void nodes.refetch()} />}
       {!nodes.isLoading && !nodes.error && inventory.length === 0 && <p className="text-12 text-muted-foreground">No eligible personal Machines are available. Add a Machine in Assistant → Machines first.</p>}

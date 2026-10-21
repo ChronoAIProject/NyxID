@@ -3696,6 +3696,7 @@ mod tests {
                 .is_ok(),
             "route restrictions must preserve legacy behavior while the flag is off"
         );
+        crate::services::security_readiness_service::ready_test_replica(&db).await;
         crate::services::feature_flag_service::set_platform_override(
             &db,
             crate::services::feature_flag_service::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,

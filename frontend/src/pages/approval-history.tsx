@@ -42,6 +42,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Wrench,
+  RefreshCw,
 } from "lucide-react";
 import { SeoKeywordIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
@@ -119,8 +120,12 @@ export function ApprovalHistoryPage() {
     <div className="space-y-8">
       <PageHeader
         title="Approval History"
-        description="View past and pending approval requests."
+        description="Review pending requests before they expire. Refresh to discover new requests or decisions."
         actions={
+          <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => void refetch()} disabled={isLoading}>
+            <ButtonIcon><RefreshCw className="h-4 w-4" /></ButtonIcon>Refresh
+          </Button>
           <Select
             value={statusFilter}
             onValueChange={(value) => {
@@ -139,6 +144,7 @@ export function ApprovalHistoryPage() {
               ))}
             </SelectContent>
           </Select>
+          </div>
         }
       />
 

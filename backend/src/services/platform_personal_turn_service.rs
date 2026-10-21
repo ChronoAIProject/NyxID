@@ -698,6 +698,7 @@ impl contract::PersonalTurnProducer for PersonalTurns {
                     ),
                     permit,
                     runtime::Events {
+                        checkpoint: None,
                         sender,
                         cursor: 0,
                         reset_notified: false,

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NyxID Oracle Worker
 // @namespace    nyxid
-// @version      1.0.0
+// @version      1.0.1
 // @description  NyxID browser oracle worker: serves ChatGPT Pro answers to NyxID oracle pools. Configurable server + worker token.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -59,7 +59,7 @@
   const MAX_WAIT = 7200000;
   const NO_OUTPUT_IDLE_TIMEOUT = 420000;
   const REFILL_NO_OUTPUT_IDLE_TIMEOUT = 1800000;
-  const SCRIPT_VERSION = "nyxid-1.0.0";
+  const SCRIPT_VERSION = "nyxid-1.0.1";
 
   // ── Configuration (GM storage; cross-tab is fine for config — only
   // task-state must stay per-tab via tabSet/tabGet) ────────────────────
@@ -252,7 +252,6 @@
     const statusText = !configured ? "NOT CONFIGURED" : (active ? (busy ? "BUSY" : "ACTIVE") : "PAUSED");
     const btnText = active ? "⏸ Pause" : "▶ Start";
     const btnColor = active ? "#f55" : "#9af";
-    const lines = logHistory.slice(-10).map(l => `<div>${l}</div>`).join("");
     const baseDisplay = configured ? baseUrl() : "⚠ not configured";
     const lbl = workerLabel();
 
@@ -297,8 +296,12 @@
       <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:2px">
         <button id="nyxid-settings" style="background:#446;color:#cdf;border:none;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:10px">⚙ Settings</button>
       </div>
-      <hr style="border-color:#446;margin:4px 0">
-      ${lines}`;
+      <hr style="border-color:#446;margin:4px 0">`;
+    for (const entry of logHistory.slice(-10)) {
+      const row = document.createElement("div");
+      row.textContent = entry;
+      panel.appendChild(row);
+    }
     const btn = document.getElementById("nyxid-toggle");
     if (btn) btn.addEventListener("click", toggleActive);
     const cfgBtn = document.getElementById("nyxid-configure");

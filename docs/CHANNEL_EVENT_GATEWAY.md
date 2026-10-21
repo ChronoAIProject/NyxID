@@ -460,6 +460,65 @@ The initial broken deploy of this feature created a `unique` variant of the `(co
 The [Aurinko email adapter](./AURINKO_INTEGRATION.md) uses the channel callback and reply protocol while owning its bounded inline ingress. Aurinko supplies redelivery; NyxID persists only subscription bindings, batch digest/cursor, stable message receipts, and irreversible send barriers. No message bodies, queue, or periodic worker are added. Active claims produce retryable failures, completed items stay deduplicated across partial batches and log expiration, and callback retries retain their UUID-v4 so runtimes can suppress duplicate work after a lost acknowledgement. Device and legacy chat adapters keep their existing protocols.
 
 
+## NyxBot gateway creator authorization and recovery
+
+Gateway management uses a **creator credential** distinct from the channel's
+provider/event-tool credential. NyxID mints the linking person's delegated
+`account:read` access JWT with reserved actor `nyxid:nyxbot-gateway-creator`
+and a 120-second lifetime. It stays server-only, is never logged or stored, and
+is sent through a redirect-disabled HTTP client. The separate channel agent key
+authenticates provider callbacks and event tools; it is never a creator bearer.
+The dedicated JWT mint owns the reserved actor, which neither catalog nor
+user-service slugs can represent; generic delegation mints reject it. The TTL
+remains a separate defense in depth.
+
+Gateway requests have a five-second connect timeout, a 20-second request timeout,
+and a streamed 2 MiB response limit. Platform-entry setup retains its dispatch
+deadline and streamed 64 KiB limit. Successful calls that require JSON or binding
+identities reject malformed responses rather than treating them as completed setup.
+
+Both gateway validators are supported: legacy gateways resolve the person with
+`GET /api/v1/users/me`; RFC 7662 gateways call `/oauth/introspect` with their own
+confidential OAuth client and require per-method permissions. For the exact
+server-side creator mint, NyxID adds only `cma-eg:channels:read`,
+`cma-eg:channels:create`, `cma-eg:channels:update`, and `cma-eg:channels:delete`
+when the authenticated, active confidential client is registered in the active
+`cmaeg` catalog row's `introspection_client_ids`. These are effective permissions
+for that caller, not stored user roles or assignments; the response's `roles`
+and `groups` and its field set stay as for any other token. Ordinary personal access tokens,
+other delegation mints and unrelated introspecting clients receive no extra grant.
+Missing, inactive, misconfigured or unreadable gateway configuration returns
+`oauth_authority_unavailable` (503), so a provisioning/read outage is not reported
+as an inactive token. A resolved configuration that does not associate the caller
+returns ordinary introspection without the creator grant; an RFC 7662 gateway
+then refuses NyxBot management with HTTP 403, surfaced as
+`gateway_permission_required`. The gateway's confidential OAuth client must be
+listed by its **full client ID**, verified against the actual configured
+introspection caller and matching NyxID client record. A display name, shortened
+ID, catalog slug or resource URI is not a client ID.
+
+The grant covers **owner-scoped CMA channel operations**; it is not bound to one
+channel ID. CMA still checks the creator subject against the profile owner and
+scopes channel reads/updates/deletes to that owner. It includes neither channel
+testing nor gateway administration. This covers connect, transport moves, group
+policy, thread/mention discovery, platform-entry setup/recovery/inspection, and
+platform cleanup without granting the person direct gateway access.
+
+A failed connection displays **Reconnect**, using its selected live agent and
+showing the returned owner-link instructions after success. Changing the agent
+on a failed row also reconnects; live rows retain their existing agent-link flow
+and account-link controls. Reconnect is disabled without a live target or while
+a mutation is pending. Disconnect remains available. Known errors have readable
+explanations and a secondary stable code; a gateway 401 means authentication
+failed and a 403 means gateway permission is missing. Remote response bodies are
+never displayed. There is **no automatic reconnect** of failed rows.
+
+REST and NyxBot tools list one current row per owner/bot. A pending/active row
+wins over failed attempts, even newer ones. Without a live row the latest record
+wins; a newer disconnection suppresses older failures. Creation time and then ID
+break ties, and the newest 50 winning, non-disconnected rows are returned. History
+is retained.
+
 ## NyxBot org bots and transport flags
 
 NyxID's CMAEG `nyxbot` provider supports personal and organization-owned bots.

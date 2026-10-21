@@ -1034,6 +1034,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .post(handlers::admin_feature_flags::create_feature_flag),
         )
         .route(
+            "/security-readiness",
+            get(handlers::health::security_readiness),
+        )
+        .route(
             "/feature-flag-targets",
             get(handlers::admin_feature_flags::list_feature_flag_targets),
         )

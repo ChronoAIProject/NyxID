@@ -804,7 +804,8 @@ async fn google_durable_corrected_grant_drifts_unchanged_grant_survives_and_reap
         let coll =
             db.collection::<service_endpoint::ServiceEndpoint>(service_endpoint::COLLECTION_NAME);
         let expiry =
-            chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + 7200, 0).unwrap();
+            chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + 7200, 123_456_789)
+                .unwrap();
         let mut selections = Vec::new();
         for name in ["drive_create_file", "docs_create_document"] {
             let body = if name == "drive_create_file" {
@@ -858,6 +859,26 @@ async fn google_durable_corrected_grant_drifts_unchanged_grant_survives_and_reap
         )
         .await
         .unwrap();
+        assert_eq!(plan.key_expires_at, Some(expiry.to_rfc3339()));
+        let stored_expiry = bson::DateTime::from_chrono(expiry).to_chrono();
+        let floored_plan = api_key_scope_service::build_scope_plan_with_operations(
+            &db,
+            &manager,
+            &owner.id,
+            None,
+            &service_ids,
+            &selections,
+            Some(stored_expiry),
+            false,
+        )
+        .await
+        .unwrap();
+        // Preview and creation must use the same exact intent, even though
+        // persisted timestamps and their returned metadata use milliseconds.
+        assert_ne!(
+            plan.normalized_grant_digest,
+            floored_plan.normalized_grant_digest
+        );
         let provisioned = durable_operation_grant_service::provision_scheduled_key(
             &db,
             &manager,
@@ -876,6 +897,14 @@ async fn google_durable_corrected_grant_drifts_unchanged_grant_survives_and_reap
         )
         .await
         .unwrap();
+        assert_eq!(provisioned.key.expires_at, Some(stored_expiry));
+        let stored_key = db
+            .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+            .find_one(doc! {"_id": &provisioned.key.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_key.expires_at, provisioned.key.expires_at);
         crate::test_utils::init_test_audit_chain_hmac_key();
         catalog_spec_sync::sync_seeded_service_endpoints(&db)
             .await
@@ -920,7 +949,7 @@ async fn google_durable_corrected_grant_drifts_unchanged_grant_survives_and_reap
             None,
             &service_ids,
             &selections,
-            Some(expiry),
+            Some(stored_expiry),
             false,
         )
         .await

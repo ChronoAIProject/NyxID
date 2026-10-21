@@ -125,6 +125,7 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
             operation: None,
             credential_class: CredentialClass::UserOwned,
             model: None,
+            reported_model: None,
             token_breakdown: None,
             audio_tokens: None,
             image_tokens: None,

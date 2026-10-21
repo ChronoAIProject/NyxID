@@ -261,6 +261,7 @@ async fn check_turn(
             .unwrap();
     let (sender, _receiver) = broadcast::channel(256);
     let mut events = Events {
+        checkpoint: None,
         sender,
         cursor: 0,
         reset_notified: false,

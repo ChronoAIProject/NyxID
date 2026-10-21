@@ -424,6 +424,7 @@ async fn mcp_proxy_legacy_provider_effective_owner_matches_rest() {
         .unwrap()
         .unwrap();
     let org = uuid::Uuid::new_v4().to_string();
+    crate::test_utils::set_test_approval_preference(&f.state.db, &org, false).await;
     f.state
         .db
         .collection::<User>(USERS)

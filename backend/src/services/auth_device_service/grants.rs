@@ -42,10 +42,21 @@ pub async fn approve_with_agent_key(
     encryption: &EncryptionKeys,
     hmac_key: &[u8],
     input: ApproveInput,
-    selection: agent::Selection,
+    mut selection: agent::Selection,
     credential_expires_at: Option<DateTime<Utc>>,
 ) -> AppResult<()> {
     let (collection, row) = pending_request(db, hmac_key, &input.user_code).await?;
+    let created_at = Utc::now();
+    let credential_expires_at = Some(
+        agent::prepare_issuance(
+            db,
+            &input.user_id,
+            &mut selection,
+            credential_expires_at,
+            created_at,
+        )
+        .await?,
+    );
     let key_id = match &selection {
         agent::Selection::Existing { api_key_id, .. } => {
             agent::eligible_key(db, &input.user_id, api_key_id)
@@ -81,7 +92,7 @@ pub async fn approve_with_agent_key(
             ).session(&mut *session).await?;
             if claimed.is_none() { return Err(current_decision_error(&collection, &row.id).await?); }
             agent::issue_selected(db, &input.user_id, &row.id, &context, row.requested_profile.as_deref(), &selection,
-                credential_expires_at, &key_id, &credential_id, &secret, &mut *session).await?;
+                credential_expires_at, created_at, &key_id, &credential_id, &secret, &mut *session).await?;
             let now = Utc::now();
             if row.expires_at <= now { return Err(AppError::AuthDeviceCodeExpired); }
             collection.update_one(doc! {"_id": &row.id}, doc! {"$set": {

@@ -49,6 +49,13 @@ export async function mockDashboard(page: Page) {
   await page.route("**/api/v1/**", async (route) => {
     const path = new URL(route.request().url()).pathname.replace("/api/v1", "");
     let body: unknown = {};
+    // Keep the shared health response scoped to channel-bot routes.
+    if (path.endsWith("/health") && !path.startsWith("/channel-bots/")) {
+      await route.fulfill({
+        json: path.includes("conversations") ? { conversations: [], total: 0 } : {},
+      });
+      return;
+    }
     if (path === "/users/me")
       body = {
         id: "test-user",

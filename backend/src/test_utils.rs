@@ -226,6 +226,37 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
     Some(db)
 }
 
+/// Explicit actor preference for fixtures exercising execution independently
+/// of generic approval. Database/user constructors keep the production default;
+/// callers opt in at the request setup and per-service required policies still
+/// take precedence over this global preference.
+pub(crate) async fn set_test_approval_preference(
+    db: &mongodb::Database,
+    user_id: &str,
+    approval_required: bool,
+) {
+    let channel = crate::services::notification_service::get_or_create_channel(db, user_id)
+        .await
+        .expect("create explicit fixture approval preference");
+    db.collection::<mongodb::bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
+        .update_one(
+            mongodb::bson::doc! { "_id": &channel.id },
+            mongodb::bson::doc! { "$set": { "approval_required": approval_required } },
+        )
+        .await
+        .expect("store fixture approval preference");
+    assert_eq!(
+        crate::services::approval_service::user_requires_approval(
+            db,
+            user_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .expect("read effective fixture approval preference"),
+        approval_required,
+    );
+}
+
 /// Connect to a fresh test database through a client with MongoDB command
 /// monitoring enabled. Tests use this to prove read-only handler boundaries;
 /// setup commands are observable too, so callers should clear their recorder
@@ -1864,6 +1895,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         gcp_kms_key_name: None,
         gcp_kms_key_name_previous: None,
         instance_name: "test-backend".to_string(),
+        security_rollout: Default::default(),
         internal_bind_addr: "127.0.0.1:3002".to_string(),
         internal_advertise_url: "http://127.0.0.1:3002".to_string(),
         internal_dispatch_hmac_key: None,
@@ -2850,6 +2882,9 @@ pub async fn set_agent_operation_scopes_enabled(
     owner: &str,
     enabled: bool,
 ) {
+    if enabled {
+        crate::services::security_readiness_service::ready_test_replica(db).await;
+    }
     crate::services::feature_flag_service::set_platform_override(
         db,
         crate::services::feature_flag_service::AGENT_OPERATION_SCOPES_FLAG_KEY,

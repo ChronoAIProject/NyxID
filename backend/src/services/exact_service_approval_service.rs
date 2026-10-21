@@ -2177,7 +2177,7 @@ mod tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
-            approval_required: true,
+            approval_required: Some(true),
             push_enabled: false,
             push_devices: Vec::new(),
             created_at: Utc::now(),

@@ -110,12 +110,36 @@ async fn actual_signed_external_gateway_preserves_personal_and_org_streaming_and
             .mount(&server)
             .await;
         let service = connected(&f.state.db, &owner, "external-policy", &server.uri()).await;
+        // Personal and org-owned jobs each opt in for this exact service only.
+        crate::services::approval_service::set_service_approval_config(
+            &f.state.db,
+            &owner,
+            &service,
+            "External policy fixture",
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::services::approval_service::user_requires_approval(
+                &f.state.db,
+                &f.owner,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
+        );
         let grant = grants::edit(
             &f.state.db,
             &f.owner,
             &f.grant_id,
             1,
             &GrantSelection {
+                separation: Some(nyxid_machine::context::Choice::SharedLegacy),
+                legacy_warning_acknowledged: true,
                 assignments: BTreeMap::from([(
                     f.node.id.clone(),
                     GrantAssignment {

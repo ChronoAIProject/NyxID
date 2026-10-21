@@ -68,6 +68,10 @@ pub struct MachineProfile {
     pub exact_cancel: bool,
     /// Absent on old nodes; never inferred from protocol v2 alone.
     pub separated: Option<context::Support>,
+    /// Live mechanism evidence for new setup selection; absent on older nodes.
+    pub separation_evidence: Option<context::Evidence>,
+    /// Recorded setup intent for new assignments; absent on older profiles.
+    pub separation_choice: Option<context::Choice>,
     pub os: String,
     pub arch: String,
     pub roots: Vec<String>,

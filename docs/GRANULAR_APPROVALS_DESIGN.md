@@ -7,6 +7,49 @@ Author: design exploration, 2026-05-29
 
 The original proposal is retained below as dated design history, including its old call-site table and decisions. It is not a description of current enforcement. MCP now has preparation and approval enforcement, and exact grants bind live execution authority. Current details are defined by `approval_service`, `execution_authority` and MCP preparation/redeem code. This status does not assert every original proposal item is shipped or enabled; feature gates and rollout requirements remain applicable.
 
+## Current global default contract
+
+The unset global preference is **Writes only (default)**. **All requests** is
+stored `approval_required=true`; **Off** is stored false. An absent preference
+is represented separately, never converted to true by lazy notification-channel
+or tool-approval creation. API clients use `global_approval_mode` (`writes_only`,
+`all`, `off`); the legacy boolean response indicates whether any verbs are gated.
+Existing stored booleans, including unmarked unreleased W9.3 lazy true rows,
+keep their exact semantics. Owners explicitly reset to writes-only; no automatic
+migration guesses which true rows were intentional.
+
+| Execution path | Approval verb source |
+| --- | --- |
+| HTTP proxy | GET/HEAD/OPTIONS read; DELETE destructive; other/unknown methods write. POST classification consults trusted stored catalog operation marks for read-only or destructive effects; other raw methods retain method classification without additional endpoint reads. Method overrides cannot establish a read. |
+| MCP service tool | The exact prepared HTTP request plus trusted catalog metadata, using the same operation-effects contract as guest/webhook authorization. Remote-spec read hints cannot promote POSTs to reads. Meta discovery remains read-only. |
+| Catalog inference / LLM gateway | Catalog `inference` metadata plus the existing closed stateless-inference payload contract. Supported generation endpoints are read-class; storage, account/resource handles, provider-hosted effects and unknown extensions remain writes. No service-name inference. |
+| NyxAgent engine transport | The internal server-admitted POST `/v1/responses` marker plus the validated engine row contract marks the outer turn transport read-class. A caller header or arbitrary raw POST cannot acquire this marker. Tool callbacks have independent approval checks. |
+| SSH | Exec and tunnel remain write-class. |
+| Machine | Native machine access keeps its signed authority, lease and owner-confirmation checks. Service gateway calls use the HTTP/MCP descriptor; smart-HTTP upload-pack remains read-class, receive-pack write-class. |
+
+Default inference metadata is provided by `inference_service::default_inference`
+and backfill for supported model catalogs. Admin clears remain authoritative.
+The assistant consent layer's `stateless_inference` contract already distinguishes
+account-independent model generation from provider resource changes; approval
+classification reuses it. Normal inference does not grant permission to execute
+model-proposed tools. Unknowns remain writes.
+
+Method overrides in headers, query parameters or request fields remain writes,
+including overrides attached to GET/HEAD/OPTIONS on the LLM gateway. An already
+destructive operation retains its destructive classification.
+
+Machine Git fetch POSTs qualify as reads only with a single exact
+`application/x-git-upload-pack-request` content type and no method overrides.
+JSON/form Git bodies retain bounded override inspection; receive-pack is a write.
+
+The verb default applies only after explicit per-service/granular and org policy
+resolution. Explicit true still gates reads, explicit false allows writes, Deny
+still wins over Session bypass, and guests are refused whenever approval would
+be required. Auto-connected behavior and scheduled/durable authorization remain
+unchanged. See [the all-replica cutover](SECURITY_ROLLOUT_READINESS.md#required-approval-and-delivery)
+before relying on new-user write approval. The design history below describes
+the original granular-policy work.
+
 ---
 
 ## Historical proposal begins (2026-05-29)

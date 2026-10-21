@@ -19,6 +19,7 @@ use crate::models::api_key_credential::{
 };
 use crate::redaction::RedactedLen;
 use crate::services::api_key_credential_service;
+use crate::services::api_key_validation::NewKeyExpiry;
 use crate::services::{
     api_key_mutation_service as key_mutations,
     api_key_scope_service::{self, ScopeAuthorization},
@@ -33,6 +34,7 @@ pub struct CreatedApiKey {
     pub full_key: String,
     pub scopes: String,
     pub created_at: chrono::DateTime<Utc>,
+    pub expires_at: Option<chrono::DateTime<Utc>>,
     pub rotation_predecessor_id: Option<String>,
     pub state_version: i64,
     pub updated_at: chrono::DateTime<Utc>,
@@ -58,6 +60,7 @@ impl fmt::Debug for CreatedApiKey {
             .field("full_key", &RedactedLen(self.full_key.len()))
             .field("scopes", &self.scopes)
             .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
             .field("rotation_predecessor_id", &self.rotation_predecessor_id)
             .field("state_version", &self.state_version)
             .field("updated_at", &self.updated_at)
@@ -112,6 +115,7 @@ fn created_api_key_from_model(key: ApiKey, full_key: String) -> AppResult<Create
         full_key,
         scopes: key.scopes,
         created_at: key.created_at,
+        expires_at: key.expires_at,
         rotation_predecessor_id: key.rotation_predecessor_id,
         state_version: key.state_version,
         updated_at,
@@ -221,7 +225,7 @@ pub async fn create_api_key(
     user_id: &str,
     name: &str,
     scopes: &str,
-    expires_at: Option<chrono::DateTime<Utc>>,
+    expires_at: impl Into<NewKeyExpiry>,
     description: Option<&str>,
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
@@ -265,7 +269,7 @@ pub async fn create_api_key_with_scope_authorization(
     scope_actor_user_id: Option<&str>,
     name: &str,
     scopes: &str,
-    expires_at: Option<chrono::DateTime<Utc>>,
+    expires_at: impl Into<NewKeyExpiry>,
     description: Option<&str>,
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
@@ -316,7 +320,7 @@ pub async fn create_api_key_with_scope_authorization_and_id(
     resource_id: &str,
     name: &str,
     scopes: &str,
-    expires_at: Option<chrono::DateTime<Utc>>,
+    expires_at: impl Into<NewKeyExpiry>,
     description: Option<&str>,
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
@@ -362,7 +366,7 @@ pub async fn create_api_key_with_security_class(
     scope_actor_user_id: Option<&str>,
     name: &str,
     scopes: &str,
-    expires_at: Option<chrono::DateTime<Utc>>,
+    expires_at: impl Into<NewKeyExpiry>,
     description: Option<&str>,
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
@@ -411,7 +415,7 @@ pub async fn create_login_api_key(
     actor: &str,
     id: &str,
     input: &super::auth_agent_key_login_service::NewKeyInput,
-    expires_at: Option<chrono::DateTime<Utc>>,
+    expires_at: impl Into<NewKeyExpiry>,
     session: &mut mongodb::ClientSession,
 ) -> AppResult<CreatedApiKey> {
     create_api_key_with_security_class_and_id(
@@ -445,6 +449,7 @@ pub async fn validate_login_api_key(
     db: &mongodb::Database,
     actor: &str,
     input: &crate::models::login_grant::NewKeyInput,
+    created_at: chrono::DateTime<Utc>,
 ) -> AppResult<Option<chrono::DateTime<Utc>>> {
     if input.name.is_empty() || input.name.len() > 200 {
         return Err(AppError::ValidationError(
@@ -456,12 +461,8 @@ pub async fn validate_login_api_key(
     let owner =
         api_key_scope_service::resolve_scope_owner_id(db, actor, input.target_org_id.as_deref())
             .await?;
-    let expiry = input
-        .expires_at
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(super::api_key_validation::parse_expires_at)
-        .transpose()?;
+    let expiry = NewKeyExpiry::from_request(input.expires_at.as_deref(), input.never_expires)?
+        .resolve(created_at)?;
     super::api_key_validation::resolve_create_allow_all(
         &input.allowed_service_ids,
         Some(input.allow_all_services),
@@ -517,7 +518,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
     resource_id: Option<&str>,
     name: &str,
     scopes: &str,
-    expires_at: Option<chrono::DateTime<Utc>>,
+    expires_at: impl Into<NewKeyExpiry>,
     description: Option<&str>,
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
@@ -545,8 +546,18 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
 
     let svc_ids = allowed_service_ids.unwrap_or(&[]).to_vec();
     let node_ids = allowed_node_ids.unwrap_or(&[]).to_vec();
-    let all_svcs = allow_all_services.unwrap_or(true);
-    let all_nodes = allow_all_nodes.unwrap_or(true);
+    let all_svcs = super::api_key_validation::resolve_create_allow_all(
+        &svc_ids,
+        allow_all_services,
+        "allow_all_services",
+        "allowed_service_ids",
+    )?;
+    let all_nodes = super::api_key_validation::resolve_create_allow_all(
+        &node_ids,
+        allow_all_nodes,
+        "allow_all_nodes",
+        "allowed_node_ids",
+    )?;
 
     if purpose == ApiKeyPurpose::PermissionBound
         && (all_svcs
@@ -629,6 +640,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
         None => Uuid::new_v4().to_string(),
     };
     let now = Utc::now();
+    let expires_at = expires_at.into().resolve_for_storage(now)?;
 
     let new_key = ApiKey {
         id: id.clone(),
@@ -679,6 +691,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
         full_key,
         scopes: scopes.to_string(),
         created_at: now,
+        expires_at,
         rotation_predecessor_id: None,
         state_version: 1,
         updated_at: now,
@@ -2029,12 +2042,24 @@ mod tests {
         assert_eq!(created.scopes, "read write");
         assert_eq!(created.description.as_deref(), Some("test key"));
         assert_eq!(created.platform.as_deref(), Some("claude-code"));
-        assert!(created.allow_all_services);
-        assert!(created.allow_all_nodes);
+        assert!(!created.allow_all_services);
+        assert!(!created.allow_all_nodes);
         assert!(!created.full_key.is_empty());
         assert_eq!(created.rotation_predecessor_id, None);
         assert_eq!(created.state_version, 1);
         assert_eq!(created.updated_at, created.created_at);
+        let stored = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! {"_id": &created.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(created.expires_at, stored.expires_at);
+        assert_eq!(
+            created.expires_at.unwrap(),
+            bson::DateTime::from_chrono(created.created_at + chrono::Duration::days(90),)
+                .to_chrono()
+        );
     }
 
     #[tokio::test]
@@ -2902,24 +2927,18 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let past = Utc::now() - chrono::Duration::hours(1);
         let created = create_api_key(
-            &db,
-            &user_id,
-            "expired",
-            "read",
-            Some(past),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &db, &user_id, "expired", "read", None, None, None, None, None, None, None, None, None,
+            None, None,
         )
         .await
         .expect("create key");
+        db.collection::<ApiKey>(API_KEYS)
+            .update_one(
+                doc! {"_id": &created.id},
+                doc! {"$set": {"expires_at": bson::DateTime::from_chrono(past)}},
+            )
+            .await
+            .expect("expire issued key fixture");
         let result = validate_api_key(&db, &created.full_key).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::Unauthorized(_)));

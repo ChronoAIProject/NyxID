@@ -284,11 +284,7 @@ impl Sandbox {
         let mut command = Command::new("/bin/true");
         identity.prepare_agent(&mut command)?;
         self.prepare(&mut command);
-        ensure!(
-            command.status().await?.success(),
-            "context_sandbox_probe_failed"
-        );
-        Ok(())
+        super::probe_status(command).await
     }
 }
 
@@ -309,9 +305,5 @@ pub async fn probe(identity: &super::Identity) -> Result<()> {
             Ok(())
         });
     }
-    ensure!(
-        command.status().await?.success(),
-        "context_landlock_probe_failed"
-    );
-    Ok(())
+    super::probe_status(command).await
 }

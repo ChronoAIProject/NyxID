@@ -1208,8 +1208,7 @@ async fn dispatch_setup(
         }
         let creator = super::nyxbot_gateway_service::creator_bearer(state, authority.actor())?;
         super::platform_entry_admin_service::provider_json(
-            state
-                .http_client
+            super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
                 .post(format!("{}/channels", row.gateway_base))
                 .bearer_auth(creator.as_str())
                 .header("idempotency-key", &row.id)

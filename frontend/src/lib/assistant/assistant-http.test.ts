@@ -16,6 +16,22 @@ const ACTOR_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
 const WIRE_LOG_ID = "d7dbbf38-a31c-4331-8ddb-13fda5a70d12";
 
 describe("assistantHttp", () => {
+  it.each([
+    ["insufficient_credits", "Add credits in Billing & Usage"],
+    ["wallet_suspended", "Your billing wallet is suspended"],
+    ["plan_entitlement_required", "Your plan does not include this service"],
+    ["billing_not_configured", "Billing setup is incomplete"],
+    ["billing_provider_unavailable", "billing service is unavailable"],
+  ])("explains the known billing cause %s before a turn is admitted", async (code, copy) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: code, message: "SECRET upstream diagnostic" }),
+      { status: 402 },
+    )));
+    await expect(assistantHttp("/assistant/nyxagent/turns")).rejects.toMatchObject({
+      status: 402, message: expect.stringContaining(copy),
+    });
+  });
+
   it.each([false, true])("shows a server trace without exposing upstream details (JSON: %s)", async (json) => {
     const traceId = "9ad6d0fa-bb8f-489e-8fdd-f8e34960921b";
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(

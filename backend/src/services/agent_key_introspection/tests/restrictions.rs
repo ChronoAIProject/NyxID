@@ -9,6 +9,21 @@ use crate::models::{
 use mongodb::bson::{Document, from_document};
 
 impl Fixture {
+    async fn allow_service_without_approval(&self) {
+        let now = mongodb::bson::DateTime::now();
+        let config: ServiceApprovalConfig = from_document(doc! {
+            "_id": Uuid::new_v4().to_string(), "user_id": &self.owner,
+            "service_id": &self.connection, "service_name": "resource",
+            "approval_required": false, "created_at": now, "updated_at": now,
+        })
+        .unwrap();
+        self.db
+            .collection::<ServiceApprovalConfig>(APPROVAL_CONFIGS)
+            .insert_one(config)
+            .await
+            .unwrap();
+    }
+
     async fn catalog_change(&self, fields: Document) {
         self.db
             .collection::<DownstreamService>(SERVICES)
@@ -165,6 +180,7 @@ async fn constrained_catalogs_and_node_transports_are_not_service_wide_authority
 #[tokio::test]
 async fn credential_admission_cannot_be_bypassed_with_service_wide_evidence() {
     let f = Fixture::new().await.unwrap();
+    f.allow_service_without_approval().await;
     // Manual connections must remain subject to this boundary too; the
     // auto-provision eligibility check deliberately skips those connections.
     f.connection_change(doc! {"source": null}).await;
@@ -303,6 +319,7 @@ async fn private_auto_connection_rechecks_consent_expiry_and_client_status() {
 #[tokio::test]
 async fn platform_acl_is_live_even_for_non_auto_connection() {
     let f = Fixture::new().await.unwrap();
+    f.allow_service_without_approval().await;
     f.connection_change(doc! {"source": null}).await;
     f.catalog_change(doc! {
         "service_category": "internal",
@@ -321,6 +338,21 @@ async fn platform_acl_is_live_even_for_non_auto_connection() {
         .await;
         assert!(f.evidence().await.is_ok());
     }
+}
+
+#[tokio::test]
+async fn unset_global_preference_refuses_manual_service_wide_evidence() {
+    let f = Fixture::new().await.unwrap();
+    f.connection_change(doc! {"source": null}).await;
+    // No channel or local policy: reads pass but writes require approval, so
+    // an audience-only result cannot vouch for the entire service.
+    f.refused().await;
+    crate::services::notification_service::get_or_create_channel(&f.db, &f.owner)
+        .await
+        .unwrap();
+    f.refused().await;
+    f.allow_service_without_approval().await;
+    assert!(f.evidence().await.is_ok());
 }
 
 #[tokio::test]

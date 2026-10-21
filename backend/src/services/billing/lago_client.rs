@@ -3497,6 +3497,7 @@ mod tests {
             operation: None,
             credential_class: crate::models::usage_meter::CredentialClass::UserOwned,
             model: None,
+            reported_model: None,
             token_breakdown: None,
             audio_tokens: None,
             image_tokens: None,

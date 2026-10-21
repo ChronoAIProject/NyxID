@@ -516,6 +516,7 @@ pub(crate) async fn turn_with_history(
             ),
             permit,
             runtime::Events {
+                checkpoint: None,
                 sender: events,
                 cursor: 0,
                 reset_notified: false,

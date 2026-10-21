@@ -3,7 +3,7 @@
 //! NyxBot as the agent behind the owner's channel bots.
 //!
 //! Telegram bots go through the Agent Event Gateway (catalog slug `cmaeg`):
-//! NyxID creates the gateway channel with the owner's dedicated agent key and
+//! NyxID creates the gateway channel with the owner's delegated creator bearer and
 //! answers as the gateway's `nyxbot` provider (Agent Card, bindings,
 //! conversations, Responses SSE, event context). Platforms the gateway relay
 //! does not support yet (Lark, Feishu, Discord, Slack, WhatsApp, ...) use
@@ -276,7 +276,7 @@ fn sha256_hex(value: impl AsRef<[u8]>) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Gateway client (server-to-server, the owner's dedicated agent key as bearer)
+// Gateway client (server-to-server, the owner's delegated creator bearer)
 // ---------------------------------------------------------------------------
 
 pub(crate) use crate::services::nyxbot_gateway_service::cleanup_platform_gateway;
@@ -288,16 +288,19 @@ use crate::services::nyxbot_gateway_service::{
 
 /// Stable, prose-free code for a failed gateway call.
 fn gateway_error_code(response: &GatewayResponse) -> &'static str {
-    let code = response.body["code"].as_str().unwrap_or_default();
-    let detail = response.body["detail"].as_str().unwrap_or_default();
-    match (response.status, code) {
-        (400, "invalid_request") if detail.contains("provider") => {
+    match response.status {
+        401 => "gateway_not_authenticated",
+        403 => "gateway_permission_required",
+        400 if response.body["code"].as_str() == Some("invalid_request")
+            && response.body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("provider")) =>
+        {
             "gateway_provider_not_registered"
         }
-        (400, _) => "gateway_rejected_request",
-        (401, _) | (403, _) => "gateway_not_authenticated",
-        (409, _) => "gateway_conflict",
-        (502, _) => "gateway_provider_rejected",
+        400 => "gateway_rejected_request",
+        409 => "gateway_conflict",
+        502 => "gateway_provider_rejected",
         _ => "gateway_unavailable",
     }
 }
@@ -431,6 +434,7 @@ async fn active_for_bot(
         .collection::<NyxbotChannel>(CHANNELS)
         .find_one(doc! {"user_id": owner, "channel_bot_id": bot_id,
         "status": {"$in": ["pending", "active"]}})
+        .sort(doc! {"created_at": -1, "_id": -1})
         .await?)
 }
 
@@ -500,7 +504,9 @@ pub(crate) async fn create_gateway_agent_key(
         owner,
         &format!("NyxBot gateway agent {}", identifier(label)),
         "read proxy",
-        None,
+        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
+            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
+        ),
         Some("Authenticates the Agent Event Gateway to NyxBot. Managed by NyxBot."),
         Some(&[]),
         Some(&[]),
@@ -654,7 +660,9 @@ async fn connect_inner(
         &bot_owner_id,
         &format!("NyxBot channel route {}", identifier(&label)),
         "read proxy",
-        None,
+        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
+            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
+        ),
         Some("NyxBot channel route key. Managed by NyxBot; disconnect NyxBot to remove."),
         Some(&[]),
         Some(&[]),
@@ -947,7 +955,10 @@ async fn connect_inner(
                     (operator step). Telegram bots cannot use NyxBot until it is."
                         .into()
                 }
-                other => format!("Connecting NyxBot failed: {other}"),
+                "gateway_not_authenticated" => "The channel gateway could not authenticate NyxBot. Try reconnecting. If this continues, contact an administrator.".into(),
+                "gateway_permission_required" => "The channel gateway has not authorized NyxBot to manage this connection. An administrator needs to check the gateway configuration.".into(),
+                "gateway_unavailable" => "The channel gateway is temporarily unavailable. Try again shortly.".into(),
+                other => format!("Could not connect this bot. Try again. ({other})"),
             }))
         }
     }
@@ -1073,12 +1084,15 @@ async fn connect_gateway(
     }
     let channel_id = created.body["channel_id"]
         .as_str()
+        .filter(|value| !value.is_empty())
         .ok_or("gateway_invalid_response")?;
     let callback = created.body["endpoints"]["nyxid_callback_url"]
         .as_str()
+        .filter(|value| !value.is_empty())
         .ok_or("gateway_invalid_response")?;
     let version = created.body["version"]
         .as_i64()
+        .filter(|value| *value > 0)
         .ok_or("gateway_invalid_response")?;
     let binding_id = created.body["provider"]["binding_id"]
         .as_str()
@@ -1168,7 +1182,11 @@ async fn connect_gateway(
     .await;
     match attached {
         Ok(response) if response.status == 200 => {
-            let version = response.body["version"].as_i64().unwrap_or(version + 1);
+            let Some(version) = response.body["version"].as_i64().filter(|value| *value > 0) else {
+                let _ = channel_routing_service::delete_conversation(db, &route.id, bot_owner(row))
+                    .await;
+                return Err(failed("gateway_invalid_response").await);
+            };
             let _ = db
                 .collection::<NyxbotChannel>(CHANNELS)
                 .update_one(
@@ -1369,7 +1387,9 @@ async fn new_route_key(
         key_owner,
         &format!("NyxBot channel route {}", identifier(label)),
         "read proxy",
-        None,
+        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
+            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
+        ),
         Some("NyxBot channel route key. Managed by NyxBot; disconnect NyxBot to remove."),
         Some(&[]),
         Some(&[]),
@@ -1518,9 +1538,13 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         Err(_) => return Err(discard(None, "gateway_unavailable").await),
     };
     let (Some(channel_id), Some(callback), Some(version)) = (
-        created.body["channel_id"].as_str(),
-        created.body["endpoints"]["nyxid_callback_url"].as_str(),
-        created.body["version"].as_i64(),
+        created.body["channel_id"]
+            .as_str()
+            .filter(|value| !value.is_empty()),
+        created.body["endpoints"]["nyxid_callback_url"]
+            .as_str()
+            .filter(|value| !value.is_empty()),
+        created.body["version"].as_i64().filter(|value| *value > 0),
     ) else {
         return Err(discard(None, "gateway_invalid_response").await);
     };
@@ -1569,7 +1593,10 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     .await
     {
         Ok(response) if response.status == 200 => {
-            response.body["version"].as_i64().unwrap_or(version + 1)
+            match response.body["version"].as_i64().filter(|value| *value > 0) {
+                Some(version) => version,
+                None => return Err(discard(opened, "gateway_invalid_response").await),
+            }
         }
         Ok(response) => return Err(discard(opened, gateway_error_code(&response)).await),
         Err(_) => return Err(discard(opened, "gateway_unavailable").await),
@@ -1744,15 +1771,7 @@ pub async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Va
 }
 
 pub async fn list(state: &AppState, owner: &str) -> AppResult<Vec<NyxbotChannel>> {
-    Ok(state
-        .db
-        .collection::<NyxbotChannel>(CHANNELS)
-        .find(doc! {"user_id": owner, "status": {"$ne": "disconnected"}})
-        .sort(doc! {"created_at": -1})
-        .limit(50)
-        .await?
-        .try_collect()
-        .await?)
+    crate::services::nyxbot_channel_query_service::list_current(&state.db, owner).await
 }
 
 fn link_json(row: &NyxbotChannel, link: &LinkInstructions) -> Value {
@@ -5426,6 +5445,24 @@ async fn machine_setup_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult
             )
         } else if profile.computer && !profile.computer_ready {
             ("permissions_missing", "The machine connected, but computer use is unavailable. Ask the owner to check Screen Recording/Accessibility or the Linux display using nyxid node machine status.".to_owned())
+        } else if let Some(reason) = Box::pin(
+            crate::services::machine_setup_service::setup_selection_reason(&state.db, &row, node),
+        )
+        .await?
+        {
+            (
+                "selection_required",
+                format!(
+                    "Machine {} ({}) connected, but owner separation selection is required before new access. {} Owner settings: {}. Do not retry execution or select legacy on the owner's behalf. Existing legacy assignments remain usable.",
+                    node.name,
+                    node.id,
+                    crate::services::machine_access_service::selection_message(reason),
+                    crate::services::assistant_links::AssistantPage::MachineSettings {
+                        node: &node.id
+                    }
+                    .path()
+                ),
+            )
         } else {
             (
                 "connected",

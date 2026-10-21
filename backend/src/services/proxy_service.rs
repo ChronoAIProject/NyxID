@@ -181,6 +181,8 @@ pub async fn authorize_master_credential(
         ));
     }
     super::retired_service_service::require_available(service)?;
+    super::security_readiness_service::require_platform(db, actor_addressed_policy_required())
+        .await?;
     if service.platform_key.is_some() {
         super::platform_key_service::require(db, service, &actor.user_id).await?;
         validate_actor_addressed_master_credential_policy(service)?;
@@ -311,7 +313,7 @@ fn validate_master_credential_service(service: &DownstreamService) -> AppResult<
 /// `/proxy/s/{slug}` and `/llm/*`). Operators enable it after confirming, from real
 /// traffic, that every such row either carries a policy or receives no actor-addressed
 /// calls. Off by default so deploying this code is a no-op.
-fn actor_addressed_policy_required() -> bool {
+pub(crate) fn actor_addressed_policy_required() -> bool {
     std::env::var("PLATFORM_REQUIRE_OPERATION_POLICY")
         .ok()
         .map(|v| {

@@ -925,10 +925,14 @@ pub async fn personal_flag_enabled(
     user_id: &str,
     flag_key: &str,
 ) -> AppResult<bool> {
-    Ok(resolve_personal_features(db, user_id)
+    let enabled = resolve_personal_features(db, user_id)
         .await?
         .iter()
-        .any(|key| key == flag_key))
+        .any(|key| key == flag_key);
+    if enabled {
+        super::security_readiness_service::require(db, flag_key).await?;
+    }
+    Ok(enabled)
 }
 
 /// Who a flag can be on for, so background work can skip a flag nobody has

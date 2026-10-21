@@ -29,6 +29,27 @@ const BASE: ChatMessage = {
 };
 
 describe("canonical chat presentation", () => {
+  it.each([
+    ["insufficient_credits", "Not enough credits", "Add credits in Billing & Usage"],
+    ["wallet_suspended", "Billing wallet suspended", "Contact support"],
+    ["plan_entitlement_required", "Service not included in your plan", "Check your plan"],
+    ["billing_not_configured", "Billing setup incomplete", "Contact support to complete the billing configuration"],
+    ["billing_provider_unavailable", "Billing service unavailable", "Try again shortly"],
+  ])("shows the billing cause and remedy before diagnostics for %s", (code, title, remedy) => {
+    render(<ChatMessageBubble message={{ ...BASE, content: "", status: "error", errorCode: code,
+      error: "Turn failed. Provide a trace.",
+      toolCalls: [{ id: "tool", name: "nyx__search_tools", status: "done", startedAt: 1 }],
+      errorDetail: { stage: "stream", turnId: "turn-billing", continuations: 0 },
+    }} />);
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(title);
+    expect(alert).toHaveTextContent(remedy);
+    expect(screen.queryByText("Turn failed. Provide a trace.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /1 action/ })).toHaveTextContent(title);
+    const details = screen.getByText("Details");
+    expect(alert.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("shows the panic stage in failure Details", () => {
     render(<ChatMessageBubble message={{ ...BASE, status: "error", content: "",
       errorCode: "internal_error",
@@ -813,6 +834,51 @@ describe("canonical chat presentation", () => {
 });
 
 describe("turn status and action ledger", () => {
+  it("keeps total turn time across tool changes, remounts and returning to the tab", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-10-21T00:00:30Z"));
+      const startedAt = "2026-10-21T00:00:00Z";
+      const message = { ...BASE, status: "streaming" as const, turnStatus: { phase: "tool" as const, label: "Running first", startedAt, toolStartedAt: "2026-10-21T00:00:20Z" } };
+      const { container, rerender, unmount } = render(<ChatMessageBubble message={message} />);
+      expect(container.querySelector("[data-turn-status]")).toHaveTextContent("30s total");
+      rerender(<ChatMessageBubble message={{ ...message, turnStatus: { ...message.turnStatus, toolStartedAt: "2026-10-21T00:00:29Z", label: "Running second" } }} />);
+      expect(container.querySelector("[data-turn-status]")).toHaveTextContent("30s total");
+      rerender(<ChatMessageBubble message={{ ...message, turnStatus: { phase: "working", label: "Working…", startedAt } }} />);
+      expect(container.querySelector("[data-turn-status]")).toHaveTextContent("30s total");
+      // Browser background throttling skips ticks; visibility must catch up at once.
+      vi.setSystemTime(new Date("2026-10-21T00:01:05Z"));
+      fireEvent(document, new Event("visibilitychange"));
+      expect(container.querySelector("[data-turn-status]")).toHaveTextContent("1:05 total");
+      unmount();
+      const reopened = render(<ChatMessageBubble message={message} />);
+      expect(reopened.container.querySelector("[data-turn-status]")).toHaveTextContent("1:05 total");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps each tool's own duration beside the correct action", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-10-21T00:00:30Z"));
+      const from = Date.parse("2026-10-21T00:00:00Z");
+      const { container } = render(<ChatMessageBubble message={{ ...BASE, toolCalls: [
+        { id: "finished", name: "github__read", status: "done", startedAt: from, finishedAt: from + 8000 },
+        { id: "running", name: "github__search", status: "running", startedAt: from + 20000 },
+      ] }} />);
+      fireEvent.click(screen.getByRole("button", { name: /2 actions/ }));
+      const done = container.querySelector('[data-tool-status="done"]')!;
+      const running = container.querySelector('[data-tool-status="running"]')!;
+      expect(done).toHaveTextContent("8s");
+      expect(running).toHaveTextContent("10s");
+      act(() => vi.advanceTimersByTime(5000));
+      expect(done).toHaveTextContent("8s");
+      expect(running).toHaveTextContent("15s");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it.each(["approval", "retrying", "continuing", "working", "active"] as const)("keeps %s status visible after reply text", (phase) => {
     const labels = { approval: "Waiting for approval", retrying: "Retrying…", continuing: "Continuing task…", working: "Working…", active: "Working — the reply appears when it is ready" };
     const { container, rerender } = render(<ChatMessageBubble message={{ ...BASE, status: "streaming", turnStatus: { phase, label: labels[phase] } }} />);
@@ -1131,11 +1197,17 @@ it("hides ordinary successful Details and shows retries without a wait", () => {
   expect(screen.getByText("Details")).toBeInTheDocument();
 });
 
-it.each(["/assistant", "/assistant/automations", "/replay"])("opens billing over the current assistant shell only: %s", async (path) => {
+it.each([
+  ["/assistant", "wallet_suspended"],
+  ["/assistant/automations", "wallet_suspended"],
+  ["/replay", "wallet_suspended"],
+  ["/assistant", "insufficient_credits"],
+  ["/assistant", "plan_entitlement_required"],
+])("opens billing over the current assistant shell only: %s (%s)", async (path, code) => {
   const root = createRootRoute();
   const route = createRoute({ getParentRoute: () => root, path,
     validateSearch: withAccountPanelSearch((search) => ({ c: String(search.c ?? "") })),
-    component: () => <ChatMessageBubble message={{ ...BASE, status: "error", errorCode: "wallet_suspended" }} />,
+    component: () => <ChatMessageBubble message={{ ...BASE, status: "error", errorCode: code }} />,
   });
   const router = createRouter({ routeTree: root.addChildren([route]),
     history: createMemoryHistory({ initialEntries: [`${path}?c=current-chat&panel=settings&panelTab=profile`] }),

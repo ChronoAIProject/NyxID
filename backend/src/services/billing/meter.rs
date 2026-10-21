@@ -374,6 +374,7 @@ pub(super) async fn persist_settlement_intent(
             platform_quantity,
             model.clone(),
             Some(&platform),
+            platform.reported_model.as_deref(),
             Some(resale_quantity),
             finalized_at,
         )
@@ -409,6 +410,7 @@ pub(super) async fn persist_settlement_intent(
             platform_quantity,
             model.clone(),
             Some(&platform),
+            platform.reported_model.as_deref(),
             None,
             finalized_at,
         )
@@ -425,6 +427,7 @@ pub(super) async fn persist_settlement_intent(
             resale_quantity,
             model,
             None,
+            platform.reported_model.as_deref(),
             None,
             finalized_at,
         )
@@ -474,6 +477,7 @@ async fn materialize_component_rows(
                     row.flush_seq,
                 ))
             .then_some(usage),
+            usage.reported_model.as_deref(),
             None,
             coordinator.finalized_at.unwrap_or(coordinator.updated_at),
         )
@@ -546,6 +550,7 @@ pub(super) async fn settle_voice_window(
             } else {
                 platform_quantity(row.metric, &usage)
             },
+            None,
             None,
             None,
             None,
@@ -729,6 +734,7 @@ pub(super) fn reserved_row(
         operation,
         credential_class: ctx.credential_class,
         model: None,
+        reported_model: None,
         token_breakdown: None,
         audio_tokens: None,
         image_tokens: None,
@@ -788,12 +794,14 @@ async fn finalize_layer(
     quantity: i64,
     model: Option<String>,
     request_usage: Option<&PlatformUsage>,
+    reported_model: Option<&str>,
     pending_resale_quantity: Option<i64>,
     finalized_at: chrono::DateTime<Utc>,
 ) -> AppResult<Option<UsageMeterRow>> {
-    finalize_matching(db, doc! { "transaction_id": transaction_id(billing_request_id, layer, None), "status": "forwarded" }, quantity, model, request_usage, pending_resale_quantity, finalized_at).await
+    finalize_matching(db, doc! { "transaction_id": transaction_id(billing_request_id, layer, None), "status": "forwarded" }, quantity, model, request_usage, reported_model, pending_resale_quantity, finalized_at).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finalize_matching(
     db: &mongodb::Database,
     filter: bson::Document,
@@ -801,6 +809,9 @@ async fn finalize_matching(
     model: Option<String>,
     // Request-level observability classes, recorded on the primary row only.
     request_usage: Option<&PlatformUsage>,
+    // Provider-reported model, recorded on every row of the request so each
+    // priced row reports under the same model. Never selects a rate.
+    reported_model: Option<&str>,
     pending_resale_quantity: Option<i64>,
     finalized_at: chrono::DateTime<Utc>,
 ) -> AppResult<Option<UsageMeterRow>> {
@@ -827,6 +838,9 @@ async fn finalize_matching(
         && let Ok(images) = bson::to_bson(images)
     {
         set.insert("image_tokens", images);
+    }
+    if let Some(model) = reported_model {
+        set.insert("reported_model", model);
     }
     if let Some(resale_quantity) = pending_resale_quantity {
         set.insert("pending_resale_quantity", resale_quantity);
@@ -878,6 +892,7 @@ pub(super) async fn materialize_pending_resale_intent(
         resale_quantity,
         coordinator.model.clone(),
         None,
+        coordinator.reported_model.as_deref(),
         None,
         finalized_at,
     )
@@ -1019,6 +1034,7 @@ pub(crate) async fn settle_channel_admission(
             platform_quantity(row.metric, &usage),
             None,
             Some(&usage),
+            usage.reported_model.as_deref(),
             None,
             Utc::now(),
         )
@@ -1558,6 +1574,7 @@ mod tests {
             42,
             Some("model-before-detach".to_string()),
             None,
+            Some("reported-before-detach"),
             Some(17),
             finalized_at,
         )
@@ -1605,6 +1622,7 @@ mod tests {
             row.layer == BillingLayer::Resale
                 && row.quantity == Some(17)
                 && row.model.as_deref() == Some("model-before-detach")
+                && row.reported_model.as_deref() == Some("reported-before-detach")
         }));
     }
 
@@ -2291,6 +2309,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Utc::now(),
         )
         .await
@@ -2491,6 +2510,7 @@ mod tests {
             input_tokens: 120,
             output_tokens: 40,
             token_breakdown: Some(breakdown),
+            reported_model: Some("gpt-5.5".into()),
             ..Default::default()
         };
         settle(&db, &request, usage.clone(), None, None)
@@ -2507,6 +2527,12 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 2);
         for row in rows {
+            // The reported model describes the whole request; it is never a
+            // pricing model.
+            assert_eq!(
+                (row.model.as_deref(), row.reported_model.as_deref()),
+                (None, Some("gpt-5.5"))
+            );
             if row.transaction_id == "component-classes:platform" {
                 assert_eq!(row.token_breakdown, Some(breakdown));
                 assert_eq!(row.quantity, Some(120));

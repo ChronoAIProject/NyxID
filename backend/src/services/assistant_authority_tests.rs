@@ -81,10 +81,25 @@ pub(crate) async fn account_gate(
 
 async fn base(name: &str) -> (crate::AppState, String) {
     let db = connect_transaction_test_database(name).await;
+    super::security_readiness_service::ready_test_replica(&db).await;
     engine::ensure_indexes(&db).await.unwrap();
     let owner = Uuid::new_v4().to_string();
     db.collection(crate::models::user::COLLECTION_NAME)
         .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    // These fixtures isolate assistant consent and execution authority from the
+    // independent generic service approval. Explicit per-service required
+    // policies still take precedence. The real no-settings proxy control
+    // removes this preference before exercising the production default.
+    let channel = super::notification_service::get_or_create_channel(&db, &owner)
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &channel.id},
+            doc! {"$set": {"approval_required": false}},
+        )
         .await
         .unwrap();
     (test_app_state(db), owner)

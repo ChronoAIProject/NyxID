@@ -17,6 +17,9 @@ mod telemetry;
 #[cfg(test)]
 mod test_support;
 mod tls;
+#[cfg(unix)]
+#[path = "commands/update_attestation/trusted_directory.rs"]
+mod trusted_directory;
 mod update_check;
 mod wizard;
 
@@ -59,8 +62,17 @@ async fn run_main() {
     // and duration after dispatch returns, regardless of success.
     let start = std::time::Instant::now();
     let matches = Cli::command().get_matches();
-    let profile = selected_profile(&matches);
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    // Local observation must precede telemetry, update checks and skill repair.
+    if matches!(
+        cli.command,
+        Commands::Node {
+            command: cli::NodeCommands::CustodyProbe
+        }
+    ) {
+        node::custody::worker();
+    }
+    let profile = selected_profile(&matches);
 
     // Only an explicit choice for this saved account/deployment can admit an
     // event. Account permission is fetched afresh after the command finishes.
