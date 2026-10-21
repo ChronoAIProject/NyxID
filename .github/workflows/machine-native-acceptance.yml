@@ -51,10 +51,10 @@ jobs:
         run: |
           npm ci --ignore-scripts --prefix cli/tests/updater-npm
           python3 scripts/install-pinned-cua.py --destination "$RUNNER_TEMP/machine-native-cua"
-      - name: Require actual Landlock and packaged Google Chrome prerequisites
+      - name: Prepare disposable managed ancestry and require Landlock and packaged Chrome
         run: |
           sudo -n env PATH="$PATH" NODE_PATH="$GITHUB_WORKSPACE/cli/tests/updater-npm/node_modules" \
-            python3 scripts/check-machine-native-prereqs.py
+            python3 scripts/check-machine-native-prereqs.py --prepare-disposable-host
       - name: Build committed CLI and production-module fixture with their locks
         run: |
           cargo build --locked -p nyxid-cli --bin nyxid

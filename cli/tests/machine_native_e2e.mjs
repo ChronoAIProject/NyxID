@@ -11,6 +11,7 @@ import fs from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {createRequire} from 'node:module';
+import {fileURLToPath} from 'node:url';
 import {contexts} from './machine_context_e2e.mjs';
 import {selectBrowser} from './machine_native_browser.mjs';
 const {WebSocketServer}=createRequire(import.meta.url)('ws');
@@ -22,6 +23,12 @@ assert(cua&&path.isAbsolute(cua),'NYXID_TEST_CUA_DRIVER must name the pinned dri
 const {browserBinary,policyDirectory,browserExecutable}=selectBrowser();
 // Setup must launch the very package whose policies this harness inspects.
 process.env.NYXID_MACHINE_BROWSER=browserBinary;
+function diagnoseManagedDirectories(){
+ const diagnostic=fileURLToPath(new URL('../../scripts/check-machine-native-prereqs.py',import.meta.url));
+ const result=spawnSync('python3',[diagnostic,'--diagnose-managed-browser','--policy-directory',policyDirectory],{stdio:'inherit'});
+ if(result.status!==0)console.error('Native managed directory diagnostics failed:',result.error?.message??result.status);
+}
+diagnoseManagedDirectories();
 const profileName=process.env.NYXID_TEST_NATIVE_PROFILE??`w94-${process.pid}`;
 assert(/^[a-z][a-z0-9-]{0,15}$/.test(profileName),'safe unique native test profile');
 const directory=`/var/lib/nyxid-machine/${profileName}/node`,workspace=`/srv/nyxid-${profileName}-workspace`;
@@ -109,6 +116,22 @@ try{
  // A written policy is insufficient: prove the live negative control before
  // any context exists, then restore the exact protected inode in all cases.
  await stop();
+ // Reproduce the hosted image's writable-ancestor failure using the real
+ // installer. Restore the exact directory mode even if an assertion fails.
+ const policyParent=path.dirname(policyDirectory),parentMetadata=await fs.lstat(policyParent);
+ assert(parentMetadata.isDirectory());assert.equal(parentMetadata.uid,0);assert.equal(parentMetadata.mode&0o022,0);
+ for(const writeBit of [0o020,0o002]){
+  try{
+   await fs.chmod(policyParent,(parentMetadata.mode&0o7777)|writeBit);
+   console.log(`Native installer negative control path=${policyParent} mode=${((parentMetadata.mode&0o7777)|writeBit).toString(8)}`);
+   const refused=spawnSync(binary,['node','machine-browser-install','--port','32248'],{encoding:'utf8'});
+   assert.notEqual(refused.status,0,'installer must refuse a writable policy ancestor');
+   assert.match(refused.stderr,/managed browser directories must be supervisor-owned and not writable by other users/);
+  }catch(error){
+   diagnoseManagedDirectories();throw error;
+  }finally{await fs.chmod(policyParent,parentMetadata.mode&0o7777);}
+ }
+ checkpoint('real installer refuses group/other-writable policy ancestry; original mode restored');
  // Chromium reads policy files regardless of their extension. Move the inode
  // outside managed/, keeping it on the same filesystem for exact restoration.
  const policyFile=`${policyDirectory}/nyxid.json`,policyBackup=path.join(policyDirectory,'../nyxid.native-acceptance-disabled');
@@ -156,6 +179,9 @@ try{
  assert.deepEqual([...observed].sort(),roles.sort(),'each restarted secure browser has a live sandboxed renderer');
  checkpoint(`live Chromium renderer identity, executable, namespace, NNP and additional seccomp checks (${observed.size} secure identities, ${rendered} renderers)`);
  console.log(`ACCEPTANCE ${checkpoints.length} passed / 0 failed / 0 skipped`);
+}catch(error){
+ diagnoseManagedDirectories();
+ throw error;
 }finally{
  await stop();clearInterval(heartbeat);
  for(const original of [browserBinary,'/opt/nyxid/machine-browser/native-host']){

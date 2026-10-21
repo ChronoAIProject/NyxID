@@ -5,8 +5,10 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shlex
+import stat
 import tarfile
 import tempfile
 import unittest
@@ -69,7 +71,9 @@ def require(data):
         if package not in shlex.split(install.replace('\\\n', ' ')):
             raise ValueError('missing snapshot native/adversarial dependency: ' + package)
     step(native, 'scripts/install-pinned-cua.py --destination "$RUNNER_TEMP/machine-native-cua"')
-    step(native, 'scripts/check-machine-native-prereqs.py')
+    prepare = step(native, 'scripts/check-machine-native-prereqs.py --prepare-disposable-host')
+    if 'sudo -n env ' not in prepare:
+        raise ValueError('disposable managed ancestry preparation requires root')
     step(native, 'cargo build --locked -p nyxid-cli --bin nyxid')
     step(native, 'cargo build --locked --manifest-path cli/tests/machine_context_spike/Cargo.toml')
     run = step(native, 'bash cli/tests/machine_native_acceptance.sh --disposable')
@@ -144,6 +148,11 @@ class AcceptanceWorkflows(unittest.TestCase):
             selected = next(s for s in steps if 'bash cli/tests/machine_native_acceptance.sh' in s.get('run', ''))
             selected['run'] = selected['run'].replace(old, new)
             with self.subTest(new=new), self.assertRaises(ValueError): require(data)
+        for old, new in (('--prepare-disposable-host', ''), ('sudo -n env ', 'env ')):
+            data = workflows(); steps = data['machine-native-acceptance']['jobs']['native']['steps']
+            selected = next(s for s in steps if 'scripts/check-machine-native-prereqs.py' in s.get('run', ''))
+            selected['run'] = selected['run'].replace(old, new)
+            with self.subTest(preparation=new), self.assertRaises(ValueError): require(data)
 
     def test_full_image_cannot_add_token_mounts_or_weaken_settings(self):
         for old, new in (('--init ', ''), ('--shm-size=512m', '--shm-size=64m'),
@@ -161,6 +170,107 @@ class AcceptanceWorkflows(unittest.TestCase):
                      ('Linux', 'x86_64', 1001, 6, '1'), ('Linux', 'x86_64', 0, -1, '1'),
                      ('Linux', 'x86_64', 0, 5, '1'), ('Linux', 'x86_64', 0, 6, '0')):
             with self.subTest(args=args), self.assertRaises(ValueError): prereqs.require_platform(*args)
+
+
+class ManagedDirectories(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        (self.root / 'etc').mkdir(mode=0o755)
+        self.policy = '/etc/opt/chrome/policies/managed'
+
+    def prepare(self):
+        prereqs.prepare_managed_directories(self.policy, self.root, os.getuid(), os.getgid())
+
+    def check(self):
+        prereqs.check_managed_directories(self.policy, self.root, os.getuid())
+
+    def test_runner_image_world_writable_opt_is_repaired_without_recursing(self):
+        # actions/runner-images ubuntu24/20261012.334 configure-system.sh:
+        # chmod -R 777 /opt. This ancestor fails before Chrome policy setup.
+        opt = self.root / 'opt'; opt.mkdir(); opt.chmod(0o777)
+        unrelated = opt / 'unrelated-tool'; unrelated.mkdir(); unrelated.chmod(0o777)
+        marker = unrelated / 'binary'; marker.write_text('do not change'); marker.chmod(0o777)
+        with self.assertRaisesRegex(ValueError, r'unsafe native managed directory: /opt;'):
+            self.check()
+        system_before = {p: p.stat() for p in (self.root, self.root / 'etc')}
+        self.prepare(); self.check()
+        for directory in prereqs.managed_directories(self.policy):
+            metadata = (self.root / directory.relative_to('/')).lstat()
+            self.assertTrue(stat.S_ISDIR(metadata.st_mode))
+            self.assertEqual(metadata.st_uid, os.getuid())
+            self.assertEqual(metadata.st_mode & 0o022, 0)
+        for path, before in system_before.items():
+            self.assertEqual((path.stat().st_ino, path.stat().st_mode), (before.st_ino, before.st_mode))
+        self.assertEqual(unrelated.stat().st_mode & 0o777, 0o777)
+        self.assertEqual(marker.stat().st_mode & 0o777, 0o777)
+        self.assertEqual(marker.read_text(), 'do not change')
+
+    def test_each_group_or_other_writable_ancestor_is_reported_and_repaired(self):
+        self.prepare()
+        for directory in prereqs.managed_directories(self.policy):
+            if directory in (Path('/'), Path('/etc')):
+                continue
+            path = self.root / directory.relative_to('/')
+            for bit in (0o020, 0o002):
+                with self.subTest(directory=str(directory), bit=bit):
+                    path.chmod(0o755 | bit)
+                    with self.assertRaisesRegex(ValueError, 'unsafe native managed directory: ' + str(directory) + ';'):
+                        self.check()
+                    self.prepare(); self.check()
+
+    def test_symlinks_and_files_are_refused_without_touching_their_targets(self):
+        self.prepare()
+        target = self.root / 'untouched'; target.mkdir(); target.chmod(0o777)
+        for directory in ('opt/nyxid/machine-browser/dev-policies', 'etc/opt/chrome/policies/managed',
+                          'etc/opt/chrome/native-messaging-hosts'):
+            path = self.root / directory; path.rmdir()
+            for kind in ('symlink', 'file'):
+                with self.subTest(directory=directory, kind=kind):
+                    if kind == 'symlink': path.symlink_to(target, target_is_directory=True)
+                    else: path.write_text('not a directory')
+                    with self.assertRaises((OSError, ValueError)): self.prepare()
+                    with self.assertRaises(ValueError): self.check()
+                    self.assertEqual(target.stat().st_mode & 0o777, 0o777)
+                    path.unlink()
+            self.prepare()
+
+    def test_untrusted_system_ancestors_and_wrong_owner_fail_closed(self):
+        for path in (self.root, self.root / 'etc'):
+            before = path.stat().st_mode
+            try:
+                path.chmod(0o777)
+                with self.assertRaisesRegex(ValueError, 'unsafe system ancestor'): self.prepare()
+                self.assertEqual(path.stat().st_mode & 0o777, 0o777)
+            finally: path.chmod(before & 0o7777)
+        self.prepare()
+        with self.assertRaisesRegex(ValueError, 'unsafe native managed directory'):
+            prereqs.check_managed_directories(self.policy, self.root, os.getuid() + 1)
+
+    def test_diagnostics_include_identity_and_every_ancestor_with_missing_or_symlink_details(self):
+        from contextlib import redirect_stdout
+        self.prepare()
+        leaf = self.root / 'etc/opt/chrome/policies/managed'; leaf.rmdir(); leaf.symlink_to('missing')
+        output = io.StringIO()
+        with redirect_stdout(output): prereqs.diagnose_managed_directories(self.policy, self.root)
+        self.assertIn(f'euid={os.geteuid()}', output.getvalue())
+        for directory in prereqs.managed_directories(self.policy):
+            self.assertIn(f'path={directory} uid=', output.getvalue())
+        mode = stat.S_IMODE(leaf.lstat().st_mode)
+        self.assertIn(f'path={self.policy} uid={os.getuid()} gid={os.getgid()} mode={mode:04o} type=l', output.getvalue())
+        leaf.unlink()
+        output = io.StringIO()
+        with redirect_stdout(output): prereqs.diagnose_managed_directories(self.policy, self.root)
+        self.assertIn(f'path={self.policy} error=', output.getvalue())
+
+    def test_supported_policy_layouts_prepare_only_their_native_host_paths(self):
+        for policy in prereqs.POLICY_DIRECTORIES:
+            with self.subTest(policy=policy):
+                prereqs.prepare_managed_directories(policy, self.root, os.getuid(), os.getgid())
+                prereqs.check_managed_directories(policy, self.root, os.getuid())
+                native = ('etc/opt/chrome/native-messaging-hosts' if '/opt/chrome/' in policy
+                          else 'etc/chromium/native-messaging-hosts')
+                self.assertTrue((self.root / native).is_dir())
 
 
 class PinnedDriver(unittest.TestCase):

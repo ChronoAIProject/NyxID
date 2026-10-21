@@ -925,6 +925,42 @@ Debian acceptance must explicitly pass the corresponding supported package path,
 for example `NYXID_MACHINE_BROWSER=/usr/bin/chromium`; these layouts remain covered
 by package-detection tests and the Snap guest / Debian container acceptance runs.
 
+The hosted job explicitly prepares its **disposable runner** with
+`sudo -n ... python3 scripts/check-machine-native-prereqs.py --prepare-disposable-host`
+before creating fixture users or credentials. This is necessary because the
+GitHub `ubuntu-24.04` image deliberately makes `/opt` world writable. In failing
+job `119122145962` (PR #1976), the reported image is `20261012.334.1`;
+its [pinned configure-system.sh](https://github.com/actions/runner-images/blob/ubuntu24/20261012.334/images/ubuntu/scripts/build/configure-system.sh)
+contains `chmod -R 777 /opt` (blob `829f338bcdeb6093e493790d9e3856efdddd2c93`).
+The production installer checks `/opt/nyxid/machine-browser` before the Chrome
+policy path, so `/opt` fails its supervisor-ownership/no-group-or-other-write
+guard first. The original hosted log contains no directory metadata; the image
+source and the installer's ordered checks establish this cause, rather than an
+observed `stat` from that run. The workflow and harness both require effective
+UID 0; changing the acceptance user would not repair a world-writable ancestor.
+
+Preparation creates the named managed resource, policy and native-host
+directories as root:root 0755 and normalizes their ancestors beneath `/opt` and
+`/etc`; `/` and `/etc` must already be supervisor-owned and protected.
+It rejects symlinks/non-directories and uses no recursive chmod/chown. Unrelated
+tool installations under `/opt` are untouched. Without the explicit preparation
+flag, the prerequisite script only verifies these paths and fails if they are
+missing or insecure. This fixture preparation is not an owner-host repair
+command or a relaxation of production setup: production continues to refuse
+insecure ancestry. The job prints UID/EUID/GID/groups and each ancestor's numeric
+owner/group, mode and type before/after preparation. Native acceptance also
+prints that inventory at startup and on failure.
+
+The native lifecycle harness exercises the actual privileged installer with
+group-writable and other-writable policy ancestry, requires its existing refusal
+message, and restores the original directory mode in `finally`. It then retains
+the existing missing-policy refusal and effective-policy restoration checks,
+two-context lifecycle, renderer checks, full adversarial suite and 100-sample
+probe calibration. A green local filesystem reproduction does not establish
+hosted acceptance: the PM must push the reviewed commit and verify this entire
+required job on the actual Ubuntu amd64 image, including the new ancestry
+inventory and both writable-ancestor negative controls.
+
 ### D12. Documentation
 
 This document describes what shipped. Also update:
