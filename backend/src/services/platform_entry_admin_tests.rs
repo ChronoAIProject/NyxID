@@ -26,6 +26,7 @@ pub(crate) async fn execute_command(
     let command = OriginalManagerCommand::from_verified(
         admission.verified_update(),
         TurnInput {
+            channel_uploads: Vec::new(),
             text: admission.text().into(),
         },
     )

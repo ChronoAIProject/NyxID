@@ -35,7 +35,7 @@ pub fn personal_command(text: &str, username: &str) -> Option<PersonalCommandKin
     match command.split('@').next()? {
         "/link" | "/login" => Some(PersonalCommandKind::Link),
         "/unlink" | "/logout" => Some(PersonalCommandKind::Unlink),
-        "/status" => Some(PersonalCommandKind::Status),
+        "/status" | "/check" => Some(PersonalCommandKind::Status),
         "/help" | "/start" if words.next().is_none() => Some(PersonalCommandKind::Help),
         "/confirm"
             if words
@@ -78,6 +78,14 @@ impl ChatLoginStatus {
                     chat.logout(),
                     chat.login()
                 ),
+                Self::AwaitingConfirmation => format!(
+                    "Chat login status: browser approved; waiting for confirmation here. Return to the approval page and use its confirmation command in this private chat. Send {} for a new review if the command is lost.",
+                    chat.login()
+                ),
+                Self::Expired => format!(
+                    "Chat login status: linking request expired. Send {} to start a new account review.",
+                    chat.login()
+                ),
                 Self::LoggedIn => format!(
                     "Chat login status: logged in. This private chat uses your verified NyxID account's NyxBot, existing access, memory and personal credits. Browser sign-out does not log this chat out. Send {} to disconnect this chat. {}",
                     chat.logout(),
@@ -97,6 +105,8 @@ impl ChatLoginStatus {
             Self::Pending => {
                 "Chat login status: confirmation pending. Finish the account review on the NyxID website, then send its confirmation command in this private chat. Signing up or signing in on the website alone does not log this chat in. Send /logout to cancel, or /login for a new link."
             }
+            Self::AwaitingConfirmation => "Chat login status: browser approved; waiting for confirmation here. Return to the approval page and tap Open Telegram to finish, or copy its /confirm command into this private chat. Send /login for a new review if the page is lost.",
+            Self::Expired => "Chat login status: linking request expired. Send /login to start a new account review.",
             Self::LoggedIn => {
                 "Chat login status: logged in. This private chat uses your verified NyxID account's NyxBot, existing access, memory and personal credits. Closing your browser does not log this chat out. Send /logout to disconnect this chat."
             }
@@ -132,16 +142,37 @@ pub(crate) async fn status_in_session(
             "manager_authority_epoch": controls.manager_authority_epoch,
             (scope::actor_key(&update.sender,false)):scope::actor_value(&update.sender),
             (scope::destination_key(&update.sender,false)):scope::destination_value(&update.sender),
-            "state": "pending", "$expr": {"$gt": ["$expires_at", "$$NOW"]},
         })
-        .session(session)
-        .await?
-        .is_some();
-    Ok(if pending {
-        ChatLoginStatus::Pending
-    } else {
-        ChatLoginStatus::LoggedOut
-    })
+        .sort(mongodb::bson::doc! {"created_at":-1,"_id":-1})
+        .session(&mut *session)
+        .await?;
+    let Some(intent) = pending else {
+        return Ok(ChatLoginStatus::LoggedOut);
+    };
+    if intent.get_str("state").ok() == Some("expired")
+        || (intent.get_str("state").ok() == Some("pending")
+            && intent
+                .get_datetime("expires_at")
+                .is_ok_and(|at| at.to_chrono() <= chrono::Utc::now()))
+    {
+        return Ok(ChatLoginStatus::Expired);
+    }
+    if intent.get_str("state").ok() != Some("pending") {
+        return Ok(ChatLoginStatus::LoggedOut);
+    }
+    if let Ok(id) = intent.get_str("current_challenge_id")
+        && let Some(challenge) = db.collection::<mongodb::bson::Document>(crate::models::platform_link_intent::CHALLENGES)
+            .find_one(mongodb::bson::doc! {"_id":id,"intent_id":intent.get_str("_id").unwrap_or_default()})
+            .session(session).await?
+    {
+        if challenge.get_datetime("expires_at").is_ok_and(|at| at.to_chrono() <= chrono::Utc::now()) {
+            return Ok(ChatLoginStatus::Expired);
+        }
+        if challenge.get_str("state").ok() == Some("awaiting_chat_confirmation") {
+            return Ok(ChatLoginStatus::AwaitingConfirmation);
+        }
+    }
+    Ok(ChatLoginStatus::Pending)
 }
 
 /// The send claim reuses the committed effect and serializes against proof
@@ -269,7 +300,9 @@ pub async fn execute(
         PersonalCommandKind::Unlink => {
             matches!(verb, Some("/unlink" | "/logout")) && words.next().is_none()
         }
-        PersonalCommandKind::Status => verb == Some("/status") && words.next().is_none(),
+        PersonalCommandKind::Status => {
+            matches!(verb, Some("/status" | "/check")) && words.next().is_none()
+        }
         PersonalCommandKind::Help => {
             matches!(verb, Some("/help" | "/start")) && words.next().is_none()
         }

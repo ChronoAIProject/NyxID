@@ -117,16 +117,30 @@ pub fn assistant_parts(text: &str, platform: &str, overflow_url: &str) -> Vec<Ou
                 .next()
                 .unwrap_or_default();
             let length = chunk.encode_utf16().count();
-            let local = local_entities(&entities, offset, length);
+            let mut local = local_entities(&entities, offset, length);
             if telegram && local.len() > 100 && budget > 8 {
                 budget = (budget / 2).max(8);
                 continue;
             }
-            let rendered = if markdown && !slack_plain {
+            let mut rendered = if markdown && !slack_plain {
                 render_markdown(chunk, &local, platform)
             } else {
                 chunk.to_owned()
             };
+            if rendered.trim().is_empty() {
+                const CONTINUATION: &str = "Whitespace continuation:\n";
+                let available = limit.budget() - limit.measure(CONTINUATION);
+                if budget > available {
+                    budget = available;
+                    continue;
+                }
+                rendered.insert_str(0, CONTINUATION);
+                for entity in &mut local {
+                    entity["offset"] = (entity["offset"].as_u64().unwrap_or(0)
+                        + CONTINUATION.encode_utf16().count() as u64)
+                        .into();
+                }
+            }
             let cost = limit.measure(&rendered);
             if cost <= limit.budget() {
                 break (chunk, rendered, local);
@@ -188,6 +202,9 @@ fn expand_long_links(
         .filter(|(index, e)| {
             e["type"] == "text_link"
                 && (expand_all
+                    || e["url"]
+                        .as_str()
+                        .is_some_and(|url| !supported_link_target(url))
                     || e["url"].as_str().is_some_and(|url| {
                         let target = if markdown {
                             markdown_link_url(url)
@@ -236,7 +253,17 @@ fn expand_long_links(
                 None
             })
             .unwrap_or(body.len());
-        let extra = format!(" ({})", link["url"].as_str().unwrap_or_default());
+        let target = link["url"].as_str().unwrap_or_default();
+        let label_is_target = body
+            .encode_utf16()
+            .skip(link["offset"].as_u64().unwrap_or(0) as usize)
+            .take(link["length"].as_u64().unwrap_or(0) as usize)
+            .eq(target.encode_utf16());
+        let extra = if label_is_target {
+            String::new()
+        } else {
+            format!(" ({target})")
+        };
         body.insert_str(byte, &extra);
         let added = extra.encode_utf16().count() as u64;
         entities.retain(|e| *e != link);
@@ -249,6 +276,20 @@ fn expand_long_links(
                 entity["length"] = (length + added).into();
             }
         }
+    }
+}
+
+fn supported_link_target(target: &str) -> bool {
+    if target.chars().any(char::is_control) || target.trim() != target {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(target) else {
+        return false;
+    };
+    match url.scheme() {
+        "http" | "https" | "tg" => url.host_str().is_some(),
+        "mailto" => !url.path().is_empty(),
+        _ => false,
     }
 }
 
@@ -413,7 +454,12 @@ fn telegram_text(source: &str) -> (String, Vec<serde_json::Value>) {
                 }
                 if stack.last().is_some_and(|(tag, _, _)| *tag == end) {
                     let (_, start, mut entity) = stack.pop().unwrap();
-                    let length = text.encode_utf16().count() - start;
+                    let mut length = text.encode_utf16().count() - start;
+                    if length == 0 && entity["type"] == "text_link" {
+                        let target = entity["url"].as_str().unwrap_or_default();
+                        text.push_str(target);
+                        length = target.encode_utf16().count();
+                    }
                     if length > 0 {
                         entity["offset"] = start.into();
                         entity["length"] = length.into();
@@ -496,6 +542,109 @@ mod tests {
             attachments: vec![],
             metadata: None,
             reply_to_platform_message_id: Some("42".into()),
+        }
+    }
+
+    #[test]
+    fn assistant_empty_link_labels_keep_the_destination() {
+        for platform in ["telegram", "discord", "slack", "whatsapp"] {
+            for markup in ["![]", "[]"] {
+                let parts = assistant_parts(
+                    &format!("See this:\n\n{markup}(https://example.test/diagram.png)"),
+                    platform,
+                    "https://nyxid.test/thread",
+                );
+                let delivered: String = parts
+                    .iter()
+                    .map(|part| {
+                        format!(
+                            "{} {}",
+                            part.text.as_deref().unwrap_or_default(),
+                            part.metadata.as_ref().unwrap_or(&serde_json::Value::Null)
+                        )
+                    })
+                    .collect();
+                assert!(
+                    delivered.contains("https://example.test/diagram.png"),
+                    "{platform}: {delivered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn assistant_unsupported_link_targets_remain_visible_without_entities() {
+        for target in [
+            "./README.md",
+            "/tmp/report.txt",
+            "#details",
+            "javascript:alert",
+            "https://",
+        ] {
+            let parts = assistant_parts(
+                &format!("Read [the file]({target}) for setup."),
+                "telegram",
+                "https://nyxid.test/thread",
+            );
+            let delivered: String = parts
+                .iter()
+                .filter_map(|part| part.text.as_deref())
+                .collect();
+            assert!(delivered.contains("the file") && delivered.contains(target));
+            assert!(parts.iter().all(|part| {
+                part.metadata.as_ref().unwrap()["entities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|entity| entity["type"] != "text_link")
+            }));
+        }
+        for target in [
+            "https://example.test/path",
+            "http://example.test/path",
+            "tg://user?id=42",
+            "mailto:help@example.test",
+        ] {
+            let parts = assistant_parts(
+                &format!("Read [this]({target})."),
+                "telegram",
+                "https://nyxid.test/thread",
+            );
+            assert!(parts.iter().any(|part| {
+                part.metadata.as_ref().unwrap()["entities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entity| entity["url"] == target)
+            }));
+        }
+    }
+
+    #[test]
+    fn assistant_whitespace_continuations_remain_deliverable() {
+        let spaces = " ".repeat(8200);
+        let source = format!("```text\nstart🦉{spaces}end\n```");
+        let parts = assistant_parts(&source, "telegram", "https://nyxid.test/thread");
+        assert!(parts.iter().all(|part| {
+            let text = part.text.as_deref().unwrap();
+            !text.trim().is_empty() && text.encode_utf16().count() <= 4096
+        }));
+        let delivered: String = parts
+            .iter()
+            .filter_map(|part| part.text.as_deref())
+            .collect();
+        assert!(delivered.contains("start🦉") && delivered.ends_with("end"));
+        assert_eq!(
+            delivered.replace("Whitespace continuation:\n", ""),
+            format!("start🦉{spaces}end")
+        );
+        for part in parts {
+            let text: Vec<_> = part.text.unwrap().encode_utf16().collect();
+            for entity in part.metadata.unwrap()["entities"].as_array().unwrap() {
+                let start = entity["offset"].as_u64().unwrap() as usize;
+                let end = start + entity["length"].as_u64().unwrap() as usize;
+                assert!(String::from_utf16(&text[start..end]).is_ok());
+            }
         }
     }
 

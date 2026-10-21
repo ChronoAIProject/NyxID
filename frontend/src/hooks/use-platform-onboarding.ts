@@ -1,4 +1,5 @@
 import { orgListResponseSchema } from "@/schemas/orgs";
+import { useMemo } from "react";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
@@ -179,12 +180,23 @@ export function useRevokeBinding() {
   });
 }
 export function useBindingPreview(code: string) {
+  const request = useMemo(
+    () => (code ? crypto.randomUUID() : undefined),
+    [code],
+  );
   return useQuery({
-    queryKey: ["onboarding-link-preview", code],
+    queryKey: ["onboarding-link-preview", request],
     enabled: !!code,
     retry: false,
     gcTime: 0,
     staleTime: 0,
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) =>
+      query.state.dataUpdateCount + query.state.errorUpdateCount < 120 &&
+      query.state.data?.state === "awaiting_chat_confirmation" &&
+      Date.parse(query.state.data.expires_at) > Date.now()
+        ? 3000
+        : false,
     queryFn: async () =>
       bindingPreviewSchema.parse(
         await apiClient("/onboarding/link/preview", {
@@ -198,9 +210,11 @@ export function useBindingDecision(code: string) {
   const actor = useAuthStore((s) => s.user?.id);
   const client = useQueryClient();
   return useMutation({
+    gcTime: 0,
+    retry: false,
     mutationFn: async (input: {
       approve: boolean;
-      matched_code: string;
+      matched_code?: string;
       replace_existing: boolean;
     }) =>
       bindingPreviewSchema.parse(
@@ -218,7 +232,7 @@ export function useBindingDecision(code: string) {
         ),
       ),
     onSuccess: () =>
-      client.invalidateQueries({ queryKey: ["onboarding-link-preview", code] }),
+      client.invalidateQueries({ queryKey: ["onboarding-link-preview"] }),
   });
 }
 export function useAdminPlatformProfiles(before?: string) {

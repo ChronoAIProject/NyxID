@@ -226,3 +226,5 @@ pub(crate) mod platform_native_reply_handle;
 pub mod credit_allocation_request;
 pub mod credit_service_limit;
 pub mod oauth_delegation_authority;
+
+pub mod platform_help;

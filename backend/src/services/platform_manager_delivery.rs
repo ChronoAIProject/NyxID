@@ -328,7 +328,19 @@ fn append_card_notices(
     }
     if chat_actions < cards.len() {
         notices.push_str(&format!(
-            "\n\nPending actions require review in NyxID: {}",
+            "\n\nPending actions require review in NyxID: <{}>",
+            conversation_url(frontend, &message.conversation_id)
+        ));
+    }
+    if chat != ChatPresentation::Telegram
+        && message.attachments.iter().any(|attachment| {
+            attachment.origin == "tool"
+                && attachment.chat_delivery != Some(false)
+                && !(attachment.chat_delivery.is_none() && attachment.label == "Machine screenshot")
+        })
+    {
+        notices.push_str(&format!(
+            "\n\nThis chat cannot receive these attachments. Open them in NyxID: <{}>",
             conversation_url(frontend, &message.conversation_id)
         ));
     }
@@ -627,6 +639,15 @@ pub(crate) async fn queue_faq_in_session(
     controls: &PlatformBotRuntimeControls,
     text: &str,
 ) -> AppResult<()> {
+    let help = super::platform_help_service::published(db, &update.profile_id).await?;
+    let article_ids = super::platform_faq_service::select_from(
+        text,
+        super::platform_faq_service::all_articles(&help.content),
+    );
+    let help = crate::models::platform_help::HelpReference {
+        library_id: help.library_id,
+        revision: help.revision,
+    };
     let now = Utc::now();
     let row = Delivery {
         id: uuid::Uuid::new_v4().to_string(),
@@ -641,7 +662,8 @@ pub(crate) async fn queue_faq_in_session(
         origin: None,
         origin_turn_id: None,
         reference: DeliveryReference::Faq {
-            article_ids: super::platform_faq_service::select(text)?,
+            help: Some(help),
+            article_ids,
             linking_enabled: controls.personal_enabled,
             public_policy_revision: controls.public_policy_revision,
         },
@@ -674,7 +696,8 @@ pub(crate) async fn deliver_faq(
     let Some(row) = row else {
         return Ok(false);
     };
-    let body = super::platform_faq_service::render_for(&row.reference, &row.entry)?;
+    let body =
+        super::platform_faq_service::render_saved(&state.db, &row.reference, &row.entry).await?;
     send(state, identity, None, row, Zeroizing::new(body), api).await?;
     Ok(true)
 }
@@ -725,7 +748,9 @@ async fn fence_transport_in_session(
                 .collection::<PlatformCredential>(
                     crate::models::platform_credential::COLLECTION_NAME,
                 )
-                .find_one(doc! {"provider":"telegram-new"})
+                .find_one(super::telegram_manager_registry::filter(
+                    &row.manager_bot_id,
+                ))
                 .session(&mut *session)
                 .await?;
             if current
@@ -910,7 +935,13 @@ async fn validate_in_session(
                     != (IngressAudience::Public {
                         public_policy_revision: *public_policy_revision,
                     })
-                || body != super::platform_faq_service::render_for(&row.reference, &row.entry)?
+                || body
+                    != super::platform_faq_service::render_saved(
+                        &state.db,
+                        &row.reference,
+                        &row.entry,
+                    )
+                    .await?
             {
                 return Err(refused());
             }
@@ -1386,7 +1417,7 @@ async fn capture_material_in_session(
         ))));
     }
     let credential=state.db.collection::<PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME)
-        .find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&row.manager_bot_id,"fields.observation_id":observation,"fields.webhook_ready":"true"})
+        .find_one(doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &row.manager_bot_id)]}, "fields.manager_bot_id": &row.manager_bot_id,"fields.observation_id":observation,"fields.webhook_ready":"true"})
         .session(&mut *session).await?.ok_or_else(refused)?;
     Ok(CapturedSend::Ready(CapturedMaterial::Telegram(Box::new(
         credential,
@@ -1709,19 +1740,27 @@ async fn send_claimed(
     };
     let mut rendered = body.to_string();
     if let Some(token) = &credential {
-        rendered.push_str(
-            &media::send_saved(
-                state,
-                row,
-                claim_id,
-                body.as_str(),
-                identity.as_ref(),
-                public.as_deref(),
-                token,
-                api,
-            )
-            .await?,
-        );
+        let media = media::send_saved(
+            state,
+            row,
+            claim_id,
+            body.as_str(),
+            identity.as_ref(),
+            public.as_deref(),
+            token,
+            api,
+        )
+        .await;
+        match media {
+            Ok(note) => rendered.push_str(&note),
+            Err(error) if error.retry_after_seconds().is_some() => {
+                let retry_at =
+                    Utc::now() + Duration::seconds(error.retry_after_seconds().unwrap() as i64);
+                finish(state, row, claim_id, "pending", vec![], Some(retry_at)).await?;
+                return Ok(DeliveryOutcome::Deferred { retry_at });
+            }
+            Err(error) => return Err(error),
+        }
     }
     let parts = super::channel_reply_plan::assistant_parts(&rendered, chat.platform(), &url);
     let plan = journal::begin(
@@ -1736,6 +1775,9 @@ async fn send_claimed(
     let mut telegram_ids = Vec::new();
     let mut platform_ids = Vec::new();
     for (index, part) in parts.into_iter().enumerate() {
+        if plan.parts[index].state != TextPartState::Sent {
+            pace_part(state, row, claim_id).await?;
+        }
         // Recheck the complete captured route and current owner generation before
         // every effect, including after a prefix was accepted or a retry waited.
         let authorized = revalidate_part(
@@ -1867,6 +1909,44 @@ async fn send_claimed(
             platform_message_ids: platform_ids,
         }
     })
+}
+
+async fn pace_part(state: &AppState, row: &Delivery, claim: &str) -> AppResult<()> {
+    loop {
+        if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
+            doc! {"_id":&row.id,"state":"dispatching","claim_id":claim,"expires_at":{"$gt":bson::DateTime::now()}},
+            doc! {"$set":{"updated_at":bson::DateTime::now()}},
+        ).await?.matched_count != 1 {
+            return Err(refused());
+        }
+        let chat = super::coordination_service::RateWindowStore::admit(
+            &state.db,
+            "manager_part_chat",
+            &format!("{}:{}", manager_lane(row), scope::actor_string(&row.sender)),
+            1,
+            std::time::Duration::from_secs(1),
+        )
+        .await?;
+        if chat.allowed {
+            let personal = matches!(row.reference, DeliveryReference::Reply { .. });
+            let lane = super::coordination_service::RateWindowStore::admit(
+                &state.db,
+                if personal {
+                    "manager_part_personal"
+                } else {
+                    "manager_part_public"
+                },
+                &manager_lane(row),
+                if personal { 24 } else { 4 },
+                std::time::Duration::from_secs(1),
+            )
+            .await?;
+            if lane.allowed {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    }
 }
 
 async fn revalidate_part(
@@ -2783,7 +2863,9 @@ pub async fn sweep(
                     .transpose()?,
                 DeliveryReference::Handoff => Some(handoff_text().to_owned()),
                 DeliveryReference::Faq { .. } => {
-                    super::platform_faq_service::render_for(&row.reference, &row.entry).ok()
+                    super::platform_faq_service::render_saved(&state.db, &row.reference, &row.entry)
+                        .await
+                        .ok()
                 }
                 DeliveryReference::Command { .. } | DeliveryReference::PublicSignup { .. } => None,
             };
@@ -2894,6 +2976,40 @@ mod native_render_tests {
             "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(10)),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn native_attachment_fallback_keeps_the_exact_thread_without_linking_plain_replies() {
+        for platform in [EntryPlatform::Discord, EntryPlatform::Slack] {
+            for text in ["", "Here is the report."] {
+                let mut message = saved(text);
+                let render = |message: &AssistantMessage| {
+                    append_card_notices(
+                        message,
+                        "https://app.nyxid.test/old?secret=discard#discard",
+                        &[],
+                        "exact-thread-key",
+                        None,
+                        ChatPresentation::Native(platform),
+                    )
+                    .unwrap()
+                };
+                assert!(!render(&message).contains("/assistant?c="));
+                message.attachments.push(
+                    bson::from_document(doc! {
+                        "id":"report", "origin":"tool", "content_type":"application/pdf",
+                        "size":100_i64, "label":"Report",
+                    })
+                    .unwrap(),
+                );
+                let output = render(&message);
+                assert!(output.starts_with(text));
+                assert!(output.contains("Open them in NyxID: <https://app.nyxid.test/assistant?c=nyxa-0123456789abcdef0123456789abcdef>"));
+                assert!(!output.contains("discard"));
+                message.attachments[0].chat_delivery = Some(false);
+                assert!(!render(&message).contains("/assistant?c="));
+            }
+        }
     }
 
     #[test]

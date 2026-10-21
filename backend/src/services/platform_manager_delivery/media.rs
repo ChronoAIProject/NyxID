@@ -208,10 +208,24 @@ pub(super) async fn send_saved(
         let (status, code) = match loaded {
             Err(_) => (ImageDeliveryState::Failed, Some("unavailable")),
             Ok((mime, bytes)) => {
-                if !revalidate_part(state, row, claim, body, identity, public).await? {
-                    let _ = claims::release(&state.db, &id, &attempt).await;
-                    missing += 1;
-                    continue;
+                let admission = async {
+                    pace_part(state, row, claim).await?;
+                    revalidate_part(state, row, claim, body, identity, public).await
+                }
+                .await;
+                match admission {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let _ = claims::release(&state.db, &id, &attempt).await;
+                        missing += 1;
+                        continue;
+                    }
+                    Err(error) => {
+                        // No provider I/O has started; retain a retryable claim
+                        // when a preflight database/authority check fails.
+                        let _ = claims::release(&state.db, &id, &attempt).await;
+                        return Err(error);
+                    }
                 }
                 let image = mime.starts_with("image/");
                 let extension = match mime.as_str() {
@@ -249,6 +263,16 @@ pub(super) async fn send_saved(
                 .await;
                 match result {
                     Ok(Ok(Some(_))) => (ImageDeliveryState::Sent, None),
+                    Ok(Err(error)) if error.retry_after_seconds().is_some() => {
+                        if matches!(
+                            claims::release(&state.db, &id, &attempt).await?,
+                            claims::ImageCompletion::Recorded
+                        ) {
+                            return Err(error);
+                        }
+                        uncertain = true;
+                        (ImageDeliveryState::Unknown, None)
+                    }
                     Ok(Err(error))
                         if !crate::services::channel_media_service::is_delivery_uncertain(
                             &error,

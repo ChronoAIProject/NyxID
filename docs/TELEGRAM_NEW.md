@@ -64,7 +64,7 @@ NyxID keeps the manager webhook and its verification secret. Ordinary private, g
 
 **Every manager-channel callback carries only delivery authentication and a message-bound reply token.** NyxID never adds `X-NyxID-User-Token` for this credential source, including explicit conversation and sender routes. The receiving agent can reply through `POST /api/v1/channel-relay/reply`, but an inbound Telegram message does not delegate the channel owner's NyxID service permissions. Other channel bots retain their existing scoped owner-token behavior. Scope any credentials held directly by the public agent separately. Telegram senders are not automatically mapped to NyxID accounts; account-specific operations require a separate authenticated workflow.
 
-A plain `/start` welcomes chat users and offers **Create bot** when the manager channel is active. Payload-bearing setup links and `/recover` keep their existing workflow, including commands addressed to the configured manager username. Creation events, manager commands, and callback queries remain reserved and are never forwarded to the agent. Generic agent inline-button callbacks are not supported. Ordinary replies retain the referenced message ID but omit quoted message content. Recognizable claim codes are removed from ordinary text, captions, and supported link metadata before relay; claim messages use Telegram's protected-content option. This reduces accidental disclosure, but is not a general secret detector: users must still enter claim codes only in NyxID. Neither raw updates nor message bodies are persisted by NyxID.
+A plain `/start` welcomes chat users and offers **Create bot** when the manager channel is active. Payload-bearing setup links and `/recover` keep their existing workflow, including commands addressed to the configured manager username. Creation events, manager commands, and callback queries remain reserved and are never forwarded to the agent. Generic agent inline-button callbacks are not supported. Ordinary replies retain the referenced message ID and safely extracted forwarded/quoted content, including visible text, captions, hidden link destinations and available author information. The manager's own setup messages remain excluded. Forwarded and quoted material is labelled as third-party reference data. Recognizable claim codes are removed from ordinary text, captions, and supported link metadata before relay; claim messages use Telegram's protected-content option. This reduces accidental disclosure, but is not a general secret detector: users must still enter claim codes only in NyxID. Neither raw updates nor message bodies are persisted by NyxID.
 
 After authentication and classification, ordinary messages are acknowledged without waiting for the agent callback. Ordinary lookup, parsing, and callback failures are logged with metadata and dropped. Authentication and management-event failures still return errors so Telegram can retry them. Each backend process allows **32 concurrent background deliveries**, each bounded by the existing callback timeout plus ten seconds for other work. At capacity, NyxID acknowledges and drops the ordinary message with a metadata-only warning. This limit is deliberately retained in this version. Deliveries can complete out of order; a process shutdown or callback failure can lose a reply, with no durable queue or automatic replay. Telegram may redeliver if it does not receive the acknowledgement, so agents must also tolerate duplicates. Telegram's shared pending-update and delivery-error checks still apply to creation: heavy ingress or a shared outage can delay or prevent automatic connection. With a remote KMS, per-request credential decryption also adds network work; no production throughput guarantee is implied.
 
@@ -353,3 +353,76 @@ fence every unfinished multipart parent/job; preserve the journals and v2 image
 claims. Do not delete a journal to force a resend. Text journals have no TTL so a
 later retry cannot forget acceptance; owner deletion purges them. Existing v1
 image rollout and sunset requirements remain in force.
+
+## Telegram forwarding and secure pairing
+
+A linked personal manager accepts forwarded text, captions, quotes, hidden links,
+and Telegram file handles, including media attached to an external reply. The
+owner's question stays separate from quoted JSON reference data. Original files
+are downloaded through the authenticated Telegram adapter and stored encrypted
+with the owner turn in the same transaction. The adapter enforces the configured
+media limit and Telegram's 20 MiB download bound, with at most ten files per turn.
+Images and supported documents use the existing extraction path. Other files
+remain available in full; unsupported audio/video is not represented as having
+been transcribed. A `t.me` URL alone does not grant Bot API access to the source
+message: use Telegram's Forward action to supply the content.
+
+Forwarded, quoted, edited, bot-originated and unverified input cannot pair an
+account or decide a pending action. Native manager controls consume proofs before
+any agent call; fallback input removes pairing proofs and claim codes, including
+those in link metadata and quotes. The manager's embedded setup messages are never
+used as agent context. Relay metadata stores only original-message eligibility;
+raw provider updates remain ephemeral.
+
+Ordinary child bots using CMA also require its authenticated `telegram_input`
+envelope for native forwarding provenance, quotes and hidden links. Missing
+provenance refuses commands and approvals. The NyxID-relay path can recover
+provenance and media handles from its exact authenticated message record; its
+text envelope stays byte-identical to Telegram for CMA verification. Enable
+`CMAEG_MEDIA_ENABLED=true` in the gateway to admit media, including external
+reply media, after upgrading its forwarding contract. The manager's direct
+Telegram path does not depend on this gateway setting.
+
+After `/login` (or `/link` for personal access), review the account in NyxID and
+choose **Open Telegram to finish**. Telegram sends a purpose-specific `/start`
+payload. It must come from the same original private sender and manager; browser
+approval alone grants no chat authority. A **Copy** button supplies the equivalent
+`/confirm P-…` command. `/check` reports pending approval, waiting confirmation,
+linked or expired status, and never completes pairing. The review page polls
+until completion or expiry. Telegram may require its own Start prompt.
+
+The older onboarding-only flow has the same return-button and copy experience,
+using a separate fresh `O-…` proof generated after browser approval. The initiation
+code is never accepted as return proof. On opted-in managers, `/onboarding` starts
+this separate flow; on legacy guides use `/link`. Their `/check` or `/status`
+reports onboarding status only. Review links use fragments, are removed before
+analytics/router startup, and survive login in this tab's session storage. Legacy
+query links are redacted in frontend access/referrer logs. A reload after approval
+cannot recover the one-time return proof; start a fresh review if it is lost.
+
+## Multiple Telegram managers
+
+The existing **Platform Credentials → Telegram — bot creation** entry remains the
+default and requires no data migration. In **Admin → Platform bots → Telegram
+managers**, a first-party human administrator can add additional BotFather tokens.
+Each remote bot must have bot management enabled. Connect its channel and prepare
+its shared bot profile as for the default manager. A deployment supports up to
+100 configured managers, including the default.
+
+Each additional manager has a distinct encrypted credential row, verification
+secret, observation identity and webhook at
+`/api/v1/webhooks/channel/telegram-new/manager/{numeric_bot_id}`. The default
+continues using the existing route without a suffix. Authentication, recovery,
+creation verification and delivery always resolve the selected identity. Repairing
+one token preserves its webhook secret and observation; it cannot replace another
+manager. Clear an additional manager from its reviewed admin control only after
+removing its active channel/children and finishing or cancelling its setup requests.
+Claim redemption and manager removal share the manager configuration lease.
+
+Upgrade all API replicas, callbacks and workers before adding managers or using
+fresh onboarding proofs. Older binaries ignore additional credential rows and
+cannot serve their scoped routes or child recovery; they also accept the old
+onboarding proof contract. Keep old binaries out of serving/restart paths. Before
+rollback, pause managers, drain deliveries and expire pending pairing requests;
+use a compatible binary that enforces the new proof and credential boundaries.
+Do not rewrite scoped rows into the default provider to force compatibility.

@@ -10,7 +10,7 @@ use crate::{
     AppState, errors::AppResult, models::platform_bot_config::PlatformBotConfig, mw::auth::AuthUser,
 };
 
-async fn admin(state: &AppState, auth: &AuthUser) -> AppResult<()> {
+pub(crate) async fn admin(state: &AppState, auth: &AuthUser) -> AppResult<()> {
     super::login_client_context::require_first_party_human(auth)?;
     if state.db.collection::<mongodb::bson::Document>(crate::models::user::COLLECTION_NAME)
         .find_one(mongodb::bson::doc! {"_id":auth.user_id.to_string(),"is_active":true,"$or":[{"user_type":"person"},{"user_type":{"$exists":false}}]})
@@ -312,6 +312,12 @@ async fn repair_with_service(
             "Platform configuration changed".into(),
         ));
     }
+    let service =
+        service
+            .for_manager(row.manager_bot_id.parse().map_err(|_| {
+                crate::errors::AppError::Conflict("Invalid manager identity".into())
+            })?)
+            .await?;
     service
         .configure_manager(
             &auth.user_id.to_string(),
@@ -320,7 +326,7 @@ async fn repair_with_service(
         )
         .await?;
     let row = configs::get(&state.db, &id.to_string()).await?;
-    let row = configs::verify_manager(service, &row.id, row.generation, &auth.user_id.to_string())
+    let row = configs::verify_manager(&service, &row.id, row.generation, &auth.user_id.to_string())
         .await?;
     audit_service::log_for_user(
         state.db.clone(),

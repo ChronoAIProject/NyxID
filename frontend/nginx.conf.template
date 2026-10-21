@@ -3,6 +3,7 @@
 map $request_uri $nyxid_has_claim {
     default 0;
     ~[?&]claim(?:=|&|$) 1;
+    ~^/onboarding/link(?:[?]|$) 1;
 }
 map $nyxid_has_claim $nyxid_referrer_policy {
     0 "strict-origin-when-cross-origin";
@@ -15,6 +16,7 @@ map $nyxid_has_claim $nyxid_access_request {
 map $http_referer $nyxid_access_referrer {
     default $http_referer;
     ~[?&]claim= "REDACTED";
+    ~/onboarding/link(?:[?]|$) "REDACTED";
 }
 log_format nyxid_frontend '$remote_addr - $remote_user [$time_local] '
     '"$nyxid_access_request" $status $body_bytes_sent '

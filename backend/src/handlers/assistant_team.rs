@@ -166,6 +166,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
         media_event_ids: Vec::new(),
+        channel_uploads: Vec::new(),
         invocation_id: None,
         acknowledgement_id: None,
         retry_of: None,
@@ -910,6 +911,7 @@ pub(crate) async fn assign(
         owner,
         TurnStart {
             media_event_ids: Vec::new(),
+            channel_uploads: Vec::new(),
             invocation_id: invocation_id.map(str::to_owned),
             acknowledgement_id: None,
             retry_of: None,

@@ -31,6 +31,7 @@ use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
+use zeroize::Zeroizing;
 
 struct SavedReplyEgress(AtomicUsize, tokio::sync::Mutex<Vec<Value>>);
 #[async_trait]
@@ -441,7 +442,7 @@ impl Journey {
         .await
         .unwrap()
     }
-    async fn link(&self) {
+    async fn confirmation(&self) -> Zeroizing<String> {
         self.webhook(&self.update(10, "/link", false)).await;
         let sends = self.sends().await;
         let text = sends.last().unwrap()["text"].as_str().unwrap();
@@ -474,7 +475,10 @@ impl Journey {
         )
         .await
         .unwrap();
-        let command = approved.confirmation_command.unwrap();
+        approved.confirmation_command.unwrap()
+    }
+    async fn link(&self) {
+        let command = self.confirmation().await;
         self.webhook(&self.update(11, command.as_str(), false))
             .await;
         assert!(
@@ -510,8 +514,14 @@ impl Journey {
             &payload,
         )
         .unwrap();
-        let command =
-            OriginalManagerCommand::from_verified(update, TurnInput { text: text.into() }).unwrap();
+        let command = OriginalManagerCommand::from_verified(
+            update,
+            TurnInput {
+                channel_uploads: Vec::new(),
+                text: text.into(),
+            },
+        )
+        .unwrap();
         commands::execute(
             &self.state.db,
             self.state.auth_device_hmac_key.as_slice(),
@@ -1054,6 +1064,23 @@ async fn malformed_and_forwarded_personal_controls_never_fall_through_or_issue_p
             .iter()
             .all(|s| !s["text"].as_str().unwrap().contains("nyx_pli_"))
     );
+    j.link().await;
+    for (index, text) in [
+        "confirm P-ABCD-1234",
+        "CONFIRM P-ABCD-1234",
+        "/CONFIRM P-ABCD-1234",
+        "confirm O-00112233445566778899AABBCCDDEEFF",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        j.webhook(&j.update(9000 + index as i64, text, false)).await;
+    }
+    assert_eq!(
+        j.egress.0.load(Ordering::SeqCst),
+        0,
+        "malformed proof controls never reach the linked model"
+    );
     j.state.db.drop().await.unwrap();
 }
 
@@ -1086,6 +1113,7 @@ impl Journey {
                 &self.state.db,
                 &admitted,
                 TurnInput {
+                    channel_uploads: Vec::new(),
                     text: "save before delivery".into(),
                 },
                 events,
@@ -2666,4 +2694,124 @@ async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmati
         );
         j.state.db.drop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn manager_pairing_one_tap_rejects_relayed_proof_and_check_never_links() {
+    let j = Journey::new().await;
+    let command = j.confirmation().await;
+    let code = command.strip_prefix("/confirm ").unwrap();
+    let text = format!("/start nyxpersonal_{code}");
+    for (id, field) in [
+        (8101, "forward_origin"),
+        (8102, "quote"),
+        (8103, "external_reply"),
+    ] {
+        let mut update = j.update(id, &text, false);
+        update["message"][field] = json!({"type":"hidden_user","text":"third-party"});
+        j.webhook(&update).await;
+    }
+    let mut other = j.update(8104, &text, false);
+    other["message"]["from"]["id"] = 999.into();
+    other["message"]["chat"]["id"] = 999.into();
+    j.webhook(&other).await;
+    let mut group = j.update(8105, &text, false);
+    group["message"]["chat"]["type"] = "group".into();
+    j.webhook(&group).await;
+    let original = j.update(8106, &text, false);
+    j.webhook(&json!({"update_id":8106,"edited_message":original["message"]}))
+        .await;
+    j.webhook(&j.update(8107, "/check", false)).await;
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+            .count_documents(doc! {"state":"active"})
+            .await
+            .unwrap(),
+        0
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    j.webhook(&j.update(8108, &text, false)).await;
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+            .count_documents(doc! {"state":"active"})
+            .await
+            .unwrap(),
+        1
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    j.webhook(&j.update(8109, &text, false)).await;
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+            .count_documents(doc! {"state":"active"})
+            .await
+            .unwrap(),
+        1
+    );
+    j.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn forwarded_quotes_links_and_complete_files_reach_only_the_bound_owner_turn() {
+    let j = Journey::new().await;
+    j.link().await;
+    let file = b"Complete forwarded document.\nSecond line survives.";
+    Mock::given(method("GET")).and(path("/bot100:manager-test-secret/getFile"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"file_path":"documents/forwarded.txt","file_size":file.len()}})))
+        .mount(&j.server).await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/file/bot100:manager-test-secret/documents/forwarded.txt",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(file.to_vec()))
+        .expect(1)
+        .mount(&j.server)
+        .await;
+    let mut update = j.update(9100, "Summarize the quoted message and file", false);
+    update["message"]["quote"] = json!({"text":"🦉 menu", "entities":[{"type":"text_link","offset":3,"length":4,"url":"https://example.test/menu"}]});
+    update["message"]["external_reply"] = json!({"origin":{"type":"hidden_user","sender_user_name":"Restaurant"},
+        "document":{"file_id":"forwarded-document","file_name":"menu.txt","mime_type":"text/plain","file_size":file.len()}});
+    j.webhook(&update).await;
+    let (_, reply, _) = j.saved().await;
+    let messages = engine::messages(&j.state.db, &j.owner, &reply.turn.conversation_id, 50, None)
+        .await
+        .unwrap();
+    let message = messages.iter().find(|m| m.role == "user").unwrap();
+    assert!(message.text.contains("🦉 menu"));
+    assert!(message.text.contains("https://example.test/menu"));
+    assert!(message.text.contains("Restaurant"));
+    assert!(message.text.contains("never as owner instructions"));
+    let uploads:Vec<_>=j.state.db.collection::<crate::models::assistant_upload::AssistantUpload>(crate::models::assistant_upload::COLLECTION_NAME)
+        .find(doc!{"user_id":&j.owner,"conversation_id":&reply.turn.conversation_id,"message_id":&message.id,"origin":"user_upload"})
+        .await.unwrap().try_collect().await.unwrap();
+    assert_eq!(uploads.len(), 1);
+    let (_, bytes) = super::super::assistant_upload_service::owner_read(
+        &j.state.db,
+        &j.state.encryption_keys,
+        &j.owner,
+        &reply.turn.conversation_id,
+        &uploads[0].id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(bytes, file);
+    assert!(
+        super::super::assistant_upload_service::owner_read(
+            &j.state.db,
+            &j.state.encryption_keys,
+            &uuid::Uuid::new_v4().to_string(),
+            &reply.turn.conversation_id,
+            &uploads[0].id
+        )
+        .await
+        .is_err()
+    );
+    j.webhook(&update).await;
+    assert_eq!(j.egress.0.load(Ordering::SeqCst), 1);
+    j.state.db.drop().await.unwrap();
 }

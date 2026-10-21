@@ -567,6 +567,7 @@ pub struct TurnRequest {
 #[derive(Clone)]
 pub struct TurnStart {
     pub media_event_ids: Vec<String>,
+    pub channel_uploads: Vec<super::assistant_upload_service::PreparedChannelUpload>,
     pub invocation_id: Option<String>,
     pub acknowledgement_id: Option<String>,
     pub retry_of: Option<String>,
@@ -737,6 +738,7 @@ impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
             media_event_ids: Vec::new(),
+            channel_uploads: Vec::new(),
             invocation_id: None,
             acknowledgement_id: request.acknowledgement_id.clone(),
             retry_of: request.retry_of.clone(),
@@ -2783,8 +2785,13 @@ pub(crate) async fn begin_owner_turn_in_session(
             .session(&mut *session)
             .await?;
     }
-    if start.guest && !start.attachment_ids.is_empty() {
+    if start.guest && (!start.attachment_ids.is_empty() || !start.channel_uploads.is_empty()) {
         return Err(AppError::Forbidden("Uploads are owner-only".into()));
+    }
+    if start.channel_uploads.len() + start.attachment_ids.len() + start.group_attachments.len()
+        > super::assistant_upload_service::MAX_FILES
+    {
+        return Err(AppError::ChannelMediaTooLarge);
     }
     let mut uploads = Box::pin(super::assistant_upload_service::bind(
         db,
@@ -2795,11 +2802,25 @@ pub(crate) async fn begin_owner_turn_in_session(
         session,
     ))
     .await?;
+    uploads.extend(
+        super::assistant_upload_service::bind_channel_uploads(
+            db,
+            session,
+            user_id,
+            &id,
+            &message_id,
+            &start.channel_uploads,
+        )
+        .await?,
+    );
     uploads.extend(start.group_attachments.clone());
     for carried in retry.iter().flat_map(|retry| retry.attachments.iter()) {
         if !uploads.iter().any(|upload| upload.id == carried.id) {
             uploads.push(carried.clone());
         }
+    }
+    if uploads.len() > super::assistant_upload_service::MAX_FILES {
+        return Err(AppError::ChannelMediaTooLarge);
     }
     Box::pin(super::assistant_upload_retention::used_in_turn(
         db,

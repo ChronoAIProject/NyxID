@@ -2041,17 +2041,8 @@ async fn send_post_planned_impl(
                     .await?;
                     return Err(error);
                 }
-                if matches!(error, AppError::RateLimited) {
-                    journal::finish(
-                        &state.db,
-                        &delivery,
-                        index,
-                        &attempt,
-                        TextPartState::Pending,
-                        None,
-                        None,
-                    )
-                    .await?;
+                if let Some(retry_after) = error.retry_after_seconds() {
+                    journal::defer(&state.db, &delivery, index, &attempt, retry_after).await?;
                     return Err(error);
                 }
                 // Provider-specific confirmed refusals retain a terminal outcome.

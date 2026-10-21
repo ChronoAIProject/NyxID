@@ -26,6 +26,9 @@ mod control_feedback;
 #[path = "owner_management.rs"]
 mod owner_management;
 
+#[path = "native_attachments.rs"]
+mod native_attachments;
+
 struct ObservedTransport {
     inner: Arc<dyn ManagerTransportProducer>,
     native: Option<Arc<NativeTestTransport>>,

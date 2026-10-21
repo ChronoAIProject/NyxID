@@ -2985,3 +2985,213 @@ async fn nyxbot_multipart_post_resumes_a_proven_rate_refusal_without_replaying_t
     );
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn nyxbot_multipart_scheduler_recovers_rate_limits_and_crashes_without_replay() {
+    use crate::models::trigger_run::{COLLECTION_NAME as RUNS, RunOutcome, TriggerRun};
+    use crate::services::trigger_schedule::{self as schedules, result_delivery};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    // Each path enters the real scheduler, including a legacy default-NyxBot
+    // run without agent_id. Recovery must reload the saved result from its thread.
+    for scenario in [
+        "rate",
+        "prefix_crash",
+        "complete_crash",
+        "unknown",
+        "legacy",
+    ] {
+        let (f, server) = image_fixture("telegram", "direct").await;
+        schedules::indexes(&f.state.db).await.unwrap();
+        let target = thread(&f).await;
+        let text: String = (0..600)
+            .map(|i| format!("🦉 full result {i}\n\n"))
+            .collect();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .update_one(
+                doc! {"conversation_id":&f.event.conversation_id,"turn_id":&f.event.turn_id},
+                doc! {"$set":{"text":&text}},
+            )
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id":&f.event.conversation_id},
+                doc! {"$set":{"active_turn":null}},
+            )
+            .await
+            .unwrap();
+        let row = engine::get(
+            &f.state.db,
+            OWNER,
+            f.event.conversation_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        let run:TriggerRun=bson::from_document(doc! {
+            "_id":Uuid::new_v4().to_string(),"trigger_id":Uuid::new_v4().to_string(),"user_id":OWNER,
+            "scheduled_at":bson::DateTime::now(),"deadline":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::hours(1)),
+            "outcome":"started","thread_id":&f.event.conversation_id,"turn_id":&f.event.turn_id,
+            "deliver_to":{"type":"chat","chat_id":&target.id},
+            "fence":"test","lease_until":bson::DateTime::now(),
+            "expires_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::days(7)),
+        }).unwrap();
+        f.state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .insert_one(&run)
+            .await
+            .unwrap();
+        f.state.db.collection::<bson::Document>(schedules::WORK).insert_one(doc! {
+            "_id":&run.id,"trigger_id":&run.trigger_id,"kind":"run","at":bson::DateTime::now(),"fence":""
+        }).await.unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let calls = count.clone();
+        Mock::given(path("/bottoken/sendMessage"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n == 1 && scenario == "unknown" {
+                    ResponseTemplate::new(200).set_body_string("lost response")
+                } else if n == 1 && matches!(scenario, "rate" | "prefix_crash") {
+                    ResponseTemplate::new(429).set_body_json(
+                        json!({"ok":false,"error_code":429,"parameters":{"retry_after":20}}),
+                    )
+                } else {
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"ok":true,"result":{"message_id":100+n}}))
+                }
+            })
+            .mount(&server)
+            .await;
+        if matches!(scenario, "prefix_crash" | "complete_crash") {
+            assert!(matches!(
+                result_delivery::claim(&f.state.db, &run).await.unwrap(),
+                result_delivery::Claim::Acquired(_)
+            ));
+            let sent =
+                chats::post_automation_images(&f.state, &run, &target.id, None, &row.id, &text)
+                    .await;
+            assert_eq!(sent.is_ok(), scenario == "complete_crash");
+        } else if scenario == "legacy" {
+            f.state
+                .db
+                .collection::<bson::Document>(RUNS)
+                .update_one(doc! {"_id":&run.id}, doc! {"$set":{"result_claimed":true}})
+                .await
+                .unwrap();
+            let mut legacy = run.clone();
+            legacy.result_claimed = true;
+            crate::handlers::trigger_scheduler::settle_result(&f.state, &row, &legacy, &text, None)
+                .await
+                .unwrap();
+        } else {
+            let (a, b) = tokio::join!(
+                crate::handlers::trigger_scheduler::settle_result(
+                    &f.state, &row, &run, &text, None
+                ),
+                crate::handlers::trigger_scheduler::settle_result(
+                    &f.state, &row, &run, &text, None
+                )
+            );
+            a.unwrap();
+            b.unwrap();
+        }
+        let before = count.load(Ordering::SeqCst);
+        if scenario == "rate" {
+            assert_eq!(before, 2);
+            crate::handlers::trigger_scheduler::settle_result(&f.state, &row, &run, &text, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                before,
+                "must honor provider retry delay"
+            );
+        }
+        // Simulate time passing after a worker loss or a provider retry delay.
+        let past = bson::DateTime::from_chrono(Utc::now() - ChronoDuration::seconds(1));
+        if !matches!(scenario, "unknown" | "legacy") {
+            f.state
+                .db
+                .collection::<bson::Document>(RUNS)
+                .update_one(
+                    doc! {"_id":&run.id},
+                    doc! {"$set":{
+                        "result_delivery.lease_until":past,"result_delivery.retry_at":past
+                    }},
+                )
+                .await
+                .unwrap();
+            f.state
+                .db
+                .collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+                .update_many(doc! {}, doc! {"$set":{"retry_at":past}})
+                .await
+                .unwrap();
+            f.state
+                .db
+                .collection::<bson::Document>(schedules::WORK)
+                .update_one(doc! {"_id":&run.id}, doc! {"$set":{"at":past}})
+                .await
+                .unwrap();
+        }
+        crate::handlers::trigger_scheduler::tick(&f.state)
+            .await
+            .unwrap();
+        let saved = f
+            .state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .find_one(doc! {"_id":&run.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.outcome,
+            if matches!(scenario, "unknown" | "legacy") {
+                RunOutcome::Failed
+            } else {
+                RunOutcome::Completed
+            },
+            "{scenario}"
+        );
+        let bodies: Vec<Value> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        if scenario == "legacy" {
+            assert!(bodies.is_empty());
+        } else {
+            assert_eq!(
+                bodies
+                    .iter()
+                    .filter(|b| b["text"] == bodies[0]["text"])
+                    .count(),
+                1,
+                "accepted prefix must not replay: {scenario}"
+            );
+            if matches!(scenario, "unknown" | "complete_crash") {
+                assert_eq!(bodies.len(), before);
+            }
+            if scenario != "unknown" {
+                let delivered: String = bodies
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !(*i == 1 && matches!(scenario, "rate" | "prefix_crash")))
+                    .map(|(_, b)| b["text"].as_str().unwrap())
+                    .collect();
+                assert_eq!(delivered.trim_end(), text.trim_end());
+            }
+        }
+        f.state.db.drop().await.unwrap();
+    }
+}

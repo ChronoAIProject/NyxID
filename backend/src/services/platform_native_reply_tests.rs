@@ -756,6 +756,7 @@ async fn committed_discord_help(
     let command = OriginalManagerCommand::from_verified(
         admission.verified_update(),
         TurnInput {
+            channel_uploads: Vec::new(),
             text: "/help".into(),
         },
     )
@@ -1332,6 +1333,7 @@ fn retained_signed_native_receipt_produces_real_login_status_and_manager_admissi
                     let command = OriginalManagerCommand::from_verified(
                         update.clone(),
                         TurnInput {
+                            channel_uploads: Vec::new(),
                             text: canonical.into(),
                         },
                     )

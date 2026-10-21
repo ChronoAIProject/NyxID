@@ -209,3 +209,7 @@ mod tools_manager_tests;
 
 pub mod assistant_invocations;
 pub mod call_adapters;
+
+pub mod platform_help;
+
+pub mod telegram_managers;

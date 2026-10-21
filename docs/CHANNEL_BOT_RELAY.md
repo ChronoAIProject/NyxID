@@ -2289,3 +2289,33 @@ parts; distinct authored posts in the same turn remain independent. Changed
 content under the same automation run is rejected. These journals have no TTL
 and are purged on owner deletion. They do not replace ordinary relay receipts or
 the legacy/v2 image migration checks.
+
+### Telegram forwarded input and approval provenance
+
+NyxBot extracts full visible text/captions, hidden link URLs (using Telegram
+UTF-16 offsets), forward origin and quotes from authenticated Telegram input as
+third-party reference data. The relay envelope retains the exact provider text
+for gateway verification. Opaque file handles resolve with the selected channel's
+current token. Manager setup/proof material is scrubbed before model input.
+`ChannelMessage.original_message` is optional boolean metadata. Only `true` from
+the authenticated original event permits owner linking or action-card decisions;
+missing legacy metadata fails closed. Followed-thread dispatch uses the same
+stored eligibility, exact owner and route checks.
+
+For gateway activity, the additive `telegram_input` contract is
+`{"version":1,"original":false,"message":{...}}`. `message` contains only selected
+text, entities, captions, forward origin, quotes and media handles, not a raw
+Telegram update, nested setup message or keyboard. CMA must derive eligibility at
+authenticated ingress, bind the envelope into its activity digest/seal and retain
+it in the public activity projection. NyxID bounds the envelope to 64 KiB. Native
+gateway events without that verified envelope cannot approve actions or pair an
+owner. Relay-sourced gateway events additionally resolve eligibility and media
+handles from the exact NyxID message/channel/route-key/sender metadata. Full native forwarding
+requires the companion CMA change; enabling this NyxID consumer alone does not
+make an older gateway preserve content.
+
+The owner turn atomically binds encrypted inbound files with its message, checks
+owner isolation and applies existing upload retention. Unsupported binary media
+is retained without fabricated extracted text. Aggregate downloaded bytes are
+bounded by the configured limit and 20 MiB; all new and retry-carried attachments
+count against the ten-file turn limit.

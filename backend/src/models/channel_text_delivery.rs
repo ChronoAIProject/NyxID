@@ -14,6 +14,8 @@ pub struct ChannelTextDelivery {
     pub fingerprint: String,
     pub notice: Option<TextDeliveryNotice>,
     pub parts: Vec<TextPart>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub retry_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }

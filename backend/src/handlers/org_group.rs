@@ -173,6 +173,7 @@ async fn run_member(
     .await?;
     let start = engine::TurnStart {
         media_event_ids: Vec::new(),
+        channel_uploads: Vec::new(),
         invocation_id: None,
         acknowledgement_id: None,
         retry_of: None,

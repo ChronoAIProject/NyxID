@@ -549,3 +549,152 @@ async fn manager_outbound_honors_legacy_claims_for_the_owner_channel_alias() {
         j.state.db.drop().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn manager_outbound_media_rate_refusal_resumes_only_the_unsent_attachment() {
+    let j = Journey::new().await;
+    j.link().await;
+    let (destination, reply, mut saved) = j.prepared_reply(7010).await;
+    attach(&j, &mut saved, "application/pdf", b"first private document").await;
+    attach(
+        &j,
+        &mut saved,
+        "application/pdf",
+        b"second private document",
+    )
+    .await;
+    let times = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = times.clone();
+    let count = Arc::new(AtomicUsize::new(0));
+    let calls = count.clone();
+    Mock::given(path("/bot100:manager-test-secret/sendDocument"))
+        .respond_with(move |_: &wiremock::Request| {
+            seen.lock().unwrap().push(std::time::Instant::now());
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            if n == 1 {
+                ResponseTemplate::new(429).set_body_json(
+                    json!({"ok":false,"error_code":429,"parameters":{"retry_after":2}}),
+                )
+            } else {
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"ok":true,"result":{"message_id":700+n}}))
+            }
+        })
+        .mount(&j.server)
+        .await;
+    let body = delivery::render_saved(&saved, &j.state.config.frontend_url);
+    let before = j.sends().await.len();
+    let first = j.deliver(&destination, &reply, body.clone()).await.unwrap();
+    let DeliveryOutcome::Deferred { retry_at } = first else {
+        panic!("retryable media refusal");
+    };
+    assert!(retry_at > Utc::now() + chrono::Duration::milliseconds(1000));
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        j.sends().await.len(),
+        before,
+        "text waits for media outcomes"
+    );
+    let _ = j.deliver(&destination, &reply, body.clone()).await.unwrap();
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        2,
+        "early retries must not call Telegram"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    assert!(matches!(
+        j.deliver(&destination, &reply, body).await.unwrap(),
+        DeliveryOutcome::Sent { .. }
+    ));
+    assert_eq!(count.load(Ordering::SeqCst), 3);
+    let requests = j.server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| String::from_utf8_lossy(&r.body).contains("first private document"))
+            .count(),
+        1
+    );
+    {
+        let sent_times = times.lock().unwrap();
+        assert!(sent_times[2].duration_since(sent_times[1]) >= std::time::Duration::from_secs(2));
+    }
+    assert!(
+        !j.sends().await.last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("could not be confirmed")
+    );
+    j.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn manager_outbound_provider_valid_text_preserves_links_and_whitespace() {
+    let j = Journey::new().await;
+    j.link().await;
+    let (destination, reply, mut saved) = j.prepared_reply(7011).await;
+    saved.text = format!(
+        "Read [the README](./README.md)\n\n![](https://example.test/a.png)\n\n```\nstart{}🦉end\n```",
+        " ".repeat(8200)
+    );
+    j.state
+        .db
+        .collection::<AssistantMessage>(MESSAGES)
+        .replace_one(doc! {"_id":&saved.id}, &saved)
+        .await
+        .unwrap();
+    let times = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = times.clone();
+    Mock::given(path("/bot100:manager-test-secret/sendMessage"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let text = body["text"].as_str().unwrap();
+            let valid = !text.trim().is_empty()
+                && text.encode_utf16().count() <= 4096
+                && body["entities"].as_array().unwrap().iter().all(|e| {
+                    e["type"] != "text_link" || url::Url::parse(e["url"].as_str().unwrap()).is_ok()
+                });
+            seen.lock().unwrap().push(std::time::Instant::now());
+            if valid {
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"ok":true,"result":{"message_id":701}}))
+            } else {
+                ResponseTemplate::new(400).set_body_json(json!({"ok":false,"error_code":400}))
+            }
+        })
+        .with_priority(1)
+        .mount(&j.server)
+        .await;
+    let before = j.sends().await.len();
+    assert!(matches!(
+        j.deliver(
+            &destination,
+            &reply,
+            delivery::render_saved(&saved, &j.state.config.frontend_url)
+        )
+        .await
+        .unwrap(),
+        DeliveryOutcome::Sent { .. }
+    ));
+    let sends = j.sends().await;
+    let text = sends[before..]
+        .iter()
+        .map(|v| v["text"].as_str().unwrap())
+        .collect::<String>();
+    assert!(text.contains("./README.md"));
+    assert!(text.contains("https://example.test/a.png"));
+    assert!(
+        text.replace("Whitespace continuation:\n", "")
+            .contains(&format!("start{}🦉end", " ".repeat(8200)))
+    );
+    {
+        let sent_times = times.lock().unwrap();
+        // Fixed server-clock windows permit adjacent sends across a boundary.
+        // A whole multipart reply must still spend multiple windows.
+        assert!(
+            sent_times.last().unwrap().duration_since(sent_times[0])
+                >= std::time::Duration::from_secs(sent_times.len().saturating_sub(2) as u64)
+        );
+    }
+    j.state.db.drop().await.unwrap();
+}

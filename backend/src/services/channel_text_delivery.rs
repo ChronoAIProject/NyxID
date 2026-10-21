@@ -61,6 +61,7 @@ pub async fn begin_with_notice(
         source_id: source.into(),
         fingerprint: fingerprint.into(),
         notice,
+        retry_at: None,
         parts: vec![
             TextPart {
                 state: TextPartState::Pending,
@@ -111,7 +112,8 @@ pub enum PartClaim {
 pub async fn claim(db: &Database, row: &ChannelTextDelivery, index: usize) -> AppResult<PartClaim> {
     let attempt = uuid::Uuid::new_v4().to_string();
     let mut filter = doc! {"_id": &row.id, "fingerprint": &row.fingerprint,
-    format!("parts.{index}.state"): "pending"};
+    format!("parts.{index}.state"): "pending",
+    "$or":[{"retry_at":bson::Bson::Null},{"retry_at":{"$lte":bson::DateTime::now()}}]};
     for previous in 0..index {
         filter.insert(format!("parts.{previous}.state"), "sent");
     }
@@ -129,6 +131,18 @@ pub async fn claim(db: &Database, row: &ChannelTextDelivery, index: usize) -> Ap
     let current = load(db, &row.logical_key).await?.ok_or_else(unconfirmed)?;
     match current.parts.get(index) {
         Some(part) if part.state == TextPartState::Sent => Ok(PartClaim::Sent(part.clone())),
+        Some(part)
+            if part.state == TextPartState::Pending
+                && current.retry_at.is_some_and(|at| at > chrono::Utc::now()) =>
+        {
+            let seconds = (current.retry_at.unwrap() - chrono::Utc::now())
+                .num_seconds()
+                .max(0) as u64
+                + 1;
+            Err(AppError::RateLimitedWithRetry {
+                retry_after: seconds,
+            })
+        }
         Some(part) if part.state == TextPartState::Refused => {
             Err(AppError::Conflict("Multipart delivery was refused".into()))
         }
@@ -161,6 +175,25 @@ pub async fn finish(
 pub const UNCERTAIN: &str =
     "Multipart delivery is incomplete or uncertain; accepted parts will not be resent";
 
+pub async fn defer(
+    db: &Database,
+    row: &ChannelTextDelivery,
+    index: usize,
+    attempt: &str,
+    retry_after: u64,
+) -> AppResult<()> {
+    let retry_at =
+        chrono::Utc::now() + chrono::Duration::seconds(retry_after.clamp(1, 86400) as i64);
+    let changed = db.collection::<ChannelTextDelivery>(COLLECTION_NAME).update_one(
+        doc! {"_id":&row.id, format!("parts.{index}.state"):"sending", format!("parts.{index}.attempt_id"):attempt},
+        doc! {"$set": {format!("parts.{index}.state"):"pending", "retry_at":bson::DateTime::from_chrono(retry_at)}},
+    ).await?;
+    if changed.matched_count != 1 {
+        return Err(unconfirmed());
+    }
+    Ok(())
+}
+
 pub fn unconfirmed() -> AppError {
     AppError::ChannelPlatformError(UNCERTAIN.into())
 }
@@ -168,6 +201,61 @@ pub fn unconfirmed() -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn multipart_refusal_delay_survives_reload_and_fences_stale_attempts() {
+        let db = crate::test_utils::connect_transaction_test_database("text_retry_delay").await;
+        ensure_indexes(&db).await.unwrap();
+        let row = begin(&db, "key", "owner", "source", "digest", 1)
+            .await
+            .unwrap();
+        let PartClaim::Send(attempt) = claim(&db, &row, 0).await.unwrap() else {
+            panic!("first attempt");
+        };
+        assert!(defer(&db, &row, 0, "stale", 25).await.is_err());
+        defer(&db, &row, 0, &attempt, 25).await.unwrap();
+        let saved = load(&db, "key").await.unwrap().unwrap();
+        assert!(recoverable(&saved));
+        let failure = claim(&db, &saved, 0).await.err().unwrap();
+        assert!(
+            failure
+                .retry_after_seconds()
+                .is_some_and(|delay| (1..=26).contains(&delay))
+        );
+        let document = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(document.get_datetime("retry_at").is_ok());
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"retry_at":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        let PartClaim::Send(next) = claim(&db, &saved, 0).await.unwrap() else {
+            panic!("retry attempt");
+        };
+        assert!(defer(&db, &row, 0, &attempt, 25).await.is_err());
+        finish(
+            &db,
+            &row,
+            0,
+            &next,
+            TextPartState::Sent,
+            Some("receipt"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            claim(&db, &saved, 0).await.unwrap(),
+            PartClaim::Sent(_)
+        ));
+        db.drop().await.unwrap();
+    }
     #[tokio::test]
     async fn multipart_claims_resume_only_proven_unsent_parts_and_bind_the_plan() {
         let db = crate::test_utils::connect_transaction_test_database("text_delivery").await;

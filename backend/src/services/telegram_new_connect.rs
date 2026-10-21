@@ -83,7 +83,11 @@ impl TelegramNewService<'_> {
         {
             saved
         } else {
-            let (manager_id, _, values) = self.manager().await?;
+            let (manager_id, _, values) = self
+                .for_manager(request.manager_bot_id)
+                .await?
+                .manager()
+                .await?;
             if manager_id != request.manager_bot_id
                 || values.get("observation_id") != Some(request.observation_id.as_str())
             {
@@ -118,6 +122,7 @@ impl TelegramNewService<'_> {
             }
             let secret = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
             let bot = ChannelBot {
+                manager_instance: None,
                 diagnostics: Default::default(),
                 x_events: None,
                 last_verification: None,
@@ -300,7 +305,11 @@ impl TelegramNewService<'_> {
                 None,
                 None,
             );
-            if let Ok((_, _, values)) = self.manager().await
+            if let Ok((_, _, values)) = self
+                .for_manager(request.manager_bot_id)
+                .await?
+                .manager()
+                .await
                 && let Some(token) = values.get(MANAGER_TOKEN)
             {
                 let username = request.bot_username.as_deref().unwrap_or_default();

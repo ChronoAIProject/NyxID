@@ -101,7 +101,7 @@ fn detect_content_type(msg: &serde_json::Value) -> &'static str {
 }
 
 /// Build attachment list from a Telegram message value.
-fn extract_attachments(msg: &serde_json::Value) -> Vec<InboundAttachment> {
+pub(crate) fn extract_attachments(msg: &serde_json::Value) -> Vec<InboundAttachment> {
     let mut attachments = Vec::new();
 
     // Photo: array of PhotoSize, pick the last (largest) one
@@ -323,6 +323,8 @@ fn parse_message(msg: &serde_json::Value, raw: serde_json::Value) -> Option<Inbo
     let display_name = from.and_then(sender_display_name);
 
     let content_type = detect_content_type(msg);
+    // The relay envelope must match Telegram's raw text for gateway verification.
+    // NyxBot enriches it from the authenticated raw content at its own boundary.
     let text = msg
         .get("text")
         .and_then(|v| v.as_str())
@@ -340,7 +342,7 @@ fn parse_message(msg: &serde_json::Value, raw: serde_json::Value) -> Option<Inbo
         .and_then(|v| v.as_i64())
         .map(|id| id.to_string());
 
-    let attachments = extract_attachments(msg);
+    let attachments = crate::services::telegram_input::attachments(msg);
 
     Some(InboundMessage {
         embedded_attachments: Vec::new(),
@@ -414,6 +416,17 @@ fn build_edit_message_body(
         "text": edit.text.as_deref().unwrap_or(""),
         "parse_mode": "Markdown",
     }))
+}
+
+fn retry_refusal(status: reqwest::StatusCode, value: &serde_json::Value) -> Option<AppError> {
+    (value["ok"] == false && (value["error_code"] == 429 || status.as_u16() == 429)).then(|| {
+        AppError::RateLimitedWithRetry {
+            retry_after: value["parameters"]["retry_after"]
+                .as_u64()
+                .unwrap_or(1)
+                .clamp(1, 86400),
+        }
+    })
 }
 
 impl TelegramAdapter {
@@ -732,8 +745,8 @@ impl PlatformAdapter for TelegramAdapter {
         }
 
         if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-            if resp["error_code"] == 429 || status.as_u16() == 429 {
-                return Err(AppError::RateLimited);
+            if let Some(error) = retry_refusal(status, &resp) {
+                return Err(error);
             }
             let description = resp
                 .get("description")
@@ -1003,6 +1016,9 @@ impl TelegramAdapter {
                         .multipart(form(field)?),
                 )
                 .await?;
+                if let Some(error) = retry_refusal(status, &response) {
+                    return Err(error);
+                }
                 let fallback = attachment.kind == MediaKind::Image
                     && (status.is_success() || status == reqwest::StatusCode::BAD_REQUEST)
                     && response["ok"] == false
@@ -1011,18 +1027,25 @@ impl TelegramAdapter {
                         response["description"].as_str().unwrap_or_default(),
                     );
                 let (kind, response) = if fallback {
+                    let (status, response) = media::platform_json_value(
+                        http.post(format!(
+                            "{}{}/sendDocument",
+                            self.base_url, credentials.token
+                        ))
+                        .multipart(form("document")?),
+                    )
+                    .await?;
+                    if let Some(error) = retry_refusal(status, &response) {
+                        return Err(error);
+                    }
                     (
                         MediaKind::File,
-                        media::platform_json(
-                            http.post(format!(
-                                "{}{}/sendDocument",
-                                self.base_url, credentials.token
-                            ))
-                            .multipart(form("document")?),
+                        media::platform_response(
+                            status,
+                            response,
                             "Telegram",
                             UNREACHABLE_TARGET_MARKERS,
-                        )
-                        .await?,
+                        )?,
                     )
                 } else {
                     (
@@ -1578,6 +1601,7 @@ mod tests {
 
     fn make_test_bot(webhook_secret_hash: &str) -> ChannelBot {
         ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
@@ -1664,6 +1688,28 @@ mod tests {
         assert_eq!(attachments[0].mime_type.as_deref(), Some("audio/ogg"));
         assert_eq!(attachments[0].size_bytes, Some(9876));
         assert!(attachments[0].filename.is_none());
+    }
+
+    #[test]
+    fn relay_text_keeps_the_provider_contract_while_raw_content_retains_forward_context() {
+        let update = serde_json::json!({"message":{
+            "message_id":7,"chat":{"id":123,"type":"private"},
+            "from":{"id":123,"is_bot":false},"text":"Read the menu",
+            "entities":[{"type":"text_link","offset":9,"length":4,"url":"https://example.test/menu"}],
+            "forward_origin":{"type":"hidden_user","sender_user_name":"Restaurant"},
+            "quote":{"text":"Dinner at eight"}
+        }});
+        let message = parse_message(&update["message"], update.clone()).unwrap();
+        assert_eq!(message.text.as_deref(), update["message"]["text"].as_str());
+        let content = crate::services::telegram_input::content(&message.raw_data["message"]);
+        for expected in [
+            "Read the menu",
+            "https://example.test/menu",
+            "Restaurant",
+            "Dinner at eight",
+        ] {
+            assert!(content.contains(expected));
+        }
     }
 
     #[test]
