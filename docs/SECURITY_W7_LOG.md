@@ -596,3 +596,14 @@
   w7-apt-followup/machine-node-only-amd64/new-blocking-findings.json and the
   delta report. The other machine image failures in this hosted run are Ubuntu
   HTTP 503 acquisition failures; MCP and updater both architectures passed.
+
+## W7 PR #1976 follow-up — required-file transport diagnostics
+
+- Treat upstream 404 for InRelease/Release/signature/package files as transport
+  failures, while retaining APT's optional index-encoding/by-hash probes. A
+  handler-level regression exercises real HTTP-error processing for all four
+  required file types and an optional index. The exact metadata/package guards
+  and all injection requirements are unchanged. APT unit/policy checks pass.
+- A frozen frontend npm install with lifecycle scripts disabled resolves the
+  local missing-parse5 prerequisite; wizard composition verification then passes
+  on this integrated head. No protected frontend/wizard source was edited.

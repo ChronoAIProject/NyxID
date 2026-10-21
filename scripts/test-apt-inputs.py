@@ -194,6 +194,26 @@ class DockerPolicy(unittest.TestCase):
 
 
 class Harness(unittest.TestCase):
+    def test_proxy_reports_required_upstream_404_but_allows_optional_index_probes(self):
+        import threading
+        from types import SimpleNamespace
+        from urllib.error import HTTPError
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            for suffix in ('InRelease', 'Release', 'Release.gpg', 'fixture.deb', 'Packages.xz'):
+                state = dict(requests=[], errors=[], injected=0, suite='bookworm', mode='success')
+                handler = object.__new__(harness.Proxy)
+                handler.path = 'http://snapshot.debian.org/archive/debian/stamp/dists/bookworm/' + suffix
+                handler.server = SimpleNamespace(state=state, cache=Path(directory),
+                    cache_lock=threading.Lock(), cache_locks={})
+                status = []
+                handler.send_error = status.append
+                with patch.object(harness.urllib.request, 'build_opener') as opener:
+                    opener.return_value.open.side_effect = HTTPError(handler.path, 404, 'missing', {}, None)
+                    handler.do_GET()
+                self.assertEqual(status, [404])
+                self.assertEqual(bool(state['errors']), suffix != 'Packages.xz')
+
     def test_unmodified_snapshot_precedes_all_injections(self):
         self.assertEqual(harness.MODES[0], 'success')
         self.assertEqual(len(harness.MODES), 9)

@@ -82,7 +82,10 @@ class Proxy(BaseHTTPRequestHandler):
                 data += b'NyxID checksum-negative fixture'
                 state['injected'] += 1
         except urllib.error.HTTPError as error:
-            if error.code != 404:  # APT may probe optional index encodings.
+            # APT may probe optional index encodings/by-hash paths. Missing
+            # required release metadata or an archive is an upstream failure.
+            required = parsed.path.endswith(('/InRelease', '/Release', '/Release.gpg', '.deb'))
+            if error.code != 404 or required:
                 state['errors'].append('upstream HTTP ' + str(error.code) + ': ' + self.path)
             self.send_error(error.code)
             return
