@@ -11,7 +11,8 @@ import { NewsletterSignup as Newsletter } from "./newsletter-signup";
 import { ContactChat as Chat } from "./contact-chat";
 import { FooterStatus as Status } from "./footer-status";
 const Hidden = () => null;
-// Build-time branches exclude dormant forms/adapters from default bundles.
+// Build-time branches exclude disabled controls and request implementations.
+// Pure schema initialization may remain; this is not a zero-byte adapter claim.
 export const NewsletterSignup = NEWSLETTER_ENABLED ? Newsletter : Hidden;
 export const ContactChat = CONTACT_CHAT_ENABLED ? Chat : Hidden;
 export const FooterStatus = STATUS_ENABLED ? Status : Hidden;

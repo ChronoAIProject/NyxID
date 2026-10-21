@@ -28,9 +28,11 @@ export function retainedDisabledFeatureCode(text, visibility) {
     .filter(
       ([name, enabled]) =>
         !enabled &&
-        new RegExp(`["']data-website-feature["']\\s*:\\s*["']${name}["']`).test(
-          text,
-        ),
+        // Rolldown may emit static strings as no-substitution templates.
+        // Match complete literal values with their own closing delimiter.
+        new RegExp(
+          "([\"'])data-website-feature\\1\\s*:\\s*([\"'`])" + name + "\\2",
+        ).test(text),
     )
     .map(([name]) => name);
 }

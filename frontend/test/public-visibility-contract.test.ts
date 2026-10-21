@@ -8,6 +8,44 @@ import {
 } from "../scripts/public-visibility-contract.mjs";
 const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
+it.each(['"', "'", "`"])(
+  "detects disabled controls using %s string literals with independent switches",
+  (quote) => {
+    const names = ["newsletter", "contact-chat", "footer-status"];
+    const code = names
+      .map((name) => `{"data-website-feature":${quote}${name}${quote}}`)
+      .join(";");
+    expect(
+      retainedDisabledFeatureCode(code, {
+        newsletter: false,
+        contactChat: false,
+        footerStatus: false,
+      }),
+    ).toEqual(names);
+    for (const [enabledName, enabledKey] of [
+      ["newsletter", "newsletter"],
+      ["contact-chat", "contactChat"],
+      ["footer-status", "footerStatus"],
+    ]) {
+      expect(
+        retainedDisabledFeatureCode(code, {
+          newsletter: false,
+          contactChat: false,
+          footerStatus: false,
+          [enabledKey]: true,
+        }),
+      ).toEqual(names.filter((name) => name !== enabledName));
+    }
+  },
+);
+it("requires a complete static marker rather than a prefix or interpolated template", () => {
+  expect(
+    retainedDisabledFeatureCode(
+      '{"data-website-feature":`newsletter${suffix}`} ; {"data-website-feature":"contact-chat-preview"}',
+      { newsletter: false, contactChat: false, footerStatus: false },
+    ),
+  ).toEqual([]);
+});
 it("still rejects retained newsletter/chat code when Status alone is enabled", () => {
   expect(
     retainedDisabledFeatureCode(
