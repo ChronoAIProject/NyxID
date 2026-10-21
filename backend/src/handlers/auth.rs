@@ -682,7 +682,8 @@ pub(crate) async fn finish_password_login(
             } else {
                 None
             };
-            let session_result = token_service::create_session_with_transaction(
+            let session_mfa_assured = mfa_completion.is_some();
+            let session_result = token_service::create_session_with_transaction_and_assurance(
                 &state.db,
                 &user.id,
                 ip.as_deref(),
@@ -691,6 +692,7 @@ pub(crate) async fn finish_password_login(
                     .as_mut()
                     .map(|completion| &mut completion.transaction)
                     .or(password_transaction.as_mut()),
+                session_mfa_assured,
             )
             .await;
             let session = match session_result {
@@ -761,13 +763,15 @@ pub(crate) async fn finish_password_login(
             ))
         }
         AuthClientMode::TokenClient => {
-            let prepared_result = token_service::prepare_session_tokens(
+            let session_mfa_assured = mfa_completion.is_some();
+            let prepared_result = token_service::prepare_session_tokens_with_assurance(
                 &state.db,
                 &state.config,
                 &state.jwt_keys,
                 &user.id,
                 ip.as_deref(),
                 ua.as_deref(),
+                session_mfa_assured,
             )
             .await;
             let prepared = match prepared_result {
@@ -1230,18 +1234,20 @@ pub async fn cli_token(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<Json<CliTokenResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let client_ua = parse_cli_token_request_body(body)?.and_then(|body| body.client_ua);
 
     let user_id_str = auth_user.user_id.to_string();
     let user_agent = resolve_cli_session_user_agent(client_ua, &headers);
 
-    let tokens = token_service::create_session_and_issue_tokens(
+    let tokens = token_service::create_derived_session_tokens(
         &state.db,
         &state.config,
         &state.jwt_keys,
         &user_id_str,
         extract_ip(&headers, Some(peer)).as_deref(),
         user_agent.as_deref(),
+        auth_user.mfa_assured,
     )
     .await?;
 

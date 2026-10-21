@@ -85,7 +85,8 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         return schedules::reschedule(&state.db, job, None).await;
     };
     if run.outcome == RunOutcome::Started {
-        if run.agent_id.is_none() {
+        if run.agent_id.is_none() && !schedules::result_delivery::versioned(&state.db, &run).await?
+        {
             return schedules::finish(
                 &state.db,
                 id,
@@ -406,6 +407,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
     };
     let start = engine::TurnStart {
         media_event_ids: Vec::new(),
+        channel_uploads: Vec::new(),
         invocation_id: None,
         acknowledgement_id: None,
         retry_of: None,
@@ -823,6 +825,9 @@ pub(super) async fn settle_result(
         }
     }
     schedules::terminal_result(&state.db, run, error, &state.config.frontend_url).await?;
+    if matches!(run.deliver_to, DeliverTo::Chat { .. }) {
+        return settle_chat_result(state, row, run, text, error).await;
+    }
     // One settlement owns the outbound attempt. Recovery never duplicates an
     // ambiguous network send; the thread remains the durable final result.
     if run.result_claimed {
@@ -892,6 +897,7 @@ pub(super) async fn settle_result(
                     final_text,
                     agent_id,
                     &row.id,
+                    &run.id,
                 ))
                 .await
                 .map(|_| ())
@@ -910,6 +916,97 @@ pub(super) async fn settle_result(
         &state.config.frontend_url,
     )
     .await
+}
+
+async fn settle_chat_result(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    run: &TriggerRun,
+    text: &str,
+    error: Option<&str>,
+) -> AppResult<()> {
+    use schedules::result_delivery::{self as delivery, Claim};
+    let claim = match delivery::claim(&state.db, run).await? {
+        Claim::Acquired(claim) => claim,
+        Claim::Busy => return Ok(()),
+        Claim::Legacy | Claim::Expired => {
+            return delivery::finish_unrecoverable(&state.db, run, &state.config.frontend_url)
+                .await;
+        }
+    };
+    let run = &claim.run;
+    let DeliverTo::Chat { chat_id } = &run.deliver_to else {
+        return Err(AppError::Conflict(
+            "Result delivery destination changed".into(),
+        ));
+    };
+    let failure = error.map(|code| {
+        if code == "capacity_exceeded" {
+            crate::services::assistant_turn_observability::capacity_message(run.capacity_wait_ms)
+        } else {
+            engine::TurnError::new(code).message
+        }
+    });
+    let text = failure.as_deref().unwrap_or(text);
+    let agent = run.agent_id.as_deref().filter(|_| row.is_subagent());
+    let seconds = (claim.expires_at - Utc::now()).num_seconds().max(0) as u64;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(seconds.min(delivery::ATTEMPT_SECONDS)),
+        async {
+            if error.is_none() {
+                Box::pin(super::nyxbot::chats::post_automation_images(
+                    state, run, chat_id, agent, &row.id, text,
+                ))
+                .await
+                .map(|_| ())
+            } else {
+                Box::pin(super::nyxbot::chats::post_automation(
+                    state,
+                    &run.user_id,
+                    chat_id,
+                    text,
+                    agent,
+                    &row.id,
+                    &run.id,
+                ))
+                .await
+                .map(|_| ())
+            }
+        },
+    )
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            delivery::finish(
+                &state.db,
+                &claim,
+                if error.is_some() {
+                    RunOutcome::Failed
+                } else {
+                    RunOutcome::Completed
+                },
+                error,
+                &state.config.frontend_url,
+            )
+            .await
+        }
+        Ok(Err(ref failure)) if failure.retry_after_seconds().is_some() => {
+            delivery::defer(&state.db, &claim, failure.retry_after_seconds().unwrap()).await
+        }
+        // A cancelled attempt may have persisted a receipt before cancellation.
+        // The journal, not this worker's timeout, decides whether a retry can send.
+        Err(_) | Ok(Err(AppError::DatabaseError(_))) => delivery::defer(&state.db, &claim, 5).await,
+        Ok(Err(_)) => {
+            delivery::finish(
+                &state.db,
+                &claim,
+                RunOutcome::Failed,
+                Some("result_delivery_failed"),
+                &state.config.frontend_url,
+            )
+            .await
+        }
+    }
 }
 
 pub(crate) async fn validate_delivery(

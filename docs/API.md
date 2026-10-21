@@ -991,9 +991,9 @@ OAuth callback handler. Called by the provider after user authorization.
 | `state`   | string | CSRF state token (must match the `nyx_social_state` cookie) |
 | `error`   | string | Error code from the provider (if authorization was denied) |
 
-**Response (302 on success, web):** Redirects to the frontend root and sets the `nyx_session` cookie.
+**Response (302 on success, web):** For users without MFA, redirects to the frontend root and sets the `nyx_session` cookie. For users with MFA enabled, no session is created: the callback sets the narrowly scoped, HttpOnly `nyx_mfa_challenge` cookie for five minutes and redirects to `/login?mfa=required` (with a trusted `return_to` value when an OAuth authorization is being resumed).
 
-**Response (302 on success, mobile):** Redirects to the provided deep link with `status=success`, `provider`, `user_id`, `access_token`, `refresh_token`, and `expires_in` query parameters.
+**Response (302 on success, mobile):** For users without MFA, redirects to the provided deep link with `status=success`, `provider`, `user_id`, `access_token`, `refresh_token`, and `expires_in` query parameters. MFA users receive no tokens; the deep link fragment contains `status=mfa_required`, `provider`, and the short-lived `mfa_token` challenge. The app posts that token and a TOTP/recovery code to `/auth/mfa/verify`.
 
 **Response (302 on error):** Redirects to `{FRONTEND_URL}/login?error={error_key}`.
 
@@ -1018,6 +1018,7 @@ Possible error keys in the redirect:
 - `social_auth_conflict` is reserved for write-time identity collisions (for example, if the provider identity is already bound to another account)
 - New users created via social login have `email_verified = true` (provider verified the email) and no password set
 - Existing email/password accounts keep their password login path after social linking
+- Existing accounts with MFA enabled must complete MFA before either a browser session or mobile tokens are issued. The challenge token never appears in a web URL, audit row, log, or telemetry event.
 
 ---
 
@@ -5506,6 +5507,11 @@ Complete MFA enrollment by verifying a TOTP code. On success, MFA is enabled on 
 
 **Auth:** Required
 
+MFA enrollment is a first-party human operation. Browser sessions and first-party
+access tokens may call this route; API keys, service-account tokens, delegated
+tokens, and relay tokens are rejected. Successful confirmation keeps the current
+session and revokes other sessions, refresh tokens, and session-fallback MCP rows.
+
 **Request Body:**
 
 | Field  | Type   | Required | Description                           |
@@ -5543,6 +5549,59 @@ curl -X POST http://localhost:3001/api/v1/auth/mfa/confirm \
   -H "Content-Type: application/json" \
   -d '{"code": "123456"}'
 ```
+
+#### POST /api/v1/auth/mfa/verify
+
+Redeem a five-minute first-factor challenge with a TOTP or single-use recovery
+code. Password login and token clients send `mfa_token` in the JSON body. A web
+social login may omit it: the server reads the HttpOnly `nyx_mfa_challenge`
+cookie instead. Success issues the normal browser cookie or token response and
+clears the challenge cookie. The cookie value is never placed in a URL.
+
+```json
+{ "code": "123456", "client": "web" }
+```
+
+Expired, cancelled, unknown, exhausted and already consumed challenges return HTTP 401
+with `details.reason: "mfa_challenge_expired"` and clear the challenge cookie.
+A wrong code on a live challenge keeps the cookie and spends the existing attempt budget.
+Clients return to sign-in after terminal failures. The web form explicitly offers recovery codes.
+
+Social token exchange at `/oauth/token` uses OAuth error JSON (HTTP 400):
+
+```json
+{ "error": "mfa_required", "error_description": "MFA required", "error_code": 2002, "session_token": "<five-minute-challenge>" }
+```
+
+No access/refresh token or session is issued in that response. Send `session_token`
+as `mfa_token` with `code` and `client: "token"` (or `"mobile"`) to MFA verify.
+Password login keeps its existing HTTP 403 error code 2002 response.
+
+Completed sessions record MFA assurance. A legacy session without assurance is
+rejected with HTTP 401 for a live MFA-enabled account by cookie/bearer auth,
+first-party refresh and MCP fallback; sign in again. Derived login-code, device
+approval/poll-web, CLI-token and approval keep-signed-in sessions inherit the exact
+parent/approval assurance. OAuth authorize, Agent Key approval and app approval
+require an accepted human session. Confirmation requires an identified session,
+marks it assured and signs out other devices transactionally. There is no startup cutoff.
+
+#### POST /api/v1/auth/mfa/cancel
+
+Abandon a pending browser challenge. This deletes the challenge and clears the
+`nyx_mfa_challenge` cookie. It is safe to call after expiry or a replay.
+
+#### POST /api/v1/auth/mfa/disable
+
+Disable MFA after proving a current factor. Every account must send `code`; a
+password-backed account must also send its current `password` (including social-linked accounts that retain one). `GET /users/me` reports `has_password` for this decision. Social-only
+accounts omit `password`. Recovery codes are consumed when used for disable.
+
+```json
+{ "code": "123456", "password": "current-password" }
+```
+
+The route is first-party human only and applies the same rate limits and account
+state fencing as login MFA.
 
 ---
 
@@ -8512,6 +8571,44 @@ Routes below are relative to `/api/v1`. Creation routes require an authenticated
 Request responses expose `auto_connect` (false for legacy requests) and nullable `connection_error` with safe automatic-retry text. Automatic connection continues while the browser is closed; clients poll the saved request rather than POSTing `/connect`.
 
 The connect body uses a decimal string for `telegram_bot_id` and an integer for `revision`, for example `{"telegram_bot_id":"900","revision":6}`. Manager credentials use the existing admin platform-credentials routes with provider `telegram-new`. Neither manager nor child bot tokens are returned to customers.
+
+### Manager registry and shared BotFather help
+
+The following routes are relative to `/api/v1/admin` and require a first-party
+human administrator with a current admin role. Responses containing management
+state use `Cache-Control: no-store`. Manager tokens are write-only. The original
+`telegram-new` Platform Credentials entry remains the default manager; additional
+managers use their verified numeric Telegram bot identity. The registry allows
+at most 100 managers, including the default.
+
+| Method | Route | Request and result |
+| --- | --- | --- |
+| GET | `/telegram-managers` | List `{manager_bot_id, username, ready, legacy_default}` records. |
+| POST | `/telegram-managers` | Configure `{token}` after Telegram identity verification; returns the configured manager's metadata. |
+| POST | `/telegram-managers/clear` | Remove an additional manager with `{manager_bot_id}`; returns 204. Live dependencies prevent removal. Manage the default through Platform Credentials. |
+| GET | `/platform-help` | List libraries with `{id, name, version, published_revision, draft, updated_at}`. |
+| POST | `/platform-help` | Create `{name}`, seeded with the built-in published help. |
+| PUT | `/platform-help/{id}` | Save `{version, content}` as a draft. |
+| POST | `/platform-help/{id}/publish` | Publish `{version}` or republish a historical version with `{version, rollback_revision}`. Returns the updated library; rollback appends a revision. |
+| GET | `/platform-help/{id}/history` | Read up to 50 revisions, newest first; `?before={revision}` pages backward. Each entry includes `{revision, content, published_at, published_by}`. |
+| GET | `/platform-bots/{id}/help-library` | Read `{profile_id, library_id, version}`; an unassigned profile uses the shared default library. |
+| PUT | `/platform-bots/{id}/help-library` | Assign `{generation, version, library_id}` using the current profile generation and assignment version. |
+
+`content` contains `articles: [{id, title, body, tags}]` and
+`use_cases: [{id, title, description, example_prompts}]`. IDs are unique lowercase
+hyphenated slugs across both lists. Libraries allow 1–30 articles, up to 20 use
+cases and 16 KiB of serialized content. Invalid content returns 400; stale edit,
+publication or assignment versions return 409. Saving a draft leaves published
+content available. Publishing affects new turns on every assigned bot, while
+an in-flight turn retains its first selected library revision.
+
+Additional manager webhooks use
+`POST /api/v1/webhooks/channel/telegram-new/manager/{id}` and verify the
+selected manager's own webhook secret. The existing default-manager webhook is
+retained. After browser approval, the pairing response provides a `confirmation_command`;
+the page also constructs a Telegram return link for the selected manager.
+Polling and `/check` report
+status; completion still requires proof from the originating Telegram account.
 
 ---
 

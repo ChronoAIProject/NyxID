@@ -47,6 +47,8 @@ pub struct PlatformManagerDelivery, RawPlatformManagerDelivery {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeliveryReference {
     Faq {
+        #[serde(default)]
+        help: Option<super::platform_help::HelpReference>,
         article_ids: Vec<String>,
         linking_enabled: bool,
         public_policy_revision: i64,

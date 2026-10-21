@@ -198,6 +198,8 @@ async fn mcp_proxy_caller_bearer_matches_rest_for_each_auth_type_direct_and_node
         .collection::<crate::models::session::Session>("sessions")
         .insert_one(crate::models::session::Session {
             purpose: Some(crate::models::session::SessionPurpose::Authenticated),
+            mfa_method: None,
+            mfa_assured: false,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: f.owner.clone(),
             token_hash: crate::crypto::token::hash_token(&raw_session),

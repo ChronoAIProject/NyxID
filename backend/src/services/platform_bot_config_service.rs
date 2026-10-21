@@ -78,11 +78,17 @@ pub(crate) async fn admit_manager_admin(
     first_party: bool,
     manager: &str,
 ) -> AppResult<()> {
+    let scoped = db
+        .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
+        .find_one(doc! {"provider":format!("telegram-new/{manager}")})
+        .await?
+        .is_some();
     if db
         .collection::<Document>(COLLECTION_NAME)
         .find_one(doc! {"manager_bot_id": manager,"native_entry":bson::Bson::Null})
         .await?
         .is_none()
+        && !scoped
     {
         return Ok(());
     }
@@ -100,6 +106,7 @@ pub(crate) async fn admit_manager_admin(
                     .session(&mut *session)
                     .await?
                     .is_some()
+                    || scoped
                 {
                     require_first_party(first_party)?;
                     fence_admin(&db, &actor, session).await?;
@@ -120,14 +127,20 @@ pub(crate) async fn finalize_manager_delivery(
     manager: &str,
     observation_started_at: String,
 ) -> AppResult<()> {
+    let scoped = db
+        .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
+        .find_one(doc! {"provider":format!("telegram-new/{manager}")})
+        .await?
+        .is_some();
     if db
         .collection::<Document>(COLLECTION_NAME)
         .find_one(doc! {"manager_bot_id": manager,"native_entry":bson::Bson::Null})
         .await?
         .is_none()
+        && !scoped
     {
         db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).update_one(
-            doc! {"provider": "telegram-new", "fields.manager_bot_id": manager},
+            doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", manager)]}, "fields.manager_bot_id": manager},
             doc! {"$set": {"fields.webhook_ready": "true", "fields.observation_started_at": observation_started_at}}
         ).await?;
         return Ok(());
@@ -138,12 +151,12 @@ pub(crate) async fn finalize_manager_delivery(
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let result: AppResult<()> = async {
-            if db.collection::<Document>(COLLECTION_NAME).find_one(doc! {"manager_bot_id": &manager,"native_entry":bson::Bson::Null}).session(&mut *session).await?.is_some() {
+            if db.collection::<Document>(COLLECTION_NAME).find_one(doc! {"manager_bot_id": &manager,"native_entry":bson::Bson::Null}).session(&mut *session).await?.is_some() || scoped {
                 require_first_party(first_party)?;
                 fence_admin(&db, &actor, session).await?;
             }
             if db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).update_one(
-                doc! {"provider": "telegram-new", "fields.manager_bot_id": &manager},
+                doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &manager)]}, "fields.manager_bot_id": &manager},
                 doc! {"$set": {"fields.webhook_ready": "true", "fields.observation_started_at": &observation_started_at}}
             ).session(&mut *session).await?.matched_count != 1 { return Err(AppError::Conflict("Manager configuration changed".into())); }
             Ok(())
@@ -378,7 +391,7 @@ async fn convert_locked(
                 (configuration.credential_fingerprint.clone(),PlatformExecutionProfile::NativeEntry,Some(2),Some(configuration.clone()))
             } else {
                 let manager = db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
-                    .find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":manager_id,"fields.webhook_ready":"true"})
+                    .find_one(doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", manager_id)]}, "fields.manager_bot_id": manager_id,"fields.webhook_ready":"true"})
                     .session(&mut *session).await?.ok_or_else(||AppError::Conflict("Manager configuration is not ready".into()))?;
                 let observation=manager.get_document("fields").ok().and_then(|fields|fields.get_str("observation_id").ok())
                     .ok_or_else(||AppError::Conflict("Manager observation identity unavailable".into()))?.to_owned();
@@ -525,6 +538,13 @@ pub(crate) async fn verify_manager(
     if row.deleted_at.is_some() || row.generation != generation {
         return Err(AppError::Conflict("Platform configuration changed".into()));
     }
+    let service = service
+        .for_manager(
+            row.manager_bot_id
+                .parse()
+                .map_err(|_| AppError::Conflict("Invalid manager identity".into()))?,
+        )
+        .await?;
     let (manager, _, values) = service.manager().await?;
     if manager.to_string() != row.manager_bot_id
         || values.get("observation_id") != Some(row.observation_id.as_str())
@@ -1477,7 +1497,7 @@ pub(crate) async fn configure_guide(
                 return Err(AppError::Forbidden("Funding consent changed".into()));
             }
             if db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).find_one(
-                doc! {"provider": "telegram-new", "fields.manager_bot_id": &profile.manager_bot_id, "fields.observation_id": &profile.observation_id, "fields.webhook_ready": "true"})
+                doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &profile.manager_bot_id)]}, "fields.manager_bot_id": &profile.manager_bot_id, "fields.observation_id": &profile.observation_id, "fields.webhook_ready": "true"})
                 .session(&mut *session).await?.is_none() { return Err(AppError::Conflict("Manager delivery is unavailable".into())); }
             if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
                 doc! {"_id": &profile.channel_bot_id, "platform_profile_id": &profile.id, "is_active": true}, doc! {"$inc": {"route_revision": 1_i64}})

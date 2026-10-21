@@ -44,6 +44,7 @@ pub async fn approve_with_agent_key(
     input: ApproveInput,
     mut selection: agent::Selection,
     credential_expires_at: Option<DateTime<Utc>>,
+    mfa_assured: bool,
 ) -> AppResult<()> {
     let (collection, row) = pending_request(db, hmac_key, &input.user_code).await?;
     let created_at = Utc::now();
@@ -97,6 +98,7 @@ pub async fn approve_with_agent_key(
             if row.expires_at <= now { return Err(AppError::AuthDeviceCodeExpired); }
             collection.update_one(doc! {"_id": &row.id}, doc! {"$set": {
                 "approved_user_id": &input.user_id,
+                "mfa_assured": mfa_assured,
                 "approved_at": bson::DateTime::from_chrono(now),
                 "approver_ip_hmac": input.approver_ip.as_deref().map(|ip| hmac_hex(hmac_key, ip.as_bytes())),
                 "expires_at": bson::DateTime::from_chrono(now + Duration::seconds(60)),

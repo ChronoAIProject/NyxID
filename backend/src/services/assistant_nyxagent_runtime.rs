@@ -493,6 +493,11 @@ pub(crate) async fn turn_notes(
     previous_user_message: Option<DateTime<Utc>>,
 ) -> String {
     let mut notes = engine::channel_note(row);
+    notes.push_str(
+        &engine::additional_channel_length_note(&state.db, row)
+            .await
+            .unwrap_or_default(),
+    );
     if let Some(turn) = row.active_turn.as_ref() {
         if !row.guest_turn && turn.origin != TurnOrigin::Event && !turn.events.is_empty() {
             notes.push_str(

@@ -208,7 +208,10 @@ function buildApiError(payload: unknown, status: number): ApiError | Error {
 
     const challenge = mfaChallengeFromResponse(payload, status);
     if (challenge) return challenge;
-    return new ApiError({ errorKey, errorCode, statusCode: status, message });
+    const reason = obj.details && typeof obj.details === "object" &&
+      (obj.details as Record<string, unknown>).reason === "mfa_challenge_expired"
+      ? "mfa_challenge_expired" : undefined;
+    return new ApiError({ errorKey, errorCode, statusCode: status, message, reason });
   }
 
   if (typeof payload === "string" && payload.length > 0) {

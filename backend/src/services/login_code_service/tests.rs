@@ -55,9 +55,16 @@ async fn redeem_code(state: &AppState, code: &str, ip: &str) -> AppResult<Delive
 async fn concurrent_redemption_commits_exactly_one_grant_of_either_kind() {
     let (state, actor) = fixture("login_code_atomic").await;
     for restricted in [false, true] {
-        let code = mint(&state.db, KEY, &actor, restricted.then(selection), None)
-            .await
-            .unwrap();
+        let code = mint(
+            &state.db,
+            KEY,
+            &actor,
+            restricted.then(selection),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             state
                 .db
@@ -122,17 +129,31 @@ async fn concurrent_redemption_commits_exactly_one_grant_of_either_kind() {
 async fn expiry_cancellation_and_invalid_selection_issue_nothing() {
     let (state, actor) = fixture("login_code_no_grant").await;
     for restricted in [false, true] {
-        let code = mint(&state.db, KEY, &actor, restricted.then(selection), None)
-            .await
-            .unwrap();
+        let code = mint(
+            &state.db,
+            KEY,
+            &actor,
+            restricted.then(selection),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
         cancel(&state.db, &actor, &code.id).await.unwrap();
         assert!(matches!(
             redeem_code(&state, &code.code, "192.0.2.1").await,
             Err(AppError::LoginCodeCancelled)
         ));
-        let code = mint(&state.db, KEY, &actor, restricted.then(selection), None)
-            .await
-            .unwrap();
+        let code = mint(
+            &state.db,
+            KEY,
+            &actor,
+            restricted.then(selection),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
         state.db.collection::<LoginCode>(COLLECTION_NAME).update_one(doc! {"_id": &code.id},
             doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
         assert!(matches!(
@@ -145,7 +166,7 @@ async fn expiry_cancellation_and_invalid_selection_issue_nothing() {
     )
     .unwrap();
     assert!(
-        mint(&state.db, KEY, &actor, Some(invalid), None)
+        mint(&state.db, KEY, &actor, Some(invalid), None, false)
             .await
             .is_err()
     );
@@ -166,9 +187,16 @@ async fn expiry_cancellation_and_invalid_selection_issue_nothing() {
 async fn failed_issuance_rolls_back_claim_and_all_rows_then_can_retry() {
     let (state, actor) = fixture("login_code_rollback").await;
     for restricted in [false, true] {
-        let code = mint(&state.db, KEY, &actor, restricted.then(selection), None)
-            .await
-            .unwrap();
+        let code = mint(
+            &state.db,
+            KEY,
+            &actor,
+            restricted.then(selection),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
         let frozen = status(&state.db, &actor, &code.id).await.unwrap();
         let collection = if restricted { CHILDREN } else { SESSIONS };
         state
@@ -234,7 +262,9 @@ async fn source_and_owner_budgets_throttle_distributed_attempts() {
         redeem_code(&state, "ABCD-EFGH", "192.0.2.1").await,
         Err(AppError::LoginCodeRateLimited)
     ));
-    let code = mint(&state.db, KEY, &actor, None, None).await.unwrap();
+    let code = mint(&state.db, KEY, &actor, None, None, false)
+        .await
+        .unwrap();
     cancel(&state.db, &actor, &code.id).await.unwrap();
     for i in 1..=10 {
         assert!(matches!(
@@ -247,10 +277,12 @@ async fn source_and_owner_budgets_throttle_distributed_attempts() {
         Err(AppError::LoginCodeRateLimited)
     ));
     for _ in 0..4 {
-        mint(&state.db, KEY, &actor, None, None).await.unwrap();
+        mint(&state.db, KEY, &actor, None, None, false)
+            .await
+            .unwrap();
     }
     assert!(matches!(
-        mint(&state.db, KEY, &actor, None, None).await,
+        mint(&state.db, KEY, &actor, None, None, false).await,
         Err(AppError::LoginCodeRateLimited)
     ));
 }
@@ -278,7 +310,9 @@ async fn protected_status(state: &AppState, token: &str) -> axum::http::StatusCo
 #[tokio::test]
 async fn issuer_revocation_blocks_initial_and_refreshed_access_at_authentication() {
     let (state, actor) = fixture("login_code_revoke_access").await;
-    let code = mint(&state.db, KEY, &actor, None, None).await.unwrap();
+    let code = mint(&state.db, KEY, &actor, None, None, false)
+        .await
+        .unwrap();
     let Delivery::Account(tokens) = redeem_code(&state, &code.code, "192.0.2.1").await.unwrap()
     else {
         panic!("expected account");
@@ -316,7 +350,9 @@ async fn issuer_revocation_blocks_initial_and_refreshed_access_at_authentication
 async fn refresh_refuses_expired_deleted_or_revoked_bound_session_before_rotation() {
     let (state, actor) = fixture("login_bound_refresh").await;
     for action in ["expired", "deleted", "revoked"] {
-        let code = mint(&state.db, KEY, &actor, None, None).await.unwrap();
+        let code = mint(&state.db, KEY, &actor, None, None, false)
+            .await
+            .unwrap();
         let Delivery::Account(tokens) = redeem_code(&state, &code.code, "192.0.2.1").await.unwrap()
         else {
             panic!("expected account");
@@ -380,6 +416,7 @@ async fn restricted_browser_handoff_and_direct_delivery_cannot_both_win() {
         },
         selection(),
         None,
+        false,
     )
     .await
     .unwrap();
@@ -535,7 +572,7 @@ async fn third_party_oauth_cannot_mint_or_approve_human_login_grants() {
 #[tokio::test]
 async fn mint_freezes_default_intent_and_old_shaped_pending_codes_remain_readable() {
     let (state, actor) = fixture("w9_code_intent").await;
-    let code = mint(&state.db, KEY, &actor, Some(selection()), None)
+    let code = mint(&state.db, KEY, &actor, Some(selection()), None, false)
         .await
         .unwrap();
     let rows = state.db.collection::<LoginCode>(COLLECTION_NAME);
@@ -567,7 +604,7 @@ async fn mint_freezes_default_intent_and_old_shaped_pending_codes_remain_readabl
         frozen_child.map(|value| value.to_rfc3339())
     );
 
-    let code = mint(&state.db, KEY, &actor, Some(selection()), None)
+    let code = mint(&state.db, KEY, &actor, Some(selection()), None, false)
         .await
         .unwrap();
     // Simulate an old replica's persisted intent: absent new field and no expiry.
@@ -594,4 +631,63 @@ async fn mint_freezes_default_intent_and_old_shaped_pending_codes_remain_readabl
         delivery.credential_expires_at.as_deref(),
         Some(expected.as_str())
     );
+}
+
+#[tokio::test]
+async fn mfa_browser_handoff_inherits_device_assurance_and_rejects_unassured_delivery() {
+    for assured in [false, true] {
+        let (state, actor) = fixture("mfa_handoff_assurance").await;
+        state
+            .db
+            .collection::<User>(USERS)
+            .update_one(doc! {"_id": &actor}, doc! {"$set": {"mfa_enabled": true}})
+            .await
+            .unwrap();
+        let request = device::initiate_v2(&state.db, KEY, context("192.0.2.1"), true)
+            .await
+            .unwrap();
+        device::approve_with_agent_key(
+            &state.db,
+            &state.encryption_keys,
+            KEY,
+            device::ApproveInput {
+                user_id: actor.clone(),
+                user_code: request.user_code,
+                approver_ip: None,
+                approver_user_agent: None,
+            },
+            selection(),
+            None,
+            assured,
+        )
+        .await
+        .unwrap();
+        let handoff = browser_handoff(&state.db, KEY, &request.device_code)
+            .await
+            .unwrap();
+        let row = state
+            .db
+            .collection::<LoginCode>(COLLECTION_NAME)
+            .find_one(doc! {"_id": &handoff.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.mfa_assured, assured);
+        let delivery = redeem_code(&state, &handoff.code, "192.0.2.2").await;
+        if assured {
+            assert!(matches!(delivery.unwrap(), Delivery::AgentKey(_)));
+        } else {
+            assert!(matches!(delivery, Err(AppError::Unauthorized(_))));
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<Session>(SESSIONS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        state.db.drop().await.unwrap();
+    }
 }

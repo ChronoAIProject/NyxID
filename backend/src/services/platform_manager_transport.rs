@@ -176,14 +176,51 @@ pub(crate) async fn dispatch_update(
     ) else {
         return Ok(ManagerDispatch::Handled);
     };
-    let text = update["message"]["text"].as_str().unwrap_or("");
+    let raw = update["message"]["text"].as_str().unwrap_or_default();
+    let word = raw
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .split('@')
+        .next()
+        .unwrap_or_default();
+    let control = commands::personal_command(raw, &username).is_some()
+        || super::platform_manager_management::parse(raw, &username).is_some()
+        || matches!(
+            word.to_ascii_lowercase().as_str(),
+            "/link"
+                | "/login"
+                | "/unlink"
+                | "/logout"
+                | "/status"
+                | "/check"
+                | "/help"
+                | "/confirm"
+                | "confirm"
+                | "/onboarding"
+                | "/setups"
+                | "/setup"
+                | "/bots"
+                | "/bot"
+        );
+    let mut text = if control {
+        raw.to_owned()
+    } else {
+        super::telegram_input::scrub(&super::telegram_input::content(&update["message"]))
+    };
+    if text.is_empty() && !super::telegram_input::attachments(&update["message"]).is_empty() {
+        text = "Please review the attached Telegram media.".into();
+    }
     dispatch_verified(
         state,
         producers,
         runtime,
-        verified,
-        text,
-        &username,
+        DispatchInput {
+            verified,
+            text: &text,
+            username: &username,
+            media: Some((bot, &update["message"])),
+        },
         &service.api,
     )
     .await
@@ -225,9 +262,12 @@ async fn dispatch_native_admission_impl(
         state,
         producers,
         runtime,
-        verified,
-        admission.text(),
-        "",
+        DispatchInput {
+            verified,
+            text: admission.text(),
+            username: "",
+            media: None,
+        },
         &super::telegram_new_api::TelegramApi::new(&state.http_client),
     )
     .await?;
@@ -239,17 +279,22 @@ async fn dispatch_native_admission_impl(
     Ok(())
 }
 
+struct DispatchInput<'a> {
+    verified: VerifiedManagerUpdate,
+    text: &'a str,
+    username: &'a str,
+    media: Option<(&'a ChannelBot, &'a serde_json::Value)>,
+}
+
 fn dispatch_verified<'a>(
     state: &'a AppState,
     producers: Arc<PlatformManagerProducers>,
     runtime: crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls,
-    verified: VerifiedManagerUpdate,
-    text: &'a str,
-    username: &'a str,
+    input: DispatchInput<'a>,
     api: &'a super::telegram_new_api::TelegramApi<'_>,
 ) -> futures::future::BoxFuture<'a, AppResult<ManagerDispatch>> {
     Box::pin(dispatch_verified_impl(
-        state, producers, runtime, verified, text, username, api,
+        state, producers, runtime, input, api,
     ))
 }
 
@@ -257,20 +302,28 @@ async fn dispatch_verified_impl(
     state: &AppState,
     producers: Arc<PlatformManagerProducers>,
     runtime: crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls,
-    verified: VerifiedManagerUpdate,
-    text: &str,
-    username: &str,
+    input: DispatchInput<'_>,
     api: &super::telegram_new_api::TelegramApi<'_>,
 ) -> AppResult<ManagerDispatch> {
+    let DispatchInput {
+        verified,
+        text,
+        username,
+        media,
+    } = input;
     let verb = text.split_whitespace().next().unwrap_or("");
-    let base = verb.split('@').next().unwrap_or("");
+    let base = verb.split('@').next().unwrap_or("").to_ascii_lowercase();
     let kind = super::platform_manager_management::parse(text, username)
         .map(commands::PersonalCommandKind::Management)
         .or_else(|| commands::personal_command(text, username));
     if let Some(kind) = kind.filter(|_| !(runtime.public_enabled && dispatch::explicit_faq(text))) {
-        if let Some(command) =
-            OriginalManagerCommand::from_verified(verified.clone(), TurnInput { text: text.into() })
-        {
+        if let Some(command) = OriginalManagerCommand::from_verified(
+            verified.clone(),
+            TurnInput {
+                channel_uploads: Vec::new(),
+                text: text.into(),
+            },
+        ) {
             let result = commands::execute(
                 &state.db,
                 state.auth_device_hmac_key.as_slice(),
@@ -322,18 +375,26 @@ async fn dispatch_verified_impl(
     if !runtime.emergency_stopped
         && matches!(verified.entry, EntryIdentity::TelegramV1 { .. })
         && legacy_confirmation(text, username)
-        && OriginalManagerCommand::from_verified(verified.clone(), TurnInput { text: text.into() })
-            .is_some()
+        && OriginalManagerCommand::from_verified(
+            verified.clone(),
+            TurnInput {
+                channel_uploads: Vec::new(),
+                text: text.into(),
+            },
+        )
+        .is_some()
     {
         return Ok(ManagerDispatch::LegacyConfirmation);
     }
     if matches!(
-        base,
-        "/link"
+        base.as_str(),
+        "confirm"
+            | "/link"
             | "/login"
             | "/unlink"
             | "/logout"
             | "/status"
+            | "/check"
             | "/help"
             | "/confirm"
             | "/onboarding"
@@ -351,7 +412,10 @@ async fn dispatch_verified_impl(
             &verified,
             if OriginalManagerCommand::from_verified(
                 verified.clone(),
-                TurnInput { text: text.into() },
+                TurnInput {
+                    channel_uploads: Vec::new(),
+                    text: text.into(),
+                },
             )
             .is_none()
             {
@@ -449,7 +513,10 @@ async fn dispatch_verified_impl(
                     .await?
                     && let Some(command) = OriginalManagerCommand::from_verified(
                         verified.clone(),
-                        TurnInput { text: text.into() },
+                        TurnInput {
+                            channel_uploads: Vec::new(),
+                            text: text.into(),
+                        },
                     )
                 {
                     let thread_matches = state
@@ -515,13 +582,34 @@ async fn dispatch_verified_impl(
                     }
                 }
             }
+            let telegram_input = match media {
+                Some((bot, message)) => {
+                    super::telegram_input::prepare_uploads_from(
+                        state,
+                        bot,
+                        &admitted.authority.user_id,
+                        &super::telegram_input::attachments(message),
+                        api.base_url,
+                    )
+                    .await
+                }
+                None => Default::default(),
+            };
+            let text = if telegram_input.note.is_empty() {
+                text.to_owned()
+            } else {
+                format!("{text}\n\n{}", telegram_input.note)
+            };
             let (events, receiver) = tokio::sync::mpsc::channel(16);
             let started = producers
                 .personal
                 .start_personal_turn(
                     &state.db,
                     &admitted,
-                    TurnInput { text: text.into() },
+                    TurnInput {
+                        channel_uploads: telegram_input.uploads,
+                        text,
+                    },
                     events,
                 )
                 .await;
@@ -675,6 +763,7 @@ async fn dispatch_verified_impl(
                     &state.db,
                     context,
                     TurnInput {
+                        channel_uploads: Vec::new(),
                         text: text.to_owned(),
                     },
                     events,
@@ -731,7 +820,8 @@ fn legacy_confirmation(text: &str, username: &str) -> bool {
     !code
         .get(..2)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("P-"))
-        && super::platform_binding_service::normalize_code(code).is_some()
+        && (super::platform_pairing_link::onboarding_code(code)
+            || super::platform_binding_service::normalize_code(code).is_some())
 }
 
 async fn refuse_control(
@@ -1217,9 +1307,7 @@ mod future_size_tests {
             &'static AppState,
             Arc<PlatformManagerProducers>,
             crate::models::platform_bot_runtime_controls::PlatformBotRuntimeControls,
-            VerifiedManagerUpdate,
-            &'static str,
-            &'static str,
+            DispatchInput<'static>,
             &'static super::super::telegram_new_api::TelegramApi<'static>,
         ) -> F,
     ) -> usize {

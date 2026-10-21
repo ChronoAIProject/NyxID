@@ -62,6 +62,8 @@ const NO_AUTH_STATE_CLEAR_ENDPOINTS = new Set([
   "/auth/reset-password",
   "/auth/verify-email",
   "/auth/setup",
+  "/auth/mfa/verify",
+  "/auth/mfa/cancel",
 ]);
 
 export function buildFetchConfig(options: RequestOptions): RequestInit {

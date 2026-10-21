@@ -283,7 +283,7 @@ pub async fn finish(
     }
 }
 
-/// Release only an attempt whose caller proved that no provider I/O started.
+/// Release only when no provider I/O started or the provider confirmed a rate refusal.
 /// An old attempt token cannot release a later sender's claim.
 pub async fn release(db: &Database, id: &str, attempt: &str) -> AppResult<ImageCompletion> {
     let collection = db.collection::<NyxbotImageDelivery>(CLAIMS);

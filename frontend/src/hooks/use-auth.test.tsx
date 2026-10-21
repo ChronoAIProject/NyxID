@@ -229,14 +229,15 @@ describe("useMfaVerify", () => {
 });
 
 describe("useMfaDisable", () => {
-  it("posts the password to /auth/mfa/disable and invalidates the user query", async () => {
+  it("posts factor and password to /auth/mfa/disable and invalidates the user query", async () => {
     mockPost.mockResolvedValue(undefined);
     const { wrapper, invalidateSpy } = setup();
     const { result } = renderHook(() => useMfaDisable(), { wrapper });
 
-    await result.current.mutateAsync("my-password");
+    await result.current.mutateAsync({ code: "123456", password: "my-password" });
 
     expect(mockPost).toHaveBeenCalledWith("/auth/mfa/disable", {
+      code: "123456",
       password: "my-password",
     });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["user"] });

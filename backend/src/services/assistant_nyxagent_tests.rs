@@ -471,6 +471,27 @@ fn web_research_guidance_reaches_both_roles_without_lifting_guest_limits() {
 }
 
 #[test]
+fn cli_guidance_reaches_both_roles_and_confines_cli_to_cma_sandboxes() {
+    let mut row = stale_test_row(Utc::now());
+    for role in [AgentRole::Orchestrator, AgentRole::Subagent] {
+        row.role = role;
+        for guest_turn in [false, true] {
+            row.guest_turn = guest_turn;
+            let prompt = base_prompt(&row, None);
+            for guidance in [
+                "Avoid CLI commands",
+                "If a CLI is absolutely necessary",
+                "CMA (slug cma) sandbox command tool",
+                "only when the owner names that machine",
+                "Guests retain their existing tool limits",
+            ] {
+                assert!(prompt.contains(guidance), "missing {guidance} for {role:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
     assert_eq!(
         TurnError::new("first_byte_timeout").code,
@@ -4960,6 +4981,165 @@ fn channel_note_follows_the_turn_destination_and_keeps_image_ordering_explicit()
         assert!(note.contains("Replies are delivered as plain text messages"));
         assert!(note.contains("Images your tools return are sent to this chat by NyxID as image messages before your reply"));
     }
+}
+
+#[test]
+fn reply_length_guidance_follows_all_channel_destinations_but_never_app_only() {
+    use crate::models::assistant_conversation::PlatformReplyRouting;
+    let mut row = stale_test_row(Utc::now());
+    let telegram = ChannelOrigin {
+        nyxbot_channel_id: "telegram-channel".into(),
+        platform: "telegram".into(),
+        partition: "chat".into(),
+        thread: None,
+    };
+    row.channel = Some(telegram.clone());
+    row.reply_channel = Some(telegram.clone());
+    for origin in [TurnOrigin::User, TurnOrigin::Orchestrator] {
+        row.active_turn.as_mut().unwrap().origin = origin;
+        assert!(!channel_note(&row).contains("One message holds"));
+    }
+    // Both direct and gateway channel turns carry this same admitted origin.
+    for origin in [TurnOrigin::Channel, TurnOrigin::Event] {
+        let turn = row.active_turn.as_mut().unwrap();
+        turn.origin = origin;
+        turn.asked_from = Some(telegram.clone());
+        let note = channel_note(&row);
+        assert!(note.contains("Destination: Telegram."));
+        assert!(note.contains("4,096 characters"));
+    }
+    // A drained followed-thread event supplies its destination explicitly.
+    row.channel = None;
+    row.reply_channel = None;
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.asked_from = None;
+    let mut event = crate::services::assistant_team_service::event("message", "wake".into(), None);
+    event.source_event_ids = vec!["source".into()];
+    event.reply_to = vec![telegram.clone()];
+    turn.events = vec![event];
+    assert!(channel_note(&row).contains("4,096 characters"));
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.events.clear();
+    turn.origin = TurnOrigin::User;
+    // App-origin work can explicitly owe several chat destinations.
+    let mut discord = telegram.clone();
+    discord.platform = "discord".into();
+    turn.also_deliver = vec![telegram.clone(), telegram, discord];
+    let note = channel_note(&row);
+    assert_eq!(note.matches("Destination: Telegram.").count(), 1);
+    assert!(note.contains("Destination: Discord. One message holds 2,000 characters"));
+    row.active_turn.as_mut().unwrap().also_deliver.clear();
+    let platform_origin = platform_test_origin(&row);
+    row.active_turn.as_mut().unwrap().platform_reply = Some(PlatformReplyRouting::Captured {
+        origin: Box::new(platform_origin),
+        turn_id: "manager-turn".into(),
+        expires_at: Utc::now() + chrono::Duration::minutes(30),
+    });
+    assert!(channel_note(&row).contains("4,096 characters"));
+    row.active_turn.as_mut().unwrap().platform_reply = Some(PlatformReplyRouting::WebOnly);
+    assert!(!channel_note(&row).contains("One message holds"));
+    row.active_turn = None;
+    assert!(channel_note(&row).is_empty());
+}
+
+#[tokio::test]
+async fn automation_and_specialist_turn_context_resolves_only_owned_chat_destinations() {
+    use crate::models::nyxbot_channel::{
+        COLLECTION_NAME as CHANNELS, THREADS_COLLECTION_NAME as THREADS,
+    };
+    use crate::models::trigger_run::COLLECTION_NAME as RUNS;
+    let db = connect_transaction_test_database("channel_length_notes").await;
+    let state = test_app_state(db.clone());
+    let date = bson::DateTime::now();
+    db.collection::<bson::Document>(CHANNELS).insert_one(doc! {
+        "_id":"channel", "user_id":"owner", "channel_bot_id":"bot", "platform":"telegram-new", "bot_label":"bot",
+        "transport":"gateway", "status":"active", "route_api_key_id":"key", "created_at":date, "updated_at":date,
+    }).await.unwrap();
+    db.collection::<bson::Document>(THREADS).insert_one(doc! {
+        "_id":"chat", "channel_id":"channel", "user_id":"owner", "partition":"chat", "platform_chat_id":"123",
+        "created_at":date, "updated_at":date,
+    }).await.unwrap();
+    db.collection::<bson::Document>(RUNS).insert_one(doc! {
+        "_id":"run", "trigger_id":"trigger", "user_id":"owner", "scheduled_at":date, "deadline":date,
+        "outcome":"started", "fence":"fence", "lease_until":date, "expires_at":date,
+        "deliver_to":{"type":"chat", "chat_id":"chat"},
+    }).await.unwrap();
+    let mut parent = stale_test_row(Utc::now());
+    parent.active_turn.as_mut().unwrap().trigger_run_id = Some("run".into());
+    parent.active_turn.as_mut().unwrap().origin = TurnOrigin::Trigger;
+    let note =
+        crate::services::assistant_nyxagent_runtime::turn_notes(&state, &parent, None, None).await;
+    assert!(note.contains("Destination: Telegram. One message holds 4,096 characters"));
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_one(&parent)
+        .await
+        .unwrap();
+    let mut specialist = stale_test_row(Utc::now());
+    specialist.role = AgentRole::Subagent;
+    specialist.active_turn.as_mut().unwrap().origin = TurnOrigin::Orchestrator;
+    specialist.active_turn.as_mut().unwrap().report_to = Some(parent.id.clone());
+    specialist.active_turn.as_mut().unwrap().note =
+        reporting_channel_length_note(&db, "owner", Some(&parent.id))
+            .await
+            .unwrap();
+    specialist.report_to = Some(parent.id.clone());
+    let note =
+        crate::services::assistant_nyxagent_runtime::turn_notes(&state, &specialist, None, None)
+            .await;
+    assert!(note.contains("Your report is intended for the requesting turn's chat destination"));
+    assert!(note.contains("4,096 characters"));
+    // Follow the immutable run destination on a confirmation continuation too.
+    parent.active_turn.as_mut().unwrap().origin = TurnOrigin::Event;
+    assert!(
+        additional_channel_length_note(&db, &parent)
+            .await
+            .unwrap()
+            .contains("4,096 characters")
+    );
+    db.collection::<bson::Document>(RUNS)
+        .update_one(
+            doc! {"_id":"run"},
+            doc! {"$set":{"deliver_to":{"type":"thread"}}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        !additional_channel_length_note(&db, &parent)
+            .await
+            .unwrap()
+            .contains("One message holds")
+    );
+    // Assigned work retains its admitted formatting context even if the
+    // requesting turn settles or its next turn is app-only.
+    let note =
+        crate::services::assistant_nyxagent_runtime::turn_notes(&state, &specialist, None, None)
+            .await;
+    assert!(note.contains("4,096 characters"));
+    assert!(
+        reporting_channel_length_note(&db, "owner", Some(&parent.id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Neither another owner's automation nor another owner's reporting thread
+    // can supply destination context to this turn.
+    parent.user_id = "other-owner".into();
+    assert!(
+        additional_channel_length_note(&db, &parent)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        reporting_channel_length_note(&db, "other-owner", Some(&parent.id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let app = stale_test_row(Utc::now());
+    let note =
+        crate::services::assistant_nyxagent_runtime::turn_notes(&state, &app, None, None).await;
+    assert!(!note.contains("One message holds"));
 }
 
 #[tokio::test]

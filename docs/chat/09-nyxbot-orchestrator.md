@@ -836,6 +836,16 @@ per-image counts (`sent_now`, `previously_delivered`, `failed`, `skipped`,
 this call's attempts. Tool-image notes mention `include_images` when the turn's
 images would not otherwise reach a chat the agent posts to. Guests cannot post.
 
+Chat destinations add a bounded turn-only length note using the delivery
+planner's platform budget (Telegram 4,096 UTF-16 code units; Discord 2,000).
+Prefer one message unless the user explicitly asks for long or complete output;
+the planner still splits longer output without truncation. This follows channel,
+followed-thread, manager and automation destinations, including additional
+recipients. Assigned specialists capture their requesting turn's guidance at
+assignment. Chat-list tool results provide `reply_length_guidance` for drafting
+explicit posts, whose input bound is 32,768 characters. App-only turns receive no
+channel-length note, and destination advice stays out of stable instructions.
+
 Upgrade from 0.71.0 keeps v1 image barriers in `nyxbot_image_deliveries`
 (read-only, original seven-day TTL) before every v2 attempt in the separate
 `nyxbot_image_deliveries_v2` collection. The guard matches the source turn and

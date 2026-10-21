@@ -275,6 +275,7 @@ fn event(text: &str, sender: &str, event_id: &str) -> Value {
         "event_context": {"schema_version": 1, "channel_id": "cmaeg1.ch.test",
             "conversation_id": PARTITION,
             "activity": {"schema_version": 1, "event_id": event_id,
+                "telegram_input":{"version":1,"original":true,"message":{"text":text}},
                 "kind": {"type": "message", "text": text, "attachments": [], "mentions_bot": false},
                 "actor": {"id": sender, "display_name": "Alice", "kind": "human"},
                 "conversation": {"id": "chat-1", "kind": "private"},
@@ -285,6 +286,33 @@ fn event(text: &str, sender: &str, event_id: &str) -> Value {
 }
 
 async fn respond(state: &AppState, agent_key: &str, body: &Value, idempotency: &str) -> Response {
+    // Model the metadata written by the authenticated relay before its callback.
+    let activity = &body["event_context"]["activity"];
+    if activity["source"]["type"] == "nyxid_relay"
+        && let Some(original) = activity["telegram_input"]["original"].as_bool()
+        && let Some(key) = state
+            .db
+            .collection::<ApiKey>(crate::models::api_key::COLLECTION_NAME)
+            .find_one(
+                doc! {"key_hash": crate::crypto::token::hash_token(agent_key), "is_active": true},
+            )
+            .await
+            .unwrap()
+        && let Some(row) = state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .find_one(doc! {"agent_api_key_id": &key.id, "user_id": &key.user_id})
+            .await
+            .unwrap()
+        && canonical_platform(&row.platform) == "telegram"
+    {
+        state.db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .update_one(doc!{"_id":activity["event_id"].as_str().unwrap()},doc!{"$setOnInsert":{
+                "channel_bot_id":&row.channel_bot_id,"agent_api_key_id":&row.route_api_key_id,
+                "direction":"inbound","sender_platform_id":activity["actor"]["id"].as_str().unwrap(),
+                "original_message":original
+            }}).upsert(true).await.unwrap();
+    }
     let mut headers = bearer(agent_key);
     headers.insert("idempotency-key", idempotency.parse().unwrap());
     responses(
@@ -715,6 +743,27 @@ async fn owners_confirm_actions_by_replying_yes_in_the_chat_app() {
     };
     assert_eq!(status(stale.id.clone()).await, "pending");
     let code = acks::confirm_code(&stale.id);
+    for (i, source) in ["nyxid_relay", "telegram"].iter().enumerate() {
+        for field in ["forward_origin", "quote", "external_reply", "unknown"] {
+            let key = format!("forwarded-{i}-{field}");
+            let mut forwarded = event(&format!("yes {code}"), "7", &key);
+            let activity = &mut forwarded["event_context"]["activity"];
+            activity["source"]["type"] = (*source).into();
+            if field == "unknown" {
+                activity.as_object_mut().unwrap().remove("telegram_input");
+            } else {
+                activity["telegram_input"]["original"] = false.into();
+                activity["telegram_input"]["message"][field] =
+                    json!({"type":"hidden_user","text":"yes"});
+            }
+            respond(&state, &agent_key, &forwarded, &key).await;
+            assert_eq!(
+                status(stale.id.clone()).await,
+                "pending",
+                "{source}/{field}"
+            );
+        }
+    }
     respond(
         &state,
         &agent_key,
@@ -2477,6 +2526,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         OWNER,
         TurnStart {
             media_event_ids: Vec::new(),
+            channel_uploads: Vec::new(),
             invocation_id: None,
             acknowledgement_id: None,
             retry_of: None,
@@ -2892,6 +2942,19 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
     let chats = chats::list_chats(&state, OWNER, Some(&row.id))
         .await
         .unwrap();
+    let posting = chats[0].posting_context();
+    assert!(
+        posting["reply_length_guidance"]
+            .as_str()
+            .unwrap()
+            .contains("Destination: Lark.")
+    );
+    assert!(
+        posting["reply_length_guidance"]
+            .as_str()
+            .unwrap()
+            .contains("30,709 bytes")
+    );
     let listed = serde_json::to_value(&chats).unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 1);
     assert_eq!(listed[0]["kind"], "group");
@@ -3521,6 +3584,7 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         OWNER,
         TurnStart {
             media_event_ids: Vec::new(),
+            channel_uploads: Vec::new(),
             invocation_id: None,
             acknowledgement_id: None,
             retry_of: None,
@@ -5016,6 +5080,8 @@ async fn the_telegram_account_that_created_a_bot_through_nyxid_is_its_owner() {
             .is_empty()
     );
     let sender = |id: &'static str| Sender {
+        media: Vec::new(),
+        original_message: true,
         kind: crate::models::channel_thread::ThreadSenderKind::Human,
         owner_eligible: true,
         id,
@@ -5141,6 +5207,8 @@ mod late_delivery_tests;
 mod gateway_thread_tests;
 #[path = "nyxbot_gateway_topic_tests.rs"]
 mod gateway_topic_tests;
+#[path = "nyxbot_telegram_relay_tests.rs"]
+mod telegram_relay_tests;
 
 /// Plan v7 §2.2 carriers: a watch stores the causing turn's report snapshot
 /// with validated provenance and wakes its thread with an event bound from

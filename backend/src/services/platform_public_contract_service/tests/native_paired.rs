@@ -565,6 +565,7 @@ fn real_codex_native_v2_discovery_readiness_faq_search_read_signup_answer_use_ac
                 &db,
                 context.clone(),
                 TurnInput {
+                    channel_uploads: Vec::new(),
                     text: admission.text().into(),
                 },
                 events,

@@ -266,6 +266,7 @@ function SecurityTab() {
   const queryClient = useQueryClient();
   const [mfaDialogOpen, setMfaDialogOpen] = useState(false);
   const [disableMfaDialogOpen, setDisableMfaDialogOpen] = useState(false);
+  const [disableMfaCode, setDisableMfaCode] = useState("");
   const [disableMfaPassword, setDisableMfaPassword] = useState("");
   const [disableMfaError, setDisableMfaError] = useState<string | null>(null);
   const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
@@ -288,9 +289,9 @@ function SecurityTab() {
   const [showNewPw, setShowNewPw] = useState(false);
   const [showConfirmPw, setShowConfirmPw] = useState(false);
 
-  // Password changes only make sense for email/password accounts. Social
-  // (OAuth) accounts have no password — social_provider is set for them.
-  const isPasswordUser = !user?.social_provider;
+  // Linked social accounts may retain a password. Older servers omit the
+  // explicit availability flag, so retain the legacy inference as a fallback.
+  const isPasswordUser = user?.has_password ?? !user?.social_provider;
   const providerLabel = user?.social_provider
     ? user.social_provider.charAt(0).toUpperCase() +
       user.social_provider.slice(1)
@@ -326,14 +327,22 @@ function SecurityTab() {
   }
 
   async function handleDisableMfa() {
-    if (!disableMfaPassword) {
-      setDisableMfaError("Password is required");
+    if (!disableMfaCode.trim()) {
+      setDisableMfaError("Enter your authenticator or recovery code");
+      return;
+    }
+    if (isPasswordUser && !disableMfaPassword) {
+      setDisableMfaError("Password is required for this account");
       return;
     }
     try {
-      await disableMfa.mutateAsync(disableMfaPassword);
+      await disableMfa.mutateAsync({
+        code: disableMfaCode.trim(),
+        ...(isPasswordUser ? { password: disableMfaPassword } : {}),
+      });
       toast.success("MFA disabled");
       setDisableMfaDialogOpen(false);
+      setDisableMfaCode("");
       setDisableMfaPassword("");
       setDisableMfaError(null);
     } catch (error) {
@@ -347,6 +356,7 @@ function SecurityTab() {
 
   function handleDisableMfaClose() {
     setDisableMfaDialogOpen(false);
+    setDisableMfaCode("");
     setDisableMfaPassword("");
     setDisableMfaError(null);
   }
@@ -429,8 +439,9 @@ function SecurityTab() {
           <DialogHeader>
             <DialogTitle>Disable Two-Factor Authentication</DialogTitle>
             <DialogDescription>
-              Enter your password to confirm disabling two-factor
-              authentication. This will make your account less secure.
+              Enter a current authenticator or recovery code to confirm.{" "}
+              {isPasswordUser && "Enter your password too. "}
+              This will make your account less secure.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -445,6 +456,23 @@ function SecurityTab() {
             <div className="space-y-2">
               <label
                 className="text-12 font-medium"
+                htmlFor="disable-mfa-code"
+              >
+                Authenticator or recovery code
+              </label>
+              <Input
+                id="disable-mfa-code"
+                value={disableMfaCode}
+                onChange={(e) => setDisableMfaCode(e.target.value)}
+                placeholder="000000 or recovery code"
+                autoComplete="one-time-code"
+                inputMode="text"
+                autoFocus
+              />
+            </div>
+            {isPasswordUser && <div className="space-y-2">
+              <label
+                className="text-12 font-medium"
                 htmlFor="disable-mfa-password"
               >
                 Password
@@ -456,9 +484,8 @@ function SecurityTab() {
                 value={disableMfaPassword}
                 onChange={(e) => setDisableMfaPassword(e.target.value)}
                 placeholder="Enter your password"
-                autoFocus
               />
-            </div>
+            </div>}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={handleDisableMfaClose}>

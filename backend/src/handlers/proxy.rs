@@ -11724,6 +11724,7 @@ mod proxy_resolution_integration_tests {
 
     fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
         AuthUser {
+            mfa_assured: false,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -11757,6 +11758,7 @@ mod proxy_resolution_integration_tests {
 
     fn access_token_auth(user_id: &str) -> AuthUser {
         AuthUser {
+            mfa_assured: false,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,

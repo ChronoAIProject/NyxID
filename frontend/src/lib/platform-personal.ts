@@ -8,6 +8,18 @@ import {
   personalBindingsSchema,
 } from "@/schemas/platform-personal";
 
+export function telegramConfirmationUrl(
+  command: string | undefined,
+  username: string | null | undefined,
+) {
+  if (!command || !username || !/^[A-Za-z0-9_]{5,32}$/.test(username))
+    return undefined;
+  const code = /^\/confirm (P-[A-Z0-9]{4}-[A-Z0-9]{4})$/.exec(command)?.[1];
+  return code
+    ? `https://t.me/${username}?start=nyxpersonal_${code}`
+    : undefined;
+}
+
 export function personalActorGuard(actor: string | undefined) {
   return () => {
     if (!actor || useAuthStore.getState().user?.id !== actor)

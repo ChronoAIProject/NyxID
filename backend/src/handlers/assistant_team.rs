@@ -51,6 +51,7 @@ pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
     let user_id =
         Uuid::parse_str(owner).map_err(|_| AppError::NotFound("Conversation not found".into()))?;
     Ok(AuthUser {
+        mfa_assured: false,
         org_agent_access: None,
         assistant_group_id: None,
         assistant_agent_owner_id: None,
@@ -166,6 +167,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
         media_event_ids: Vec::new(),
+        channel_uploads: Vec::new(),
         invocation_id: None,
         acknowledgement_id: None,
         retry_of: None,
@@ -905,11 +907,13 @@ pub(crate) async fn assign(
     ))
     .await?;
     let limit = team_pool_limit(state, owner).await;
+    let note = engine::reporting_channel_length_note(&state.db, owner, report_to).await?;
     start_server_turn(
         state,
         owner,
         TurnStart {
             media_event_ids: Vec::new(),
+            channel_uploads: Vec::new(),
             invocation_id: invocation_id.map(str::to_owned),
             acknowledgement_id: None,
             retry_of: None,
@@ -925,7 +929,7 @@ pub(crate) async fn assign(
             origin: TurnOrigin::Orchestrator,
             channel: None,
             title: None,
-            note: None,
+            note,
             new_id: None,
             agent_id: None,
             report_to: report_to.map(str::to_owned),
@@ -2461,7 +2465,10 @@ async fn dispatch_channels(
                 args["channel_agent_id"].as_str(),
             ))
             .await?;
-            (json!({"chats": chats}), false)
+            (
+                json!({"chats": chats.iter().map(|chat| chat.posting_context()).collect::<Vec<_>>()}),
+                false,
+            )
         }
         "list_channel_threads" => (
             super::nyxbot::thread_controls::list_tool(state, owner, args).await?,

@@ -598,6 +598,7 @@ impl contract::PersonalTurnProducer for PersonalTurns {
             super::assistant_team_service::ensure_nyxbot(db, &admitted.authority.user_id).await?;
         let mut start = engine::TurnStart::from(&request);
         start.model = Some(agent.model.clone());
+        start.channel_uploads = input.channel_uploads;
         let ids = engine::OwnerTurnIds {
             conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
             turn_id: uuid::Uuid::new_v4().to_string(),

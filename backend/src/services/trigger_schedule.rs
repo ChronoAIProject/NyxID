@@ -1,6 +1,7 @@
 //! Trigger schedules: derived leased work, durable UUID-v5 occurrence identity,
 //! and admission fenced in the same transaction as an assistant turn.
 pub mod compute;
+pub mod result_delivery;
 use super::api_key_mutation_service as transactions;
 use super::assistant_engine_policy as policy;
 use crate::models::trigger_run::RunOutcome;

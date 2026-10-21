@@ -21,7 +21,7 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 pub const DELIVERY_UNCERTAIN: &str = "Media upload or delivery failed";
 
 pub fn is_delivery_uncertain(error: &AppError) -> bool {
-    matches!(error, AppError::ChannelPlatformError(message) if message == DELIVERY_UNCERTAIN)
+    matches!(error, AppError::ChannelPlatformError(message) if message == DELIVERY_UNCERTAIN || message == crate::services::channel_text_delivery::UNCERTAIN)
 }
 
 pub fn fetch_failed() -> AppError {

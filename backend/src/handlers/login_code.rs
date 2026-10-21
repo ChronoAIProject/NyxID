@@ -136,6 +136,7 @@ pub async fn mint(
             &user.user_id.to_string(),
             selection,
             expiry,
+            user.mfa_assured,
         )
         .await?
         .into(),

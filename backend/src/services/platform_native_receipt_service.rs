@@ -141,6 +141,7 @@ pub(crate) async fn finish(db: &Database, claim: &ReceiptClaim, success: bool) -
 
 pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
     let service = super::telegram_new_service::TelegramNewService {
+        manager_id: None,
         db: &state.db,
         keys: &state.encryption_keys,
         config: &state.config,
@@ -245,6 +246,9 @@ async fn recover_notice(
     } else {
         None
     };
+    let service = service
+        .for_manager(profile.manager_bot_id.parse().map_err(|_| closed())?)
+        .await?;
     let (manager, _, values) = service.manager().await?;
     if manager.to_string() != profile.manager_bot_id
         || values.get("observation_id") != Some(profile.observation_id.as_str())

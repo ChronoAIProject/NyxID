@@ -82,6 +82,7 @@ pub mod channel_reply_plan;
 pub mod channel_routing_service;
 pub mod channel_send_service;
 pub mod channel_text;
+pub mod channel_text_delivery;
 pub mod channel_thread_follow_service;
 pub mod channel_thread_service;
 pub mod channel_verification_service;
@@ -455,6 +456,7 @@ pub mod tools_manager_service;
 
 pub mod platform_manager_delivery;
 pub mod platform_manager_transport;
+pub mod platform_pairing_link;
 
 pub mod platform_public_contract_service;
 
@@ -500,3 +502,8 @@ pub(crate) mod record_storage;
 pub(crate) mod trigger_record_service;
 
 pub(crate) mod agent_login_record_service;
+pub mod telegram_input;
+
+pub mod platform_help_service;
+
+pub mod telegram_manager_registry;

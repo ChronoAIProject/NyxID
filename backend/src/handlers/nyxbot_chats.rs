@@ -18,7 +18,7 @@ use crate::{
 
 pub(super) const MAX_TITLE_CHARS: usize = 80;
 const LIST_LIMIT: i64 = 100;
-pub(super) const MAX_POST_CHARS: usize = 4000;
+pub(super) const MAX_POST_CHARS: usize = engine::MAX_MESSAGE_CHARS;
 
 /// `private`, `group` or `channel`; anything else counts as a group.
 pub(super) fn chat_kind(kind: &str) -> &'static str {
@@ -1096,6 +1096,20 @@ pub struct ChannelChatResponse {
     follow_guidance: Option<String>,
 }
 
+impl ChannelChatResponse {
+    /// Tool results are per-turn input. Keep platform advice out of the stable
+    /// tool inventory and app-only conversation instructions.
+    pub(crate) fn posting_context(&self) -> Value {
+        let mut context = json!(self);
+        context["reply_length_guidance"] = format!(
+            "When drafting a post_to_chat message to this chat: {}",
+            crate::services::channel_text::reply_length_guidance(&self.platform)
+        )
+        .into();
+        context
+    }
+}
+
 fn chat_response(row: &NyxbotChannel, chat: &NyxbotThread) -> ChannelChatResponse {
     ChannelChatResponse {
         parent_chat_id: chat.follow.parent_chat_id.clone(),
@@ -1639,16 +1653,26 @@ pub(crate) async fn post_current_turn(
     if !post_turn_is_live(state, chat).await.unwrap_or(false) {
         return Ok(json!({"text":"cancelled","images":images,"chat_id":chat_id}));
     }
-    let result = send_post_with_fence(
+    let request = format!(
+        "turn:{}:{}:{}",
+        chat.conversation_id,
+        chat.turn_id.as_deref().unwrap_or_default(),
+        crate::services::mcp_service::canonical_sha256(json!(text))
+    );
+    let key = post_key(&target, &request);
+    let result = send_post_planned(
         state,
         &target,
         crate::services::channel_platform::OutboundReply {
-            text: Some(super::images::append_failure(text, &report)),
+            text: Some(text.to_owned()),
             metadata: None,
             attachments: Vec::new(),
             reply_to_platform_message_id: None,
         },
         Some(chat),
+        &request,
+        Some(&chat.conversation_id),
+        Some(notice_context(&report, 0)),
     )
     .await;
     let (status, message_id) = match result {
@@ -1664,6 +1688,16 @@ pub(crate) async fn post_current_turn(
         }
         Err(_) => ("failed", None),
     };
+    let text_delivery = crate::services::channel_text_delivery::load(&state.db, &key)
+        .await?
+        .map(|row| {
+            use crate::models::channel_text_delivery::TextPartState;
+            json!({"total":row.parts.len(),
+                "sent":row.parts.iter().filter(|p|p.state==TextPartState::Sent).count(),
+                "uncertain":row.parts.iter().filter(|p|p.state==TextPartState::Sending).count(),
+                "unattempted":row.parts.iter().filter(|p|p.state==TextPartState::Pending).count(),
+                "refused":row.parts.iter().filter(|p|p.state==TextPartState::Refused).count()})
+        });
     audit(
         state,
         &chat.user_id,
@@ -1679,6 +1713,7 @@ pub(crate) async fn post_current_turn(
     Ok(json!({
         "status": if status == "sent" { "posted" } else { status },
         "text": status,
+        "text_delivery": text_delivery,
         "images": images,
         "chat_id": chat_id,
         "message_id": message_id,
@@ -1692,8 +1727,17 @@ pub(crate) async fn post_automation(
     text: &str,
     agent_id: Option<&str>,
     thread_id: &str,
+    run_id: &str,
 ) -> AppResult<Value> {
-    post_inner(state, owner, chat_id, text, agent_id, Some(thread_id)).await
+    post_inner(
+        state,
+        owner,
+        chat_id,
+        text,
+        agent_id,
+        Some((thread_id, run_id)),
+    )
+    .await
 }
 
 pub(crate) struct PostTarget {
@@ -1809,6 +1853,254 @@ pub(super) async fn send_post(
 pub(super) async fn send_post_with_fence(
     state: &AppState,
     target: &PostTarget,
+    outbound: crate::services::channel_platform::OutboundReply,
+    fence: Option<&crate::services::assistant_acknowledgement_service::ChatAuthority>,
+) -> AppResult<crate::handlers::channel_relay::AsyncReplyResponse> {
+    let request = fence.map_or_else(
+        || uuid::Uuid::new_v4().to_string(),
+        |chat| {
+            format!(
+                "turn:{}:{}:{}",
+                chat.conversation_id,
+                chat.turn_id.as_deref().unwrap_or_default(),
+                crate::services::mcp_service::canonical_sha256(
+                    json!({"text":outbound.text,"metadata":outbound.metadata})
+                )
+            )
+        },
+    );
+    send_post_planned(state, target, outbound, fence, &request, None, None).await
+}
+
+fn post_key(target: &PostTarget, request: &str) -> String {
+    crate::services::mcp_service::canonical_sha256(json!([
+        "nyxbot-post-v1",
+        target.channel.user_id,
+        target.thread.id,
+        request
+    ]))
+}
+
+fn notice_context(
+    report: &super::images::ImageReport,
+    omitted: u32,
+) -> crate::models::channel_text_delivery::TextDeliveryNotice {
+    crate::models::channel_text_delivery::TextDeliveryNotice {
+        attempted: report.attempted,
+        sent: report.sent,
+        failed: report.failed,
+        unknown: report.unknown,
+        skipped: report.skipped,
+        unsupported: report.unsupported,
+        app_visible: report.app_visible,
+        automation: report.automation,
+        omitted,
+    }
+}
+
+fn render_notice(context: &crate::models::channel_text_delivery::TextDeliveryNotice) -> String {
+    let mut note = super::images::failure_note(&super::images::ImageReport {
+        attempted: context.attempted,
+        sent: context.sent,
+        failed: context.failed,
+        unknown: context.unknown,
+        skipped: context.skipped,
+        unsupported: context.unsupported,
+        app_visible: context.app_visible,
+        automation: context.automation,
+        ..Default::default()
+    });
+    if context.omitted > 0 {
+        note.push_str(&format!("\n\n{} additional images were omitted from this delivery. Check the automation's thread in the app; older images may have expired.",context.omitted));
+    }
+    note
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_post_planned<'a>(
+    state: &'a AppState,
+    target: &'a PostTarget,
+    outbound: crate::services::channel_platform::OutboundReply,
+    fence: Option<&'a crate::services::assistant_acknowledgement_service::ChatAuthority>,
+    request: &'a str,
+    reply_conversation: Option<&'a str>,
+    notice: Option<crate::models::channel_text_delivery::TextDeliveryNotice>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = AppResult<crate::handlers::channel_relay::AsyncReplyResponse>,
+            > + Send
+            + 'a,
+    >,
+> {
+    Box::pin(send_post_planned_impl(
+        state,
+        target,
+        outbound,
+        fence,
+        request,
+        reply_conversation,
+        notice,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_post_planned_impl(
+    state: &AppState,
+    target: &PostTarget,
+    outbound: crate::services::channel_platform::OutboundReply,
+    fence: Option<&crate::services::assistant_acknowledgement_service::ChatAuthority>,
+    request: &str,
+    reply_conversation: Option<&str>,
+    notice: Option<crate::models::channel_text_delivery::TextDeliveryNotice>,
+) -> AppResult<crate::handlers::channel_relay::AsyncReplyResponse> {
+    use crate::{
+        models::channel_text_delivery::TextPartState,
+        services::{channel_reply_plan as plan, channel_text_delivery as journal},
+    };
+    if !outbound.attachments.is_empty() || plan::has_structured_content(&outbound) {
+        return send_post_one(state, target, outbound, fence).await;
+    }
+    let url = crate::services::assistant_links::AssistantPage::Conversation {
+        conversation: reply_conversation
+            .or_else(|| fence.map(|c| c.conversation_id.as_str()))
+            .or(target.thread.conversation_id.as_deref())
+            .unwrap_or_default(),
+    }
+    .url(&state.config.frontend_url);
+    let key = post_key(target, request);
+    let notice = match journal::load(&state.db, &key).await? {
+        Some(existing) => existing.notice,
+        None => notice,
+    };
+    let mut text = outbound.text.clone().unwrap_or_default();
+    if let Some(context) = &notice {
+        text.push_str(&render_notice(context));
+    }
+    let mut parts = plan::assistant_parts(&text, &target.bot.platform, &url);
+    for part in &mut parts {
+        target.adapter.reply_context(
+            crate::services::channel_image_audience::chat_thread(&target.thread),
+            target.thread.created_at,
+            &mut part.metadata,
+        );
+    }
+    let fingerprint = crate::services::mcp_service::canonical_sha256(json!({
+        "parts":plan::fingerprint(&parts),"bot":target.bot.id,"platform":target.bot.platform,
+        "chat":target.thread.platform_chat_id,"thread":target.thread.platform_thread_id,
+        "topic":target.thread.telegram_topic,"generation":target.thread.follow.binding_generation,
+        "route":target.channel.route_id,"route_key":target.channel.route_api_key_id,
+        "transport":target.channel.transport,"gateway_version":target.channel.gateway_version,
+    }));
+    let delivery = journal::begin_with_notice(
+        &state.db,
+        &key,
+        &target.channel.user_id,
+        request,
+        &fingerprint,
+        parts.len(),
+        notice,
+    )
+    .await?;
+    let mut last = None;
+    for (index, part) in parts.into_iter().enumerate() {
+        let attempt = match journal::claim(&state.db, &delivery, index).await? {
+            journal::PartClaim::Sent(previous) => {
+                last = Some(crate::handlers::channel_relay::AsyncReplyResponse {
+                    message_id: previous
+                        .outbound_message_id
+                        .ok_or_else(journal::unconfirmed)?,
+                    platform_message_id: previous.platform_message_id,
+                    delivered_as: None,
+                });
+                continue;
+            }
+            journal::PartClaim::Send(attempt) => attempt,
+        };
+        match send_post_one(state, target, part, fence).await {
+            Ok(sent) if sent.platform_message_id.is_some() => {
+                journal::finish(
+                    &state.db,
+                    &delivery,
+                    index,
+                    &attempt,
+                    TextPartState::Sent,
+                    sent.platform_message_id.as_deref(),
+                    Some(&sent.message_id),
+                )
+                .await?;
+                last = Some(sent);
+            }
+            Ok(_) => return Err(journal::unconfirmed()),
+            Err(error) => {
+                if matches!(
+                    error,
+                    AppError::Forbidden(_)
+                        | AppError::Conflict(_)
+                        | AppError::ChannelConversationNotReachable(_)
+                        | AppError::ValidationError(_)
+                        | AppError::Unauthorized(_)
+                        | AppError::AssistantTurnRequired
+                        | AppError::ChannelBotInactive(_)
+                ) {
+                    journal::finish(
+                        &state.db,
+                        &delivery,
+                        index,
+                        &attempt,
+                        TextPartState::Refused,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    return Err(error);
+                }
+                if let Some(retry_after) = error.retry_after_seconds() {
+                    journal::defer(&state.db, &delivery, index, &attempt, retry_after).await?;
+                    return Err(error);
+                }
+                // Provider-specific confirmed refusals retain a terminal outcome.
+                if matches!(&error, AppError::ChannelPlatformError(message) if message.starts_with("Telegram send failed:"))
+                {
+                    journal::finish(
+                        &state.db,
+                        &delivery,
+                        index,
+                        &attempt,
+                        TextPartState::Refused,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    return Err(error);
+                }
+                // Keep the pre-dispatch Sending marker on ambiguous effects.
+                return Err(journal::unconfirmed());
+            }
+        }
+    }
+    last.ok_or_else(journal::unconfirmed)
+}
+
+fn send_post_one<'a>(
+    state: &'a AppState,
+    target: &'a PostTarget,
+    outbound: crate::services::channel_platform::OutboundReply,
+    fence: Option<&'a crate::services::assistant_acknowledgement_service::ChatAuthority>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = AppResult<crate::handlers::channel_relay::AsyncReplyResponse>,
+            > + Send
+            + 'a,
+    >,
+> {
+    Box::pin(send_post_one_impl(state, target, outbound, fence))
+}
+
+async fn send_post_one_impl(
+    state: &AppState,
+    target: &PostTarget,
     mut outbound: crate::services::channel_platform::OutboundReply,
     fence: Option<&crate::services::assistant_acknowledgement_service::ChatAuthority>,
 ) -> AppResult<crate::handlers::channel_relay::AsyncReplyResponse> {
@@ -1821,6 +2113,11 @@ pub(super) async fn send_post_with_fence(
     .await?;
     let (channel, thread) = load_chat(state, &target.channel.user_id, &target.thread.id).await?;
     if channel.channel_bot_id != target.bot.id
+        || channel.route_id != target.channel.route_id
+        || channel.route_api_key_id != target.channel.route_api_key_id
+        || channel.transport != target.channel.transport
+        || channel.gateway_version != target.channel.gateway_version
+        || thread.follow.binding_generation != target.thread.follow.binding_generation
         || thread.platform_chat_id != target.thread.platform_chat_id
         || thread.platform_thread_id != target.thread.platform_thread_id
         || thread.telegram_topic != target.thread.telegram_topic
@@ -1861,7 +2158,7 @@ async fn post_inner(
     chat_id: &str,
     text: &str,
     agent_id: Option<&str>,
-    full_thread: Option<&str>,
+    full_thread: Option<(&str, &str)>,
 ) -> AppResult<Value> {
     let text = text.trim();
     if text.is_empty() || (full_thread.is_none() && text.chars().count() > MAX_POST_CHARS) {
@@ -1870,20 +2167,12 @@ async fn post_inner(
         )));
     }
     let target = prepare_post(state, owner, chat_id, agent_id).await?;
-    let text = full_thread.map_or_else(
-        || text.to_owned(),
-        |thread| {
-            automation_reply(
-                &target.bot.platform,
-                text,
-                &format!(
-                    "{}/assistant?c={thread}",
-                    state.config.frontend_url.trim_end_matches('/')
-                ),
-            )
-        },
+    let text = text.to_owned();
+    let request = full_thread.map_or_else(
+        || uuid::Uuid::new_v4().to_string(),
+        |(_, run)| format!("automation:{run}"),
     );
-    let sent = send_post(
+    let sent = send_post_planned(
         state,
         &target,
         crate::services::channel_platform::OutboundReply {
@@ -1892,6 +2181,10 @@ async fn post_inner(
             attachments: Vec::new(),
             reply_to_platform_message_id: None,
         },
+        None,
+        &request,
+        full_thread.map(|(thread, _)| thread),
+        None,
     )
     .await?;
     audit(
@@ -1923,247 +2216,239 @@ pub(crate) async fn post_automation_images(
     // Keep this multi-stage delivery future on the heap. Its callers include
     // Tokio workers and nested image/automation delivery on normal stacks.
     Box::pin(async move {
-    let target = prepare_post(state, &run.user_id, chat_id, agent_id).await?;
-    let mut report = super::images::ImageReport {
-        app_visible: target.thread.owner_chat && target.thread.kind.as_deref() == Some("private"),
-        automation: true,
-        ..Default::default()
-    };
-    let mut outbound = crate::services::channel_platform::OutboundReply {
-        text: None,
-        metadata: None,
-        attachments: Vec::new(),
-        reply_to_platform_message_id: None,
-    };
-    target.adapter.reply_context(
-        crate::services::channel_image_audience::chat_thread(&target.thread),
-        target.thread.created_at,
-        &mut outbound.metadata,
-    );
-    let audience = crate::services::channel_image_audience::resolve(
-        &target.bot.id,
-        &target.bot.platform,
-        &target.conversation.platform_conversation_id,
-        &outbound,
-    );
-    let mut budget = engine::MAX_TURN_ATTACHMENTS;
-    let mut omitted = run.image_refs_truncated;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(135);
-    let mut seen = std::collections::HashSet::new();
-    let mut stop = None;
-    let mut last_send: Option<std::time::Instant> = None;
-    for item in run.image_refs.iter().rev() {
-        if !seen.insert(item.attachment.id.as_str()) {
-            continue;
-        }
-        if run.thread_id.as_deref() != Some(item.conversation_id.as_str())
-            || !engine::chat_tool_image(&item.attachment)
-        {
-            report.outcomes.push(super::images::ImageItemResult {
-                attachment_id: item.attachment.id.clone(),
-                status: "failed".into(),
-                code: Some("unavailable".into()),
-            });
-            report.failed += 1;
-            report.attempted += 1;
-            continue;
-        }
-        let metadata = match engine::turn_tool_attachments(
-            &state.db,
-            &run.user_id,
-            &item.conversation_id,
-            &item.turn_id,
-        )
-        .await
-        {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                tracing::warn!(
-                    run_id = run.id,
-                    code = error.error_code(),
-                    "Automation image metadata unavailable"
-                );
-                Vec::new()
-            }
+        let target = prepare_post(state, &run.user_id, chat_id, agent_id).await?;
+        let mut report = super::images::ImageReport {
+            app_visible: target.thread.owner_chat
+                && target.thread.kind.as_deref() == Some("private"),
+            automation: true,
+            ..Default::default()
         };
-        if !metadata.iter().any(|attachment| {
-            attachment.id == item.attachment.id
-                && attachment.content_type == item.attachment.content_type
-                && attachment.size == item.attachment.size
-                && engine::chat_tool_image(attachment)
-        }) {
-            report.outcomes.push(super::images::ImageItemResult {
-                attachment_id: item.attachment.id.clone(),
-                status: "failed".into(),
-                code: Some("unavailable".into()),
-            });
-            report.failed += 1;
-            report.attempted += 1;
-            continue;
-        }
-        match crate::services::channel_image_delivery::read_legacy(
-            &state.db,
-            &run.user_id,
-            &item.conversation_id,
-            &item.turn_id,
-            &target.channel.id,
-            &item.attachment.id,
-        )
-        .await
-        {
-            Ok(Some(outcome)) => {
-                report
-                    .outcomes
-                    .push(super::images::legacy_item(&item.attachment.id, outcome));
-                continue;
-            }
-            Ok(None) => {}
-            Err(_) => {
-                report.outcomes.push(super::images::ImageItemResult {
-                    attachment_id: item.attachment.id.clone(),
-                    status: "unknown".into(),
-                    code: None,
-                });
-                report.unknown += 1;
-                report.attempted += 1;
-                stop = Some("after_unknown");
-                continue;
-            }
-        }
-        let existing = match crate::services::channel_image_delivery::read(
-            &state.db,
-            &run.user_id,
-            &item.attachment.id,
-            &audience,
-        )
-        .await
-        {
-            Ok(existing) => existing,
-            Err(_) => {
-                report.outcomes.push(super::images::ImageItemResult {
-                    attachment_id: item.attachment.id.clone(),
-                    status: "unknown".into(),
-                    code: None,
-                });
-                report.unknown += 1;
-                report.attempted += 1;
-                stop = Some("after_unknown");
-                continue;
-            }
-        };
-        let pending = existing.as_ref().is_none_or(|claim| {
-            claim.state == crate::models::nyxbot_image_delivery::ImageDeliveryState::Pending
-        });
-        if let Some(existing) = existing.as_ref().filter(|_| !pending) {
-            report.outcomes.push(super::images::existing_item(existing));
-            continue;
-        }
-        if pending && budget == 0 {
-            omitted = omitted.saturating_add(1);
-            continue;
-        }
-        if pending
-            && matches!(target.bot.platform.as_str(), "telegram" | "telegram-new")
-            && target.thread.kind.as_deref() != Some("private")
-            && let Some(last) = last_send
-        {
-            tokio::time::sleep(
-                (last + std::time::Duration::from_secs(1))
-                    .saturating_duration_since(std::time::Instant::now()),
-            )
-            .await;
-        }
-        if pending {
-            last_send = Some(std::time::Instant::now());
-        }
-        let one = super::images::report_or_failure_with_stop(
-            state,
-            super::images::ImageSendContext {
-                owner: &run.user_id,
-                conversation_id: &item.conversation_id,
-                turn_id: &item.turn_id,
-                channel: &target.channel,
-                thread: &target.thread,
-                anchor: super::images::ImageAnchor::Initiated {
-                    chat_id: chat_id.into(),
-                },
-                audience: super::images::ImageAudience {
-                    owner_private: report.app_visible,
-                },
-                deadline: Some(deadline),
-                initiated: Some(&target),
-                fence: None,
-            },
-            &super::images::ImageSendPlan {
-                attachments: vec![item.attachment.clone()],
-            },
-            stop,
-        )
-        .await;
-        if pending && (one.claimed > 0 || one.unknown > 0) {
-            budget -= 1;
-        }
-        if one.unknown > 0 {
-            stop = Some("after_unknown");
-        }
-        if one
-            .outcomes
-            .iter()
-            .any(|item| item.code.as_deref() == Some("billing"))
-        {
-            stop = Some("billing");
-        }
-        report.attempted += one.attempted;
-        report.sent += one.sent;
-        report.failed += one.failed;
-        report.unknown += one.unknown;
-        report.skipped += one.skipped;
-        report.unsupported |= one.unsupported;
-        report.outcomes.extend(one.outcomes);
-    }
-    let mut note = super::images::failure_note(&report);
-    if omitted > 0 {
-        note.push_str(&format!("\n\n{omitted} additional images were omitted from this delivery. Check the automation's thread in the app; older images may have expired."));
-    }
-    let reply = automation_reply_with_note(
-        &target.bot.platform,
-        text,
-        &format!(
-            "{}/assistant?c={conversation_id}",
-            state.config.frontend_url.trim_end_matches('/')
-        ),
-        &note,
-    );
-    let sent = send_post(
-        state,
-        &target,
-        crate::services::channel_platform::OutboundReply {
-            text: Some(reply),
+        let mut outbound = crate::services::channel_platform::OutboundReply {
+            text: None,
             metadata: None,
             attachments: Vec::new(),
             reply_to_platform_message_id: None,
-        },
-    )
-    .await?;
-    audit(
-        state,
-        &run.user_id,
-        "nyxbot_channel_chat_posted",
-        json!({
-            "channel_agent_id": target.channel.id,
+        };
+        target.adapter.reply_context(
+            crate::services::channel_image_audience::chat_thread(&target.thread),
+            target.thread.created_at,
+            &mut outbound.metadata,
+        );
+        let audience = crate::services::channel_image_audience::resolve(
+            &target.bot.id,
+            &target.bot.platform,
+            &target.conversation.platform_conversation_id,
+            &outbound,
+        );
+        let mut budget = engine::MAX_TURN_ATTACHMENTS;
+        let mut omitted = run.image_refs_truncated;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(135);
+        let mut seen = std::collections::HashSet::new();
+        let mut stop = None;
+        let mut last_send: Option<std::time::Instant> = None;
+        for item in run.image_refs.iter().rev() {
+            if !seen.insert(item.attachment.id.as_str()) {
+                continue;
+            }
+            if run.thread_id.as_deref() != Some(item.conversation_id.as_str())
+                || !engine::chat_tool_image(&item.attachment)
+            {
+                report.outcomes.push(super::images::ImageItemResult {
+                    attachment_id: item.attachment.id.clone(),
+                    status: "failed".into(),
+                    code: Some("unavailable".into()),
+                });
+                report.failed += 1;
+                report.attempted += 1;
+                continue;
+            }
+            let metadata = match engine::turn_tool_attachments(
+                &state.db,
+                &run.user_id,
+                &item.conversation_id,
+                &item.turn_id,
+            )
+            .await
+            {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    tracing::warn!(
+                        run_id = run.id,
+                        code = error.error_code(),
+                        "Automation image metadata unavailable"
+                    );
+                    Vec::new()
+                }
+            };
+            if !metadata.iter().any(|attachment| {
+                attachment.id == item.attachment.id
+                    && attachment.content_type == item.attachment.content_type
+                    && attachment.size == item.attachment.size
+                    && engine::chat_tool_image(attachment)
+            }) {
+                report.outcomes.push(super::images::ImageItemResult {
+                    attachment_id: item.attachment.id.clone(),
+                    status: "failed".into(),
+                    code: Some("unavailable".into()),
+                });
+                report.failed += 1;
+                report.attempted += 1;
+                continue;
+            }
+            match crate::services::channel_image_delivery::read_legacy(
+                &state.db,
+                &run.user_id,
+                &item.conversation_id,
+                &item.turn_id,
+                &target.channel.id,
+                &item.attachment.id,
+            )
+            .await
+            {
+                Ok(Some(outcome)) => {
+                    report
+                        .outcomes
+                        .push(super::images::legacy_item(&item.attachment.id, outcome));
+                    continue;
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    report.outcomes.push(super::images::ImageItemResult {
+                        attachment_id: item.attachment.id.clone(),
+                        status: "unknown".into(),
+                        code: None,
+                    });
+                    report.unknown += 1;
+                    report.attempted += 1;
+                    stop = Some("after_unknown");
+                    continue;
+                }
+            }
+            let existing = match crate::services::channel_image_delivery::read(
+                &state.db,
+                &run.user_id,
+                &item.attachment.id,
+                &audience,
+            )
+            .await
+            {
+                Ok(existing) => existing,
+                Err(_) => {
+                    report.outcomes.push(super::images::ImageItemResult {
+                        attachment_id: item.attachment.id.clone(),
+                        status: "unknown".into(),
+                        code: None,
+                    });
+                    report.unknown += 1;
+                    report.attempted += 1;
+                    stop = Some("after_unknown");
+                    continue;
+                }
+            };
+            let pending = existing.as_ref().is_none_or(|claim| {
+                claim.state == crate::models::nyxbot_image_delivery::ImageDeliveryState::Pending
+            });
+            if let Some(existing) = existing.as_ref().filter(|_| !pending) {
+                report.outcomes.push(super::images::existing_item(existing));
+                continue;
+            }
+            if pending && budget == 0 {
+                omitted = omitted.saturating_add(1);
+                continue;
+            }
+            if pending
+                && matches!(target.bot.platform.as_str(), "telegram" | "telegram-new")
+                && target.thread.kind.as_deref() != Some("private")
+                && let Some(last) = last_send
+            {
+                tokio::time::sleep(
+                    (last + std::time::Duration::from_secs(1))
+                        .saturating_duration_since(std::time::Instant::now()),
+                )
+                .await;
+            }
+            if pending {
+                last_send = Some(std::time::Instant::now());
+            }
+            let one = super::images::report_or_failure_with_stop(
+                state,
+                super::images::ImageSendContext {
+                    owner: &run.user_id,
+                    conversation_id: &item.conversation_id,
+                    turn_id: &item.turn_id,
+                    channel: &target.channel,
+                    thread: &target.thread,
+                    anchor: super::images::ImageAnchor::Initiated {
+                        chat_id: chat_id.into(),
+                    },
+                    audience: super::images::ImageAudience {
+                        owner_private: report.app_visible,
+                    },
+                    deadline: Some(deadline),
+                    initiated: Some(&target),
+                    fence: None,
+                },
+                &super::images::ImageSendPlan {
+                    attachments: vec![item.attachment.clone()],
+                },
+                stop,
+            )
+            .await;
+            if pending && (one.claimed > 0 || one.unknown > 0) {
+                budget -= 1;
+            }
+            if one.unknown > 0 {
+                stop = Some("after_unknown");
+            }
+            if one
+                .outcomes
+                .iter()
+                .any(|item| item.code.as_deref() == Some("billing"))
+            {
+                stop = Some("billing");
+            }
+            report.attempted += one.attempted;
+            report.sent += one.sent;
+            report.failed += one.failed;
+            report.unknown += one.unknown;
+            report.skipped += one.skipped;
+            report.unsupported |= one.unsupported;
+            report.outcomes.extend(one.outcomes);
+        }
+        let sent = send_post_planned(
+            state,
+            &target,
+            crate::services::channel_platform::OutboundReply {
+                text: Some(text.to_owned()),
+                metadata: None,
+                attachments: Vec::new(),
+                reply_to_platform_message_id: None,
+            },
+            None,
+            &format!("automation:{}", run.id),
+            Some(conversation_id),
+            Some(notice_context(&report, omitted)),
+        )
+        .await?;
+        audit(
+            state,
+            &run.user_id,
+            "nyxbot_channel_chat_posted",
+            json!({
+                "channel_agent_id": target.channel.id,
+                "chat_id": chat_id,
+                "message_id": sent.message_id,
+            }),
+        )
+        .await;
+        Ok(json!({
+            "status": "posted",
             "chat_id": chat_id,
             "message_id": sent.message_id,
-        }),
-    )
-    .await;
-    Ok(json!({
-        "status": "posted",
-        "chat_id": chat_id,
-        "message_id": sent.message_id,
-        "images": super::images::image_result(&report),
-    }))
-
-    }).await
+            "images": super::images::image_result(&report),
+        }))
+    })
+    .await
 }
 
 /// Chats given to a destroyed agent go back to their bot's agent (in new
@@ -2297,76 +2582,6 @@ pub async fn update_channel_chat(
     Ok(Json(update_chat(&state, &owner, &chat_id, &body).await?))
 }
 
-/// Fit a single proactive message to the destination's text contract. The full
-/// result stays in its durable thread; shortening is always explicit.
-fn automation_reply(platform: &str, text: &str, thread_url: &str) -> String {
-    automation_reply_with_note(platform, text, thread_url, "")
-}
-
-fn automation_reply_with_note(platform: &str, text: &str, thread_url: &str, note: &str) -> String {
-    let limit = match platform {
-        "discord" => 2000,
-        "telegram" | "telegram-new" | "whatsapp" => 4096,
-        "slack" => 40_000,
-        "x" => 10_000,
-        // Lark's JSON text content is limited to 30 KB.
-        "lark" | "feishu" => 30 * 1024,
-        _ => MAX_POST_CHARS,
-    };
-    let json_bytes = matches!(platform, "lark" | "feishu");
-    let cost = |value: &str| {
-        if json_bytes {
-            serde_json::json!({"text": value}).to_string().len()
-        } else {
-            value.encode_utf16().count()
-        }
-    };
-    let full = format!("{text}{note}");
-    if cost(&full) <= limit {
-        return full;
-    }
-    let suffix = format!("\n\n[Reply shortened. Read the full reply: {thread_url}]{note}");
-    let mut result = String::new();
-    let budget = limit.saturating_sub(cost(&suffix));
-    let mut used = 0;
-    for ch in text.chars() {
-        let units = if json_bytes {
-            serde_json::to_string(&ch.to_string()).map_or(6, |v| v.len().saturating_sub(2))
-        } else {
-            ch.len_utf16()
-        };
-        if used + units > budget {
-            break;
-        }
-        result.push(ch);
-        used += units;
-    }
-    result.push_str(&suffix);
-    result
-}
-
-#[cfg(test)]
-mod automation_reply_tests {
-    use super::automation_reply;
-    #[test]
-    fn respects_platform_limits_and_links_shortened_unicode_replies() {
-        for (platform, limit) in [("telegram", 4096), ("discord", 2000), ("slack", 40_000)] {
-            let reply = automation_reply(
-                platform,
-                &"🦉".repeat(25_000),
-                "https://nyx.id/assistant?c=thread",
-            );
-            assert!(reply.encode_utf16().count() <= limit);
-            assert!(reply.contains("Reply shortened"));
-            assert!(reply.contains("https://nyx.id/assistant?c=thread"));
-        }
-        assert_eq!(
-            automation_reply("discord", "All done", "https://nyx.id"),
-            "All done"
-        );
-    }
-}
-
 /// Native actor kind from authenticated provider data, never a display name.
 pub(super) fn native_sender_kind(
     platform: &str,
@@ -2460,6 +2675,36 @@ pub(super) async fn existing_bot_chat(
         "user_id":&row.user_id,"channel_id":&row.id,"partition":partition,
         "record_scope":{"$ne":crate::services::channel_thread_follow_service::SCOPE},"kind":"group"
     }).await?.filter(members_may_talk))
+}
+
+#[cfg(test)]
+mod future_size_tests {
+    use super::*;
+
+    type SendArgs = (
+        &'static AppState,
+        &'static PostTarget,
+        crate::services::channel_platform::OutboundReply,
+    );
+
+    fn future_size<Args, F: std::future::Future>(_: impl FnOnce(Args) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn proactive_multipart_send_futures_stay_small() {
+        let planned = future_size(|(state, target, outbound): SendArgs| {
+            send_post_planned(state, target, outbound, None, "request", None, None)
+        });
+        let part = future_size(|(state, target, outbound): SendArgs| {
+            send_post_one(state, target, outbound, None)
+        });
+        assert!(
+            planned < 1024,
+            "multipart send future grew to {planned} bytes"
+        );
+        assert!(part < 1024, "part send future grew to {part} bytes");
+    }
 }
 
 #[cfg(test)]

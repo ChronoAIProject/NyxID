@@ -132,6 +132,7 @@ async fn first_use_resolves_real_nyxbot_and_emits_only_durable_reply_reference()
             &db,
             &admitted,
             contract::TurnInput {
+                channel_uploads: Vec::new(),
                 text: "hello".into(),
             },
             sender,
@@ -206,6 +207,7 @@ async fn revoked_admission_cannot_claim_thread_key_turn_or_receipt() {
                 &db,
                 &admitted,
                 contract::TurnInput {
+                    channel_uploads: Vec::new(),
                     text: "old admission".into()
                 },
                 sender
@@ -509,6 +511,7 @@ async fn execution_factory_resumes_exact_input_once_across_competing_workers() {
                 db,
                 authority.clone(),
                 contract::TurnInput {
+                    channel_uploads: Vec::new(),
                     text: "changed".into()
                 },
                 sender.clone(),
@@ -530,6 +533,7 @@ async fn execution_factory_resumes_exact_input_once_across_competing_workers() {
                 db,
                 wrong,
                 contract::TurnInput {
+                    channel_uploads: Vec::new(),
                     text: "work".into()
                 },
                 sender.clone(),
@@ -550,6 +554,7 @@ async fn execution_factory_resumes_exact_input_once_across_competing_workers() {
             db,
             authority.clone(),
             contract::TurnInput {
+                channel_uploads: Vec::new(),
                 text: "work".into()
             },
             sender.clone()
@@ -558,6 +563,7 @@ async fn execution_factory_resumes_exact_input_once_across_competing_workers() {
             db,
             authority,
             contract::TurnInput {
+                channel_uploads: Vec::new(),
                 text: "work".into()
             },
             sender
@@ -618,6 +624,7 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
                 platform_origin: None,
             },
             contract::TurnInput {
+                channel_uploads: Vec::new(),
                 text: "work".into(),
             },
             sender.clone(),
@@ -669,6 +676,7 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
             &db,
             contract::NyxAgentExecutionContext::Public(public),
             contract::TurnInput {
+                channel_uploads: Vec::new(),
                 text: "work".into(),
             },
             sender,
@@ -976,9 +984,14 @@ async fn admitted_command(
     else {
         panic!("original private command must be personally admitted");
     };
-    let command =
-        contract::OriginalManagerCommand::from_verified(update, contract::TurnInput { text })
-            .unwrap();
+    let command = contract::OriginalManagerCommand::from_verified(
+        update,
+        contract::TurnInput {
+            channel_uploads: Vec::new(),
+            text,
+        },
+    )
+    .unwrap();
     (admitted, command)
 }
 
@@ -1027,6 +1040,7 @@ async fn personal_card_decision_queues_one_durable_continuation_that_survives_un
         let replay = contract::OriginalManagerCommand::from_verified(
             command.update().clone(),
             contract::TurnInput {
+                channel_uploads: Vec::new(),
                 text: command.text().to_owned(),
             },
         )

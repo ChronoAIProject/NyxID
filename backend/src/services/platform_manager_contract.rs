@@ -329,7 +329,9 @@ pub enum NyxAgentExecutionContext {
 }
 
 /// Deliberately has no Debug/serde implementation: user text is private.
+#[derive(Default)]
 pub struct TurnInput {
+    pub channel_uploads: Vec<super::assistant_upload_service::PreparedChannelUpload>,
     pub text: String,
 }
 

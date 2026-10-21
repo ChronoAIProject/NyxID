@@ -71,7 +71,7 @@
             "type": "function"
           },
           {
-            "description": "Read one article returned by public_faq_search.",
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
             "name": "public_faq_read",
             "parameters": {
               "additionalProperties": false,
@@ -80,6 +80,12 @@
                   "maxLength": 80,
                   "minLength": 1,
                   "type": "string"
+                },
+                "offset": {
+                  "description": "Byte offset returned as next_offset; omit for the first page.",
+                  "maximum": 16384,
+                  "minimum": 0,
+                  "type": "integer"
                 }
               },
               "required": [
@@ -187,13 +193,16 @@
             "type": "function"
           },
           {
-            "description": "Read one article returned by public_faq_search.",
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
             "name": "public_faq_read",
             "parameters": {
               "additionalProperties": false,
               "properties": {
                 "article_id": {
                   "type": "string"
+                },
+                "offset": {
+                  "type": "integer"
                 }
               },
               "required": [
@@ -307,7 +316,7 @@
             "type": "function"
           },
           {
-            "description": "Read one article returned by public_faq_search.",
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
             "name": "public_faq_read",
             "parameters": {
               "additionalProperties": false,
@@ -316,6 +325,12 @@
                   "maxLength": 80,
                   "minLength": 1,
                   "type": "string"
+                },
+                "offset": {
+                  "description": "Byte offset returned as next_offset; omit for the first page.",
+                  "maximum": 16384,
+                  "minimum": 0,
+                  "type": "integer"
                 }
               },
               "required": [
@@ -443,13 +458,16 @@
             "type": "function"
           },
           {
-            "description": "Read one article returned by public_faq_search.",
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
             "name": "public_faq_read",
             "parameters": {
               "additionalProperties": false,
               "properties": {
                 "article_id": {
                   "type": "string"
+                },
+                "offset": {
+                  "type": "integer"
                 }
               },
               "required": [
@@ -581,7 +599,7 @@
             "type": "function"
           },
           {
-            "description": "Read one article returned by public_faq_search.",
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
             "name": "public_faq_read",
             "parameters": {
               "additionalProperties": false,
@@ -590,6 +608,12 @@
                   "maxLength": 80,
                   "minLength": 1,
                   "type": "string"
+                },
+                "offset": {
+                  "description": "Byte offset returned as next_offset; omit for the first page.",
+                  "maximum": 16384,
+                  "minimum": 0,
+                  "type": "integer"
                 }
               },
               "required": [
@@ -737,13 +761,16 @@
             "type": "function"
           },
           {
-            "description": "Read one article returned by public_faq_search.",
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
             "name": "public_faq_read",
             "parameters": {
               "additionalProperties": false,
               "properties": {
                 "article_id": {
                   "type": "string"
+                },
+                "offset": {
+                  "type": "integer"
                 }
               },
               "required": [
@@ -893,7 +920,7 @@
             "type": "function"
           },
           {
-            "description": "Read one article returned by public_faq_search.",
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
             "name": "public_faq_read",
             "parameters": {
               "additionalProperties": false,
@@ -902,6 +929,12 @@
                   "maxLength": 80,
                   "minLength": 1,
                   "type": "string"
+                },
+                "offset": {
+                  "description": "Byte offset returned as next_offset; omit for the first page.",
+                  "maximum": 16384,
+                  "minimum": 0,
+                  "type": "integer"
                 }
               },
               "required": [
@@ -1069,13 +1102,16 @@
             "type": "function"
           },
           {
-            "description": "Read one article returned by public_faq_search.",
+            "description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
             "name": "public_faq_read",
             "parameters": {
               "additionalProperties": false,
               "properties": {
                 "article_id": {
                   "type": "string"
+                },
+                "offset": {
+                  "type": "integer"
                 }
               },
               "required": [
@@ -1400,10 +1436,32 @@
       "/calls/2/codex/tools/public_signup_link/description",
       "/calls/2/callback/tools/public_signup_link/description",
       "/calls/3/codex/tools/public_signup_link/description",
-      "/calls/3/callback/tools/public_signup_link/description"
+      "/calls/3/callback/tools/public_signup_link/description",
+      "/calls/0/codex/tools/public_faq_read/description",
+      "/calls/0/codex/tools/public_faq_read/parameters/properties/offset",
+      "/calls/0/callback/tools/public_faq_read/description",
+      "/calls/0/callback/tools/public_faq_read/parameters/properties/offset",
+      "/calls/1/codex/tools/public_faq_read/description",
+      "/calls/1/codex/tools/public_faq_read/parameters/properties/offset",
+      "/calls/1/callback/tools/public_faq_read/description",
+      "/calls/1/callback/tools/public_faq_read/parameters/properties/offset",
+      "/calls/2/codex/tools/public_faq_read/description",
+      "/calls/2/codex/tools/public_faq_read/parameters/properties/offset",
+      "/calls/2/callback/tools/public_faq_read/description",
+      "/calls/2/callback/tools/public_faq_read/parameters/properties/offset",
+      "/calls/3/codex/tools/public_faq_read/description",
+      "/calls/3/codex/tools/public_faq_read/parameters/properties/offset",
+      "/calls/3/callback/tools/public_faq_read/description",
+      "/calls/3/callback/tools/public_faq_read/parameters/properties/offset"
     ],
     "old_description": "Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in Telegram.",
     "new_description": "Offer this private-chat visitor a link to sign in or create their own NyxID account and review linking. Final confirmation is required in the same original private chat using the controls shown by NyxID.",
-    "warning": "Callback projections are schema-adapted expectations pending actual Rust normalization/size/cold-compaction replay; raw captures remain unchanged."
+    "warning": "Callback projections are schema-adapted expectations pending actual Rust normalization/size/cold-compaction replay; raw captures remain unchanged.",
+    "faq_read_pagination": {
+      "old_description": "Read one article returned by public_faq_search.",
+      "new_description": "Read an article page returned by public_faq_search. If next_offset is present, pass it as offset to read the next page. Never treat a page as the complete article when next_offset is present.",
+      "offset_optional": true,
+      "maximum_offset": 16384
+    }
   }
 }
