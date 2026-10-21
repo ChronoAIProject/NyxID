@@ -2,6 +2,7 @@ use super::*;
 use crate::services::billing::route_inventory::{
     BillingIngress, BillingRoutePolicy, enforce_billing_egress_classification,
 };
+use crate::services::credential_record_service as records;
 use crate::test_utils::{test_app_state, test_auth_user, test_user};
 use axum::{
     Router,
@@ -116,14 +117,13 @@ async fn token_for(f: &Fixture, owner: &str, value: &str) -> String {
         .db
         .collection::<UserProviderToken>(USER_PROVIDER_TOKENS);
     let mut token = tokens.find_one(doc! { "_id": &id }).await.unwrap().unwrap();
-    token.access_token_encrypted = Some(
-        f.state
-            .encryption_keys
-            .encrypt(value.as_bytes())
+    let (versions, access, refresh) =
+        records::oauth_token_fields(&f.state.encryption_keys, &id, owner, None, value, None)
             .await
-            .unwrap(),
-    );
-    token.refresh_token_encrypted = None;
+            .unwrap();
+    token.secret_context_versions = versions;
+    token.access_token_encrypted = Some(access);
+    token.refresh_token_encrypted = refresh;
     tokens
         .replace_one(doc! { "_id": &id }, token)
         .await
@@ -291,11 +291,21 @@ async fn optional_header_reaches_rest_and_mcp_after_listing() {
     unrelated_key.provider_config_id = Some(f.provider_id.clone());
     unrelated_key.connection_id = Some(uuid::Uuid::new_v4().to_string());
     unrelated_key.credential_encrypted = Some(
-        f.state
-            .encryption_keys
-            .encrypt(b"unselected-modern-token")
-            .await
-            .unwrap(),
+        records::encrypt(
+            &f.state.encryption_keys,
+            USER_API_KEYS,
+            &unrelated_key.id,
+            &unrelated_key.user_id,
+            "credential_encrypted",
+            b"unselected-modern-token",
+        )
+        .await
+        .unwrap(),
+    );
+    records::mark_version(
+        &mut unrelated_key.secret_context_versions,
+        &f.state.encryption_keys,
+        "credential_encrypted",
     );
     f.state
         .db
@@ -638,11 +648,21 @@ async fn optional_manual_and_modern_connections_do_not_inherit_legacy_tokens() {
     key.connection_id = Some(uuid::Uuid::new_v4().to_string());
     key.provider_config_id = Some(f.provider_id.clone());
     key.credential_encrypted = Some(
-        f.state
-            .encryption_keys
-            .encrypt(b"selected-modern-token")
-            .await
-            .unwrap(),
+        records::encrypt(
+            &f.state.encryption_keys,
+            USER_API_KEYS,
+            &key.id,
+            &key.user_id,
+            "credential_encrypted",
+            b"selected-modern-token",
+        )
+        .await
+        .unwrap(),
+    );
+    records::mark_version(
+        &mut key.secret_context_versions,
+        &f.state.encryption_keys,
+        "credential_encrypted",
     );
     f.state
         .db

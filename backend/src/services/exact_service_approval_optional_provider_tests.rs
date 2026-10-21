@@ -6,6 +6,7 @@ use crate::models::{
     user_provider_token::{COLLECTION_NAME as TOKENS, UserProviderToken},
     user_service::{AUTO_PROVISION_SOURCE, COLLECTION_NAME as CONNECTIONS, UserService},
 };
+use crate::services::credential_record_service as records;
 use crate::services::delegation_service::{
     materialize_optional_auto_provision_snapshot, read_optional_auto_provision_snapshot,
 };
@@ -85,10 +86,30 @@ async fn optional_fixture() -> OptionalFixture {
     })
     .unwrap();
     let mut provider = provider;
-    provider.client_id_encrypted =
-        Some(state.encryption_keys.encrypt(b"test-client").await.unwrap());
-    provider.client_secret_encrypted =
-        Some(state.encryption_keys.encrypt(b"test-secret").await.unwrap());
+    for (field, value) in [
+        ("client_id_encrypted", b"test-client".as_slice()),
+        ("client_secret_encrypted", b"test-secret".as_slice()),
+    ] {
+        let encrypted = records::encrypt(
+            &state.encryption_keys,
+            PROVIDERS,
+            &provider.id,
+            records::PLATFORM_OWNER,
+            field,
+            value,
+        )
+        .await
+        .unwrap();
+        records::mark_version(
+            &mut provider.secret_context_versions,
+            &state.encryption_keys,
+            field,
+        );
+        match field {
+            "client_id_encrypted" => provider.client_id_encrypted = Some(encrypted),
+            _ => provider.client_secret_encrypted = Some(encrypted),
+        }
+    }
     db.collection::<ProviderConfig>(PROVIDERS)
         .insert_one(&provider)
         .await
@@ -181,31 +202,27 @@ impl OptionalFixture {
         .unwrap()
     }
     async fn token(&self, refresh: bool) -> UserProviderToken {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (versions, access, refresh_token) = records::oauth_token_fields(
+            &self.state.encryption_keys,
+            &id,
+            &self.caller.proxy_resolution_user_id,
+            None,
+            "owner-token",
+            refresh.then_some("refresh"),
+        )
+        .await
+        .unwrap();
         let token = UserProviderToken {
-            id: uuid::Uuid::new_v4().to_string(),
+            secret_context_versions: versions,
+            id,
             user_id: self.caller.proxy_resolution_user_id.clone(),
             provider_config_id: self.requirement.provider_config_id.clone(),
             connection_id: None,
             credential_user_id: None,
             token_type: "oauth2".into(),
-            access_token_encrypted: Some(
-                self.state
-                    .encryption_keys
-                    .encrypt(b"owner-token")
-                    .await
-                    .unwrap(),
-            ),
-            refresh_token_encrypted: if refresh {
-                Some(
-                    self.state
-                        .encryption_keys
-                        .encrypt(b"refresh")
-                        .await
-                        .unwrap(),
-                )
-            } else {
-                None
-            },
+            access_token_encrypted: Some(access),
+            refresh_token_encrypted: refresh_token,
             token_scopes: None,
             expires_at: Some(
                 Utc::now()
@@ -568,7 +585,22 @@ async fn optional_authority_pins_policy_through_refresh_and_rejects_token_replac
 #[tokio::test]
 async fn optional_authority_exact_redemption_forwards_frozen_header_once() {
     let f = optional_fixture().await;
-    f.token(false).await;
+    let mut token = f.token(false).await;
+    // A pending approval created before storage migration keeps its lineage.
+    token.secret_context_versions.clear();
+    token.access_token_encrypted = Some(
+        f.state
+            .encryption_keys
+            .encrypt(b"owner-token")
+            .await
+            .unwrap(),
+    );
+    f.state
+        .db
+        .collection::<UserProviderToken>(TOKENS)
+        .replace_one(doc! {"_id": &token.id}, &token)
+        .await
+        .unwrap();
     // Exercise the actual approval producer, including persisted additive
     // authority, read-only observation, decision, redemption and replay.
     let operation = f.operation().await;
@@ -629,6 +661,68 @@ async fn optional_authority_exact_redemption_forwards_frozen_header_once() {
     assert_eq!(
         stored.optional_provider_authority_digest,
         f.authority().await.optional_provider_authority_digest
+    );
+    let source = f
+        .state
+        .db
+        .collection::<bson::Document>(TOKENS)
+        .find_one(doc! {"_id": &token.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        records::migrate_snapshot(&f.state.db, &f.state.encryption_keys, TOKENS, &source)
+            .await
+            .unwrap()
+    );
+    let migrated = f
+        .state
+        .db
+        .collection::<UserProviderToken>(TOKENS)
+        .find_one(doc! {"_id": &token.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        migrated
+            .secret_context_versions
+            .get("access_token_encrypted"),
+        Some(&3)
+    );
+    assert_eq!(migrated.state_version, token.state_version);
+    assert_ne!(
+        migrated.access_token_encrypted,
+        token.access_token_encrypted
+    );
+    assert_eq!(
+        stored.optional_provider_authority_digest,
+        f.authority().await.optional_provider_authority_digest,
+        "storage-only migration must preserve the pending approval's optional authority"
+    );
+    let pending_before = f
+        .state
+        .db
+        .collection::<bson::Document>(TOKENS)
+        .find_one(doc! {"_id": &token.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        Box::pin(observe_request(&f.state, &f.caller, &request_id))
+            .await
+            .unwrap()
+            .state,
+        ExactServiceApprovalState::Pending
+    );
+    assert_eq!(
+        Some(pending_before),
+        f.state
+            .db
+            .collection::<bson::Document>(TOKENS)
+            .find_one(doc! {"_id": &token.id})
+            .await
+            .unwrap(),
+        "observe stays metadata-only after migration"
     );
     Box::pin(approval_service::process_decision(
         &f.state.db,
@@ -700,5 +794,88 @@ async fn optional_authority_exact_redemption_forwards_frozen_header_once() {
         );
     }
     assert_eq!(*f.effects.lock().unwrap(), vec![Some("owner-token".into())]);
+    assert_eq!(f.refreshes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn optional_authority_pinned_contextual_token_rejects_cross_record_ciphertext() {
+    let f = optional_fixture().await;
+    let token = f.token(false).await;
+    assert_eq!(
+        token.secret_context_versions.get("access_token_encrypted"),
+        Some(&3)
+    );
+    let mut keys = crate::test_utils::test_encryption_keys();
+    keys.set_allow_legacy_record_reads(false);
+    let authority = f.authority().await;
+    let snapshot = read_optional_auto_provision_snapshot(
+        &f.state.db,
+        &f.caller.proxy_resolution_user_id,
+        &f.connection.id,
+        &f.catalog.id,
+        &authority.resolution.target,
+    )
+    .await
+    .unwrap();
+    let credentials = Box::pin(materialize_optional_auto_provision_snapshot(
+        &f.state.db,
+        &keys,
+        &authority.resolution.target,
+        &snapshot,
+        None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(credentials.len(), 1);
+    assert_eq!(credentials[0].credential, "owner-token");
+    let foreign_id = uuid::Uuid::new_v4().to_string();
+    let foreign_ciphertext = records::encrypt(
+        &keys,
+        TOKENS,
+        &foreign_id,
+        &token.user_id,
+        "access_token_encrypted",
+        b"foreign-token",
+    )
+    .await
+    .unwrap();
+    let mut substituted = token.clone();
+    substituted.access_token_encrypted = Some(foreign_ciphertext);
+    f.state
+        .db
+        .collection::<UserProviderToken>(TOKENS)
+        .replace_one(doc! {"_id": &token.id}, &substituted)
+        .await
+        .unwrap();
+    assert!(
+        crate::services::user_token_service::get_active_token_at_revision(
+            &f.state.db,
+            &keys,
+            &token,
+            None,
+        )
+        .await
+        .is_err(),
+        "the pinned reader must authenticate the persisted record identity"
+    );
+    assert_eq!(
+        snapshot.digest,
+        f.authority().await.optional_provider_authority_digest,
+        "storage bytes are not approval authority"
+    );
+    let credentials = Box::pin(materialize_optional_auto_provision_snapshot(
+        &f.state.db,
+        &keys,
+        &authority.resolution.target,
+        &snapshot,
+        None,
+    ))
+    .await
+    .unwrap();
+    assert!(
+        credentials.is_empty(),
+        "unavailable optional material must never inject foreign plaintext"
+    );
+    assert!(f.effects.lock().unwrap().is_empty());
     assert_eq!(f.refreshes.load(Ordering::SeqCst), 0);
 }

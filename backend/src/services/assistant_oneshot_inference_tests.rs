@@ -96,14 +96,21 @@ async fn optional_provider_header_reaches_utility_inference_after_listing() {
             .all(|r| !r.headers.contains_key("x-github-token"))
     );
 
-    let encrypted = state
-        .encryption_keys
-        .encrypt(b"utility-optional-token")
-        .await
-        .unwrap();
+    let token_id = uuid::Uuid::new_v4().to_string();
+    let (versions, encrypted, _) = crate::services::credential_record_service::oauth_token_fields(
+        &state.encryption_keys,
+        &token_id,
+        ACTOR,
+        None,
+        "utility-optional-token",
+        None,
+    )
+    .await
+    .unwrap();
     state.db.collection::<Document>("user_provider_tokens").insert_one(doc! {
-        "_id": uuid::Uuid::new_v4().to_string(), "user_id": ACTOR,
+        "_id": token_id, "user_id": ACTOR,
         "provider_config_id": &provider_id, "token_type": "oauth2", "status": "active",
+        "secret_context_versions": bson::to_bson(&versions).unwrap(),
         "access_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted },
         "created_at": now, "updated_at": now,
     }).await.unwrap();
