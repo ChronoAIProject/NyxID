@@ -15,7 +15,8 @@ use crate::{
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService, OfferingKind},
         oauth_client::OauthClient,
         service_approval_config::{
-            ApprovalEffect, COLLECTION_NAME as APPROVAL_CONFIGS, ServiceApprovalConfig,
+            ApprovalEffect, ApprovalVerb, COLLECTION_NAME as APPROVAL_CONFIGS,
+            ServiceApprovalConfig,
         },
         user_service::{AUTO_PROVISION_SOURCE, COLLECTION_NAME as CONNECTIONS, UserService},
     },
@@ -213,7 +214,15 @@ async fn allows_service_wide_approval(
     {
         return Ok(true);
     }
-    Ok(!super::approval_service::user_requires_approval(db, owner).await?)
+    // Service-wide evidence authorizes every verb, so any gated verb refuses it.
+    let mode = super::approval_service::user_approval_mode(db, owner).await?;
+    Ok(![
+        ApprovalVerb::Read,
+        ApprovalVerb::Write,
+        ApprovalVerb::Destructive,
+    ]
+    .iter()
+    .any(|verb| mode.requires(verb)))
 }
 
 fn is_unavailable(error: &AppError) -> bool {
