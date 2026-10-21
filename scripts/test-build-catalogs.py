@@ -18,7 +18,8 @@ from apk_archive_release import stage_payload
 from apk_inputs import ARCHES
 from build_catalogs import (CA_URL, CA_CHECKSUM_URL, MAX_CA_SOURCE_AGE_DAYS, ROOT,
                             SnapshotRedirect, ca_provenance, fetch, fetch_ca,
-                            freshness, refresh_apt, refresh_ca)
+                            fetch_debian_listing, freshness, refresh_apt, refresh_ca,
+                            settled_snapshots)
 from resolve_apk_requests import REQUESTS
 
 spec = importlib.util.spec_from_file_location('catalog_publisher', ROOT / 'scripts/publish-build-input-candidates.py')
@@ -32,6 +33,15 @@ CA_DATA = re.sub(rb'^## Certificate data from Mozilla as of: .+ GMT$',
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+RUNS = {'debian': ('20261017T100101Z', '20261018T100101Z', '20261019T100101Z'),
+        'debian-security': ('20261017T110202Z', '20261018T110202Z', '20261019T110202Z')}
+
+
+def run_listing(archive, year, month):
+    return ''.join(f'<a href="{stamp}/">run</a>' for stamp in RUNS[archive]
+                   if stamp.startswith(f'{year:04}{month:02}')).encode()
 
 
 class Candidates(unittest.TestCase):
@@ -82,6 +92,15 @@ fixture\t1-r0\t{native}\t{checksum}\thttps://github.com/ChronoAIProject/NyxID/re
         self.apt.write_text(self.apt.read_text().replace('20261019', '20261001'))
         self.assertEqual(sum('stale input' in error for error in self.check()), 4)
 
+    def test_freshness_uses_oldest_archive_run_in_each_root(self):
+        rows = self.apt.read_text().splitlines()
+        self.apt.write_text('\n'.join(row.replace('20261019', '20261001')
+                            if row.startswith('debian\tbookworm\t') and '\tbookworm-security\t' not in row
+                            else row for row in rows) + '\n')
+        errors = self.check()
+        self.assertEqual(len(errors), 1)
+        self.assertIn('APT debian:bookworm: stale input 2026-10-01', errors[0])
+
     def test_stale_apk_catalogs_fail(self):
         for path in self.catalogs.iterdir():
             path.write_text(path.read_text().replace('2026-10-20', '2026-10-01'))
@@ -102,6 +121,15 @@ fixture\t1-r0\t{native}\t{checksum}\thttps://github.com/ChronoAIProject/NyxID/re
 
     def test_future_catalog_dates_fail(self):
         self.assertTrue(any('future' in error for error in self.check(datetime(2026, 10, 18, tzinfo=timezone.utc))))
+
+    def test_future_archive_run_cannot_hide_behind_fresh_base(self):
+        rows = self.apt.read_text().splitlines()
+        self.apt.write_text('\n'.join(row.replace('20261019', '20261021')
+                            if row.startswith('debian\tbookworm\t') and '\tbookworm-security\t' in row
+                            else row for row in rows) + '\n')
+        errors = self.check()
+        self.assertEqual(len(errors), 1)
+        self.assertIn('APT debian:bookworm: input date is in the future', errors[0])
 
     def test_missing_or_inconsistent_catalogs_fail(self):
         next(self.catalogs.iterdir()).unlink()
@@ -134,18 +162,90 @@ fixture\t1-r0\t{native}\t{checksum}\thttps://github.com/ChronoAIProject/NyxID/re
             urls.append(url)
             return ('signed fixture ' + url).encode()
         output = self.root / 'candidate.tsv'
-        text = refresh_apt(output, '20261019T000000Z', download)
+        text = refresh_apt(output, '20261018T120000Z', download, now=NOW, listing=run_listing)
         self.assertEqual(len(urls), 12)
-        self.assertTrue(all(url.startswith('https://snapshot.') and '20261019T000000Z/dists/' in url for url in urls))
         for row in text.splitlines()[1:]:
             distro, code, suite, components, url, expected = row.split('\t')
+            stamp = ('20261018T120000Z' if distro == 'ubuntu' else
+                     '20261018T110202Z' if suite.endswith('-security') else '20261018T100101Z')
+            self.assertTrue(url.startswith('https://snapshot.'))
+            self.assertTrue(url.endswith('/' + stamp))
             self.assertEqual(expected, digest(('signed fixture ' + url + '/dists/' + suite + '/InRelease').encode()))
+
+    def test_rounded_alias_is_resolved_to_exact_settled_runs(self):
+        stamps = settled_snapshots('20261018T120000Z', NOW, run_listing)
+        self.assertEqual(stamps, {'debian': '20261018T100101Z',
+                                 'debian-security': '20261018T110202Z', 'ubuntu': '20261018T120000Z'})
+        self.assertEqual(settled_snapshots(now=NOW, listing=run_listing), stamps)
+
+    def test_recent_future_and_stale_cutoffs_fail_before_network(self):
+        for cutoff in ('20261018T120001Z', '20261020T120000Z', '20261021T120000Z', '20261001T000000Z'):
+            with self.subTest(cutoff=cutoff), patch('build_catalogs.fetch_https') as network:
+                with self.assertRaisesRegex(ValueError, 'cutoff'):
+                    refresh_apt(self.root / 'candidate.tsv', cutoff, now=NOW)
+                network.assert_not_called()
+                self.assertFalse((self.root / 'candidate.tsv').exists())
+
+    def test_unlisted_runs_and_latest_import_without_successor_cannot_be_selected(self):
+        for listing in (lambda *args: b'<a href="20261018T120000Z/extra">alias</a>',
+                        lambda *args: b'<a href="https://evil.invalid/20261018T120000Z/">run</a>',
+                        lambda *args: b'<a href="20261018T120000Z/">only/latest run</a>'):
+            with self.subTest(listing=listing), self.assertRaisesRegex(ValueError, 'no settled, listed'):
+                refresh_apt(self.root / 'candidate.tsv', now=NOW, listing=listing)
+            self.assertFalse((self.root / 'candidate.tsv').exists())
+
+    def test_future_successor_and_expired_listed_runs_do_not_qualify(self):
+        for runs in (('20261018T100101Z', '20261021T100101Z'),
+                     ('20261001T100101Z', '20261002T100101Z')):
+            with self.subTest(runs=runs), self.assertRaisesRegex(ValueError, 'no settled, listed'):
+                settled_snapshots(now=NOW, listing=lambda *args: ''.join(f'<a href="{s}/">run</a>' for s in runs).encode())
+
+    def test_invalid_calendar_wrong_month_and_duplicate_listed_runs_fail(self):
+        for links in (('20261032T000000Z',), ('20260930T000000Z',), ('20261018T100101Z',) * 2):
+            with self.subTest(links=links), self.assertRaises(ValueError):
+                settled_snapshots(now=NOW, listing=lambda *args: ''.join(f'<a href="{s}/">run</a>' for s in links).encode())
+
+    def test_month_year_boundary_uses_previous_month_and_later_completed_run(self):
+        calls = []
+        def listing(archive, year, month):
+            calls.append((archive, year, month))
+            stamp = '20261231T110000Z' if (year, month) == (2026, 12) else '20270101T110000Z'
+            return f'<a href="{stamp}/">run</a>'.encode()
+        stamps = settled_snapshots(now=datetime(2027, 1, 2, 12, tzinfo=timezone.utc), listing=listing)
+        self.assertEqual(stamps['debian'], '20261231T110000Z')
+        self.assertEqual(set(calls), {(a, y, m) for a in RUNS for y, m in ((2026, 12), (2027, 1))})
+
+    def test_listing_fetch_is_bounded_to_exact_official_month_query(self):
+        with patch('build_catalogs.fetch_https', return_value=b'listing') as network:
+            self.assertEqual(fetch_debian_listing('debian-security', 2026, 10), b'listing')
+            network.assert_called_once_with('https://snapshot.debian.org/archive/debian-security/?year=2026&month=10',
+                                            {'snapshot.debian.org'}, 1024 * 1024, expected_query='year=2026&month=10')
+        for archive, year, month in (('debian/../../evil', 2026, 10), ('debian', 2026, 13), ('debian', 2000, 10)):
+            with self.subTest(archive=archive, year=year, month=month), self.assertRaises(ValueError):
+                fetch_debian_listing(archive, year, month)
 
     def test_invalid_timestamp_or_failed_fetch_never_writes_candidate(self):
         output = self.root / 'candidate.tsv'
         with self.assertRaises(ValueError): refresh_apt(output, '2026-10-19')
-        with self.assertRaises(RuntimeError): refresh_apt(output, '20261019T000000Z', lambda url: (_ for _ in ()).throw(RuntimeError('offline')))
+        with self.assertRaises(RuntimeError):
+            refresh_apt(output, '20261018T120000Z', lambda url: (_ for _ in ()).throw(RuntimeError('offline')),
+                        now=NOW, listing=run_listing)
+        with self.assertRaises(RuntimeError):
+            refresh_apt(output, now=NOW, listing=lambda *args: (_ for _ in ()).throw(RuntimeError('listing offline')))
         self.assertFalse(output.exists())
+
+    def test_publisher_rechecks_exact_daily_settled_selection_and_rejects_aliases(self):
+        candidate = refresh_apt(self.apt, '20261018T000000Z', lambda url: url.encode(), now=NOW, listing=run_listing)
+        with patch.object(publisher, 'settled_snapshots', side_effect=lambda cutoff: settled_snapshots(cutoff, NOW, run_listing)) as resolver:
+            publisher.validate_snapshot_selection(self.root, '2026-10-20')
+            resolver.assert_called_once_with('20261018T000000Z')
+            for changed in (candidate.replace('20261017T100101Z', '20261018T000000Z'),
+                            candidate.replace('20261017T110202Z', '20261017T100101Z'),
+                            candidate.replace('20261018T000000Z', '20261019T000000Z')):
+                with self.subTest(changed=changed[-200:]):
+                    self.apt.write_text(changed)
+                    with self.assertRaisesRegex(ValueError, 'selected settled archive runs'):
+                        publisher.validate_snapshot_selection(self.root, '2026-10-20')
 
     def ca_download(self, url):
         return CA_DATA if url == CA_URL else (digest(CA_DATA) + '  cacert.pem\n').encode()
@@ -234,7 +334,7 @@ class Publication(unittest.TestCase):
         self.env = {'GITHUB_EVENT_NAME': 'schedule', 'GITHUB_REF': 'refs/heads/main', 'GITHUB_REPOSITORY': publisher.REPOSITORY}
         self.commands = []
 
-    def run_publisher(self, existing=False, changed=True, conflict=False, existing_pr=False, foreign_changes=False):
+    def run_publisher(self, existing=False, changed=True, conflict=False, existing_pr=False, foreign_changes=False, selection_error=False):
         def run(command, **kwargs):
             self.commands.append(command)
             result = int(changed) if command[:3] == ['git', 'diff', '--cached'] else 0
@@ -249,15 +349,15 @@ class Publication(unittest.TestCase):
             if command[:2] == ['git', 'rev-parse']: return 'a' * 40
             if command[:3] == ['gh', 'pr', 'list']: return '[{"url":"https://github.com/fixture"}]' if existing_pr else '[]'
             self.fail('unexpected external command: ' + str(command))
-        stamps = {name: datetime(2026, 10, 19, tzinfo=timezone.utc) for name in ('APT debian:bookworm', 'APT ubuntu:noble')}
         with patch.dict(os.environ, self.env), patch.object(publisher, 'ROOT', self.checkout), \
              patch.object(publisher, 'validate', return_value=('build-inputs-apk-2026-10-20', [])), \
-             patch.object(publisher, 'dates', return_value=stamps), \
+             patch.object(publisher, 'validate_snapshot_selection', side_effect=ValueError('unsettled selection') if selection_error else None) as snapshots, \
              patch.object(publisher, 'ca_provenance', return_value=(None, datetime(2026, 10, 20, tzinfo=timezone.utc))), \
              patch.object(publisher.subprocess, 'run', side_effect=run), \
              patch.object(publisher.subprocess, 'check_output', side_effect=output), \
              patch.object(publisher, 'publish_archives') as archive:
             publisher.publish(self.candidate, '2026-10-20')
+            snapshots.assert_called_once_with(self.candidate, '2026-10-20')
             return archive.call_args_list
 
     def test_pr_nonmain_and_foreign_repo_cannot_publish(self):
@@ -265,6 +365,11 @@ class Publication(unittest.TestCase):
             with self.subTest(changed=changed), patch.dict(os.environ, {**self.env, **changed}), patch.object(publisher.subprocess, 'run') as run:
                 with self.assertRaisesRegex(ValueError, 'official main schedule'): publisher.publish(self.candidate, '2026-10-20')
                 run.assert_not_called()
+
+    def test_snapshot_selection_failure_precedes_all_publication_commands(self):
+        with self.assertRaisesRegex(ValueError, 'unsettled selection'):
+            self.run_publisher(selection_error=True)
+        self.assertEqual(self.commands, [])
 
     def test_explicit_catalog_only_commit_and_nonforce_push(self):
         self.assertEqual(len(self.run_publisher()), 1)

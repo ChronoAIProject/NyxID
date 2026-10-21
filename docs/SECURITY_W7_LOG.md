@@ -661,3 +661,39 @@
   and logs/ beside the approval evidence. Hosted validation limits recorded
   above are unchanged; no other code, policy or workflow changes accompany this
   approval.
+
+## W7 PR #1976 follow-up — settled Debian archive run selection
+
+- Start from integrated PR head 4ae69ddf3. The second hosted trixie failure
+  expected 1b01d660dc2b0c97a5045bfa37bb8857623a533549323b749930ac800b5b0847
+  but received 9ebd44ce8aaef0af6a6d184d0f4750610f652472df536645843c9f1ef43e9af6
+  from the same 20261021T000000Z alias. Debian's official run listing contains
+  neither midnight alias used in the previous catalog. Debian documents that
+  unlisted timestamps resolve to the latest earlier import. Local cached
+  redirects still return the older bytes; both signed files are recovered at
+  exact listed runs 20261020T142926Z and 20261020T202723Z respectively, matching
+  their file API first_seen records. Both signatures verify with the pinned
+  Debian keyring. Date/Valid-Until and signatures change, but all 409 signed
+  SHA-256 index entries are identical. This is signed metadata/alias drift,
+  rather than a garbled unsigned response. Import completion timing is not
+  independently observable; exact run selection removes reliance on that alias.
+- Resolve candidates from each Debian archive's official HTTPS monthly listing.
+  Only canonical listed runs at least 48 hours old, with a later listed import,
+  and within the unchanged 14-day freshness window qualify. Reject recent,
+  future, stale, absent, malformed and duplicate runs; handle month/year
+  boundaries; leave the output unwritten when selection or acquisition fails.
+  The 48-hour interval is an additional local guard, not an upstream SLA.
+- Replace --stamp with --before: it is a cutoff, never a literal Debian URL
+  timestamp. The workflow derives midnight two days before its single catalog
+  date. The scheduled publisher independently resolves that same cutoff and
+  requires every suite to match before any publication command. Tests reject
+  aliases, cross-archive substitutions and publication after failed selection.
+  No publisher, PR creation or workflow dispatch was invoked during this work.
+- Debian base/updates must still share a run; security has its own exact
+  debian-security run. Ubuntu still requires one ID across its three suites.
+  Freshness uses the oldest required run and rejects a future date in any suite.
+  Portable regressions pass: 40 build-catalog/publication tests, 27 APT policy
+  tests, and 20 workflow tests. Exact InRelease bytes, distro signatures,
+  authenticated indexes/packages, tamper injections and existing timeouts remain
+  mandatory. Raw research and command evidence are under
+  ~/Library/Caches/nyxid-targets/w7-apt-followup/settled/.

@@ -174,6 +174,16 @@ class CatalogWorkflowBoundary(unittest.TestCase):
         self.assertNotIn('--push', text)
         self.assertNotIn('--build-context', text)
 
+    def test_apt_candidate_resolves_settled_runs_from_one_utc_cutoff(self):
+        job = self.load('build-input-maintenance.yml')['jobs']['apt-candidate']
+        commands = '\n'.join(step.get('run', '') for step in job['steps'])
+        self.assertIn('python3 scripts/refresh-apt-catalog.py --output "$RUNNER_TEMP/apt-candidate/security/apt-snapshots.tsv" --before "$SNAPSHOT_BEFORE"', commands)
+        self.assertIn("'before=' + (now - timedelta(days=2)).strftime('%Y%m%dT000000Z')", commands)
+        fetch = next(step for step in job['steps'] if 'SNAPSHOT_BEFORE' in step.get('env', {}))
+        self.assertEqual(fetch['env']['SNAPSHOT_BEFORE'], '${{ steps.date.outputs.before }}')
+        self.assertNotIn('--stamp', commands)
+        self.assertNotIn('stamp=', commands)
+
     def test_only_schedule_publisher_can_write_after_native_verification(self):
         workflow = self.load('refresh-build-inputs.yml')
         events = workflow.get('on', workflow.get(True))

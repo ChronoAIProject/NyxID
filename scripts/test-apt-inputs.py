@@ -86,6 +86,16 @@ class Catalog(unittest.TestCase):
                 self.reject(self.original.replace(stamp, replacement))
         self.reject(self.original.replace(stamp, '20261017T000000Z', 1))
 
+    def test_debian_archives_have_independent_runs_but_base_updates_share_one(self):
+        rows = self.original.splitlines()
+        changed = '\n'.join('\t'.join(row.split('\t')[:4] +
+                            [row.split('\t')[4].rsplit('/', 1)[0] + '/20261018T123456Z', row.split('\t')[5]])
+                            if row.startswith('debian\t') and '-security\t' in row else row for row in rows) + '\n'
+        self.catalog.write_text(changed)
+        self.assertEqual(len(select(self.root, ROOTS).splitlines()), 12)
+        row = next(row for row in changed.splitlines() if row.startswith('debian\tbookworm\tbookworm\t'))
+        self.reject(changed.replace(row, row.replace(row.split('\t')[4].rsplit('/', 1)[1], '20261017T111111Z')))
+
     def test_components_unknown_root_and_extra_field_rejected(self):
         self.reject(self.original.replace('main,universe', 'main'))
         self.reject(self.original.replace('\tfocal\t', '\tjammy\t', 1))

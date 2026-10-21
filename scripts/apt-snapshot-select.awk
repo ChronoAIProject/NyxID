@@ -31,6 +31,7 @@ BEGIN {
         prefix = "https://snapshot.debian.org/archive/" archive "/"
     } else {
         if ($4 != "main,universe") fail("unexpected Ubuntu components")
+        archive = "ubuntu"
         prefix = "https://snapshot.ubuntu.com/ubuntu/"
     }
     if (index($5, prefix) != 1) fail("unexpected snapshot origin")
@@ -38,8 +39,11 @@ BEGIN {
     if (length(stamp) != 16 || substr(stamp, 9, 1) != "T" || substr(stamp, 16) != "Z" ||
         substr(stamp, 1, 8) ~ /[^0-9]/ || substr(stamp, 10, 6) ~ /[^0-9]/)
         fail("invalid snapshot timestamp")
-    if (timestamps[root] != "" && timestamps[root] != stamp) fail("mixed root timestamps")
-    timestamps[root] = stamp
+    # Debian and debian-security have independent exact import run IDs.
+    # Base/updates must still share one run; Ubuntu's three suites share one ID.
+    key = root ":" archive
+    if (timestamps[key] != "" && timestamps[key] != stamp) fail("mixed root archive timestamps")
+    timestamps[key] = stamp
     count[root]++
     if (root in wanted) selected = selected $0 "\n"
 }

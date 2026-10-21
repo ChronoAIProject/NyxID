@@ -120,15 +120,15 @@ jobs:
           now = datetime.now(timezone.utc)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('date=' + now.date().isoformat() + '\n')
-              output.write('stamp=' + (now - timedelta(days=1)).strftime('%Y%m%dT000000Z') + '\n')
+              output.write('before=' + (now - timedelta(days=2)).strftime('%Y%m%dT000000Z') + '\n')
           PYDATE
       - name: Fetch official HTTPS CA/checksum and signed snapshot candidates
         env:
           CATALOG_DATE: ${{ steps.date.outputs.date }}
-          SNAPSHOT_STAMP: ${{ steps.date.outputs.stamp }}
+          SNAPSHOT_BEFORE: ${{ steps.date.outputs.before }}
         run: |
           python3 scripts/refresh-apt-transport-ca.py --output "$RUNNER_TEMP/apt-candidate/security" --date "$CATALOG_DATE"
-          python3 scripts/refresh-apt-catalog.py --output "$RUNNER_TEMP/apt-candidate/security/apt-snapshots.tsv" --stamp "$SNAPSHOT_STAMP"
+          python3 scripts/refresh-apt-catalog.py --output "$RUNNER_TEMP/apt-candidate/security/apt-snapshots.tsv" --before "$SNAPSHOT_BEFORE"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: catalog-candidate-apt

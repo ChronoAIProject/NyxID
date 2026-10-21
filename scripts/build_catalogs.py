@@ -1,6 +1,7 @@
 """Validate frozen APT/APK/CA inputs and generate unaccepted HTTPS candidates."""
 from datetime import datetime, timedelta, timezone
 import hashlib
+from html.parser import HTMLParser
 from pathlib import Path
 import re
 import ssl
@@ -15,6 +16,7 @@ from apk_inputs import ARCHES
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_AGE_DAYS = 14  # weekly refresh plus one missed weekly run
+SNAPSHOT_SETTLE_DAYS = 2  # do not select an active/recent archive import
 MAX_CA_SOURCE_AGE_DAYS = 90  # upstream publishes bundles less often than weekly
 CA_URL = 'https://curl.se/ca/cacert.pem'
 CA_CHECKSUM_URL = CA_URL + '.sha256'
@@ -29,10 +31,10 @@ class SnapshotRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(request, fp, code, message, headers, url)
 
 
-def fetch_https(url, origins, maximum):
+def fetch_https(url, origins, maximum, *, expected_query=''):
     parsed = urllib.parse.urlsplit(url)
     if (parsed.scheme != 'https' or parsed.netloc not in origins or parsed.username or parsed.password or
-            parsed.query or parsed.fragment):
+            parsed.query != expected_query or parsed.fragment):
         raise ValueError('candidate requires an official HTTPS origin')
     with urllib.request.build_opener(SnapshotRedirect()).open(url, timeout=120) as response:
         data = response.read(maximum + 1)
@@ -46,6 +48,63 @@ def fetch(url):
     if not data.startswith(b'-----BEGIN PGP SIGNED MESSAGE-----') or b'-----BEGIN PGP SIGNATURE-----' not in data:
         raise ValueError('candidate InRelease is absent or unsigned')
     return data
+
+
+def fetch_debian_listing(archive, year, month):
+    if archive not in {'debian', 'debian-security'} or not 1 <= month <= 12 or not 2005 <= year <= 9999:
+        raise ValueError('invalid Debian archive listing request')
+    query = f'year={year}&month={month}'
+    return fetch_https(f'https://snapshot.debian.org/archive/{archive}/?{query}',
+                       {'snapshot.debian.org'}, 1024 * 1024, expected_query=query)
+
+
+def snapshot_date(stamp):
+    if not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z', stamp):
+        raise ValueError('non-canonical snapshot timestamp')
+    return datetime.strptime(stamp, '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+
+
+class DebianRuns(HTMLParser):
+    """Only relative canonical run links from the requested monthly listing."""
+    def __init__(self, year, month):
+        super().__init__()
+        self.month = (year, month)
+        self.runs = set()
+
+    def handle_starttag(self, tag, attrs):
+        if tag != 'a':
+            return
+        for name, value in attrs:
+            if name == 'href' and value and re.fullmatch(r'[0-9]{8}T[0-9]{6}Z/', value):
+                stamp = snapshot_date(value[:-1])
+                if (stamp.year, stamp.month) != self.month or stamp in self.runs:
+                    raise ValueError('invalid or duplicate Debian archive run')
+                self.runs.add(stamp)
+
+
+def settled_snapshots(before=None, now=None, listing=fetch_debian_listing):
+    now = now or datetime.now(timezone.utc)
+    settled = now - timedelta(days=SNAPSHOT_SETTLE_DAYS)
+    cutoff = snapshot_date(before) if before is not None else settled.replace(microsecond=0)
+    if cutoff > settled or now - cutoff > timedelta(days=MAX_AGE_DAYS):
+        raise ValueError('snapshot cutoff must be at least 48 hours old and within the freshness window')
+    # Include adjacent months for month/year boundaries and a later completed
+    # import. Never treat a rounded cutoff itself as a Debian archive run.
+    months = sorted({(date.year, date.month) for date in
+                     (cutoff - timedelta(days=MAX_AGE_DAYS), cutoff, now)})
+    result = {'ubuntu': cutoff.strftime('%Y%m%dT%H%M%SZ')}
+    for archive in ('debian', 'debian-security'):
+        runs = set()
+        for year, month in months:
+            parser = DebianRuns(year, month)
+            parser.feed(listing(archive, year, month).decode('utf-8'))
+            runs.update(parser.runs)
+        runs = sorted(date for date in runs if date <= now)
+        eligible = [date for date in runs[:-1] if now - timedelta(days=MAX_AGE_DAYS) <= date <= cutoff]
+        if not eligible:
+            raise ValueError(f'no settled, listed {archive} run within the freshness window')
+        result[archive] = max(eligible).strftime('%Y%m%dT%H%M%SZ')
+    return result
 
 
 def fetch_ca(url):
@@ -90,7 +149,9 @@ def dates(apt, apk):
     result = {}
     for row in selected.splitlines():
         distro, codename, _, _, url, _ = row.split('\t')
-        result['APT ' + distro + ':' + codename] = datetime.strptime(url.rsplit('/', 1)[1], '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+        label = 'APT ' + distro + ':' + codename
+        stamp = snapshot_date(url.rsplit('/', 1)[1])
+        result[label] = min(result.get(label, stamp), stamp)
     tag, _ = expected_assets(apk, ARCHES)
     result['APK catalogs'] = datetime.strptime(tag.removeprefix('build-inputs-apk-'), '%Y-%m-%d').replace(tzinfo=timezone.utc)
     return result
@@ -99,6 +160,14 @@ def dates(apt, apk):
 def freshness(apt, apk, ca_pins, ca_bundle, now=None):
     now = now or datetime.now(timezone.utc)
     stamps = dates(apt, apk)
+    # The oldest archive controls staleness, but every suite must also be in
+    # the past. A newer/future security run must not hide behind an old base.
+    for row in select(ROOT, ROOTS, apt).splitlines():
+        distro, codename, _, _, url, _ = row.split('\t')
+        stamp = snapshot_date(url.rsplit('/', 1)[1])
+        if stamp > now:
+            label = 'APT ' + distro + ':' + codename
+            stamps[label] = max(stamps[label], stamp)
     source, checked = ca_provenance(ca_pins, ca_bundle)
     stamps['APT transport CA upstream check'] = checked
     errors = []
@@ -138,17 +207,16 @@ def refresh_ca(output, checked, download=fetch_ca):
     return manifest
 
 
-def refresh_apt(output, stamp, download=fetch):
+def refresh_apt(output, before=None, download=fetch, *, now=None, listing=fetch_debian_listing):
     # HTTPS hashes alone never accept a candidate. Native replay with distro
     # keyrings must authenticate its signatures/indexes/packages before a PR.
-    parsed = datetime.strptime(stamp, '%Y%m%dT%H%M%SZ')
-    if parsed.strftime('%Y%m%dT%H%M%SZ') != stamp:
-        raise ValueError('non-canonical snapshot timestamp')
+    stamps = settled_snapshots(before, now, listing)
     rows = select(ROOT, ROOTS).splitlines()
     refreshed = ['# distro codename suite components snapshot-url signed-InRelease-sha256']
     for row in rows:
         fields = row.split('\t')
-        fields[4] = fields[4].rsplit('/', 1)[0] + '/' + stamp
+        archive = 'ubuntu' if fields[0] == 'ubuntu' else ('debian-security' if fields[2].endswith('-security') else 'debian')
+        fields[4] = fields[4].rsplit('/', 1)[0] + '/' + stamps[archive]
         metadata = download(fields[4] + '/dists/' + fields[2] + '/InRelease')
         fields[5] = hashlib.sha256(metadata).hexdigest()
         refreshed.append('\t'.join(fields))

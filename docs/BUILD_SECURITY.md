@@ -157,10 +157,12 @@ resolve arbitrary image construction in application code.
 
 Ubuntu/Debian additions use `scripts/apt-snapshot-install.sh` and the reviewed
 `security/apt-snapshots.tsv` catalog. Each root has base, updates and security
-suites at one timestamp, with an exact signed InRelease SHA-256 per suite.
+suites, with an exact signed InRelease SHA-256 per suite. Debian base/updates
+share one exact `debian` archive run; security uses an independent exact
+`debian-security` run. Ubuntu's three suites share one point-in-time ID.
 The portable selector rejects absent requested roots, duplicate suites/roots,
-mixed timestamps, unexpected origins/components and malformed hashes before
-APT runs. Every Dockerfile stage that installs APT packages copies the same
+mixed timestamps within a root's archive, unexpected origins/components and
+malformed hashes before APT runs. Every Dockerfile stage that installs APT packages copies the same
 installer, selector and catalog. Hosted Chromium selects both noble and
 bookworm, retaining its Debian package preference rules.
 
@@ -342,8 +344,8 @@ the maintainer provisioning step; scheduled refreshes provision new candidates
 before opening their review PR.
 
 `Weekly Build Input Refresh` runs each Monday. Its read-only candidate workflow
-selects one UTC date, fetches all twelve APT InRelease files from the previous
-UTC day's official HTTPS snapshots, fetches the official curl.se bundle and
+selects one UTC catalog date, resolves settled official HTTPS snapshots and
+fetches all twelve APT InRelease files, fetches the official curl.se bundle and
 its matching HTTPS checksum, and resolves APK closures from the exact pinned
 bases on native amd64 and arm64 runners. Generated dates, full signed metadata
 hashes, inventories and every archive checksum become reviewable inputs.
@@ -352,6 +354,27 @@ all nine success/tamper cases for four distro roots on both architectures,
 using the exact candidate transport CA. APK jobs replay all eighteen cases for
 all three closures on each architecture and stage the exact archive payloads.
 HTTPS-derived hashes alone never accept a distro candidate.
+
+`refresh-apt-catalog.py` resolves Debian timestamps from each archive's official
+monthly run listing. It selects the latest listed run at or before a cutoff
+that is at least 48 hours old (the default), requires a later listed import,
+and refuses runs outside the unchanged 14-day freshness window. The
+`--before YYYYMMDDTHHMMSSZ` option may select an older cutoff inside those
+bounds; it cannot override the settling rule. Month/year boundaries use adjacent monthly listings.
+Debian resolves unlisted timestamps to the nearest earlier import, so rounded
+midnight aliases are never written into a Debian candidate. The exact run ID
+avoids alias changes as imports arrive; the additional settling interval keeps
+recent/active imports out of selection and is a local policy, not an upstream
+completion SLA. Ubuntu documents arbitrary point-in-time IDs rather than an
+import-run listing; its candidate uses the same settled cutoff. Freshness uses
+the oldest archive run needed by each root. Distro signature verification and
+exact signed-byte, index and package checks remain mandatory for both services.
+The workflow derives its cutoff from midnight two UTC days before its one
+catalog date, keeping same-date retries consistent while the resolver selects
+the actual Debian run IDs independently. Before any publication command, the
+scheduled publisher re-resolves that cutoff and requires every candidate suite
+to match the selected run for its archive. Aliases, stale/recent runs and a
+candidate that no longer matches the official selection are rejected.
 
 The same candidate workflow runs as `CI / Build Input Maintenance` on relevant
 PRs and is required by `CI Pipeline`. Its PR jobs have contents:read, no secrets

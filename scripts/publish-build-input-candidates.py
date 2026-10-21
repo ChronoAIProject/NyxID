@@ -17,7 +17,7 @@ import importlib.util
 from apt_inputs import ROOTS, select
 from apk_archive_release import ROOT, validate_payload
 from apk_inputs import ARCHES
-from build_catalogs import ca_provenance, dates, freshness
+from build_catalogs import ca_provenance, freshness, settled_snapshots
 from resolve_apk_requests import REQUESTS
 
 REPOSITORY = 'ChronoAIProject/NyxID'
@@ -55,6 +55,16 @@ def publish_archives(commit, payload):
     archive_publisher.publish(commit, payload)
 
 
+def validate_snapshot_selection(candidate, catalog_date):
+    cutoff = (date.fromisoformat(catalog_date) - timedelta(days=2)).strftime('%Y%m%dT000000Z')
+    expected = settled_snapshots(cutoff)
+    for row in select(ROOT, ROOTS, candidate / 'security/apt-snapshots.tsv').splitlines():
+        distro, _, suite, _, url, _ = row.split('\t')
+        archive = 'ubuntu' if distro == 'ubuntu' else ('debian-security' if suite.endswith('-security') else 'debian')
+        if url.rsplit('/', 1)[1] != expected[archive]:
+            raise ValueError('APT candidate differs from the selected settled archive runs')
+
+
 def publish(candidate, catalog_date):
     if (os.environ.get('GITHUB_EVENT_NAME') != 'schedule' or os.environ.get('GITHUB_REF') != 'refs/heads/main' or
             os.environ.get('GITHUB_REPOSITORY') != REPOSITORY):
@@ -64,9 +74,7 @@ def publish(candidate, catalog_date):
     tag, _ = validate(candidate)
     if tag != 'build-inputs-apk-' + catalog_date:
         raise ValueError('catalog date differs from the verified matrix')
-    expected_snapshot = date.fromisoformat(catalog_date) - timedelta(days=1)
-    if any(stamp.date() != expected_snapshot for label, stamp in dates(candidate / 'security/apt-snapshots.tsv', candidate / 'security/apk').items() if label.startswith('APT ')):
-        raise ValueError('APT candidates do not match the selected daily snapshot')
+    validate_snapshot_selection(candidate, catalog_date)
     _, checked = ca_provenance(candidate / 'security/apt-transport-ca.tsv', candidate / 'security/apt-transport-ca.pem')
     if checked.date().isoformat() != catalog_date:
         raise ValueError('CA upstream check date differs from the verified matrix')
