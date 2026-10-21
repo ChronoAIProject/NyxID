@@ -68,6 +68,8 @@ it("rejects credential-bearing endpoints and fake status destinations", () => {
   for (const url of [
     "/",
     "https://nyx.chrono-ai.fun/",
+    "https://nyx.chrono-ai.fun/?",
+    "https://nyx.chrono-ai.fun/#",
     "https://status.example.test/health",
     "javascript:alert(1)",
   ])

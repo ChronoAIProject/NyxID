@@ -95,7 +95,10 @@ export function resolveWebsiteRelease(env: ReleaseEnvironment): WebsiteRelease {
     const url = publicUrl(env.VITE_WEBSITE_STATUS_URL);
     requireConfig(
       url &&
-        url !== "https://nyx.chrono-ai.fun/" &&
+        !(
+          new URL(url).origin === "https://nyx.chrono-ai.fun" &&
+          new URL(url).pathname === "/"
+        ) &&
         !/^\/(?:api|health)(?:\/|$)/.test(new URL(url).pathname) &&
         accepted(env.VITE_WEBSITE_STATUS_ACCEPTANCE),
       "status",
