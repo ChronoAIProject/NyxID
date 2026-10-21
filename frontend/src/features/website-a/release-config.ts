@@ -61,6 +61,17 @@ function requireConfig(condition: unknown, feature: string): asserts condition {
       `Invalid website release configuration: ${feature}. Keep the switch off until adapter configuration and acceptance are complete.`,
     );
 }
+function normalizedStatusPath(status: URL): string | null {
+  try {
+    const normalized = new URL(status.href);
+    // Nginx matches decoded URIs with merge_slashes on; the public router
+    // then treats the optional trailing slash and /zh as home aliases.
+    normalized.pathname = decodeURIComponent(status.pathname).replace(/\/+/g, "/");
+    return normalized.pathname.replace(/\/+$/, "") || "/";
+  } catch {
+    return null;
+  }
+}
 /** Public build configuration only. No credentials or backend autodetection. */
 export function resolveWebsiteRelease(env: ReleaseEnvironment): WebsiteRelease {
   const release: WebsiteRelease = {
@@ -94,15 +105,15 @@ export function resolveWebsiteRelease(env: ReleaseEnvironment): WebsiteRelease {
   if (env.VITE_WEBSITE_STATUS_ENABLED === "true") {
     const url = publicUrl(env.VITE_WEBSITE_STATUS_URL);
     const status = url ? new URL(url) : null;
-    // public-site/publication.ts routes both /zh and /zh/ to the home page.
-    const statusPath = status?.pathname.replace(/\/$/, "") || "/";
+    const statusPath = status ? normalizedStatusPath(status) : null;
     requireConfig(
       status &&
+        statusPath &&
         !(
           status.origin === "https://nyx.chrono-ai.fun" &&
           ["/", "/zh"].includes(statusPath)
         ) &&
-        !/^\/(?:api|health)(?:\/|$)/.test(status.pathname) &&
+        !/^\/(?:api|health)(?:\/|$)/.test(statusPath) &&
         accepted(env.VITE_WEBSITE_STATUS_ACCEPTANCE),
       "status",
     );

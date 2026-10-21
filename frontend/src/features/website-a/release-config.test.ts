@@ -72,6 +72,11 @@ it("rejects credential-bearing endpoints and fake status destinations", () => {
     "https://nyx.chrono-ai.fun/#",
     "https://nyx.chrono-ai.fun/zh",
     "https://nyx.chrono-ai.fun/zh/",
+    "https://nyx.chrono-ai.fun/zh//",
+    "https://nyx.chrono-ai.fun/%7A%68",
+    "https://nyx.chrono-ai.fun/%7A%68%2f%2f",
+    "https://nyx.chrono-ai.fun/zh%2f..%2fzh",
+    "https://nyx.chrono-ai.fun/%invalid",
     "https://status.example.test/health",
     "javascript:alert(1)",
   ])
