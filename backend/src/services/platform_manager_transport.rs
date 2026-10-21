@@ -582,7 +582,7 @@ async fn dispatch_verified_impl(
                     }
                 }
             }
-            let channel_uploads = match media {
+            let telegram_input = match media {
                 Some((bot, message)) => {
                     super::telegram_input::prepare_uploads_from(
                         state,
@@ -591,9 +591,14 @@ async fn dispatch_verified_impl(
                         &super::telegram_input::attachments(message),
                         api.base_url,
                     )
-                    .await?
+                    .await
                 }
-                None => Vec::new(),
+                None => Default::default(),
+            };
+            let text = if telegram_input.note.is_empty() {
+                text.to_owned()
+            } else {
+                format!("{text}\n\n{}", telegram_input.note)
             };
             let (events, receiver) = tokio::sync::mpsc::channel(16);
             let started = producers
@@ -602,8 +607,8 @@ async fn dispatch_verified_impl(
                     &state.db,
                     &admitted,
                     TurnInput {
-                        channel_uploads,
-                        text: text.into(),
+                        channel_uploads: telegram_input.uploads,
+                        text,
                     },
                     events,
                 )

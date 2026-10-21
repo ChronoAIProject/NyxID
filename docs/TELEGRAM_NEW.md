@@ -361,7 +361,23 @@ and Telegram file handles, including media attached to an external reply. The
 owner's question stays separate from quoted JSON reference data. Original files
 are downloaded through the authenticated Telegram adapter and stored encrypted
 with the owner turn in the same transaction. The adapter enforces the configured
-media limit and Telegram's 20 MiB download bound, with at most ten files per turn.
+media limit and Telegram's 20 MiB aggregate payload bound, with at most eight
+successfully attached files per turn. Owner file ingestion requires the existing
+per-person `assistant:channel-media` flag, which defaults off and resolves for the
+bound owner (including manager personal runtimes). With the flag off, the text
+and gateway descriptions still reach the turn with a note that files are not
+shared; no Telegram file download occurs. Enable it only after upgrading all
+NyxID replicas; disabling it stops new Telegram file ingestion without dropping
+text turns. No CMA update is required for NyxID's own file ingestion.
+
+Each Telegram fetch shares the process-wide 192 MiB byte budget with browser
+uploads, other channel downloads and managed attachment egress. It reserves
+twice the payload limit through extraction/encryption, starts with the smaller
+declared-size/4 MiB limit, and releases that reservation before one full-limit
+retry. Budget waits are bounded to one second; cancellation releases permits.
+Oversized, unsupported, unavailable, rate-limited or excess files produce a
+bounded count/reason note. Successful sibling files and the forwarded text
+continue into the owner turn, including when every file fails.
 Images and supported documents use the existing extraction path. Other files
 remain available in full; unsupported audio/video is not represented as having
 been transcribed. A `t.me` URL alone does not grant Bot API access to the source

@@ -332,7 +332,7 @@ pub(crate) async fn prepare_uploads(
     bot: &crate::models::channel_bot::ChannelBot,
     user: &str,
     attachments: &[super::channel_platform::InboundAttachment],
-) -> crate::errors::AppResult<Vec<super::assistant_upload_service::PreparedChannelUpload>> {
+) -> PreparedInput {
     #[cfg(test)]
     let test_api_base = TEST_API_BASES.lock().unwrap().get(&bot.id).cloned();
     #[cfg(test)]
@@ -353,48 +353,147 @@ pub(crate) async fn prepare_uploads_from(
     user: &str,
     attachments: &[super::channel_platform::InboundAttachment],
     api_base: &str,
-) -> crate::errors::AppResult<Vec<super::assistant_upload_service::PreparedChannelUpload>> {
-    use super::channel_platform::{BotCredentials, PlatformAdapter, canonical_platform};
-    use crate::errors::AppError;
+) -> PreparedInput {
+    use super::channel_platform::canonical_platform;
+    use super::feature_flag_service as flags;
     if attachments.is_empty() {
-        return Ok(Vec::new());
+        return PreparedInput::default();
     }
-    if attachments.len() > super::assistant_nyxagent::MAX_TURN_ATTACHMENTS
-        || canonical_platform(&bot.platform) != "telegram"
+    if !flags::personal_flag_enabled(&state.db, user, flags::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY)
+        .await
+        .unwrap_or(false)
     {
-        return Err(AppError::ChannelMediaUnsupported);
+        return PreparedInput {
+            uploads: Vec::new(),
+            note: format!(
+                "{} attachments are not shared with the assistant because channel file sharing is disabled for this owner.",
+                attachments.len()
+            ),
+        };
+    }
+    if canonical_platform(&bot.platform) != "telegram" {
+        return PreparedInput::failed(attachments.len(), 1);
     }
     let adapter = super::channel_adapters::telegram::TelegramAdapter::for_api_base(api_base);
-    let token = super::channel_credentials::resolve_bot_token(
+    let Ok(token) = super::channel_credentials::resolve_bot_token(
         &state.db,
         &state.encryption_keys,
         &adapter,
         bot,
     )
-    .await?;
-    super::assistant_upload_service::admit(&state.db, user).await?;
+    .await
+    else {
+        return PreparedInput::failed(attachments.len(), 2);
+    };
     let mut result = Vec::new();
+    let mut failures = [0; 3];
     let mut remaining = state.config.channel_media_max_bytes.min(20 * 1024 * 1024);
     for attachment in attachments {
-        if attachment.size_bytes.is_some_and(|n| n > remaining) {
-            return Err(AppError::ChannelMediaTooLarge);
+        if result.len() == super::assistant_nyxagent::MAX_TURN_ATTACHMENTS {
+            failures[1] += 1;
+            continue;
         }
+        match fetch_upload(state, &adapter, bot, user, attachment, &token, remaining).await {
+            Ok((upload, size)) => {
+                remaining -= size;
+                result.push(upload);
+            }
+            Err(crate::errors::AppError::ChannelMediaTooLarge) => failures[0] += 1,
+            Err(
+                crate::errors::AppError::ChannelMediaUnsupported
+                | crate::errors::AppError::BadRequest(_),
+            ) => failures[1] += 1,
+            Err(_) => failures[2] += 1,
+        }
+    }
+    PreparedInput::with_failures(result, failures)
+}
+
+#[derive(Default)]
+pub(crate) struct PreparedInput {
+    pub uploads: Vec<super::assistant_upload_service::PreparedChannelUpload>,
+    pub note: String,
+}
+
+impl PreparedInput {
+    pub(crate) fn failed(count: usize, class: usize) -> Self {
+        let mut failures = [0; 3];
+        failures[class] = count;
+        Self::with_failures(Vec::new(), failures)
+    }
+
+    fn with_failures(
+        uploads: Vec<super::assistant_upload_service::PreparedChannelUpload>,
+        failures: [usize; 3],
+    ) -> Self {
+        let count: usize = failures.iter().sum();
+        let mut note = String::new();
+        if count > 0 {
+            if uploads.is_empty() {
+                note.push_str(super::assistant_channel_media::FAILED_NOTE);
+                note.push(' ');
+            }
+            note.push_str(&format!(
+                "{count} attachments could not be read (too large: {}, unsupported or attachment limit: {}, unavailable: {}). Please ask the owner to resend the failed files.",
+                failures[0], failures[1], failures[2]
+            ));
+        }
+        Self { uploads, note }
+    }
+}
+
+async fn fetch_upload(
+    state: &crate::AppState,
+    adapter: &super::channel_adapters::telegram::TelegramAdapter,
+    bot: &crate::models::channel_bot::ChannelBot,
+    user: &str,
+    attachment: &super::channel_platform::InboundAttachment,
+    token: &str,
+    maximum: u64,
+) -> crate::errors::AppResult<(super::assistant_upload_service::PreparedChannelUpload, u64)> {
+    use super::{
+        assistant_upload_service as uploads,
+        channel_platform::{BotCredentials, PlatformAdapter},
+    };
+    use crate::errors::AppError;
+    if maximum == 0 || attachment.size_bytes.is_some_and(|n| n > maximum) {
+        return Err(AppError::ChannelMediaTooLarge);
+    }
+    let initial =
+        uploads::byte_budget::initial_channel_limit(attachment.size_bytes, maximum as usize);
+    for (attempt, limit) in [initial, maximum as usize].into_iter().enumerate() {
+        uploads::admit(&state.db, user).await?;
+        // Keep the shared reservation through extraction/encryption. A busy
+        // replica skips this file rather than blocking the owner's text turn.
+        let reservation = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            uploads::byte_budget::reserve(limit),
+        )
+        .await
+        .map_err(|_| AppError::ChannelMediaFetchFailed("Attachment memory budget busy".into()))??;
         let fetched = adapter
             .fetch_attachment(
                 &state.http_client,
                 &BotCredentials {
                     billing: None,
-                    token: &token,
+                    token,
                     platform_bot_id: Some(&bot.platform_bot_id),
                     platform_secrets: None,
                 },
                 attachment,
-                remaining,
+                reservation.payload_limit as u64,
             )
-            .await?;
-        remaining = remaining
-            .checked_sub(fetched.bytes.len() as u64)
-            .ok_or(AppError::ChannelMediaTooLarge)?;
+            .await;
+        let fetched = match fetched {
+            Err(AppError::ChannelMediaTooLarge) if attempt == 0 && limit < maximum as usize => {
+                drop(reservation);
+                continue;
+            }
+            other => other?,
+        };
+        let size = fetched.bytes.len() as u64;
+        let bytes = fetched.bytes.to_vec();
+        drop(fetched);
         let name =
             attachment
                 .filename
@@ -404,18 +503,18 @@ pub(crate) async fn prepare_uploads_from(
                 } else {
                     "Telegram attachment"
                 });
-        result.push(
-            super::assistant_upload_service::prepare_channel_upload(
-                &state.encryption_keys,
-                user,
-                name,
-                attachment.mime_type.as_deref(),
-                fetched.bytes.to_vec(),
-            )
-            .await?,
-        );
+        let upload = uploads::prepare_channel_upload(
+            &state.encryption_keys,
+            user,
+            name,
+            attachment.mime_type.as_deref(),
+            bytes,
+        )
+        .await?;
+        drop(reservation);
+        return Ok((upload, size));
     }
-    Ok(result)
+    Err(AppError::ChannelMediaTooLarge)
 }
 
 #[cfg(test)]
@@ -446,3 +545,7 @@ mod media_tests {
         assert_eq!(media.len(), 2);
     }
 }
+
+#[cfg(test)]
+#[path = "telegram_input_upload_tests.rs"]
+mod upload_tests;

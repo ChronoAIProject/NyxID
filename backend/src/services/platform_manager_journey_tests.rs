@@ -11,6 +11,8 @@ mod management;
 mod native_personal;
 #[path = "platform_manager_journey_tests/outbound.rs"]
 mod outbound;
+#[path = "platform_manager_journey_tests/telegram_media.rs"]
+mod telegram_media;
 use super::*;
 use crate::{
     models::{
@@ -2785,6 +2787,15 @@ async fn manager_pairing_one_tap_rejects_relayed_proof_and_check_never_links() {
 #[tokio::test]
 async fn forwarded_quotes_links_and_complete_files_reach_only_the_bound_owner_turn() {
     let j = Journey::new().await;
+    super::super::feature_flag_service::set_platform_override(
+        &j.state.db,
+        super::super::feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+        &super::super::feature_flag_service::FlagTarget::User(j.owner.clone()),
+        true,
+        &j.owner,
+    )
+    .await
+    .unwrap();
     j.link().await;
     let file = b"Complete forwarded document.\nSecond line survives.";
     Mock::given(method("GET")).and(path("/bot100:manager-test-secret/getFile"))

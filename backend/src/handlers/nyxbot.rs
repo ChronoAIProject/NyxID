@@ -3209,23 +3209,36 @@ async fn start_chat_turn(
         }))
     };
     late_delivery::prepare(state, event_key, row, &origin, sender, guest, addressed).await?;
-    let channel_uploads = if !guest
+    let telegram_input = if !guest
         && canonical_platform(&row.platform) == "telegram"
         && !sender.media.is_empty()
     {
-        let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
-        crate::services::telegram_input::prepare_uploads(state, &bot, &row.user_id, &sender.media)
-            .await?
+        match channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await {
+            Ok(bot) => {
+                crate::services::telegram_input::prepare_uploads(
+                    state,
+                    &bot,
+                    &row.user_id,
+                    &sender.media,
+                )
+                .await
+            }
+            Err(_) => crate::services::telegram_input::PreparedInput::failed(sender.media.len(), 2),
+        }
     } else {
-        Vec::new()
+        Default::default()
     };
+    if !telegram_input.note.is_empty() {
+        note.push(' ');
+        note.push_str(&telegram_input.note);
+    }
     let start = TurnStart {
         media_event_ids: if guest {
             Vec::new()
         } else {
             media_event_ids.clone()
         },
-        channel_uploads,
+        channel_uploads: telegram_input.uploads,
         invocation_id: None,
         acknowledgement_id: None,
         retry_of: None,

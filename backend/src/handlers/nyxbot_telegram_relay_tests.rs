@@ -14,8 +14,101 @@ impl Drop for TelegramOrigin {
 }
 
 #[tokio::test]
+async fn gateway_file_failure_or_disabled_sharing_keeps_the_owner_text_turn() {
+    for enabled in [false, true] {
+        let (state, calls, model) = setup("telegram_file_degrade").await;
+        let (row, agent_key) = channel(&state, "gateway").await;
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"owner_sender_ids":["7"]}},
+            )
+            .await
+            .unwrap();
+        let token = state
+            .encryption_keys
+            .encrypt(b"123:quoted-relay-test-secret")
+            .await
+            .unwrap();
+        state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(doc!{"_id":&row.channel_bot_id},doc!{"$set":{"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:token}}}).await.unwrap();
+        crate::services::feature_flag_service::set_platform_override(
+            &state.db,
+            crate::services::feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::User(OWNER.into()),
+            enabled,
+            OWNER,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            put_binding(
+                State(state.clone()),
+                Path("bnd_chats".into()),
+                bearer(&agent_key),
+                Json(binding_body(&agent_key, OWNER))
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        ensure_partition(&state, &agent_key, PARTITION).await;
+        let telegram = MockServer::start().await;
+        crate::services::telegram_input::TEST_API_BASES
+            .lock()
+            .unwrap()
+            .insert(row.channel_bot_id.clone(), telegram.uri());
+        let _origin = TelegramOrigin(row.channel_bot_id.clone());
+        let id = Uuid::new_v4().to_string();
+        // The gateway sends only its plain text; files come from the exact
+        // authenticated relay record, including this unavailable quoted file.
+        state.db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .insert_one(doc!{"_id":&id,"channel_bot_id":&row.channel_bot_id,"agent_api_key_id":&row.route_api_key_id,
+                "direction":"inbound","sender_platform_id":"7","original_message":false,
+                "attachments":[{"content_type":"file","provider_ref":"too-large","filename":"large.txt","size_bytes":64_i64*1024*1024}]}).await.unwrap();
+        let mut body = event("Keep the forwarded text despite the file failure", "7", &id);
+        body["event_context"]["activity"]
+            .as_object_mut()
+            .unwrap()
+            .remove("telegram_input");
+        body["event_context"]["activity"]["source"]["route_id"] = json!(row.route_id);
+        body["event_context"]["activity"]["conversation"]["id"] = "7".into();
+        let response = Box::pin(respond(&state, &agent_key, &body, &id)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("Here is your answer"));
+        let captured = calls.lock().await;
+        assert_eq!(captured.len(), 1);
+        let input = captured[0].to_string();
+        assert!(input.contains("Keep the forwarded text despite the file failure"));
+        assert!(
+            input.contains(if enabled {
+                "too large: 1"
+            } else {
+                "attachments are not shared"
+            }),
+            "{input}"
+        );
+        assert!(telegram.received_requests().await.unwrap().is_empty());
+        drop(captured);
+        model.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn quoted_files_stay_out_of_gateway_payload_but_reach_the_owner_turn() {
     let (state, calls, model) = setup("nyxbot_telegram_quoted_relay").await;
+    crate::services::feature_flag_service::set_platform_override(
+        &state.db,
+        crate::services::feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::User(OWNER.into()),
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
     let (row, agent_key) = channel(&state, "gateway").await;
     state
         .db
