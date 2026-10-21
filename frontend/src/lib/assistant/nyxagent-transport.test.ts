@@ -1176,7 +1176,6 @@ describe("NyxBot agents", () => {
     });
     await vi.waitFor(() => expect(bodies).toHaveLength(1));
     expect(bodies[0]).toEqual({
-      model: "nyxagent/chat",
       agent_id: RESEARCHER.id,
       text: "Hello",
     });
@@ -1828,6 +1827,24 @@ it("sends the chosen draft model only for a new thread and never changes the nex
   expect(transport.getModel()).toBe("nyxagent/chat");
   await transport.send(id, "Continue", vi.fn(), undefined, { model: "nyxagent/research" });
   expect(bodies[1]).toEqual({ conversation_id: id, text: "Continue" });
+});
+
+it("inherits a specialist's configured profile unless the owner explicitly selects a model", async () => {
+  const transport = new NyxAgentTransport();
+  const bodies: unknown[] = [];
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+    if (endpoint.endsWith("/turns")) {
+      bodies.push(JSON.parse(String(init.body)));
+      return stream();
+    }
+    if (endpoint.includes("/conversations?")) return json({ conversations: [conversation()], next_cursor: null });
+    return json(history());
+  };
+  const agent = { id: "specialist-id", kind: "specialist" as const, name: "faq", destroyed: false };
+  await transport.send(undefined, "Use your default", vi.fn(), undefined, { agent });
+  expect(bodies[0]).toEqual({ agent_id: agent.id, text: "Use your default" });
+  await transport.send(undefined, "Use this model", vi.fn(), undefined, { agent, model: "nyxagent/research" });
+  expect(bodies[1]).toEqual({ agent_id: agent.id, model: "nyxagent/research", text: "Use this model" });
 });
 
 it("persists decision continuation provenance through the request, optimistic turn and history without losing its turn count", async () => {

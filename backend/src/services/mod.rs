@@ -147,6 +147,7 @@ pub mod node_routing_service;
 pub mod node_service;
 pub mod node_ws_manager;
 pub mod notification_service;
+pub mod notion_evidence;
 pub mod oauth_app_source;
 pub(crate) mod oauth_broker_record_service;
 pub mod oauth_broker_service;

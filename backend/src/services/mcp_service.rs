@@ -2647,7 +2647,8 @@ pub fn generate_tool_definitions(
         description: "Execute any connected tool by name. Use nyx__search_tools first to \
             discover available tools and their inputSchema, then invoke them through this \
             tool. Pass the tool_name and arguments_json (a JSON string containing all \
-            required parameters from the tool's inputSchema)."
+            required parameters from the tool's inputSchema). For chat Notion block reads, \
+            use result_query to retrieve relevant sections from the returned block page."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -2659,6 +2660,12 @@ pub fn generate_tool_definitions(
                 "arguments_json": {
                     "type": "string",
                     "description": "A JSON string containing all required arguments for the tool. Check the tool's inputSchema from nyx__search_tools results. Example: '{\"graphId\": \"dbeef00f-f2c7-4447-9686-3a6deba65a72\", \"depth\": 2}'. Pass '{}' if the tool takes no arguments."
+                },
+                "result_query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": "Chat only: for a published Notion block-children GET, return compact sections matching these keywords, with block IDs, revisions and pagination. Searches only the returned page of blocks; set page_size=100 and follow next_cursor if needed. Does not search the workspace or expand nested blocks. Omit for a section index and preview. This field is never sent to the provider."
                 }
             },
             "required": ["tool_name", "arguments_json"]

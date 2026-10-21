@@ -844,6 +844,11 @@ its next turn when its stored fingerprint differs and receives the normal recap.
 Legacy sessions follow the reset-or-adopt migration rules below; this change
 does not force every legacy session to reset at deployment.
 
+Verified Notion block reads also support [compact section evidence and an
+optional `result_query`](10-source-resources.md#compact-notion-evidence).
+This separately implemented presentation step ranks the current returned block
+page; it does not synchronize a workspace or cache changing source facts.
+
 For media requests, the instructions distinguish a verified attachment from a
 link. An authorized operation must materialize the requested attachment;
 without one, the agent supplies a verified usable source link and explains the
@@ -1639,6 +1644,13 @@ settings menu selects a thread's model with
 model for an agent's new threads with `PATCH /assistant/nyxagent/agents/{id}`
 (`model`), and NyxBot can change an agent's model with `nyxid__update_subagent`
 `model`, which the owner's access mode treats as a sensitive change.
+
+New threads with no explicit `model` inherit the selected agent's configured
+profile. The app omits the model for an agent draft unless the owner explicitly
+selected one; an explicit selection wins. Existing conversations retain their
+stored model when the agent default changes. This rule also applies to API
+turns, so a specialist's faster profile is not silently replaced by the global
+chat default.
 
 The default composer exposes a Thinking toggle: on selects `nyxagent/research`,
 off selects `nyxagent/chat`. `assistant:model-controls` (default off) replaces

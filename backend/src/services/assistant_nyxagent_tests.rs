@@ -888,6 +888,61 @@ async fn persistence_fences_concurrent_turns_scopes_owners_paginates_and_deletes
 }
 
 #[tokio::test]
+async fn new_threads_inherit_agent_profile_explicit_selection_wins_existing_threads_keep_model() {
+    let f =
+        crate::services::assistant_authority_tests::direct_fixture("nyxa_default_profile").await;
+    let agent_id = f.row.agent_id.clone().unwrap();
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&agent_id},
+            doc! {"$set":{"model":"nyxagent/channel"}},
+        )
+        .await
+        .unwrap();
+    let mut req = request(None, "FAQ question");
+    req.agent_id = Some(agent_id.clone());
+    let row = begin_turn(&f.state.db, &f.owner, &req, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    assert_eq!(row.model, "nyxagent/channel");
+    req.model = Some("nyxagent/research".into());
+    let explicit = begin_turn(&f.state.db, &f.owner, &req, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    assert_eq!(explicit.model, "nyxagent/research");
+    // Changing the agent default never rewrites an existing thread's selection.
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&agent_id},
+            doc! {"$set":{"model":"nyxagent/channel"}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&explicit.id},
+            doc! {"$set":{"active_turn":bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    let continued = begin_turn(
+        &f.state.db,
+        &f.owner,
+        &request(Some(&explicit.id), "Continue"),
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert_eq!(continued.model, "nyxagent/research");
+}
+
+#[tokio::test]
 async fn every_failed_turn_clears_binding_and_retains_partial_reply() {
     let db = connect_transaction_test_database("nyxa_failures").await;
     ensure_indexes(&db).await.unwrap();

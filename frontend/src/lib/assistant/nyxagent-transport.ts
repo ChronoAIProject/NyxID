@@ -812,7 +812,12 @@ export class NyxAgentTransport {
           body: {
             ...(id
               ? { conversation_id: id }
-              : { model, ...(options.agent ? { agent_id: options.agent.id } : {}) }),
+              : {
+                  // Let the server use the agent's configured profile unless the
+                  // owner made an explicit model selection for this new thread.
+                  ...(!options.agent || options.model ? { model } : {}),
+                  ...(options.agent ? { agent_id: options.agent.id } : {}),
+                }),
             text,
             ...(options.retryOf ? { retry_of: options.retryOf } : {}),
             ...(options.acknowledgementId ? { acknowledgement_id: options.acknowledgementId } : {}),
