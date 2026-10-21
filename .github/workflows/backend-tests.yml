@@ -67,7 +67,7 @@ jobs:
         run: >-
           cargo nextest list --archive-file backend-tests.tar.zst
           --profile ci --message-format json > test-inventory.json
-      - name: Record build image identity
+      - name: Record build runner OS identity
         run: python3 .github/scripts/coverage_identity.py --record build-identity.json
       - uses: actions/upload-artifact@v4
         with:
@@ -111,10 +111,10 @@ jobs:
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
-          components: llvm-tools-preview
+          components: ${{ inputs.coverage && 'llvm-tools-preview' || '' }}
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
+          tool: ${{ inputs.coverage && 'cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146' || 'cargo-nextest@0.9.146' }}
       - uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.coverage && 'backend-coverage-build' || 'backend-test-build' }}-archive
@@ -198,19 +198,25 @@ jobs:
         with:
           name: backend-coverage-build-archive
       # Never merge-multiple here: LLVM's pooled filenames repeat per runner.
+      # Preserve missing-evidence failures until the execution-result check and
+      # inventory verifier can report the failed shard or missing directory.
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-1
           path: results/shard-1
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-2
           path: results/shard-2
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-3
           path: results/shard-3
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-4
           path: results/shard-4

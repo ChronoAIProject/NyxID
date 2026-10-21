@@ -804,7 +804,7 @@ jobs:
       coverage: true
 
   # Base coverage is an informational comparison, not a correctness gate.
-  # Reuse an exact source/recipe/image report from a trusted push/publish run.
+  # Reuse an exact source/recipe/runner OS report from a trusted push/publish run.
   # Try the exact-SHA cache, then a published baseline; otherwise report N/A.
   # Head coverage always executes all current tests; never rerun the base suite.
   coverage-backend-base:
@@ -863,7 +863,7 @@ jobs:
         if: steps.base-cache.outputs.cache-hit != 'true' && steps.base-artifact.outputs.available != 'true'
         run: >-
           echo 'Base coverage delta: N/A (no report for this exact base commit,
-          measurement recipe and runner image). Head tests and coverage remain required.'
+          measurement recipe and runner OS). Head tests and coverage remain required.'
           >> "$GITHUB_STEP_SUMMARY"
       - name: Upload base report
         if: steps.base-cache.outputs.cache-hit == 'true' || steps.base-artifact.outputs.available == 'true'

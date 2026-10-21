@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fingerprint the measurement recipe and require matching measurement images."""
+"""Fingerprint the measurement recipe and require matching runner OS identities."""
 
 import argparse
 import hashlib
@@ -22,9 +22,9 @@ INPUTS = (
 )
 
 
-def fingerprint(root, image_os, image_version, architecture):
+def fingerprint(root, image_os, architecture):
     digest = hashlib.sha256()
-    for value in (image_os, image_version, architecture):
+    for value in (image_os, architecture):
         digest.update(value.encode() + b"\0")
     for name in INPUTS:
         digest.update(name.encode() + b"\0")
@@ -50,14 +50,13 @@ def main():
     parser.add_argument("--require-identities", type=Path, nargs="*", default=[])
     args = parser.parse_args()
     image_os = os.environ.get("ImageOS", "")
-    image_version = os.environ.get("ImageVersion", "")
-    value = fingerprint(Path.cwd(), image_os, image_version, platform.machine())
-    # An image rollout between build, execution, and reporting must not label a
-    # heterogeneous measurement as an exact reusable baseline.
-    reusable = bool(image_os and image_version) and matching_identities(args.require_identities, value)
+    value = fingerprint(Path.cwd(), image_os, platform.machine())
+    # Tools are pinned in the recipe. Weekly image builds may differ, while
+    # runner OS, architecture, and recipe must agree across all measurements.
+    reusable = bool(image_os) and matching_identities(args.require_identities, value)
     if args.record:
         args.record.write_text(json.dumps({"fingerprint": value, "reusable": reusable}))
-    print(f"Coverage recipe: {value}; runner image: {image_os}/{image_version}; reusable: {reusable}")
+    print(f"Coverage recipe: {value}; runner OS: {image_os}; reusable: {reusable}")
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(f"fingerprint={value}\nreusable={str(reusable).lower()}\n")
 
