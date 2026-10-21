@@ -28,6 +28,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         operation: None,
         credential_class: CredentialClass::NyxidManagedMaster,
         model: Some("test-model".into()),
+        reported_model: None,
         token_breakdown: None,
         audio_tokens: None,
         image_tokens: None,
