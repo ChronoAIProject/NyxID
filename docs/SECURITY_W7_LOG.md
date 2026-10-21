@@ -401,3 +401,72 @@
 - Reuse D's nyxid_server-91bd2f1ee51e6e06 (driver 21:09 after last source edit 21:07): health tests 5/5. Reuse ID's both-KMS all-target Clippy /tmp/nyxid-w8-id-oauth-corrected-clippy.log (drivers 21:25): exit 0 at 21:32:44.
 - Local policy: rootfs 7/7, backend runner 2/2, runtime 10/10, vulnerabilities 15/15, packaging 19/19, credential 21/21, scanner 7/7, SBOM 3/3; pinned actionlint and diff whitespace pass.
 - PR: Artifact Packaging / Backend Credential Packaging amd64+arm64 must start the real final server and require the binary probe with invalid application/key env; Artifact Packaging Policy; APT Dockerfile Layers; Scanner Policy.
+
+## W7 composed-bundle reconciliation — 2026-10-21
+
+- Review this bundle's source after the main merge, with W8 and W9.6 excluded.
+  Cherry-pick the PR branch's sole additional auth fix (upstream 43865ba90,
+  local dd68b92a3); it adds no RSA-reference or private-operation lines.
+- Refresh only reviewed RSA source/context bindings: 223 changed binding entries
+  across 78 paths, removing excluded-file operation counts. Main's new AES-GCM
+  adapters and SigV4 HMAC call add no RustCrypto private signing/decryption.
+  Preserve dependency graph/checksum/feature/parent fences and set both RSA
+  disposition deadlines to November 19, matching the existing monthly deadline.
+- Remove current-tree allowances for 20 deleted-file findings, retaining only
+  exact introducing-history revisions where the full-history scan still finds
+  them. Add five exact benign identities: fixed runtime directory text, one
+  excluded-history mock fixture, one public source digest and two regression
+  lines containing the same directory text. All additions expire November 19.
+  The real-detector regression no longer reads the absent W8 document; changed
+  lines and inserted credentials still fail. Deleted-file exceptions have a
+  separate regression that forbids current-tree use.
+- The live locked audit identified the new emSign distrust advisories
+  RUSTSEC-2026-0381/0382/0383. Upgrade only rustls-webpki, webpki-roots and
+  webpki-root-certs to their patched releases; add no advisory exception.
+  The rerun passes all 13 roots (9 npm, 3 Cargo, 1 pnpm), with zero unresolved
+  findings. Mobile proof checks all 119 installed files, eight security cases,
+  five YAML compatibility cases, four vulnerable-original proofs, and the actual
+  iOS production bundle (3,581 modules; zero forbidden modules).
+- Preserve main's reviewed 120-minute backend build budget; keep two 90-minute
+  archive test partitions, their pinned nextest/toolchain, features, package set,
+  archive handoff, reports and fail-closed aggregate. Add explicit read-only
+  permissions to build/partition and no permissions to the aggregate; make
+  repository-default permission inheritance a local checker failure.
+- Require --locked for every workflow Cargo compile command, including main's
+  billing smoke test. Keep the caller's cache target in dependency verification.
+  The release helper test now asserts the exact signed-snapshot request set
+  (clang, jq, pkg-config, python3) and the actual pure-Rust keyring features;
+  native libdbus development linkage is not part of that contract.
+- APK provisioning never checks out dispatch input. Both phases read only six
+  catalog files from an ancestor of the protected main workflow revision, with
+  full-history trusted checkouts, no persisted credentials and no shared caches.
+  Real Git fixtures reject unmerged/missing commits before extraction or any
+  publish command. Only the separate publisher has contents:write.
+- Replace the signing test's registry-prefix check with parsed exact authority
+  comparison and adversarial host/userinfo/port cases. No CodeQL dismissal or
+  suppression is added. Hosted CodeQL must confirm the alert resolution.
+- Make mobile CI explicitly freeze its lock and disable lifecycle/pnpmfile
+  execution. Wiring mutations for each removed flag fail. Existing frozen,
+  hook-free production-bundle audit provides the compatibility evidence.
+- Local validation runs every offline W7 Python/JavaScript policy suite from the
+  workflow inventory, including .github helper discovery, image/APK/APT unit
+  tests, real offline OCI/SBOM replay, packaging/publication contracts, actionlint,
+  YAML/permissions, build/node/tool policies, exact audits and secret detection.
+  The production release-verifier example tests pass 59/59 including the live
+  TUF mirror (zero ignored), and its locked build and warning-denying Clippy pass.
+  No full backend/CLI suite is run. Cargo uses the dedicated cache target, four
+  jobs, no incremental compilation and no development debug information.
+- The committed source export, actual cargo-dist plan, generated input guard,
+  publication-plan validation and untagged dist manifest all pass. They perform
+  no application build or publication. Full native image/package replay and
+  OIDC signing remain hosted acceptance checks, not local evidence claims.
+- Two external checks remain open: the W5-owned wizard seal reports stale
+  rendered module source, and the live APK availability check reports the absent
+  build-inputs-apk-2026-10-19 release. No frontend/wizard source was edited and
+  no provisioning workflow was dispatched. Local/scheduled availability still
+  fails closed; PR warning behavior and verified HTTP-404 fallback are unchanged.
+- Detailed before/after source lines, hashes, finding locations and benign
+  rationales are in ~/Library/Caches/nyxid-targets/w7-pins/delta-report.md.
+  command-results.md and results.jsonl in that directory retain every local gate
+  attempt, exact command, exit status and log location, including failures and
+  their subsequent resolutions. Raw secret scanner output is not retained.
