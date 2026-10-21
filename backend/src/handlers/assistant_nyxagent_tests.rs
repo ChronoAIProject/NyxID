@@ -628,8 +628,10 @@ async fn tool_progress_events_reset_the_no_progress_bound() {
     assert_eq!(
         reply.status,
         "completed",
-        "{:?}",
-        reply.error_detail.map(|d| d.stage)
+        "stage={:?}; activity_total={}; activities={:?}",
+        reply.error_detail.as_ref().map(|d| &d.stage),
+        reply.activity_total,
+        reply.activities
     );
     server.abort();
 }
