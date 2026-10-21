@@ -34,6 +34,15 @@ from the signed snapshot. The CLI uses async Secret Service with RustCrypto;
 it requires no native libdbus development package. Its test checks both the
 manifest features and the installer's recorded package request set.
 
+Backend base coverage has one explicit compatibility addition: its trusted PR
+`install-linux-build-deps.sh --base-coverage` requests `libdbus-1-dev` alongside
+`pkg-config` and `ripgrep`, through the same signed, exact-byte snapshot and
+offline install. The separately checked-out main revision still uses native
+DBus keyring features. This mode is confined to `coverage-backend-base`; PR-head
+and release requests retain their RustCrypto package sets. The base-report
+fingerprint includes the installer, selectors, catalog and transport trust so
+a dependency-input change invalidates cached measurements.
+
 The Glama reference image builds the supplied reviewed source context with a
 pinned Rust image and Cargo.lock. Operators copying this definition into its
 external UI must select the same immutable repository revision. It no longer

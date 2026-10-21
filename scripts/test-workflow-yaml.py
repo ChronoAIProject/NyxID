@@ -81,6 +81,26 @@ class CatalogWorkflowBoundary(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         return load_unique((root / '.github/workflows' / name).read_text())
 
+    def test_native_dbus_supplement_is_restricted_to_base_coverage(self):
+        jobs = self.load('ci.yml')['jobs']
+        callers = []
+        for name, job in jobs.items():
+            for step in job.get('steps', []):
+                command = step.get('run', '')
+                if '--base-coverage' in command:
+                    callers.append(name)
+                    self.assertEqual(command, 'bash .github/scripts/install-linux-build-deps.sh --base-coverage')
+        self.assertEqual(callers, ['coverage-backend-base'])
+        base = jobs['coverage-backend-base']
+        checkout = next(step for step in base['steps'] if step.get('name') == 'Checkout base tree')
+        self.assertEqual(checkout['with']['ref'], '${{ github.event.pull_request.base.sha }}')
+        self.assertEqual(checkout['with']['path'], 'base-coverage')
+        install = next(step for step in base['steps'] if step.get('name') == 'Install system dependencies')
+        self.assertEqual(install['if'], "steps.base-cache.outputs.cache-hit != 'true'")
+        # The trusted PR snapshot helper runs from the root, never the base's
+        # older mutable apt-get wrapper. Only the measured source comes from base.
+        self.assertNotIn('working-directory', install)
+
     def test_apk_provisioning_never_checks_out_dispatch_input_or_shares_caches(self):
         workflow = self.load('provision-apk-archives.yml')
         self.assertEqual(set(workflow.get('on', workflow.get(True))), {'workflow_dispatch'})

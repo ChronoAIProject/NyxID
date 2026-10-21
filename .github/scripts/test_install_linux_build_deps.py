@@ -126,9 +126,9 @@ if operation == "update":
         path.write_text(("#!/usr/bin/env python3\n" if python else "#!/bin/sh\nset -eu\n") + source)
         path.chmod(0o755)
 
-    def invoke(self, failure=""):
+    def invoke(self, failure="", arguments=()):
         return subprocess.run(
-            ["bash", str(self.script)],
+            ["bash", str(self.script), *arguments],
             env={**os.environ, "BASH_ENV": str(self.harness), "TEST_ROOT": str(self.root),
                  "PATH": str(self.root / "bin") + os.pathsep + os.environ["PATH"],
                  "TEST_CALLS": str(self.calls), "TEST_ARGUMENTS": str(self.arguments), "TEST_FAIL": failure},
@@ -147,6 +147,31 @@ class BuildDependencyTests(BuildDependencyHarness, unittest.TestCase):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.arguments.read_text().splitlines().count("ripgrep"), 2)
+
+    def test_head_build_has_exact_rust_crypto_dependencies(self):
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence = list((self.root / 'evidence').glob('*/requested-packages.txt'))
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0].read_text().splitlines(), ['pkg-config', 'ripgrep'])
+        self.assertNotIn('libdbus-1-dev', self.arguments.read_text().splitlines())
+
+    def test_base_coverage_adds_only_reviewed_native_dbus_from_snapshot(self):
+        result = self.invoke(arguments=('--base-coverage',))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), ['update', 'download', 'install'])
+        self.assertEqual(self.arguments.read_text().splitlines().count('libdbus-1-dev'), 2)
+        evidence = list((self.root / 'evidence').glob('*/requested-packages.txt'))
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0].read_text().splitlines(), ['pkg-config', 'ripgrep', 'libdbus-1-dev'])
+
+    def test_unreviewed_dependency_modes_fail_before_apt(self):
+        for arguments in (('--unknown',), ('libdbus-1-dev',), ('--base-coverage', 'curl')):
+            with self.subTest(arguments=arguments):
+                result = self.invoke(arguments=arguments)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('unsupported build dependency mode', result.stderr)
+                self.assertFalse(self.calls.exists())
 
     def test_private_input_parent_uses_verified_readable_transport_copy(self):
         self.root.chmod(0o700)

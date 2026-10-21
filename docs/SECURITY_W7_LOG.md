@@ -489,3 +489,22 @@
   and original proofs are retained under
   ~/Library/Caches/nyxid-targets/w7-apt-followup/ (results.jsonl,
   mobile-original-proofs.json and logs/).
+
+## W7 PR #1976 follow-up — base coverage native dependencies
+
+- Main still declares native DBus in its CI build wrapper, but base coverage
+  executes the PR's trusted dependency wrapper before compiling main. Add an
+  explicit `--base-coverage` mode requesting exactly pkg-config, ripgrep and
+  libdbus-1-dev through the reviewed signed snapshot and offline installation.
+  Only coverage-backend-base selects it. PR-head and release package sets stay
+  exact and omit native DBus.
+- Include the APT installer/selectors/catalog/CA in the base-report fingerprint
+  so changing those inputs invalidates the cached measurement.
+- Workflow regressions restrict the compatibility mode to base coverage and
+  retain checkout of the exact base SHA. Real-helper fixture tests verify both
+  recorded package sets, authenticated download/offline install, and rejection
+  of unknown modes before APT. All 52 .github/scripts tests and 19 workflow YAML
+  tests pass; YAML and permissions policy checks also pass. No backend/CLI suite
+  was run; hosted base coverage must confirm the historical source build.
+- Full command results are in w7-apt-followup/results.jsonl and logs/ under
+  ~/Library/Caches/nyxid-targets/.

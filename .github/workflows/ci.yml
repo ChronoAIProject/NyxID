@@ -1364,7 +1364,7 @@ jobs:
       - name: Install system dependencies
         if: steps.base-cache.outputs.cache-hit != 'true'
         timeout-minutes: 5
-        run: bash .github/scripts/install-linux-build-deps.sh
+        run: bash .github/scripts/install-linux-build-deps.sh --base-coverage
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
           components: clippy, llvm-tools-preview, rustfmt
