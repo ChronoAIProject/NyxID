@@ -1102,7 +1102,7 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
           cache-dependency-path: mobile/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile
       - run: node ../scripts/test-mobile-yaml-compat.cjs
       - name: Prove production bundle excludes build-only glob modules
         run: node ../scripts/check-mobile-bundle.cjs

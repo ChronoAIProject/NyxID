@@ -51,6 +51,10 @@ def require(data):
         required_step(jobs['policy']['steps'], script)
     required_step(ci['jobs']['mobile']['steps'], 'scripts/check-mobile-bundle.cjs')
     required_step(ci['jobs']['mobile']['steps'], 'scripts/test-mobile-yaml-compat.cjs')
+    mobile_steps = ci['jobs']['mobile']['steps']
+    install = required_step(mobile_steps, 'pnpm install')
+    if mobile_steps[install]['run'] != 'pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile':
+        raise ValueError('mobile install must freeze the lock and disable lifecycle hooks and pnpmfile')
     required_step(jobs['freshness']['steps'], 'scripts/check-build-input-freshness.py')
     packaging = data['artifact-packaging']
     if 'schedule' not in packaging.get('on', packaging.get(True, {})) or packaging['permissions'] != {'contents': 'read'}:
@@ -95,6 +99,15 @@ def require(data):
 class ScannerWorkflows(unittest.TestCase):
     def test_current_workflows_enforce_scanners(self):
         require(workflows())
+
+    def test_mobile_install_cannot_enable_hooks_or_unlock_dependencies(self):
+        for flag in ('--frozen-lockfile', '--ignore-scripts', '--ignore-pnpmfile'):
+            data = workflows()
+            step = next(step for step in data['ci']['jobs']['mobile']['steps']
+                        if 'pnpm install' in step.get('run', ''))
+            step['run'] = step['run'].replace(' ' + flag, '')
+            with self.subTest(flag=flag), self.assertRaisesRegex(ValueError, 'mobile install'):
+                require(data)
 
     def test_no_history_truncation_or_optional_secret_scan(self):
         for mutation in ('shallow', 'missing', 'conditional', 'warning'):
