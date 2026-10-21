@@ -4235,7 +4235,7 @@ async fn missing_submission_effects(f: &RecoveryFixture) -> Vec<Document> {
             },
         );
         effect.insert("state", "applied");
-        effect.insert("attempts", index as i64 * 7);
+        effect.insert("attempts", index * 7);
         effect.insert(
             "created_at",
             bson::DateTime::from_millis(978307200000 + index),
