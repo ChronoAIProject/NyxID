@@ -5026,7 +5026,7 @@ pub async fn relay_callback(
             .map(crate::services::telegram_input::content)
             .unwrap_or(text)
     } else {
-        chats::named_mentions(&text, &raw)
+        text
     };
     if text.is_empty()
         && canonical_platform(&row.platform) == "telegram"

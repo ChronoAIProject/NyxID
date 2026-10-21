@@ -305,7 +305,7 @@ async fn decrypt_platform_field(
         )),
     }
 }
-async fn encrypt_platform_field(
+pub(crate) async fn encrypt_platform_field(
     keys: &EncryptionKeys,
     id: &str,
     name: &str,

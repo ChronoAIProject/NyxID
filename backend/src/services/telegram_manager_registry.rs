@@ -27,8 +27,11 @@ pub async fn values(
     keys: &crate::crypto::aes::EncryptionKeys,
     manager: Option<&str>,
 ) -> AppResult<PlatformVerifySecrets> {
-    super::platform_credential_service::decrypt_snapshot(keys, load(db, manager).await?.as_ref())
-        .await
+    super::platform_credential_service::decrypt_platform_snapshot(
+        keys,
+        load(db, manager).await?.as_ref(),
+    )
+    .await
 }
 impl<'a> TelegramNewService<'a> {
     pub async fn for_manager(&self, manager: i64) -> AppResult<Self> {
@@ -52,7 +55,7 @@ impl<'a> TelegramNewService<'a> {
             .collection::<PlatformCredential>(COLLECTION_NAME)
             .find_one(doc! {"provider":self.manager_provider()})
             .await?;
-        super::platform_credential_service::decrypt_snapshot(self.keys, row.as_ref()).await
+        super::platform_credential_service::decrypt_platform_snapshot(self.keys, row.as_ref()).await
     }
     pub(crate) fn manager_provider(&self) -> String {
         self.manager_id
@@ -93,6 +96,7 @@ impl<'a> TelegramNewService<'a> {
             .find_one(doc! {"provider":self.manager_provider()})
             .await?;
         let mut row = previous.unwrap_or_else(|| PlatformCredential {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             channel_observation_version: 0,
             provider: self.manager_provider(),
@@ -109,8 +113,19 @@ impl<'a> TelegramNewService<'a> {
                 super::channel_adapters::telegram_new::MANAGER_TOKEN.into(),
                 bson::Binary {
                     subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: self.keys.encrypt(token.trim().as_bytes()).await?,
+                    bytes: super::platform_credential_service::encrypt_platform_field(
+                        self.keys,
+                        &row.id,
+                        super::channel_adapters::telegram_new::MANAGER_TOKEN,
+                        token.trim().as_bytes(),
+                    )
+                    .await?,
                 },
+            );
+            super::credential_record_service::mark_version(
+                &mut row.secret_context_versions,
+                self.keys,
+                super::channel_adapters::telegram_new::MANAGER_TOKEN,
             );
         }
         if !row
@@ -128,8 +143,19 @@ impl<'a> TelegramNewService<'a> {
                 super::platform_credential_service::VERIFY_TOKEN_FIELD.into(),
                 bson::Binary {
                     subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: self.keys.encrypt(secret.as_bytes()).await?,
+                    bytes: super::platform_credential_service::encrypt_platform_field(
+                        self.keys,
+                        &row.id,
+                        super::platform_credential_service::VERIFY_TOKEN_FIELD,
+                        secret.as_bytes(),
+                    )
+                    .await?,
                 },
+            );
+            super::credential_record_service::mark_version(
+                &mut row.secret_context_versions,
+                self.keys,
+                super::platform_credential_service::VERIFY_TOKEN_FIELD,
             );
         }
         row.fields.insert("manager_bot_id".into(), id.to_string());
@@ -265,6 +291,25 @@ mod tests {
             .unwrap();
         let saved = additional.manager_values().await.unwrap();
         assert_eq!(saved.get("manager_bot_id"), Some("200"));
+        let mut strict_keys = state.encryption_keys.clone();
+        strict_keys.set_allow_legacy_record_reads(false);
+        let mut snapshot = load(&state.db, Some("200")).await.unwrap().unwrap();
+        let strict = super::super::platform_credential_service::decrypt_platform_snapshot(
+            &strict_keys,
+            Some(&snapshot),
+        )
+        .await
+        .unwrap();
+        assert_eq!(strict.get("manager_bot_token"), Some(token));
+        snapshot.id = uuid::Uuid::new_v4().to_string();
+        assert!(
+            super::super::platform_credential_service::decrypt_platform_snapshot(
+                &strict_keys,
+                Some(&snapshot),
+            )
+            .await
+            .is_err()
+        );
         let verify = super::super::platform_credential_service::VERIFY_TOKEN_FIELD;
         assert_ne!(saved.get(verify), default_before.get(verify));
         assert_eq!(

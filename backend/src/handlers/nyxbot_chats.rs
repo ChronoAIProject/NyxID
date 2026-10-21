@@ -2202,238 +2202,239 @@ pub(crate) async fn post_automation_images(
     // Keep this multi-stage delivery future on the heap. Its callers include
     // Tokio workers and nested image/automation delivery on normal stacks.
     Box::pin(async move {
-    let target = prepare_post(state, &run.user_id, chat_id, agent_id).await?;
-    let mut report = super::images::ImageReport {
-        app_visible: target.thread.owner_chat && target.thread.kind.as_deref() == Some("private"),
-        automation: true,
-        ..Default::default()
-    };
-    let mut outbound = crate::services::channel_platform::OutboundReply {
-        text: None,
-        metadata: None,
-        attachments: Vec::new(),
-        reply_to_platform_message_id: None,
-    };
-    target.adapter.reply_context(
-        crate::services::channel_image_audience::chat_thread(&target.thread),
-        target.thread.created_at,
-        &mut outbound.metadata,
-    );
-    let audience = crate::services::channel_image_audience::resolve(
-        &target.bot.id,
-        &target.bot.platform,
-        &target.conversation.platform_conversation_id,
-        &outbound,
-    );
-    let mut budget = engine::MAX_TURN_ATTACHMENTS;
-    let mut omitted = run.image_refs_truncated;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(135);
-    let mut seen = std::collections::HashSet::new();
-    let mut stop = None;
-    let mut last_send: Option<std::time::Instant> = None;
-    for item in run.image_refs.iter().rev() {
-        if !seen.insert(item.attachment.id.as_str()) {
-            continue;
-        }
-        if run.thread_id.as_deref() != Some(item.conversation_id.as_str())
-            || !engine::chat_tool_image(&item.attachment)
-        {
-            report.outcomes.push(super::images::ImageItemResult {
-                attachment_id: item.attachment.id.clone(),
-                status: "failed".into(),
-                code: Some("unavailable".into()),
-            });
-            report.failed += 1;
-            report.attempted += 1;
-            continue;
-        }
-        let metadata = match engine::turn_tool_attachments(
-            &state.db,
-            &run.user_id,
-            &item.conversation_id,
-            &item.turn_id,
-        )
-        .await
-        {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                tracing::warn!(
-                    run_id = run.id,
-                    code = error.error_code(),
-                    "Automation image metadata unavailable"
-                );
-                Vec::new()
-            }
+        let target = prepare_post(state, &run.user_id, chat_id, agent_id).await?;
+        let mut report = super::images::ImageReport {
+            app_visible: target.thread.owner_chat
+                && target.thread.kind.as_deref() == Some("private"),
+            automation: true,
+            ..Default::default()
         };
-        if !metadata.iter().any(|attachment| {
-            attachment.id == item.attachment.id
-                && attachment.content_type == item.attachment.content_type
-                && attachment.size == item.attachment.size
-                && engine::chat_tool_image(attachment)
-        }) {
-            report.outcomes.push(super::images::ImageItemResult {
-                attachment_id: item.attachment.id.clone(),
-                status: "failed".into(),
-                code: Some("unavailable".into()),
-            });
-            report.failed += 1;
-            report.attempted += 1;
-            continue;
-        }
-        match crate::services::channel_image_delivery::read_legacy(
-            &state.db,
-            &run.user_id,
-            &item.conversation_id,
-            &item.turn_id,
-            &target.channel.id,
-            &item.attachment.id,
-        )
-        .await
-        {
-            Ok(Some(outcome)) => {
-                report
-                    .outcomes
-                    .push(super::images::legacy_item(&item.attachment.id, outcome));
-                continue;
-            }
-            Ok(None) => {}
-            Err(_) => {
-                report.outcomes.push(super::images::ImageItemResult {
-                    attachment_id: item.attachment.id.clone(),
-                    status: "unknown".into(),
-                    code: None,
-                });
-                report.unknown += 1;
-                report.attempted += 1;
-                stop = Some("after_unknown");
-                continue;
-            }
-        }
-        let existing = match crate::services::channel_image_delivery::read(
-            &state.db,
-            &run.user_id,
-            &item.attachment.id,
-            &audience,
-        )
-        .await
-        {
-            Ok(existing) => existing,
-            Err(_) => {
-                report.outcomes.push(super::images::ImageItemResult {
-                    attachment_id: item.attachment.id.clone(),
-                    status: "unknown".into(),
-                    code: None,
-                });
-                report.unknown += 1;
-                report.attempted += 1;
-                stop = Some("after_unknown");
-                continue;
-            }
-        };
-        let pending = existing.as_ref().is_none_or(|claim| {
-            claim.state == crate::models::nyxbot_image_delivery::ImageDeliveryState::Pending
-        });
-        if let Some(existing) = existing.as_ref().filter(|_| !pending) {
-            report.outcomes.push(super::images::existing_item(existing));
-            continue;
-        }
-        if pending && budget == 0 {
-            omitted = omitted.saturating_add(1);
-            continue;
-        }
-        if pending
-            && matches!(target.bot.platform.as_str(), "telegram" | "telegram-new")
-            && target.thread.kind.as_deref() != Some("private")
-            && let Some(last) = last_send
-        {
-            tokio::time::sleep(
-                (last + std::time::Duration::from_secs(1))
-                    .saturating_duration_since(std::time::Instant::now()),
-            )
-            .await;
-        }
-        if pending {
-            last_send = Some(std::time::Instant::now());
-        }
-        let one = super::images::report_or_failure_with_stop(
-            state,
-            super::images::ImageSendContext {
-                owner: &run.user_id,
-                conversation_id: &item.conversation_id,
-                turn_id: &item.turn_id,
-                channel: &target.channel,
-                thread: &target.thread,
-                anchor: super::images::ImageAnchor::Initiated {
-                    chat_id: chat_id.into(),
-                },
-                audience: super::images::ImageAudience {
-                    owner_private: report.app_visible,
-                },
-                deadline: Some(deadline),
-                initiated: Some(&target),
-                fence: None,
-            },
-            &super::images::ImageSendPlan {
-                attachments: vec![item.attachment.clone()],
-            },
-            stop,
-        )
-        .await;
-        if pending && (one.claimed > 0 || one.unknown > 0) {
-            budget -= 1;
-        }
-        if one.unknown > 0 {
-            stop = Some("after_unknown");
-        }
-        if one
-            .outcomes
-            .iter()
-            .any(|item| item.code.as_deref() == Some("billing"))
-        {
-            stop = Some("billing");
-        }
-        report.attempted += one.attempted;
-        report.sent += one.sent;
-        report.failed += one.failed;
-        report.unknown += one.unknown;
-        report.skipped += one.skipped;
-        report.unsupported |= one.unsupported;
-        report.outcomes.extend(one.outcomes);
-    }
-    let sent = send_post_planned(
-        state,
-        &target,
-        crate::services::channel_platform::OutboundReply {
-            text: Some(text.to_owned()),
+        let mut outbound = crate::services::channel_platform::OutboundReply {
+            text: None,
             metadata: None,
             attachments: Vec::new(),
             reply_to_platform_message_id: None,
-        },
-        None,
-        &format!("automation:{}", run.id),
-        Some(conversation_id),
-        Some(notice_context(&report, omitted)),
-    )
-    .await?;
-    audit(
-        state,
-        &run.user_id,
-        "nyxbot_channel_chat_posted",
-        json!({
-            "channel_agent_id": target.channel.id,
+        };
+        target.adapter.reply_context(
+            crate::services::channel_image_audience::chat_thread(&target.thread),
+            target.thread.created_at,
+            &mut outbound.metadata,
+        );
+        let audience = crate::services::channel_image_audience::resolve(
+            &target.bot.id,
+            &target.bot.platform,
+            &target.conversation.platform_conversation_id,
+            &outbound,
+        );
+        let mut budget = engine::MAX_TURN_ATTACHMENTS;
+        let mut omitted = run.image_refs_truncated;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(135);
+        let mut seen = std::collections::HashSet::new();
+        let mut stop = None;
+        let mut last_send: Option<std::time::Instant> = None;
+        for item in run.image_refs.iter().rev() {
+            if !seen.insert(item.attachment.id.as_str()) {
+                continue;
+            }
+            if run.thread_id.as_deref() != Some(item.conversation_id.as_str())
+                || !engine::chat_tool_image(&item.attachment)
+            {
+                report.outcomes.push(super::images::ImageItemResult {
+                    attachment_id: item.attachment.id.clone(),
+                    status: "failed".into(),
+                    code: Some("unavailable".into()),
+                });
+                report.failed += 1;
+                report.attempted += 1;
+                continue;
+            }
+            let metadata = match engine::turn_tool_attachments(
+                &state.db,
+                &run.user_id,
+                &item.conversation_id,
+                &item.turn_id,
+            )
+            .await
+            {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    tracing::warn!(
+                        run_id = run.id,
+                        code = error.error_code(),
+                        "Automation image metadata unavailable"
+                    );
+                    Vec::new()
+                }
+            };
+            if !metadata.iter().any(|attachment| {
+                attachment.id == item.attachment.id
+                    && attachment.content_type == item.attachment.content_type
+                    && attachment.size == item.attachment.size
+                    && engine::chat_tool_image(attachment)
+            }) {
+                report.outcomes.push(super::images::ImageItemResult {
+                    attachment_id: item.attachment.id.clone(),
+                    status: "failed".into(),
+                    code: Some("unavailable".into()),
+                });
+                report.failed += 1;
+                report.attempted += 1;
+                continue;
+            }
+            match crate::services::channel_image_delivery::read_legacy(
+                &state.db,
+                &run.user_id,
+                &item.conversation_id,
+                &item.turn_id,
+                &target.channel.id,
+                &item.attachment.id,
+            )
+            .await
+            {
+                Ok(Some(outcome)) => {
+                    report
+                        .outcomes
+                        .push(super::images::legacy_item(&item.attachment.id, outcome));
+                    continue;
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    report.outcomes.push(super::images::ImageItemResult {
+                        attachment_id: item.attachment.id.clone(),
+                        status: "unknown".into(),
+                        code: None,
+                    });
+                    report.unknown += 1;
+                    report.attempted += 1;
+                    stop = Some("after_unknown");
+                    continue;
+                }
+            }
+            let existing = match crate::services::channel_image_delivery::read(
+                &state.db,
+                &run.user_id,
+                &item.attachment.id,
+                &audience,
+            )
+            .await
+            {
+                Ok(existing) => existing,
+                Err(_) => {
+                    report.outcomes.push(super::images::ImageItemResult {
+                        attachment_id: item.attachment.id.clone(),
+                        status: "unknown".into(),
+                        code: None,
+                    });
+                    report.unknown += 1;
+                    report.attempted += 1;
+                    stop = Some("after_unknown");
+                    continue;
+                }
+            };
+            let pending = existing.as_ref().is_none_or(|claim| {
+                claim.state == crate::models::nyxbot_image_delivery::ImageDeliveryState::Pending
+            });
+            if let Some(existing) = existing.as_ref().filter(|_| !pending) {
+                report.outcomes.push(super::images::existing_item(existing));
+                continue;
+            }
+            if pending && budget == 0 {
+                omitted = omitted.saturating_add(1);
+                continue;
+            }
+            if pending
+                && matches!(target.bot.platform.as_str(), "telegram" | "telegram-new")
+                && target.thread.kind.as_deref() != Some("private")
+                && let Some(last) = last_send
+            {
+                tokio::time::sleep(
+                    (last + std::time::Duration::from_secs(1))
+                        .saturating_duration_since(std::time::Instant::now()),
+                )
+                .await;
+            }
+            if pending {
+                last_send = Some(std::time::Instant::now());
+            }
+            let one = super::images::report_or_failure_with_stop(
+                state,
+                super::images::ImageSendContext {
+                    owner: &run.user_id,
+                    conversation_id: &item.conversation_id,
+                    turn_id: &item.turn_id,
+                    channel: &target.channel,
+                    thread: &target.thread,
+                    anchor: super::images::ImageAnchor::Initiated {
+                        chat_id: chat_id.into(),
+                    },
+                    audience: super::images::ImageAudience {
+                        owner_private: report.app_visible,
+                    },
+                    deadline: Some(deadline),
+                    initiated: Some(&target),
+                    fence: None,
+                },
+                &super::images::ImageSendPlan {
+                    attachments: vec![item.attachment.clone()],
+                },
+                stop,
+            )
+            .await;
+            if pending && (one.claimed > 0 || one.unknown > 0) {
+                budget -= 1;
+            }
+            if one.unknown > 0 {
+                stop = Some("after_unknown");
+            }
+            if one
+                .outcomes
+                .iter()
+                .any(|item| item.code.as_deref() == Some("billing"))
+            {
+                stop = Some("billing");
+            }
+            report.attempted += one.attempted;
+            report.sent += one.sent;
+            report.failed += one.failed;
+            report.unknown += one.unknown;
+            report.skipped += one.skipped;
+            report.unsupported |= one.unsupported;
+            report.outcomes.extend(one.outcomes);
+        }
+        let sent = send_post_planned(
+            state,
+            &target,
+            crate::services::channel_platform::OutboundReply {
+                text: Some(text.to_owned()),
+                metadata: None,
+                attachments: Vec::new(),
+                reply_to_platform_message_id: None,
+            },
+            None,
+            &format!("automation:{}", run.id),
+            Some(conversation_id),
+            Some(notice_context(&report, omitted)),
+        )
+        .await?;
+        audit(
+            state,
+            &run.user_id,
+            "nyxbot_channel_chat_posted",
+            json!({
+                "channel_agent_id": target.channel.id,
+                "chat_id": chat_id,
+                "message_id": sent.message_id,
+            }),
+        )
+        .await;
+        Ok(json!({
+            "status": "posted",
             "chat_id": chat_id,
             "message_id": sent.message_id,
-        }),
-    )
-    .await;
-    Ok(json!({
-        "status": "posted",
-        "chat_id": chat_id,
-        "message_id": sent.message_id,
-        "images": super::images::image_result(&report),
-    }))
-
-    }).await
+            "images": super::images::image_result(&report),
+        }))
+    })
+    .await
 }
 
 /// Chats given to a destroyed agent go back to their bot's agent (in new
