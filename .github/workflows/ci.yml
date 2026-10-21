@@ -410,7 +410,9 @@ jobs:
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # A measured run compiled for 28 minutes and was still passing tests at
+    # 90 minutes. Match coverage's budget for the full compile and suite.
+    timeout-minutes: 120
     # Reduce debug-information volume while retaining locations and backtraces.
     # Resource samples distinguish future compilation shutdowns from test failures.
     env:
@@ -1006,7 +1008,8 @@ jobs:
         working-directory: base-coverage
         run: >-
           python3 "$GITHUB_WORKSPACE/.github/scripts/ci_resources.py" coverage-test
-          cargo llvm-cov nextest --package nyxid --profile ci --no-report
+          cargo llvm-cov nextest --package nyxid --profile ci
+          --config-file "$GITHUB_WORKSPACE/.config/nextest.toml" --no-report
       - name: Test MongoDB diagnostics
         if: (failure() || cancelled()) && steps.base-cache.outputs.cache-hit != 'true'
         continue-on-error: true

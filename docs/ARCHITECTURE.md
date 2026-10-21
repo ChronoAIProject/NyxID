@@ -39,6 +39,15 @@ binding. Machine jobs persist their command-use grant on `machine_jobs` for thei
 existing bounded lifetime. No secret or payload is stored in these digests or
 forwarded to providers. See [NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
 
+NyxBot model reporting reuses the journal-validated usage aggregation engine.
+Meters persist trusted execution provenance in additive billed and free rollup
+partitions; root identities and charging remain unchanged. Historical recovery
+uses the metadata-only MongoDB view `usage_api_key_lineage` and bounded,
+actor-bound credential, conversation, and audit evidence. The view projects no
+credential material. Legacy free summaries without attribution remain explicit
+uncovered residuals. All rollup writers must be upgraded to preserve provenance
+for new usage. See [NyxBot model usage](BILLING_ANALYTICS.md#nyxbot-model-usage).
+
 NyxBot phone/speech adapters extend the executable channel registry with typed
 messaging, conversation and Custom LLM interfaces. Versioned capabilities derive
 from that registry; persisted bindings separately compute live readiness.

@@ -7055,6 +7055,28 @@ custom role. Holders get read-only access: `PUT /admin/usage/workspace` stays
 admin-only. `GET /api/v1/users/me` reports the result as
 `capabilities.read_admin_usage`.
 
+#### GET /api/v1/admin/assistant/model-usage
+
+Returns attributed NyxBot and specialist model costs, requests, and provider
+token counts, with daily UTC series and top billing accounts. Requires Admin
+or Operator; the Usage Viewer permission alone does not grant access.
+
+Use `from` and `to` RFC 3339 timestamps for a positive window of at most 31 days.
+An optional `model` selects an exact, case-sensitive billing model (trimmed,
+1–256 characters); `unknown_model=true` selects missing model identities and
+cannot be combined with `model`.
+
+The response contains `window`, `freshness`, `totals`, `models`, `daily`,
+`accounts`, `other_accounts`, and `excluded`. Costs are exact decimal credit
+strings or null. Top 20 models and Top 10 accounts include summed Other usage;
+account rows include their own model breakdown. Excluded populations disclose
+orchestration, ordinary tools, unclassified assistant activity, and historical
+platform records without provable attribution. See the full
+[reporting contract](BILLING_ANALYTICS.md#nyxbot-model-usage).
+
+**Errors:** `400` invalid window or model filter; `403` without Admin/Operator
+access; `503` (`12200`) when the bounded report times out.
+
 #### GET /api/v1/admin/usage/identities
 
 Options for the Usage page's actor/owner filters, or labels for saved filter

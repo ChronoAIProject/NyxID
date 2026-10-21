@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { mockDashboard } from "./managed-onboarding-fixtures";
 import { newView } from "../src/lib/usage-analytics";
+import { nyxbotModelFixture } from "../src/test/nyxbot-model-fixture";
 import { usageFixture } from "../src/test/admin-usage-fixture";
 
 async function setup(page: Page) {
@@ -20,6 +21,16 @@ async function setup(page: Page) {
   await page.route("**/api/v1/admin/usage?**", (route) =>
     route.fulfill({ json: usageFixture() }),
   );
+  await page.route("**/api/v1/admin/assistant/model-usage?**", (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    return route.fulfill({
+      json: nyxbotModelFixture(
+        params.get("from")!,
+        params.get("to")!,
+        params.has("unknown_model") ? null : (params.get("model") ?? undefined),
+      ),
+    });
+  });
   await page.route("**/api/v1/admin/assistant/analytics?**", (route) => {
     const params = new URL(route.request().url()).searchParams;
     return route.fulfill({
@@ -252,3 +263,117 @@ test("usage viewers cannot see the NyxBot tab or request assistant data", async 
   ).toHaveCount(0);
   expect(assistantRequests).toEqual([]);
 });
+
+test("model trends, exact credits and keyboard drilldown share the date/model filter", async ({
+  page,
+}) => {
+  await setup(page);
+  await page.goto("/admin/usage?tab=nyxbot");
+  await expect(
+    page.getByRole("heading", { name: "Cost and billing by model" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Gross credits · Daily UTC" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Requests · Daily UTC" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Total tokens · Daily UTC" }),
+  ).toBeVisible();
+  const model = page
+    .getByRole("button", { name: "gpt-5.4", exact: true })
+    .first();
+  await model.focus();
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByRole("status").filter({ hasText: "Model: gpt-5.4" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "claude-sonnet-4-5", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText("0.000000000001", { exact: true }).first(),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "All models", exact: true }).click();
+  await expect(
+    page
+      .getByRole("button", { name: "claude-sonnet-4-5", exact: true })
+      .first(),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Unknown model", exact: true })
+    .first()
+    .click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Unknown model selected" }),
+  ).toBeVisible();
+});
+
+for (const mobile of [false, true]) {
+  test(`model report sections have scrolled ${mobile ? "mobile" : "desktop"} proof`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(
+      mobile ? { width: 390, height: 844 } : { width: 1440, height: 1000 },
+    );
+    await setup(page);
+    await page.goto("/admin/usage?tab=nyxbot");
+    await expect(
+      page.getByRole("heading", { name: "Cost and billing by model" }),
+    ).toBeVisible();
+    for (const [section, target] of [
+      ["cost", page.getByText("Gross cost", { exact: true })],
+      [
+        "traffic",
+        page.getByRole("heading", { name: "Traffic by model", exact: true }),
+      ],
+      [
+        "accounts",
+        page.getByRole("heading", {
+          name: "Top billing accounts",
+          exact: true,
+        }),
+      ],
+    ] as const) {
+      await target.evaluate((element) => {
+        const main = element.closest("main");
+        if (main)
+          main.scrollTop +=
+            element.getBoundingClientRect().top -
+            main.getBoundingClientRect().top -
+            24;
+      });
+      await expect(target).toBeInViewport();
+      if (section === "accounts") {
+        await expect(
+          page.getByRole("heading", { name: "Alice Research" }),
+        ).toBeVisible();
+        await expect(
+          page.getByRole("table", { name: "Alice Research usage by model" }),
+        ).toBeVisible();
+      }
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= window.innerWidth,
+        ),
+      ).toBe(true);
+      await page.screenshot({
+        path: `test-results/nyxbot-model-${mobile ? "mobile" : "desktop"}-${section}.png`,
+        animations: "disabled",
+      });
+    }
+    await page
+      .getByRole("textbox", { name: "Billing model" })
+      .fill("no-such-model");
+    await page
+      .getByRole("button", { name: "Apply model", exact: true })
+      .click();
+    await expect(
+      page.getByText(/No attributed model usage in this period for this model/),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Top billing accounts", exact: true }),
+    ).toHaveCount(0);
+  });
+}

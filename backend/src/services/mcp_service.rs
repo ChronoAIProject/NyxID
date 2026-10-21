@@ -5733,7 +5733,10 @@ async fn execute_tool_resolved_inner(
                 (!is_generic_proxy_endpoint).then_some(endpoint.name.as_str()),
             )
             .await?;
-        let billing_ctx = billing_ctx.with_request_body(body.as_deref());
+        let billing_ctx = billing_ctx.with_assistant_provenance(
+            assistant_chat.is_some(), false,
+            super::llm_usage_service::model_execution(super::llm_usage_service::inference_service(&target.service), method.as_str(), &path, false),
+        ).with_request_body(body.as_deref());
         let attribution = exec_ctx.attribution.clone().unwrap_or_else(|| {
             super::service_insights_activity::RequestAttribution {
                 actor: super::audit_service::AuditActor {
