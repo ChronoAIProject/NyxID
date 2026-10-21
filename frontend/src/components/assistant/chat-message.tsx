@@ -401,11 +401,12 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
  * model can think for many seconds before its first word, which must not read
  * as a frozen page. Ticks only itself, never the transcript.
  */
-function WaitingStatus({ label, interrupted, startedAt, capacity, capacityStartedAt, capacityDeadline }: {
+function WaitingStatus({ label, interrupted, startedAt, capacity, queued, capacityStartedAt, capacityDeadline }: {
   readonly label?: string;
   readonly interrupted?: boolean;
   readonly startedAt?: string;
   readonly capacity?: boolean;
+  readonly queued?: boolean;
   readonly capacityStartedAt?: string | null;
   readonly capacityDeadline?: string | null;
 }) {
@@ -421,7 +422,7 @@ function WaitingStatus({ label, interrupted, startedAt, capacity, capacityStarte
     const waited = Math.min(bound, Math.max(0, Math.floor((now - from) / 1000)));
     return (
       <span data-waiting-status>
-        <StatusLabel label="Waiting for the assistant" interrupted={interrupted} />
+        <StatusLabel label={queued ? "Queued until another reply finishes" : "Waiting for the assistant"} interrupted={interrupted} />
         {Number.isFinite(from) && Number.isFinite(to)
           ? <span aria-hidden> · {clock(waited)} of up to {clock(bound)}</span>
           : seconds >= 3 ? <span aria-hidden> · {formatElapsed(seconds)}</span> : null}
@@ -751,6 +752,7 @@ export function ChatMessageBubble({
                   interrupted={message.turnStatus?.interrupted}
                   startedAt={message.turnStatus?.startedAt}
                   capacity={capacityNote || message.waitingForCapacity}
+                  queued={message.queued}
                   capacityStartedAt={message.capacityWaitStartedAt}
                   capacityDeadline={message.capacityWaitDeadline}
                 />

@@ -23,7 +23,7 @@ it.each([
   ["first_byte_timeout", "did not start"], ["invalid_stream", "ended unexpectedly"],
   ["output_too_large", "response limit"], ["nyxid_error", "authorize"],
   ["stale_response", "context changed"], ["context_unavailable", "could not be restored"],
-  ["some_upstream_code", "could not complete"],
+  ["some_upstream_code", "could not complete"], ["queue_timeout", "was not started"],
 ])("maps %s to actionable copy", (code, text) => {
   expect(storedError(code)).toContain(text);
 });
@@ -2182,6 +2182,31 @@ it("never restores the pending acknowledgement from a poll that arrives after li
   await sending;
 });
 
+
+it("shows a queued turn as queued until it runs", async () => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? new Response(new ReadableStream({ start(value) { controller = value; } }), { headers: { "content-type": "text/event-stream" } })
+    : json(history());
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const sending = transport.send(id, "hello", vi.fn());
+  await vi.waitFor(() => expect(controller).toBeDefined());
+  const emit = (event: Record<string, unknown>, cursor: number) => controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ ...event, cursor })}\n\n`));
+  emit({ ...runningStatus, status: "waiting", queued: true, waiting_for_capacity: true,
+    capacity_wait_started_at: start, capacity_wait_deadline: "2026-09-17T00:10:00Z" }, 1);
+  emit({ event: "message.started", message_id: "live-reply", role: "assistant" }, 2);
+  await vi.waitFor(() => expect(transport.session(id).messages.at(-1)).toMatchObject({
+    queued: true, waitingForCapacity: true, capacityWaitStartedAt: start, capacityWaitDeadline: "2026-09-17T00:10:00Z",
+  }));
+  emit({ ...runningStatus, status: "running", waiting_for_capacity: false }, 3);
+  await vi.waitFor(() => expect(transport.getConversation(id)?.active_turn?.queued).toBe(false));
+  expect(transport.session(id).messages.at(-1)?.queued).toBeFalsy();
+  expect(transport.session(id).messages.at(-1)?.waitingForCapacity).toBeFalsy();
+  emit({ event: "turn.completed", turn_id: "turn", status: "completed", error: null }, 4);
+  controller.close();
+  await sending;
+});
 
 it("describes a busy session separately from platform capacity", () => {
   expect(storedError("session_busy", 120_000)).toBe("The assistant session is busy. Try again shortly.");

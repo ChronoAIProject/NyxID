@@ -287,14 +287,14 @@ async fn external_busy_human_group_retry_keeps_one_reset_and_can_start_once() {
     );
     ensure_partition(&state, &agent_key, PARTITION).await;
     let mut slots = Vec::new();
-    for _ in 0..crate::handlers::assistant_team::CHANNEL_TURNS_PER_OWNER {
+    for _ in 0..crate::services::assistant_team_service::CHANNEL_TURNS_PER_OWNER {
         slots.push(
             state
                 .direct_chat_limiter
                 .try_acquire_pool(
                     "assistant_channel",
                     OWNER,
-                    crate::handlers::assistant_team::CHANNEL_TURNS_PER_OWNER,
+                    crate::services::assistant_team_service::CHANNEL_TURNS_PER_OWNER,
                 )
                 .await
                 .unwrap()

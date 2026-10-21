@@ -37,6 +37,8 @@ export interface ChatMessage {
   /** NyxID display metadata; never model-authored reply content. */
   readonly systemNote?: "capacity_wait";
   readonly waitingForCapacity?: boolean;
+  /** Waiting for one of the owner's other replies to finish. */
+  readonly queued?: boolean;
   readonly capacityWaitStartedAt?: string | null;
   readonly capacityWaitDeadline?: string | null;
   readonly channelDelivery?: { readonly status: string; readonly heard_prefix_chars?: number | null; readonly heard_prefix_matches_sent: boolean } | null;

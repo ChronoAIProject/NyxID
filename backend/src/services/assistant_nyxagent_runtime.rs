@@ -135,7 +135,7 @@ impl contract::NyxAgentExecutionProducer for ExecutionProducer {
         let permit = self
             .state
             .direct_chat_limiter
-            .try_acquire_pool("assistant_channel", &user_id, 2)
+            .try_acquire_pool("assistant_channel", &user_id, team::CHANNEL_TURNS_PER_OWNER)
             .await?
             .ok_or(AppError::AssistantTurnActive)?;
         let (sender, _) = broadcast::channel(256);
@@ -692,7 +692,7 @@ pub(crate) async fn run_owner_turn(
     text: String,
     mut credential: AssistantCredential,
     policy: Option<BillingRoutePolicy>,
-    permit: DirectChatPermit,
+    mut permit: DirectChatPermit,
     mut events: Events,
 ) -> Option<OwnerTurnSettlement> {
     if row
@@ -758,11 +758,27 @@ pub(crate) async fn run_owner_turn(
             }
         }
     }));
-    events.emit(
-        "turn.status",
-        json!({"conversation_id": row.id, "turn_id": turn_id, "status": "running",
-            "started_at": row.active_turn.as_ref().expect("claimed turn").started_at}),
-    );
+    let started_at = row.active_turn.as_ref().expect("claimed turn").started_at;
+    let queue_deadline = permit.is_queued().then(|| {
+        let since = Utc::now();
+        let wait = chrono::Duration::seconds(engine::TURN_QUEUE_WAIT_SECS as i64);
+        (since, since + wait)
+    });
+    if let Some((since, deadline)) = queue_deadline {
+        // `waiting` with the capacity fields keeps older clients' waiting display.
+        events.emit(
+            "turn.status",
+            json!({"conversation_id": row.id, "turn_id": turn_id, "status": "waiting",
+            "started_at": started_at, "queued": true, "waiting_for_capacity": true,
+            "capacity_wait_started_at": since, "capacity_wait_deadline": deadline}),
+        );
+    } else {
+        events.emit(
+            "turn.status",
+            json!({"conversation_id": row.id, "turn_id": turn_id, "status": "running",
+                "started_at": started_at}),
+        );
+    }
     events.emit(
         "message.started",
         json!({"message_id": message_id, "role": "assistant"}),
@@ -776,9 +792,31 @@ pub(crate) async fn run_owner_turn(
             "block": {"type": "text", "block_id": block_id, "text": ""},
         }),
     );
+    let queued = match queue_deadline {
+        Some((since, deadline)) => {
+            let queued =
+                wait_for_running_slot(&state, &row, &turn_id, &mut permit, since, deadline).await;
+            if queued.is_ok() {
+                events.emit(
+                    "turn.status",
+                    json!({"conversation_id": row.id, "turn_id": turn_id, "status": "running",
+                    "waiting_for_capacity": false}),
+                );
+            }
+            queued
+        }
+        None => Ok(()),
+    };
     let mut partial = String::new();
     let mut instruction_context = None;
-    let mut result = crate::services::assistant_engine_worker::contain(&row, async {
+    let mut result = match queued {
+        Err(error) => TurnResult {
+            text: String::new(),
+            session_id: None,
+            response_id: None,
+            error: Some(error),
+        },
+        Ok(()) => crate::services::assistant_engine_worker::contain(&row, async {
         // Execution includes upload planning and upstream streaming. Keep that
         // state off the caller's stack when this task is created by a tool.
         let mut execution = Box::pin(async {
@@ -814,7 +852,8 @@ pub(crate) async fn run_owner_turn(
         session_id: None,
         response_id: None,
         error: Some(error),
-    });
+    }),
+    };
     if result
         .error
         .as_ref()
@@ -870,6 +909,96 @@ pub(crate) async fn run_owner_turn(
             text: result.text,
         }),
         SettledExecution::Deleted | SettledExecution::Unconfirmed => None,
+    }
+}
+
+/// Bound on the queue's own writes: a stalled write must not hold capacity.
+const QUEUE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A turn admitted while its owner's running replies were at their limit
+/// waits here, inside its claimed turn, so Stop, deletion and orphan
+/// recovery already apply to it, until one of them finishes. On failure the
+/// permit's capacity is given back at once, before the turn settles.
+pub(crate) async fn wait_for_running_slot(
+    state: &AppState,
+    row: &AssistantConversation,
+    turn_id: &str,
+    permit: &mut DirectChatPermit,
+    since: DateTime<Utc>,
+    deadline: DateTime<Utc>,
+) -> Result<(), TurnError> {
+    let marked = engine::mark_queued(&state.db, row, turn_id, since, deadline);
+    if let Err(error) = wait_queued(state, row, turn_id, permit, deadline, marked).await {
+        permit.release();
+        return Err(error);
+    }
+    // Display only, for the moments before the engine request starts, which
+    // clears the markers durably; the lease set on queuing covers execution.
+    let (db, row, turn_id) = (state.db.clone(), row.clone(), turn_id.to_owned());
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(
+            QUEUE_WRITE_TIMEOUT,
+            engine::mark_dequeued(&db, &row, &turn_id),
+        )
+        .await;
+    });
+    Ok(())
+}
+
+/// The wait itself. `marked` records the queued state and lease; claims start
+/// only after it lands. Each claim runs on its own task, so Stop and the
+/// deadline stay observable while it is outstanding; dropping it releases any
+/// slot it later claims.
+pub(crate) async fn wait_queued(
+    state: &AppState,
+    row: &AssistantConversation,
+    turn_id: &str,
+    permit: &mut DirectChatPermit,
+    deadline: DateTime<Utc>,
+    marked: impl std::future::Future<Output = AppResult<bool>>,
+) -> Result<(), TurnError> {
+    let mut marked = std::pin::pin!(tokio::time::timeout(QUEUE_WRITE_TIMEOUT, marked));
+    let mut is_marked = false;
+    let mut claim: Option<crate::mw::rate_limit::SlotClaim> = None;
+    loop {
+        let remaining = (deadline - Utc::now()).to_std().unwrap_or_default();
+        tokio::select! {
+            () = permit.cancelled() => {
+                return Err(TurnError::internal("assistant_unavailable", "queue"));
+            }
+            error = watch_stop(state, row, turn_id) => return Err(error),
+            () = tokio::time::sleep(remaining) => {
+                return Err(TurnError::internal("queue_timeout", "queue"));
+            }
+            written = &mut marked, if !is_marked => match written {
+                Ok(Ok(true)) => is_marked = true,
+                Ok(Ok(false)) => return Err(TurnError::internal("cancelled", "stop")),
+                Ok(Err(_)) | Err(_) => {
+                    return Err(TurnError::internal("assistant_unavailable", "queue"));
+                }
+            },
+            claimed = async { claim.as_mut().expect("outstanding claim").await }, if claim.is_some() => {
+                claim = None;
+                match claimed {
+                    // A slot claimed after the deadline is released, not used.
+                    Ok(Ok(Some(slot))) if Utc::now() < deadline => {
+                        if permit.take_slot(slot) {
+                            return Ok(());
+                        }
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, "Queued assistant turn could not check for a slot");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Queued assistant turn slot claim failed");
+                    }
+                }
+            }
+            () = tokio::time::sleep(crate::mw::rate_limit::DIRECT_CHAT_QUEUE_POLL), if is_marked && claim.is_none() => {
+                claim = permit.claim_slot();
+            }
+        }
     }
 }
 

@@ -587,7 +587,11 @@ impl contract::PersonalTurnProducer for PersonalTurns {
         let Some(permit) = self
             .state
             .direct_chat_limiter
-            .try_acquire_pool("assistant_channel", &admitted.authority.user_id, 2)
+            .try_acquire_pool(
+                "assistant_channel",
+                &admitted.authority.user_id,
+                super::assistant_team_service::CHANNEL_TURNS_PER_OWNER,
+            )
             .await?
         else {
             return Ok(contract::PersonalTurnStart::Unavailable(

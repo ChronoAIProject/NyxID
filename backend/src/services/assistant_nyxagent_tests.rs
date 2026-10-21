@@ -1101,6 +1101,8 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             continuations: 0,
             tool_progress: Default::default(),
             lease_expires_at: None,
+            queued_at: None,
+            queue_deadline: None,
             heartbeat_at: None,
             trigger_run_id: None,
             report_to: None,

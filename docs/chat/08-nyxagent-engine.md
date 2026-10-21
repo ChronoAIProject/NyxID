@@ -1096,6 +1096,25 @@ active turns retain a five-second polling backstop even with live notifications
 (two seconds without them). The notification stream reconnects after 45 seconds
 without bytes, including keepalive comments, and reports connecting while closed.
 
+Each person may have four browser turns running at once (shared with Direct
+model chat) and start 30 per minute. A NyxAgent turn sent while all four run is
+still admitted: it claims its conversation's turn fence, saves the user message
+and waits (`active_turn.queued_at`/`queue_deadline`) until one of the person's
+running slots frees, checking the cluster slot store every two seconds. Waiting
+turns start in arrival order, and a new turn joins the queue whenever another is
+already waiting. At most eight turns per person wait; a send beyond that is
+refused with 429. The stream opens with `turn.status` `waiting`, `queued: true`
+and the capacity-wait clock fields, which older clients already render;
+conversation responses report the same through `active_turn.queued` and the
+capacity-wait fields. A waiting turn holds a renewable queue place and keeps its
+heartbeat, so Stop, deletion and orphan recovery behave as for a running turn;
+steering is unavailable until it runs. Queuing extends the turn's lease by the queue wait, so waiting never
+shortens the turn, and the queue's own writes are time-bounded and raced with
+Stop. A turn still waiting after ten minutes settles as `queue_timeout`
+without calling NyxAgent or resetting the conversation's context; a turn that
+stops waiting gives its capacity back before it settles. Server-started turns
+use their own owner pools and never queue here.
+
 Stop sets a durable flag on the exact active turn. Its worker polls every 250 ms,
 drops the upstream stream, saves partial text as failed/error `cancelled`, clears
 the binding with `stopped`, then emits `turn.completed(cancelled)`. A Stop
