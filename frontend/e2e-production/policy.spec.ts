@@ -2,7 +2,6 @@ import { expect } from "@playwright/test";
 import { test } from "../e2e/production-policy-fixture";
 import fs from "node:fs";
 import path from "node:path";
-import { hasOnlyConfiguredEgress, observeTelemetryEgress } from "../e2e/telemetry-request";
 
 const dist = path.resolve(process.env.NYXID_PRODUCTION_DIST ?? "dist");
 const manifest = JSON.parse(fs.readFileSync(path.join(dist, "release-integrity/releases.json"), "utf8")) as {
@@ -12,6 +11,9 @@ const manifest = JSON.parse(fs.readFileSync(path.join(dist, "release-integrity/r
 test("production response/header matrix and backend .js routing", async ({ request }) => {
   const asset = fs.readdirSync(path.join(dist, "assets")).find((name) => name.endsWith(".js"))!;
   for (const [url, status] of [["/", 200], ["/login", 200], ["/docs", 200], ["/privacy", 200], ["/terms", 200],
+    ["/assistant", 200], ["/assistant/machines", 200], ["/assistant/automations", 200],
+    ["/login/device", 200], ["/login/agent-key", 200], ["/login/code", 200], ["/settings", 200],
+    ["/admin/usage", 200], ["/nyxbot-inter-latin.woff2", 200], ["/nyxbot-inter-LICENSE.txt", 200],
     ["/build-version.json", 200], [`/assets/${asset}`, 200], ["/assets/missing-policy-fixture.js", 404],
     ["/api/v1/policy-probe.js", 200], ["/oauth/policy-probe.js", 200],
     ["/api/v1/policy-probe.js?status=500", 500], ["/credential-accept/assets/missing.js", 404]] as const) {
@@ -23,6 +25,10 @@ test("production response/header matrix and backend .js routing", async ({ reque
     expect(headers["content-security-policy"], url).toContain("frame-ancestors 'none'");
     expect(response.headersArray().filter((header) => header.name.toLowerCase() === "content-security-policy"), url).toHaveLength(1);
     expect(headers["strict-transport-security"], url).toBeUndefined();
+    if (!url.includes("policy-probe.js") && !url.startsWith("/credential-accept/")) {
+      expect(headers["content-security-policy"]).not.toMatch(/posthog|analytics\.example/);
+      expect(headers["content-security-policy-report-only"]).toBeUndefined();
+    }
     if (url.includes("policy-probe.js")) {
       expect((await response.json()).transport).toBe("backend");
       expect(headers["content-security-policy"]).toContain("script-src 'sha256-dGVzdA=='");
@@ -68,7 +74,7 @@ test("built login submits and completes MFA under enforcing CSP", async ({ page 
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(page.getByRole("heading", { name: "MFA verification" })).toBeVisible();
   expect(submitted).toBe(true);
-  await page.getByRole("textbox", { name: "Enter 6-digit verification code" }).fill("123456");
+  await page.getByRole("textbox", { name: "Authenticator or recovery code" }).fill("123456");
   await page.getByRole("button", { name: "Verify", exact: true }).click();
   await expect(page).toHaveURL(/\/dashboard$/);
   expect(authenticated).toBe(true);
@@ -125,42 +131,6 @@ test("rejects injected inline scripts, event handlers and unlisted connections",
   expect(blocked.events).toContain("script-src-attr");
   expect(blocked.events).toContain("connect-src");
 });
-
-for (const [enabled, host] of [[false, "https://us.i.posthog.com"], [true, "https://us.i.posthog.com"], [true, "https://analytics.example"]] as const) {
-  test(`production PostHog ${enabled ? "enabled" : "disabled"} at ${host} has bounded egress and no lazy scripts`, async ({ page, baseURL }) => {
-    await page.addInitScript((consent) => {
-      // The vendor intentionally suppresses WebDriver traffic. Model the
-      // supported human-browser path across both UA surfaces without changing
-      // production filtering. Chromium's UA Client Hints otherwise still
-      // advertise HeadlessChrome even with the configured normal Chrome UA.
-      Object.defineProperty(navigator, "webdriver", { get: () => false });
-      Object.defineProperty(navigator, "userAgentData", { get: () => ({
-        brands: [{ brand: "Chromium", version: "151" }, { brand: "Google Chrome", version: "151" }],
-        mobile: false, platform: "macOS",
-      }) });
-      localStorage.setItem("nyxid.telemetry_consent", JSON.stringify({ state: { asked: true, enabled: consent }, version: 1 }));
-    }, enabled);
-    await page.route("**/api/v1/public/config", (route) => route.fulfill({ json: {
-      email_auth_enabled: true, social_providers: [], invite_code_required: false,
-      telemetry_dsn: "phc_policy_fixture", telemetry_host: host, telemetry_share_analytics: false,
-    } }));
-    const requests: string[] = [];
-    const appOrigin = new URL(baseURL!).origin;
-    page.on("request", (request) => {
-      observeTelemetryEgress(requests, request.url(), request.resourceType(), appOrigin, host);
-    });
-    await page.route("https://*.posthog.com/**", (route) => route.fulfill({ json: { status: 1 }, headers: { "access-control-allow-origin": "*" } }));
-    await page.route("https://analytics.example/**", (route) => route.fulfill({ json: { status: 1 }, headers: { "access-control-allow-origin": "*" } }));
-    await page.goto("/login");
-    await expect(page.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
-    if (enabled) await expect.poll(() => requests.length).toBeGreaterThan(0);
-    await page.waitForTimeout(700);
-    expect(requests.some((url) => /\.js(?:\?|$)|\/config|\/flags/.test(url))).toBe(false);
-    expect(hasOnlyConfiguredEgress(requests, host), JSON.stringify(requests)).toBe(true);
-    expect(await page.locator('script[src*="posthog"]').count()).toBe(0);
-    if (!enabled) expect(requests).toEqual([]);
-  });
-}
 
 test("standalone credential page keeps its policy and packaged SRI assets", async ({ page, request }) => {
   const url = "/api/v1/nodes/fixture/credentials/pending/fixture/accept";

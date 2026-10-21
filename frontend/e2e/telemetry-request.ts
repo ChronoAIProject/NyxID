@@ -1,21 +1,24 @@
-/** Classify requests observed by the production egress test. */
-export function isTelemetryRequest(requestUrl: string, configuredHost: string): boolean {
+/** Only this same-origin endpoint delivers browser product events. */
+export function isTelemetryRequest(requestUrl: string, appOrigin: string): boolean {
   const url = new URL(requestUrl);
-  return url.hostname === "posthog.com"
-    || url.hostname.endsWith(".posthog.com")
-    || url.origin === new URL(configuredHost).origin;
+  return url.origin === new URL(appOrigin).origin
+    && url.pathname === "/api/v1/users/me/analytics/events"
+    && !url.username && !url.password && !url.search && !url.hash;
 }
 
-/** Retain every cross-origin data request for the egress assertion, including lookalikes. */
+/** Retain relay delivery and all external data/script attempts, even lookalikes.
+ * Requests blocked by CSP are checked separately by productionPolicy.
+ */
 export function observeTelemetryEgress(
-  requests: string[], requestUrl: string, resourceType: string, appOrigin: string, configuredHost: string,
+  requests: string[], requestUrl: string, resourceType: string, appOrigin: string,
 ): void {
-  if (isTelemetryRequest(requestUrl, configuredHost)
-    || ((resourceType === "fetch" || resourceType === "xhr") && new URL(requestUrl).origin !== appOrigin)) {
+  if (isTelemetryRequest(requestUrl, appOrigin)
+    || (["fetch", "xhr", "script", "eventsource", "websocket", "ping", "other"].includes(resourceType)
+      && new URL(requestUrl).origin !== new URL(appOrigin).origin)) {
     requests.push(requestUrl);
   }
 }
 
-export function hasOnlyConfiguredEgress(requests: string[], configuredHost: string): boolean {
-  return requests.every((url) => new URL(url).origin === new URL(configuredHost).origin);
+export function hasOnlyRelayEgress(requests: string[], appOrigin: string): boolean {
+  return requests.every((url) => isTelemetryRequest(url, appOrigin));
 }

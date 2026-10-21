@@ -71,7 +71,7 @@ already running server; it does not start one.
 |---|---|---|
 | `BACKEND_URL` | `http://backend:3001` | Internal HTTP(S) upstream origin, without path/credentials/query/fragment. |
 | `NYXID_PUBLIC_ORIGIN` | `http://localhost:8080` | Trusted public frontend origin. HTTPS enables HSTS; production Compose passes `FRONTEND_URL`. |
-| `NYXID_BROWSER_CONNECT_ORIGINS` | *(empty)* | At most 16 space-separated HTTP(S) origins for custom runtime API/analytics destinations; matching WS(S) origins are derived. Origin values are validated, never substituted as CSP/nginx fragments. |
+| `NYXID_BROWSER_CONNECT_ORIGINS` | *(empty)* | At most 16 space-separated HTTP(S) origins for custom runtime API destinations (analytics uses the authenticated same-origin relay); matching WS(S) origins are derived. Origin values are validated, never substituted as CSP/nginx fragments. |
 
 See [Production browser policy](BROWSER_SECURITY_POLICY.md) for response-specific
 CSP, supported resources, split credential routing and the production harness.

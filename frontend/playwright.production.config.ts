@@ -12,10 +12,6 @@ export default defineConfig({
   timeout: 45_000,
   use: {
     ...devices["Desktop Chrome"], baseURL,
-    // PostHog deliberately drops HeadlessChrome as bot traffic. Exercise the
-    // real consented browser path with a normal Chrome UA, without changing
-    // the application's production bot/DNT filtering.
-    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
     permissions: ["microphone"],
     launchOptions: {
       executablePath: process.env.NYXID_CHROME_EXECUTABLE,
@@ -29,5 +25,7 @@ export default defineConfig({
     { name: "production-policy", testDir: "./e2e-production" },
     { name: "production-oauth-meta", testDir: "./e2e", testMatch: /channel-(x|whatsapp)-managed\.spec\.ts/,
       grep: /X OAuth connect and reconnect at 1440px|managed Meta (?:Cloud API signup|signup) at 1440px/ },
+    { name: "production-telegram-privacy", testDir: "./e2e", testMatch: /channel-telegram-new\.spec\.ts/,
+      grep: /Telegram secrets stay out of live telemetry and storage/ },
   ],
 });

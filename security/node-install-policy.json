@@ -5,14 +5,6 @@
       "path": "frontend",
       "install_scripts": [
         {
-          "lock_path": "node_modules/core-js",
-          "name": "core-js",
-          "version": "3.49.0",
-          "integrity": "sha512-es1U2+YTtzpwkxVLwAFdSpaIMyQaq0PBgm3YD1W3Qpsn1NAmO3KSgZfu+oGSWVu6NvLHoHCV/aYcsE5wiB7ALg==",
-          "allow": false,
-          "reason": "Deny its optional funding/notification postinstall; installed runtime files need no generation."
-        },
-        {
           "lock_path": "node_modules/fsevents",
           "name": "fsevents",
           "version": "2.3.3",

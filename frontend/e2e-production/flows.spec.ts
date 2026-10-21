@@ -108,7 +108,7 @@ for (const status of [401, 503]) {
     await page.getByLabel("Email", { exact: true }).fill("policy@example.test");
     await page.getByLabel("Password", { exact: true }).fill("fixture-only-password");
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
-    await page.getByRole("textbox", { name: "Enter 6-digit verification code" }).fill("123456");
+    await page.getByRole("textbox", { name: "Authenticator or recovery code" }).fill("123456");
     await page.getByRole("button", { name: "Verify", exact: true }).click();
     expect(new URL(page.url()).pathname).not.toBe("/dashboard");
     if (status === 401) {
@@ -116,10 +116,10 @@ for (const status of [401, 503]) {
       await page.getByLabel("Email", { exact: true }).fill("policy@example.test");
       await page.getByLabel("Password", { exact: true }).fill("fixture-only-password");
       await page.getByRole("button", { name: "Sign in", exact: true }).click();
-      await page.getByRole("textbox", { name: "Enter 6-digit verification code" }).fill("123456");
+      await page.getByRole("textbox", { name: "Authenticator or recovery code" }).fill("123456");
     } else {
       await expect(page.getByRole("alert")).toHaveText("Verification failed. Please try again.");
-      await expect(page.getByRole("textbox", { name: "Enter 6-digit verification code" })).toBeDisabled();
+      await expect(page.getByRole("textbox", { name: "Authenticator or recovery code" })).toBeDisabled();
     }
     refreshWorks = true;
     await page.getByRole("button", { name: status === 401 ? "Verify" : "Retry session check", exact: true }).click();
@@ -144,7 +144,7 @@ for (const sessionIssued of [true, false]) {
     await page.getByLabel("Email", { exact: true }).fill("policy@example.test");
     await page.getByLabel("Password", { exact: true }).fill("fixture-only-password");
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
-    await page.getByRole("textbox", { name: "Enter 6-digit verification code" }).fill("123456");
+    await page.getByRole("textbox", { name: "Authenticator or recovery code" }).fill("123456");
     await page.getByRole("button", { name: "Verify", exact: true }).click();
     if (sessionIssued) await expect(page).toHaveURL(/\/dashboard$/);
     else await expect(page.getByLabel("Email", { exact: true })).toBeVisible();
