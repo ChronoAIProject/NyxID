@@ -1,0 +1,8 @@
+2026-10-21T13:48:18.4244206Z Public artifact gate passed: 90 pages.
+2026-10-21T13:48:18.6512137Z Single help-desk fixture configuration verified; not production delivery or real task acceptance.
+2026-10-21T13:48:50.0028041Z Running 2 tests using 1 worker
+2026-10-21T13:48:54.0309518Z   ✓  1 e2e-public/public-site.spec.ts:79:1 › contact preselection and configured solution gate survive hydration (1.2s)
+2026-10-21T13:48:58.7693191Z   ✓  2 e2e-public/public-site.spec.ts:112:3 › single accepted help-desk fixture preserves invitations through all entry routes (4.7s)
+2026-10-21T13:48:58.8382082Z   2 passed (9.0s)
+2026-10-21T13:48:58.8976063Z Single help-desk fixture configuration verified; not production delivery or real task acceptance.
+2026-10-21T13:49:01.5849019Z SHA256 digest of uploaded artifact zip is 04d43e2dcad8f63e75c4f997dee37e5d7632cb0c1ad514ab2fea251c90cff634

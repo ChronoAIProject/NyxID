@@ -1,0 +1,524 @@
+{
+  "sourceCommit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+  "engineeringCommit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+  "method": "Actual TS functions transpiled only in memory, import.meta.env supplied explicitly; real /start beforeLoad extracted via TypeScript AST and invoked with window.location.replace spy. App-entry and login expressions evaluated from exact source. No build, browser, real session or backend.",
+  "status": [
+    {
+      "url": "https://nyx.chrono-ai.fun/",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://nyx.chrono-ai.fun/zh",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://nyx.chrono-ai.fun/zh/",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://nyx.chrono-ai.fun/zh//",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://nyx.chrono-ai.fun//zh",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://nyx.chrono-ai.fun/%7A%68",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://nyx.chrono-ai.fun/%7A%68%2f%2f",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://nyx.chrono-ai.fun/zh%2f..%2fzh",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://nyx.chrono-ai.fun/%2fzh",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://nyx.chrono-ai.fun/%invalid",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://status.example.test/",
+      "expect": true,
+      "accepted": true,
+      "pass": true
+    },
+    {
+      "url": "https://status.example.test/incidents",
+      "expect": true,
+      "accepted": true,
+      "pass": true
+    },
+    {
+      "url": "https://nyx.chrono-ai.fun/status",
+      "expect": true,
+      "accepted": true,
+      "pass": true
+    },
+    {
+      "url": "https://status.example.test/health",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://status.example.test/api/status",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://status.example.test/%68ealth",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    },
+    {
+      "url": "https://status.example.test//api/status",
+      "expect": false,
+      "accepted": false,
+      "pass": true,
+      "error": "Invalid website release configuration: status. Keep the switch off until adapter configuration and acceptance are complete."
+    }
+  ],
+  "cta": {
+    "href": "/login?code=NYX-ABCDEF12&return_to=%2Fassistant%3Fsetup%3Dhelp-desk%26draft%3Dhello%2Bworld&utm_source=campaign",
+    "path": "/login",
+    "code": "NYX-ABCDEF12",
+    "returnTo": "/assistant?setup=help-desk&draft=hello+world",
+    "trusted": "https://nyx.chrono-ai.fun/assistant?setup=help-desk&draft=hello+world"
+  },
+  "fragment": {
+    "href": "/login?code=NYX-ABCDEF12&return_to=%2Fassistant%3Fsetup%3Dhelp-desk%26draft%3Dhello%2Bworld&utm_source=campaign",
+    "path": "/login",
+    "code": "NYX-ABCDEF12",
+    "returnTo": "/assistant?setup=help-desk&draft=hello+world",
+    "trusted": "https://nyx.chrono-ai.fun/assistant?setup=help-desk&draft=hello+world"
+  },
+  "realStart": {
+    "input": "https://nyx.chrono-ai.fun/start?t=help-desk&code=NYX-ABCDEF12",
+    "handler": "() => { const target = solutionStartTarget(window.location.search); window.location.replace(target ? siteHref(target) : authHref(\"register\")); }",
+    "configuredTarget": "/assistant?setup=help-desk&draft=hello+world",
+    "firstDestination": "/assistant?t=help-desk&code=NYX-ABCDEF12&setup=help-desk&draft=hello+world",
+    "loginHref": "/login?return_to=https%3A%2F%2Fnyx.chrono-ai.fun%2Fassistant%3Ft%3Dhelp-desk%26code%3DNYX-ABCDEF12%26setup%3Dhelp-desk%26draft%3Dhello%2Bworld",
+    "loginCode": null,
+    "expectedTopLevelCode": "NYX-ABCDEF12",
+    "pass": false
+  },
+  "gate": [
+    {
+      "keyQuote": "\"",
+      "valueQuote": "\"",
+      "enabled": -1,
+      "actual": [
+        "newsletter",
+        "contact-chat",
+        "footer-status"
+      ],
+      "expected": [
+        "newsletter",
+        "contact-chat",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "\"",
+      "valueQuote": "\"",
+      "enabled": 0,
+      "actual": [
+        "contact-chat",
+        "footer-status"
+      ],
+      "expected": [
+        "contact-chat",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "\"",
+      "valueQuote": "\"",
+      "enabled": 1,
+      "actual": [
+        "newsletter",
+        "footer-status"
+      ],
+      "expected": [
+        "newsletter",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "\"",
+      "valueQuote": "\"",
+      "enabled": 2,
+      "actual": [
+        "newsletter",
+        "contact-chat"
+      ],
+      "expected": [
+        "newsletter",
+        "contact-chat"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "\"",
+      "valueQuote": "'",
+      "enabled": -1,
+      "actual": [
+        "newsletter",
+        "contact-chat",
+        "footer-status"
+      ],
+      "expected": [
+        "newsletter",
+        "contact-chat",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "\"",
+      "valueQuote": "'",
+      "enabled": 0,
+      "actual": [
+        "contact-chat",
+        "footer-status"
+      ],
+      "expected": [
+        "contact-chat",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "\"",
+      "valueQuote": "'",
+      "enabled": 1,
+      "actual": [
+        "newsletter",
+        "footer-status"
+      ],
+      "expected": [
+        "newsletter",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "\"",
+      "valueQuote": "'",
+      "enabled": 2,
+      "actual": [
+        "newsletter",
+        "contact-chat"
+      ],
+      "expected": [
+        "newsletter",
+        "contact-chat"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "\"",
+      "valueQuote": "`",
+      "enabled": -1,
+      "actual": [
+        "newsletter",
+        "contact-chat",
+        "footer-status"
+      ],
+      "expected": [
+        "newsletter",
+        "contact-chat",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "\"",
+      "valueQuote": "`",
+      "enabled": 0,
+      "actual": [
+        "contact-chat",
+        "footer-status"
+      ],
+      "expected": [
+        "contact-chat",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "\"",
+      "valueQuote": "`",
+      "enabled": 1,
+      "actual": [
+        "newsletter",
+        "footer-status"
+      ],
+      "expected": [
+        "newsletter",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "\"",
+      "valueQuote": "`",
+      "enabled": 2,
+      "actual": [
+        "newsletter",
+        "contact-chat"
+      ],
+      "expected": [
+        "newsletter",
+        "contact-chat"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "'",
+      "valueQuote": "\"",
+      "enabled": -1,
+      "actual": [
+        "newsletter",
+        "contact-chat",
+        "footer-status"
+      ],
+      "expected": [
+        "newsletter",
+        "contact-chat",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "'",
+      "valueQuote": "\"",
+      "enabled": 0,
+      "actual": [
+        "contact-chat",
+        "footer-status"
+      ],
+      "expected": [
+        "contact-chat",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "'",
+      "valueQuote": "\"",
+      "enabled": 1,
+      "actual": [
+        "newsletter",
+        "footer-status"
+      ],
+      "expected": [
+        "newsletter",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "'",
+      "valueQuote": "\"",
+      "enabled": 2,
+      "actual": [
+        "newsletter",
+        "contact-chat"
+      ],
+      "expected": [
+        "newsletter",
+        "contact-chat"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "'",
+      "valueQuote": "'",
+      "enabled": -1,
+      "actual": [
+        "newsletter",
+        "contact-chat",
+        "footer-status"
+      ],
+      "expected": [
+        "newsletter",
+        "contact-chat",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "'",
+      "valueQuote": "'",
+      "enabled": 0,
+      "actual": [
+        "contact-chat",
+        "footer-status"
+      ],
+      "expected": [
+        "contact-chat",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "'",
+      "valueQuote": "'",
+      "enabled": 1,
+      "actual": [
+        "newsletter",
+        "footer-status"
+      ],
+      "expected": [
+        "newsletter",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "'",
+      "valueQuote": "'",
+      "enabled": 2,
+      "actual": [
+        "newsletter",
+        "contact-chat"
+      ],
+      "expected": [
+        "newsletter",
+        "contact-chat"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "'",
+      "valueQuote": "`",
+      "enabled": -1,
+      "actual": [
+        "newsletter",
+        "contact-chat",
+        "footer-status"
+      ],
+      "expected": [
+        "newsletter",
+        "contact-chat",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "'",
+      "valueQuote": "`",
+      "enabled": 0,
+      "actual": [
+        "contact-chat",
+        "footer-status"
+      ],
+      "expected": [
+        "contact-chat",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "'",
+      "valueQuote": "`",
+      "enabled": 1,
+      "actual": [
+        "newsletter",
+        "footer-status"
+      ],
+      "expected": [
+        "newsletter",
+        "footer-status"
+      ],
+      "pass": true
+    },
+    {
+      "keyQuote": "'",
+      "valueQuote": "`",
+      "enabled": 2,
+      "actual": [
+        "newsletter",
+        "contact-chat"
+      ],
+      "expected": [
+        "newsletter",
+        "contact-chat"
+      ],
+      "pass": true
+    }
+  ],
+  "boundaryCases": [
+    {
+      "text": "{\"data-website-feature\":`newsletter${suffix}`}",
+      "actual": []
+    },
+    {
+      "text": "{\"data-website-feature\":\"contact-chat-preview\"}",
+      "actual": []
+    },
+    {
+      "text": "{\"data-website-feature\":`newsletter\"}",
+      "actual": []
+    },
+    {
+      "text": "{'data-website-feature\":'newsletter'}",
+      "actual": []
+    }
+  ],
+  "enabledBrowserAssertion": {
+    "spec": "frontend/e2e-public/public-site.spec.ts:94",
+    "expectedExpression": "publication.configuration.solutions[\"help-desk\"]",
+    "expected": "/assistant?setup=help-desk&draft=hello+world",
+    "actualCtaHref": "/login?return_to=%2Fassistant%3Fsetup%3Dhelp-desk%26draft%3Dhello%2Bworld",
+    "pass": false,
+    "scope": "Exact expected expression versus actual CTA URL builder; browser was not executed."
+  },
+  "sameBooleansDifferentTargetRejected": true
+}

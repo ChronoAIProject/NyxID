@@ -1,5 +1,9 @@
 # v4.2 暂时隐藏交接 / Temporary visibility handoff
 
+当前状态：前两轮正式独立验收均 FAIL；人类已明确授权追加且仅追加一轮修复/复验。最新实现、默认包与单项 on fixture 的验证证据见[追加轮交接](website-visibility-extra-round-fixes.md)。下文既有 SHA/CI 与“待复验”描述属于各自历史交付，不能作为当前通过结论。
+
+Current status: both formal independent rounds failed; the human authorized exactly one additional round. See the linked repair handoff for current source and separate default/on-fixture evidence. Earlier SHAs, CI and pending-status descriptions below remain historical.
+
 2026-10-21。基线 `c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52`，交付分支 `aelf-hzz780/NyxID:codex/website-a-delivery`。此前 SEO 复验仅绑定该旧基线，本轮是独立增量。目标是默认不展示、保留可恢复源码、验收后逐项配置发布；不接真实后端、不部署、不改变认证和 dashboard 默认落点。
 
 Dated 2026-10-21, based on `c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52`. Earlier SEO acceptance applies only to that baseline. This increment retains recoverable implementation behind default-off publication settings, without connecting live services, deploying, or changing authentication/default dashboard behavior.
