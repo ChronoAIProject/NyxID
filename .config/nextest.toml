@@ -15,3 +15,11 @@ store-failure-output = true
 [[profile.ci.overrides]]
 filter = "test(=handlers::assistant_nyxagent::tests::capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot)"
 threads-required = "num-cpus"
+
+# These tests require positive live-consent reads within the production 200ms
+# MongoDB / 250ms overall deadlines. Reserve the runner's test slots so unrelated
+# MongoDB fixture churn cannot turn their healthy-admission preconditions into
+# intentional fail-closed drops. Keep the real deadlines and all assertions.
+[[profile.ci.overrides]]
+filter = "test(=telemetry::tests::track_enqueues_scrubbed_capture_job_with_common_properties) | test(=telemetry::tests::track_silently_drops_when_channel_is_full) | test(=telemetry::tests::dispatch_checks_live_revision_across_independent_clients)"
+threads-required = "num-cpus"
