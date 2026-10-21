@@ -128,6 +128,8 @@ async fn permission_keys_persist_atomically_and_live_pause_revocation_reach_engi
         .await
         .unwrap();
     assert_eq!(stored_key.purpose, ApiKeyPurpose::PermissionBound);
+    assert!(stored_key.expires_at.is_some());
+    assert_eq!(key.expires_at, stored_key.expires_at);
     assert_eq!(stored_key.allowed_service_ids, [connection]);
     assert!(!stored_key.allow_all_nodes && !stored_key.allow_all_services);
     let stored = get(&state.db, &owner, &key.id).await.unwrap();

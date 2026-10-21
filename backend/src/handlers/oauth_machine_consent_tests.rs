@@ -62,7 +62,7 @@ impl MachineConsentFixture {
         }
     }
     fn selection(&self) -> crate::services::machine_external_grant_service::GrantSelection {
-        serde_json::from_value(serde_json::json!({"assignments":{self.node.clone():{
+        serde_json::from_value(serde_json::json!({"separation":"shared_legacy","legacy_warning_acknowledged":true,"assignments":{self.node.clone():{
             "capabilities":{"shell":true,"files":true},"file_roots":["/workspace"],"service_ids":[]
         }}}))
         .unwrap()

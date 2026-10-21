@@ -54,7 +54,7 @@ export interface CreatedKey {
 
 interface ConnectVerifyStepProps {
   readonly createdKey: CreatedKey;
-  readonly isNodeRouted: boolean;
+  readonly nodeId: string | null;
   readonly onDone: () => void;
 }
 
@@ -83,11 +83,9 @@ function proxyBaseUrl(slug: string): string {
  */
 export function ConnectVerifyStep({
   createdKey,
-  isNodeRouted,
+  nodeId,
   onDone,
 }: ConnectVerifyStepProps) {
-  void isNodeRouted; // kept in props so the parent's data flow stays stable
-
   const createApiKey = useCreateApiKey();
   const [phase, setPhase] = useState<Phase>("connected");
   const [agentKey, setAgentKey] = useState<ApiKeyCreateResponse | null>(null);
@@ -103,7 +101,8 @@ export function ConnectVerifyStep({
         scopes: ["proxy"],
         allow_all_services: false,
         allowed_service_ids: [createdKey.id],
-        allow_all_nodes: true,
+        allow_all_nodes: false,
+        allowed_node_ids: nodeId ? [nodeId] : [],
       },
       {
         onSuccess: (key) => {

@@ -381,9 +381,12 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   creates the gateway channel as the owner, points the route key's callback at the
   gateway, creates the default route, and attaches it. Channel management
   (create, attach, delete) authenticates as the owner with a 120-second delegated
-  token carrying only `account:read`, because the gateway resolves creators with
-  `GET /api/v1/users/me`, which refuses API keys. The agent key is the channel's
-  provider and event-tool bearer, never a creator bearer. NyxID is the gateway's
+  token carrying only `account:read` and reserved actor
+  `nyxid:nyxbot-gateway-creator`, separate from the provider/event-tool agent key.
+  Its actor-scoped management grant is restricted to the catalog-associated
+  confidential gateway caller. See the [gateway creator contract](../CHANNEL_EVENT_GATEWAY.md#nyxbot-gateway-creator-authorization-and-recovery)
+  for both validators, the full-client-ID association, permission boundaries,
+  failure responses and HTTP limits. NyxID is the gateway's
   `nyxbot` provider (`/api/v1/nyxbot/{agent-card,bindings/…,responses}`) and
   streams only the final answer as a committed message; `event_context` is stored
   encrypted and served verbatim for `readEventContext`.
@@ -514,6 +517,10 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   from an earlier setup) are lost as `routed_elsewhere`, and the agent is told
   to show the user that route and remove it with their OK; connecting reports
   such routes up front (`other_routes`).
+- **Failed connections and listing.** Failed rows offer explicit **Reconnect**
+  with the selected live agent; channel listings show one current record per
+  owner/bot while retaining history. See the [gateway recovery contract](../CHANNEL_EVENT_GATEWAY.md#nyxbot-gateway-creator-authorization-and-recovery)
+  for action behavior, error guidance and the current-row selection rules.
 - **Verification hints.** While the owner has not verified a channel, the chat's
   waiting note and `nyxid__list_channel_agents` (`inbound_hint`) say what NyxID saw
   from the bot since the code was issued: nothing at all (check the platform's

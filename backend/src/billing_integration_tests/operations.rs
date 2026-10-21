@@ -123,6 +123,9 @@ async fn priced(
 ) -> Priced {
     create_usage_index(&db).await;
     let owner = insert_owner(&db).await;
+    // Operation pricing is independent of generic service approval.
+    crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+
     let (url, downstream) = start_billing_downstream().await;
     let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
     catalog.id = Uuid::new_v4().to_string();
@@ -404,6 +407,9 @@ async fn llm_provider_and_gateway_requests_price_the_matched_operation() {
     };
     create_usage_index(&db).await;
     let owner = insert_owner(&db).await;
+    // Operation pricing is independent of generic service approval.
+    crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+
     let (url, _downstream) = start_billing_downstream().await;
     let mut catalog = insert_llm_route_service(&db, &owner, &url).await;
     catalog.billing = Some(requests_lane(

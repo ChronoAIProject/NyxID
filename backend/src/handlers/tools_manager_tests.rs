@@ -430,6 +430,8 @@ async fn tools_manager_no_auth_http_ws_mcp_acl_preserves_provider_own_connection
     let admin = seed(&db, "admin", false, false).await;
     let manager = seed(&db, "operator", true, false).await;
     let person = seed(&db, "user", false, false).await;
+    crate::test_utils::set_test_approval_preference(&db, &person, false).await;
+
     let hits = Arc::new(AtomicUsize::new(0));
     let http_hits = hits.clone();
     let ws_hits = hits.clone();
@@ -923,6 +925,8 @@ async fn tools_manager_catalog_auth_scheme_reaches_http_ws_and_mcp_user_connecti
         .unwrap();
     let manager = seed(&db, "operator", false, true).await;
     let person = seed(&db, "user", false, false).await;
+    crate::test_utils::set_test_approval_preference(&db, &person, false).await;
+
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let http_seen = seen.clone();
     let ws_seen = seen.clone();
@@ -1974,6 +1978,8 @@ async fn tools_manager_published_byok_bills_user_without_platform_audience() {
     let admin = seed(&db, "admin", false, false).await;
     let manager = seed(&db, "operator", true, false).await;
     let person = seed(&db, "user", false, false).await;
+    crate::test_utils::set_test_approval_preference(&db, &person, false).await;
+
     let vendor = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/read"))

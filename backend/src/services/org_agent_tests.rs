@@ -151,6 +151,7 @@ impl Fixture {
         (Self::with_db(db).await, memberships, reads)
     }
     async fn with_db(db: mongodb::Database) -> Self {
+        super::security_readiness_service::ready_test_replica(&db).await;
         engine::ensure_indexes(&db).await.unwrap();
         let ids: Vec<_> = (0..5).map(|_| Uuid::new_v4().to_string()).collect();
         for (i, id) in ids.iter().enumerate() {
@@ -2083,6 +2084,22 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
         .insert_one(&catalog)
         .await
         .unwrap();
+    // Isolate skill pinning/organization authority from the separate generic
+    // service-approval policy. Native Ornn reads still traverse the real proxy.
+    for actor in [&f.member, &f.admin] {
+        super::approval_service::set_service_approval_config(
+            &f.state.db,
+            actor,
+            &catalog.id,
+            &catalog.name,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     zip.start_file("SKILL.md", zip::write::SimpleFileOptions::default())
         .unwrap();

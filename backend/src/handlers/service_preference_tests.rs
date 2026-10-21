@@ -1452,6 +1452,8 @@ async fn service_preference_slug_proxy_and_implicit_llm_execution_unchanged() {
         matchers::{method, path},
     };
     let (state, router, owner, token, ids) = fixture("preference_execution_unchanged").await;
+    crate::test_utils::set_test_approval_preference(&state.db, &owner, false).await;
+
     let a = MockServer::start().await;
     let b = MockServer::start().await;
     for (upstream, target) in [(&a, "alpha"), (&b, "beta")] {

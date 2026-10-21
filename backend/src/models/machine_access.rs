@@ -8,6 +8,9 @@ pub const CONTEXTS: &str = "machine_contexts";
 pub const LEASES: &str = "machine_authority_leases";
 pub const OUTBOX: &str = "machine_revocations";
 pub const CUTOVER: &str = "machine-capabilities-v2";
+pub const SEPARATION_CUTOVER: &str = "machine-separation-defaults-v1";
+pub const SEPARATION_COMPATIBILITY: &str = "machine_separation_compatibility";
+pub const SELECTION_REQUIRED: &str = "selection_required";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Assignment {

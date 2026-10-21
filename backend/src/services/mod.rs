@@ -225,6 +225,7 @@ pub mod resource_adapter;
 pub mod resource_request_proof;
 pub mod role_service;
 pub mod scope_catalog;
+pub mod security_readiness_service;
 pub mod service_account_key_read_service;
 pub mod service_account_service;
 pub mod service_endpoint_service;
@@ -446,6 +447,7 @@ mod platform_provisioning_acceptance_tests;
 pub mod platform_setup_notice_service;
 
 pub mod assistant_access_policy;
+pub(crate) mod nyxbot_channel_query_service;
 pub(crate) mod nyxbot_gateway_service;
 pub mod nyxbot_watch_service;
 pub mod tools_manager_service;

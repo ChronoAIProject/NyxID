@@ -700,7 +700,7 @@ cannot approve or mint login grants.
 or a `kind: "new"` selection containing the confirmed key permissions. Restricted
 decisions use a distinct fail-closed route so an old replica cannot silently
 interpret that choice as full account approval. Creation and delivery revalidate
-eligibility and effective authority.
+eligibility and effective authority. New parent keys default to restricted grants and 90 days; explicit `never_expires: true` selects a nonexpiring parent. Newly issued child credentials still default to at most 90 days, bounded by the parent expiry. Explicit child expiry cannot exceed the parent. The response reports the stored parent and child expiries separately. See [issuance rollout](API_KEY_ISSUANCE.md).
 
 Successful CLI polling returns a tagged union. `auth_kind: "account_session"`
 includes `access_token`, `refresh_token`, `token_type` and `expires_in`.
@@ -1147,22 +1147,25 @@ Create a new API key. The full key is returned only in this response and cannot 
 |--------------|--------|----------|----------------------------------------------|
 | `name`       | string | Yes      | Human-readable name for the key              |
 | `scopes`     | string | No       | Space-separated scopes (default: `"read"`)   |
-| `expires_at` | string | No       | ISO 8601 expiration datetime                 |
+| `expires_at` | string/null | No | Future RFC3339 instant or date-only UTC end of day. Omitted, null or empty means creation time + 90 days. Stored and returned at millisecond precision. |
+| `never_expires` | boolean | No | Explicitly select no expiry (default false); cannot be true with a nonempty `expires_at`. |
 | `description` | string | No      | Optional description of key purpose          |
-| `allowed_service_ids` | string[] | No | UserService IDs this key can proxy. Only enforced when `allow_all_services: false`. Providing values without also setting `allow_all_services: false` will silently store the list but **not** scope the key. |
-| `allowed_node_ids` | string[] | No | Node IDs this key can route through. Only enforced when `allow_all_nodes: false`. Providing values without also setting `allow_all_nodes: false` will silently store the list but **not** scope the key. |
-| `allow_all_services` | boolean | No | If true, key can access all user's external services (default: true) |
-| `allow_all_nodes` | boolean | No | If true, key can route through all user's nodes (default: true) |
+| `allowed_service_ids` | string[] | No | UserService IDs this key can proxy; omitted means empty. Incompatible with `allow_all_services: true`. |
+| `allowed_node_ids` | string[] | No | Node IDs this key can route through; omitted means empty. Incompatible with `allow_all_nodes: true`. |
+| `allow_all_services` | boolean | No | If true, key can access all user's external services (default: false) |
+| `allow_all_nodes` | boolean | No | If true, key can route through all user's nodes (default: false) |
 
-> **Scoping API keys:** To create a scoped key you must set BOTH `allow_all_services: false` AND a non-empty `allowed_service_ids` (and likewise `allow_all_nodes: false` + `allowed_node_ids` for node scoping). Either alone is a no-op. The defaults exist for backward compatibility with pre-scope keys, so a naive payload yields a broad key.
+> New keys start with restricted service/node authority and a finite lifetime. An empty restricted list grants no resources. Broad grants and nonexpiry require explicit choices. Existing stored keys retain their policy, including legacy absent fields; rotation preserves that policy. See [issuance and rollout](API_KEY_ISSUANCE.md).
 
-Broad key (default):
+Explicit broad, nonexpiring key:
 
 ```json
 {
   "name": "Production API Key",
   "scopes": "read write",
-  "expires_at": "2026-01-01T00:00:00Z"
+  "allow_all_services": true,
+  "allow_all_nodes": true,
+  "never_expires": true
 }
 ```
 
@@ -1186,7 +1189,8 @@ Scoped key:
   "key_prefix": "nyx_k_a1b2c3d4",
   "full_key": "nyx_k_a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef12345678",
   "scopes": "read write",
-  "created_at": "2025-06-01T10:00:00+00:00"
+  "created_at": "2025-06-01T10:00:00+00:00",
+  "expires_at": null
 }
 ```
 
@@ -1238,7 +1242,7 @@ curl -X DELETE http://localhost:3001/api/v1/api-keys/a1b2c3d4-e5f6-7890-abcd-ef1
 
 #### POST /api/v1/api-keys/{key_id}/rotate
 
-Rotate an API key: deactivate the existing key and create a new one with the same name and scopes. The new full key is returned in the response.
+Rotate an API key: deactivate the existing key and create a new one with the same stored permissions and expiry (including nonexpiry). The new full key is returned in the response.
 
 **Auth:** Required
 
@@ -1257,7 +1261,8 @@ Rotate an API key: deactivate the existing key and create a new one with the sam
   "key_prefix": "nyx_k_b2c3d4e5",
   "full_key": "nyx_k_b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef12345678ab",
   "scopes": "read write",
-  "created_at": "2025-06-02T10:00:00+00:00"
+  "created_at": "2025-06-02T10:00:00+00:00",
+  "expires_at": null
 }
 ```
 
@@ -4014,7 +4019,7 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Streaming:** If the client sends `Accept: text/event-stream` or the upstream responds with `Content-Type: text/event-stream`, NyxID forwards the SSE stream without buffering and strips `content-length`.
 
-**Transaction Approval:** If the resource owner has `approval_required` enabled, has at least one active notification channel, and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing approval grant. If no grant exists, an approval request is created (with Telegram notification if configured) and the **HTTP connection is held open** until the user approves/rejects or the configured timeout expires. If approved, the request proceeds and the downstream response is returned. If rejected or timed out, a `403 Forbidden` is returned. The implicit global default is suspended while the owner has no active notification channel and never applies to auto-connected (auto-provisioned, credential-free) services. Explicit per-service `ServiceApprovalConfig` rows apply regardless of channel availability or the auto-connected exemption. Direct browser sessions (session cookie auth) bypass approval.
+**Transaction Approval:** When the resolved approval policy requires approval and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing grant in grant mode. Otherwise it persists a pending request and **holds the HTTP connection open** until approval, rejection, or timeout. Notification delivery is attempted when configured; an unavailable provider or missing channel never authorizes execution. Review and decide pending requests in `/approvals/history`, using **Refresh** to discover requests created after the page opened. Approved requests proceed; rejection or timeout returns `403 Forbidden`. An absent global preference uses **Writes only**: read-class operations proceed without approval, while write and destructive operations require it. Explicit stored true selects **All requests** and false selects **Off**; existing booleans keep their meaning. Lazy notification settings creation preserves the absent preference. The implicit global default exempts auto-connected (auto-provisioned, credential-free) services; explicit per-service and org `ServiceApprovalConfig` policies retain their precedence and existing grant semantics. Direct browser sessions (session cookie auth) bypass approval requirements; explicit Deny rules still refuse execution. Upgrade and drain all serving replicas and participating workers before relying on this contract; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
 
 **Limits:** Request body is limited to 10 MB for proxy requests.
 
@@ -4190,7 +4195,7 @@ Three access modes are available:
 
 Streaming is supported for providers that expose SSE-compatible streaming APIs. When the request sets `"stream": true`, NyxID returns `text/event-stream` and forwards or translates provider SSE events on the fly.
 
-**Transaction Approval:** The same blocking approval flow applies to LLM gateway endpoints as to the proxy. If the resource owner has `approval_required` enabled, has at least one active notification channel, and the request uses a non-session auth method (API key, delegated token, service account, or access token), the connection is held open until the user approves/rejects or the timeout expires. The implicit global default is suspended while the owner has no active notification channel and never applies to auto-connected (auto-provisioned, credential-free) services. Explicit per-service `ServiceApprovalConfig` rows apply regardless of channel availability or the auto-connected exemption. See the [Proxy](#proxy) section for details.
+**Transaction Approval:** LLM gateway endpoints share the blocking approval flow described under [Proxy](#proxy). Required programmatic requests wait for approval, rejection, or expiry independently of notification availability. The unset **Writes only** preference allows read-class generation under the catalog inference metadata and closed stateless request contract. Provider storage, resource effects and unknown request extensions remain writes. Explicit true still gates reads and explicit false allows writes; explicit per-service/org policies, auto-connected exemptions and grant semantics retain their documented behavior. Pending requests remain available in web Approval History when delivery is unavailable.
 
 #### GET /api/v1/llm/status
 
@@ -7828,6 +7833,29 @@ Service account tokens do **not** include `sid`, `roles`, `groups`, `permissions
 
 ---
 
+## Security Rollout Readiness
+
+```
+GET /api/v1/admin/security-readiness
+Authorization: Bearer <admin_or_operator_access_token>
+```
+
+Returns a map keyed by security capability. Each report includes `ready`,
+`blockers`, `expected_replicas`, `live_generations`,
+`platform_policy_required`, `catalog_missing_policy`, and
+`catalog_explicit_empty_policy`. Catalog counts apply to the platform-policy
+capability. Missing, duplicate, stale, unsupported or differently configured
+serving processes block effective activation. Ordinary effective flag gates
+return `503 security_readiness_unavailable` (code `12900`) while unready.
+
+This endpoint requires admin/operator access and is separate from public
+`/health`. Roster/drain declarations are operational prerequisites; the
+`approval:required-web-v1` report is diagnostic and does not fence old serving
+replicas. See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md) for
+configuration, stored-policy boundaries and sticky platform cutover/recovery.
+
+---
+
 ## Notification Settings
 
 Manage notification channels and approval preferences. All endpoints require authentication (human-only, no service accounts or delegated tokens).
@@ -7848,14 +7876,41 @@ Authorization: Bearer <access_token>
   "telegram_enabled": true,
   "push_enabled": true,
   "push_device_count": 1,
+  "global_approval_mode": "writes_only",
   "approval_required": true,
   "approval_suspended": false,
+  "approval_delivery_configured": true,
+  "approval_web_available": true,
   "approval_timeout_secs": 30,
   "grant_expiry_days": 30
 }
 ```
 
-The global `approval_required` preference is enforced only while at least one Telegram or push notification channel is active. `approval_suspended` is `true` when the stored preference remains on but no channel is currently available; enforcement resumes automatically when a channel becomes active again.
+`global_approval_mode` is `writes_only` (the unset default), `all`, or `off`.
+Writes only requires approval for write and destructive operations and allows reads;
+All requests requires approval for every verb; Off removes only the global fallback.
+Explicit per-service rules and organization policies retain their precedence.
+The compatibility boolean `approval_required` is true for writes-only and all;
+clients must use `global_approval_mode` to distinguish them. Older servers omit
+that field: a stored/returned true means All requests, and false means Off.
+
+New channels leave the stored preference absent and use a 300-second timeout.
+Lazy settings reads and tool-approval creation never choose a preference. Stored
+true/false rows retain their exact behavior, including rows from the unreleased
+W9.3 lazy-creation build. They have no reliable provenance marker and are never
+silently reset. An owner can explicitly select Writes only to clear the choice.
+A missing preference on any row means writes-only; existing timeout values and
+the legacy missing-timeout default of 30 seconds remain unchanged.
+
+Approval enforcement is independent of notification delivery. This server returns
+`approval_suspended: false` and `approval_web_available: true`: pending requests
+can be decided in Approval History without Telegram or push.
+`approval_delivery_configured` reports enabled registration plus initialized
+provider configuration; it does not promise a successful send. Older servers may
+omit these fields or report suspension, so clients retain cautious channel guidance.
+Upgrade and drain every old replica before relying on write approval for new
+users; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
+
 
 **curl:**
 
@@ -7877,19 +7932,24 @@ Content-Type: application/json
 ```json
 {
   "telegram_enabled": true,
-  "approval_required": true,
+  "global_approval_mode": "writes_only",
   "approval_timeout_secs": 60,
   "grant_expiry_days": 14
 }
 ```
 
-All fields are optional. Only provided fields are updated.
+All fields are optional. Only provided fields are updated. `global_approval_mode`
+accepts `writes_only`, `all`, or `off`. Selecting `writes_only` clears the stored
+boolean. The legacy `approval_required` write remains supported: true selects
+All requests, false selects Off. Conflicting mode/boolean writes return 400;
+omitting both preserves the current choice. The authorization evidence endpoint
+also includes `global_approval_mode`.
 
 **Validation:**
 - `approval_timeout_secs`: 10..=300
 - `grant_expiry_days`: 1..=365
 - `telegram_enabled: true` requires a linked Telegram account
-- `approval_required: true` (turning it on from off) requires an active Telegram or push channel; an already-enabled preference may keep its value while channels are disabled (protection is suspended)
+- `approval_required: true` can be enabled with no external notification channel. Pending requests wait for a web decision or expire without executing.
 
 **Response (200):**
 
@@ -7900,8 +7960,11 @@ All fields are optional. Only provided fields are updated.
   "telegram_enabled": true,
   "push_enabled": true,
   "push_device_count": 1,
+  "global_approval_mode": "writes_only",
   "approval_required": true,
   "approval_suspended": false,
+  "approval_delivery_configured": true,
+  "approval_web_available": true,
   "approval_timeout_secs": 60,
   "grant_expiry_days": 14
 }
@@ -7960,7 +8023,7 @@ Clears the linked Telegram account and disables Telegram notifications.
 }
 ```
 
-If approval protection remains enabled but no active channel remains, the message is `Telegram disconnected. Approval protection is suspended until a notification channel is available; it resumes automatically.`
+If approval remains required and no configured delivery remains, the response directs the user to Approval History on the web. Disconnecting Telegram does not suspend required approval.
 
 **curl:**
 
@@ -7983,7 +8046,7 @@ Authorization: Bearer <access_token>
 Content-Type: application/json
 ```
 
-Register or refresh a device token for push notifications. If a device with the same `token` already exists, its metadata is updated (token refresh). The first registered device automatically enables push notifications. Registration never changes the stored `approval_required` preference; if protection was suspended, it resumes from that existing preference when the push channel becomes active.
+Register or refresh a device token for push notifications. If a device with the same `token` already exists, its metadata is updated (token refresh). The first registered device automatically enables push notifications. Registration never changes the stored `approval_required` preference. It adds a notification route; required approval is already enforced independently of that route, and provider configuration does not guarantee successful delivery.
 
 **Request Body:**
 
@@ -8090,7 +8153,7 @@ Remove a registered push notification device. If no devices remain after removal
 }
 ```
 
-If approval protection remains enabled but no active channel remains, the message is `Device removed. Approval protection is suspended until a notification channel is available; it resumes automatically.`
+If approval remains required and no configured delivery remains, the response directs the user to Approval History on the web. Removing the last device does not suspend required approval.
 
 **Errors:**
 - `1003 not_found` -- Device not found
@@ -8302,7 +8365,7 @@ Authorization: Bearer <access_token>
 
 **Auth:** Required (human-only -- rejects delegated tokens and service account tokens).
 
-Returns all per-service approval configurations for the current user. These override the global `approval_required` setting on a per-service basis (only the global fallback is subject to channel suspension and the auto-connected exemption).
+Returns all per-service approval configurations for the current user. These override the global `approval_required` setting on a per-service basis (the global fallback retains the auto-connected exemption; delivery never suspends approval).
 
 **Response (200):**
 
@@ -8337,7 +8400,7 @@ Content-Type: application/json
 
 **Auth:** Required (human-only).
 
-Creates or updates a per-service approval override. When set, this value takes precedence over the global `notification_channels.approval_required` setting for the specified service (only the global fallback is subject to channel suspension and the auto-connected exemption).
+Creates or updates a per-service approval override. When set, this value takes precedence over the global `notification_channels.approval_required` setting for the specified service (the global fallback retains the auto-connected exemption; delivery never suspends approval).
 
 **Request:**
 
@@ -8383,7 +8446,7 @@ Authorization: Bearer <access_token>
 
 **Auth:** Required (human-only).
 
-Removes the per-service approval override, reverting to the global `approval_required` setting for this service (the global fallback is subject to channel suspension and the auto-connected exemption).
+Removes the per-service approval override, reverting to the global `approval_required` setting for this service (the global fallback retains the auto-connected exemption; delivery never suspends approval).
 
 **Response (200):**
 

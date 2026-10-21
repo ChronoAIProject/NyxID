@@ -20,12 +20,42 @@ pub struct NotificationResult {
     pub telegram_message_id: Option<i64>,
 }
 
-/// Return whether at least one notification channel can currently receive an
-/// approval request. This is a delivery fact, separate from the user's stored
-/// approval preference.
+/// Whether the user has enabled a registered channel. This does not establish
+/// provider configuration, delivery success, or approval enforcement.
 pub fn has_active_notification_channel(channel: &NotificationChannel) -> bool {
     (channel.telegram_enabled && channel.telegram_chat_id.is_some())
         || (channel.push_enabled && !channel.push_devices.is_empty())
+}
+
+/// Configuration readiness only; a provider may still reject a token or fail
+/// transiently. Actual send results remain on each persisted approval request.
+pub fn approval_delivery_configured(
+    channel: &NotificationChannel,
+    config: &AppConfig,
+    fcm_initialized: bool,
+    apns_initialized: bool,
+) -> bool {
+    if !has_active_notification_channel(channel) {
+        return false;
+    }
+    let nonempty = |value: Option<&str>| value.is_some_and(|v| !v.trim().is_empty());
+    (channel.telegram_enabled
+        && channel.telegram_chat_id.is_some()
+        && nonempty(config.telegram_bot_token.as_deref()))
+        || (channel.push_enabled
+            && channel.push_devices.iter().any(|device| {
+                !device.token.trim().is_empty()
+                    && match device.platform.as_str() {
+                        "fcm" => fcm_initialized && nonempty(config.fcm_project_id.as_deref()),
+                        "apns" => {
+                            apns_initialized
+                                && nonempty(
+                                    device.app_id.as_deref().or(config.apns_topic.as_deref()),
+                                )
+                        }
+                        _ => false,
+                    }
+            }))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -943,9 +973,9 @@ pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<No
         telegram_enabled: false,
         telegram_link_code: None,
         telegram_link_code_expires_at: None,
-        approval_timeout_secs: 30,
+        approval_timeout_secs: 300,
         grant_expiry_days: 30,
-        approval_required: false,
+        approval_required: None,
         push_enabled: false,
         push_devices: vec![],
         created_at: now,
@@ -1389,9 +1419,9 @@ mod tests {
         assert!(channel.telegram_chat_id.is_none());
         assert!(!channel.push_enabled);
         assert!(channel.push_devices.is_empty());
-        assert_eq!(channel.approval_timeout_secs, 30);
+        assert_eq!(channel.approval_timeout_secs, 300);
         assert_eq!(channel.grant_expiry_days, 30);
-        assert!(!channel.approval_required);
+        assert_eq!(channel.approval_required, None);
     }
 
     #[tokio::test]
@@ -1470,9 +1500,9 @@ mod tests {
         assert!(channel.telegram_username.is_none());
         assert!(channel.telegram_link_code.is_none());
         assert!(channel.telegram_link_code_expires_at.is_none());
-        assert_eq!(channel.approval_timeout_secs, 30);
+        assert_eq!(channel.approval_timeout_secs, 300);
         assert_eq!(channel.grant_expiry_days, 30);
-        assert!(!channel.approval_required);
+        assert_eq!(channel.approval_required, None);
         assert!(!channel.push_enabled);
         assert!(channel.push_devices.is_empty());
     }
@@ -1520,7 +1550,7 @@ mod tests {
 
         // Create the channel
         let channel = get_or_create_channel(&db, &user_id).await.unwrap();
-        assert!(!channel.approval_required);
+        assert_eq!(channel.approval_required, None);
 
         // Manually update approval_required in DB
         let now = bson::DateTime::from_chrono(Utc::now());
@@ -1538,7 +1568,7 @@ mod tests {
 
         // Fetch again -- should return the modified state
         let updated = get_or_create_channel(&db, &user_id).await.unwrap();
-        assert!(updated.approval_required);
+        assert_eq!(updated.approval_required, Some(true));
         assert_eq!(updated.approval_timeout_secs, 60);
         assert_eq!(updated.id, channel.id);
     }
@@ -1744,13 +1774,17 @@ mod tests {
         remove_stale_device_tokens(&db, &channel.id, &["dev-only".to_string()]).await;
 
         let updated = get_or_create_channel(&db, &user_id).await.unwrap();
-        assert!(updated.approval_required);
+        assert_eq!(updated.approval_required, Some(true));
         assert!(updated.push_devices.is_empty());
         assert!(!updated.push_enabled);
         assert!(
-            !crate::services::approval_service::user_requires_approval(&db, &user_id)
-                .await
-                .unwrap()
+            crate::services::approval_service::user_requires_approval(
+                &db,
+                &user_id,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
         );
     }
 

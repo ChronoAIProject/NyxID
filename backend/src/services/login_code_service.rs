@@ -78,23 +78,21 @@ pub async fn mint(
     db: &Database,
     key: &[u8],
     actor: &str,
-    selection: Option<Selection>,
+    mut selection: Option<Selection>,
     expiry: Option<DateTime<Utc>>,
 ) -> AppResult<MintedCode> {
     limit(db, "login-code-mint-owner", actor, 5).await?;
-    if let Some(Selection::Existing { api_key_id, .. }) = &selection {
-        let parent = agent::eligible_key(db, actor, api_key_id).await?;
-        credentials::credential_expiry(parent.expires_at, expiry)?;
-    }
-    if let Some(Selection::New(input)) = &selection {
-        let parent_expiry = super::key_service::validate_login_api_key(db, actor, input).await?;
-        credentials::credential_expiry(parent_expiry, expiry)?;
-    }
-    if selection.is_none() && expiry.is_some() {
-        return Err(AppError::ValidationError(
-            "Credential expiry requires an Agent Key grant".into(),
-        ));
-    }
+    let created_at = Utc::now();
+    let expiry = if let Some(selection) = &mut selection {
+        Some(agent::prepare_issuance(db, actor, selection, expiry, created_at).await?)
+    } else {
+        if expiry.is_some() {
+            return Err(AppError::ValidationError(
+                "Credential expiry requires an Agent Key grant".into(),
+            ));
+        }
+        None
+    };
     for _ in 0..8 {
         let code = Zeroizing::new(device::format_user_code(&device::generate_user_code()));
         let now = Utc::now();
@@ -329,7 +327,7 @@ pub async fn redeem(
             } else {
                 let selection = row.selection.as_ref().ok_or(AppError::LoginCodeInvalid)?;
                 let parent = agent::issue_selected(db, &row.user_id, &row.id, context, profile.as_deref(), selection,
-                    row.credential_expires_at, &key_id, &child_id, &secret, &mut *session).await?;
+                    row.credential_expires_at, row.created_at, &key_id, &child_id, &secret, &mut *session).await?;
                 let summary = agent::key_summary(db, &parent, matches!(selection, Selection::New(_))).await?;
                 let child = db.collection::<crate::models::api_key_credential::ApiKeyCredential>(crate::models::api_key_credential::COLLECTION_NAME)
                     .find_one(doc! {"_id": &child_id}).session(&mut *session).await?.ok_or(AppError::AgentKeyCredentialNotFound)?;

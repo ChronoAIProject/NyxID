@@ -829,12 +829,9 @@ pub struct UpdateArgs {
     /// Print installed prebuilt versions without downloading anything
     #[arg(long, conflicts_with_all = ["version", "check", "from_source", "rollback", "skills_only"])]
     pub list_versions: bool,
-    /// Compile and install from source with cargo install
+    /// Build the requested release from its resolved immutable commit (--locked)
     #[arg(long)]
     pub from_source: bool,
-    /// Continue after release attestation verification fails
-    #[arg(long)]
-    pub insecure_skip_verify: bool,
     /// NyxID base URL for skill content (uses saved URL by default)
     #[arg(long, env = "NYXID_URL")]
     pub base_url: Option<String>,
@@ -2245,7 +2242,7 @@ pub enum ApiKeyCommands {
         /// Scopes (space-separated: read write proxy)
         #[arg(long)]
         scopes: Option<String>,
-        /// Expiry in days (0 = no expiry)
+        /// Expiry in days (default: 90; 0 explicitly selects no expiry)
         #[arg(long)]
         expires_in_days: Option<u32>,
         /// Allowed service UUIDs or slugs (comma-separated; includes platform services)
@@ -2711,6 +2708,9 @@ pub enum OrgRoleScopeCommands {
 
 #[derive(Subcommand)]
 pub enum NodeCommands {
+    /// Internal bounded access observation; emits no credential or provider data.
+    #[command(hide = true)]
+    CustodyProbe,
     /// Prepare the protected recipient request for managed platform attestation.
     #[command(hide = true)]
     ManagedPrepare(crate::node::managed_runtime::Prepare),
@@ -3165,8 +3165,16 @@ pub enum NodeDockerCommands {
     Start {
         #[command(flatten)]
         args: NodeDockerArgs,
+        /// New machine container intent; omission defaults to automatic.
+        #[arg(
+            long,
+            value_enum,
+            env = "NYXID_MACHINE_SEPARATION",
+            requires = "machine"
+        )]
+        separation: Option<crate::node::machine::setup::Separation>,
     },
-    /// Stop and remove the node agent container
+    /// Stop the node container (machine containers are retained for start)
     Stop {
         #[command(flatten)]
         args: NodeDockerArgs,
@@ -3175,6 +3183,14 @@ pub enum NodeDockerCommands {
     Restart {
         #[command(flatten)]
         args: NodeDockerArgs,
+        /// New machine container intent; existing containers retain their choice.
+        #[arg(
+            long,
+            value_enum,
+            env = "NYXID_MACHINE_SEPARATION",
+            requires = "machine"
+        )]
+        separation: Option<crate::node::machine::setup::Separation>,
     },
     /// Show Docker container status
     Status {
@@ -3257,7 +3273,91 @@ pub enum NodeDaemonCommands {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_machine_start_and_restart_parse_explicit_separation_only_for_machine() {
+        for verb in ["start", "restart"] {
+            for selection in ["automatic", "require-separated", "shared-legacy"] {
+                let parsed = Cli::try_parse_from([
+                    "nyxid",
+                    "node",
+                    "docker",
+                    verb,
+                    "--machine",
+                    "--separation",
+                    selection,
+                ])
+                .unwrap();
+                let Commands::Node {
+                    command: NodeCommands::Docker { command },
+                } = parsed.command
+                else {
+                    panic!("expected Docker command")
+                };
+                let (NodeDockerCommands::Start { separation, .. }
+                | NodeDockerCommands::Restart { separation, .. }) = command
+                else {
+                    panic!("expected Docker start/restart")
+                };
+                assert_eq!(separation.unwrap().as_cli_str(), selection);
+                assert!(
+                    Cli::try_parse_from([
+                        "nyxid",
+                        "node",
+                        "docker",
+                        verb,
+                        "--separation",
+                        selection
+                    ])
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn notification_approval_modes_parse_and_refuse_ambiguous_legacy_toggle() {
+        for mode in ["writes_only", "all", "off"] {
+            let cli =
+                Cli::try_parse_from(["nyxid", "notification", "update", "--approval-mode", mode])
+                    .unwrap();
+            assert!(matches!(cli.command,
+                Commands::Notification { command: NotificationCommands::Update { approval_mode: Some(value), .. } }
+                if value == mode));
+        }
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "notification",
+                "update",
+                "--approval-mode",
+                "unknown",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "notification",
+                "update",
+                "--approval-mode",
+                "writes_only",
+                "--approval-email",
+                "true",
+            ])
+            .is_err()
+        );
+    }
     use clap::Parser;
+
+    #[test]
+    fn updates_require_explicit_source_and_have_no_verification_bypass() {
+        assert!(
+            Cli::try_parse_from(["nyxid", "update", "--from-source", "--version", "1.2.3"]).is_ok()
+        );
+        assert!(Cli::try_parse_from(["nyxid", "update", "--insecure-skip-verify"]).is_err());
+        assert!(Cli::try_parse_from(["nyxid", "update", "auto", "run", "--from-source"]).is_err());
+    }
 
     #[test]
     fn ifttt_generated_node_setup_command_parses() {
@@ -4936,7 +5036,10 @@ pub enum NotificationCommands {
     },
     /// Update notification settings
     Update {
-        /// Enable/disable approval email notifications
+        /// Global approval: writes_only (default), all, or off
+        #[arg(long, value_parser = ["writes_only", "all", "off"], conflicts_with = "approval_email")]
+        approval_mode: Option<String>,
+        /// Legacy global approval toggle: true = all requests, false = off
         #[arg(long)]
         approval_email: Option<bool>,
         /// Enable/disable approval push notifications
@@ -5034,7 +5137,7 @@ pub enum ApprovalCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Enable approval protection globally (requires notification channel)
+    /// Require approval for all requests (select writes_only via notification update --approval-mode)
     Enable {
         #[command(flatten)]
         auth: AuthArgs,

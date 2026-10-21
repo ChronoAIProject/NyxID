@@ -2,6 +2,9 @@
 #[allow(dead_code)]
 #[path = "../../cli/src/tls.rs"]
 mod tls;
+#[cfg(unix)]
+#[path = "../../cli/src/commands/update_attestation/trusted_directory.rs"]
+mod trusted_directory;
 #[allow(dead_code)]
 #[path = "../../cli/src/commands/update_attestation.rs"]
 mod update_attestation;

@@ -142,6 +142,47 @@ async fn setup(
 ) -> (AppState, Captures, tokio::task::JoinHandle<()>) {
     setup_script(error, delay, Vec::new()).await
 }
+
+#[tokio::test]
+async fn new_user_nyxagent_chat_transport_completes_without_approval_preferences() {
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let mut auth = test_auth_user(OWNER);
+    auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+    auth.api_key_id = Some("new-user-assistant-agent".into());
+    let reply = tokio::time::timeout(Duration::from_secs(10), async {
+        let response = proxy_raw(
+            &state,
+            &auth,
+            "fixture-conversation-key",
+            "POST",
+            "v1/responses",
+            Some(json!({"input":"hello", "stream":true})),
+            Some("new-user-turn"),
+            Some(SERVER_TURN_POLICY),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        drain(response).await
+    })
+    .await
+    .expect("ordinary assistant chat must complete without an approval decision");
+    assert!(reply.contains("response.completed"));
+    assert_eq!(calls.lock().await.len(), 1);
+    for collection in ["notification_channels", "approval_requests"] {
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+        );
+    }
+    server.abort();
+}
+
 async fn setup_script(
     error: Option<(u16, &'static str)>,
     delay: Duration,

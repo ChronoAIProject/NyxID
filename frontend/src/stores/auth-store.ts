@@ -49,7 +49,7 @@ interface AuthState {
 interface AuthActions {
   readonly login: (email: string, password: string) => Promise<LoginResult>;
   readonly logout: () => Promise<void>;
-  readonly checkAuth: (options?: { ephemeral?: boolean }) => Promise<void>;
+  readonly checkAuth: (options?: { ephemeral?: boolean; requireSession?: boolean }) => Promise<void>;
   readonly setUser: (user: User | null) => void;
   readonly setMfaRequired: (required: boolean, token: string | null) => void;
   readonly clearMfaState: () => void;
@@ -115,7 +115,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  checkAuth: async ({ ephemeral = false } = {}): Promise<void> => {
+  checkAuth: async ({ ephemeral = false, requireSession = false } = {}): Promise<void> => {
     set({ isLoading: true });
     try {
       const user = ephemeral
@@ -141,6 +141,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       } else {
         set({ isLoading: false });
       }
+      if (requireSession) throw error;
     }
   },
 

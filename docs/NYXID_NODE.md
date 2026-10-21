@@ -245,7 +245,92 @@ nyxid node register --token nyx_nreg_... --keychain
 
 Keychain entries use `nyxid-node` as the service name, with `{node_id}/auth_token`, `{node_id}/signing_secret`, and `{node_id}/cred/{service_slug}` as account identifiers. Multiple nodes on the same machine do not collide.
 
-> **Note:** The keychain backend requires an active keychain daemon. On headless Linux servers without GNOME Keyring or KDE Wallet, use the file backend (the default).
+For an interactive desktop installation, select `--keychain` explicitly and use
+that supervisor user's native service: a macOS LaunchAgent in the Aqua login
+session or a Linux systemd user unit connected to its own `%t/bus`, ordered after
+`dbus.socket`. An unlocked desktop key service must be available to that user.
+The supervisor owns the key-service session; agent and browser jobs never inherit
+its bus address or credential environment.
+
+On headless Linux and separated root-supervisor machines, the default file backend
+works without a desktop key service. Keep the supervisor's config directory private
+and the worker identities distinct. A file-backed node does not contact Secret
+Service just to prove file custody. A locked or unavailable configured keychain
+refuses secret access; the daemon never silently switches storage, creates a new
+key, or treats a missing object as an access denial. To change an existing backend,
+use the explicit stopped-daemon migration below.
+
+Existing installed service definitions keep working. To opt into the new native
+key-service session binding, explicitly reinstall after upgrading (with the same
+`--profile` and `--config`):
+
+```bash
+nyxid node daemon install --force --profile work
+nyxid node daemon restart --profile work
+```
+
+Only install/reinstall renders the new definition. Start does not rewrite it, and
+migration accepts both the original and the new canonical definitions.
+
+### Credential custody and worker identities
+
+A per-user keychain does not isolate programs sharing its OS identity. The trusted
+credential supervisor must remain outside the command, secure-browser and developer-
+browser identities. On supported separated Linux nodes, the node makes real opens
+of its config and keyfile and the supported sibling profiles' keyfiles under each
+worker UID/GID and its selected supplementary groups. Keychain-backed nodes also
+create a public synthetic entry in the supervisor's actual OS key service, prove
+that it exists there, and attempt retrieval from every worker identity. Probe
+entries use `{node_id}/object/v1/custody/*`; they contain no node secret and are
+retired after the observation. The helper never reads actual credential values.
+
+File custody checks the complete supplied path before resolving aliases: every
+directory traversed, including parents inside intermediate symlink targets, must
+belong to root or the supervisor UID and disallow group/other writes unless
+sticky. The selected node directory must belong to the supervisor and disallow
+other writers; config/key files must be private regular files. Trusted platform
+aliases such as macOS `/var` and `/tmp` remain supported. A private destination
+does not make an alias under a writable non-sticky parent safe. Custody retains
+the same path spelling as later config readers and revalidates that traversal;
+canonicalizing only the custody path would hide those parents. Root and processes
+sharing the supervisor UID remain trusted and can change accepted paths.
+
+Only an expected OS permission error establishes denial. Successful access is
+reported as accessible; missing paths/objects, unavailable services, unfamiliar
+provider errors, invalid identities and timeouts remain unknown. Diagnostics contain
+fixed reasons and per-role metadata, never provider bodies or secret identifiers.
+The cache is separate for each context's actual identities: initial/context probes
+and identity changes refresh it, and a bounded monitor repeats every 60 seconds.
+Execution reads the cache; it does not launch a probe on each request. Expired
+observations cannot authorize separated execution. Machine status includes
+`credential_custody` outcomes for command, browser and developer roles; stale
+snapshots are unknown until the next daemon profile publication. The CLI helper
+executable must also be reachable by every worker identity: a binary installed
+inside a supervisor-only home cannot establish custody. Install it at the shared,
+administrator-controlled executable location used by the separated setup.
+
+Shared legacy and non-separated machines retain their existing execution behavior
+with a downgraded custody claim and an explicit warning that agent commands or
+browsers may access node tokens, signing secrets and stored credentials. A separated
+context instead refuses unverified custody with `node_custody_unverified` (12419)
+before a worker or browser effect. Signed job cancellation, turn stops and desktop
+close remain available when custody becomes unverified, with their existing
+signature, authority and scope checks. This is OS identity separation, with the shared
+kernel, supervisor and privileged-user limits described in the machine docs; it is
+not VM isolation. Independently configured profiles outside the supported default
+or machine-profile roots remain the operator's responsibility.
+
+Custody adds a prerequisite to separation evidence v4. Upgrade both backends and
+nodes before separated mode becomes available again: old backends refuse v4 node
+evidence, and new backends refuse v3 node evidence. Missing/null/false custody never
+becomes a successful observation. Existing `shared_legacy` assignments retain their
+stored mode; a failed separated request never falls back to shared legacy.
+
+After the backend upgrade, existing separated assignments pause until their nodes
+report supported v4 evidence. Their stored mode and capabilities stay unchanged;
+discovery and settings retain them with an unavailable reason. Upgrade and drain
+every backend replica before relying on this admission gate: older replicas may
+still trust the old support advertisement for an existing separated assignment.
 
 ---
 
@@ -614,10 +699,14 @@ and content they encounter can contain prompt injection. Workspace roots
 constrain file tools and command working directories; they do not sandbox a
 shell command.
 
-On a machine you already have access to, run:
+On a supported Linux host, install Chromium and the desktop prerequisites below.
+Follow the [credential custody executable prerequisite](#credential-custody-and-worker-identities):
+install `nyxid` in an administrator-controlled location every worker identity can
+execute, such as `/usr/local/bin/nyxid`, rather than inside a supervisor-private
+home. Then run:
 
 ```sh
-nyxid node setup --machine --computer
+sudo nyxid node setup --machine --computer --separate-users
 ```
 
 Without a token this prints an expiring pairing code and link. Open the link
@@ -628,6 +717,119 @@ profile's launchd or systemd daemon. `--profile NAME` isolates node identities.
 `--root DIR` can be repeated; the default workspace is `~/nyxid-workspace`.
 `--token` is supported for the page-generated command. Existing `register` and
 `daemon install` commands still work.
+
+New machine setups record `automatic` intent for new agent assignments. Setup
+confirms Linux Landlock ABI 6 or newer, the root supervisor and three distinct
+non-root users, the command seccomp filter, actual Landlock enforcement, and
+the configured Chromium's namespace/PID/network/seccomp sandbox under both
+browser users. A configured username or kernel version alone is insufficient.
+The browser probe uses a fresh profile and the actual executable, including its
+AppArmor attachment; Ubuntu's user-namespace restriction stays enabled.
+
+Evidence v4 holds the launched package browser with a pidfd and observes live
+sandboxed descendants through kernel PPid ancestry, all UID/GID values, NNP,
+additional seccomp filters, deeper NSpid membership, different UID/GID maps and
+a different namespace-specific net/dev inode. Process names and renderer-like
+arguments never establish ancestry. These are observations, not attestation of
+descendant executables or protection from browser/supervisor/kernel compromise.
+The probe needs neither DevTools nor a tracing capability. A container hiding
+required observations reports `separated_browser_sandbox_unobservable_in_container`
+and `managed_browser_sandbox: false`; use supported native Linux or a separate
+machine container/VM per agent instead of adding capabilities. It also
+positively verifies the secure policy's refusal of remote debugging and absence
+of a listener, and requires `credential_custody: true` from actual dropped-identity
+access checks against protected credential storage. Missing or failed custody
+returns `node_custody_unverified`; repair protected storage and rerun setup or
+the probe. Container preflight uses disposable public sentinels without creating
+node keys; registered native probes check actual node and sibling-profile
+custody. v1/v2/v3 and unknown reports cannot authorize new automatic/required
+assignments; existing stored assignments retain their mode.
+
+Linux setup detects the resolved browser and its package metadata before
+installing policies. Supported locations are Debian Chromium's
+`/etc/chromium/policies/managed`, the actual Ubuntu Snap Chromium binary's
+`/etc/chromium-browser/policies/managed`, and Google Chrome's
+`/etc/opt/chrome/policies/managed`. Unknown executable/package layouts stop with
+`managed_browser_policy_layout_unknown`; install a supported browser package
+and rerun setup. Setup never installs a policy-directory alias. A policy file
+alone is insufficient: `separated_browser_policy_not_effective` means the real
+secure browser did not prove its policy blocks DevTools. Reinstall managed
+policies for that executable and rerun; keep `RemoteDebuggingAllowed=false`.
+
+The setup page carries the reviewed choice into native `--separation` arguments
+or Docker's `NYXID_MACHINE_SEPARATION` environment variable. It preserves the
+capabilities you selected; it does not silently enable a browser to make probes
+pass. On a fresh Linux VM, install the managed browser and desktop prerequisites,
+select Browser if you intend to grant it, and run the generated native setup
+command with `sudo` and `--separate-users` to provision the required OS identities.
+For example, an explicitly required browser/files setup is:
+
+```sh
+sudo nyxid node setup --files --browser --separate-users --separation require-separated
+```
+
+| Setup option | New-assignment intent |
+|---|---|
+| Omitted on a new setup, or `--separation automatic` | Choose separated only after every supported mechanism is confirmed; otherwise explain the reason and offer an informed legacy choice when stdin and stderr are terminals. |
+| `--separation require-separated` | Require confirmed separation; never fall back to shared access. |
+| `--separation shared-legacy` | Explicitly accept shared legacy access after reviewing the warning below. |
+
+On macOS or another unsupported configuration, automatic setup prints the
+observed reason and the full warning below, then asks
+`Continue with shared legacy mode? [y/N]` when stdin **and** stderr are terminals.
+Only `y` records an explicit `shared_legacy` owner choice. No, an empty answer
+or EOF stops setup with a nonzero exit and retains automatic intent.
+`require-separated` never prompts. Noninteractive automatic setup also stops;
+its error names the reason and the exact `--separation shared-legacy` flag.
+Known missing prerequisites are handled before pairing. To deliberately
+use a single-user host in a script, run `nyxid node setup --machine --computer --separation
+shared-legacy`. **Shared legacy access gives agent commands the full access of
+their OS user. A misbehaving or prompt-injected agent may read node tokens,
+signing secrets and stored credentials accessible to that user, including the
+node config and local credential store. Workspace roots constrain file tools
+and working directories, not the shell. Supported separated contexts still
+share the host kernel and retain kernel-exploit and supervisor-compromise risks;
+they are not a VM boundary.** Use a separate machine container or VM per agent
+for stronger isolation; containers also share their host kernel.
+Supported `separated` mode retains the residual
+risks in [MACHINE_AGENT_ISOLATION.md](MACHINE_AGENT_ISOLATION.md).
+
+Probes have a five-second bound. `separated_probe_timeout` means the host did not
+confirm support in time; a cold Chromium start can cause this. Rerun setup when
+the host is less busy. Setup kills probe helpers and reaps the parent after
+success, failure or timeout. Failed automatic/required intent remains recorded
+so a retry cannot silently become legacy consent, and setup does not start the
+daemon after failed verification. Before registration, the private
+`machine-separation-choice.json` file retains pending intent without creating
+registration credentials. After registration, intent lives in `config.toml`.
+
+Rerunning setup against an enabled older machine preserves its absent intent
+unless `--separation` is supplied. Stored agent assignments always retain their
+mode. A selection records intent for future assignments; owner authorization
+and the existing feature gates still apply. `machine status` shows the recorded
+intent and cached probe reason without launching a browser. Upgrade the server
+to the W9.4 selection contract before relying on a node's advertised intent;
+older servers do not enforce the new selection field.
+
+After successful setup, `[machine].separation_choice` in the profile's
+`config.toml` stores `automatic`, `require_separated` or `shared_legacy` (the CLI
+uses hyphens). An older profile with no value stays unselected on an omitted-flag
+rerun. Before relying on these defaults, upgrade and drain every server replica,
+then deploy the matching UI and CLI/container versions. The server's durable
+W9.4 marker preserves only pre-cutover implicit NyxBot reachability under live
+ACLs; a newly added machine with no choice requires owner selection. Existing
+legacy assignments continue normally, and node intent never rewrites them.
+
+Assistant → Machines distinguishes confirmed support, unmet prerequisites and
+unknown evidence. A new or old support boolean alone is insufficient for a new
+separated assignment. Node settings say **Sharing set per agent** because one
+node can have legacy and separated assignments at the same time. Review the
+agent's **Shared legacy**, **Separate workspace and browser**, or **Owner
+selection required** label for its effective mode. Saved-login fills still bind
+to their approved context and profile generation; revocation quarantines the old
+profile before reuse. These controls do not establish VM-level isolation or move
+the credential service outside agent OS identities; see the [residuals and
+mechanisms](MACHINE_AGENT_ISOLATION.md#what-separated-does-and-does-not-guarantee).
 
 ```sh
 nyxid node machine enable                    # commands and files
@@ -687,7 +889,10 @@ sudo nyxid node setup --machine --computer --separate-users --root /srv/workspac
 
 Setup creates profile-specific users and a system supervisor service. The
 supervisor running as root does not authorize commands as root: children drop
-to the configured users. A single-user host remains supported.
+to the configured users. Per-agent separation additionally requires the live
+capability checks above. Single-user setups require explicit `--separation
+shared-legacy`; this flag does not remove browser/command OS-user separation
+from an existing `--separate-users` installation.
 
 ### Connected services, files and desktop
 
@@ -853,6 +1058,48 @@ docker run --rm --shm-size=1g \
 
 The setup page downloads this profile in its single copyable command, and
 `nyxid node docker start --machine` writes the embedded profile automatically.
+It accepts `--separation automatic|require-separated|shared-legacy` and forwards
+the choice as `NYXID_MACHINE_SEPARATION` to setup in the container. An omitted
+choice on a new container means automatic. Before creating a new container, the
+CLI runs the real probes in a disposable copy of the machine image with the
+same seccomp settings and no node identity or workspace volumes. Failed
+automatic selection offers the same default-No prompt on a terminal; scripts
+must explicitly pass `--separation shared-legacy` to accept the warning.
+Required separation always fails if support is unavailable. Setup checks again
+after provisioning. Existing containers and stored assignments keep their
+recorded choice; change an existing container's intent through `node setup`
+inside it rather than passing a new choice to Docker start/restart.
+
+The Docker CLI uses self-hosted registration and sets
+`NYXID_MACHINE_MANAGED=0`, including when its image reference is locally tagged
+with the node-only image. It forwards `NYXID_NODE_URL`, `NYXID_NODE_TOKEN` and
+configured CA certificates only to the selected node container. The probe gets
+none of these variables or certificate mounts. Image-declared anonymous volumes
+may be created for the probe; Docker removes them with its `--rm` container.
+Refused selection creates no named identity or workspace volume.
+
+For a profile named `work`, the machine container is `nyxid-node-machine-work`.
+Its named volumes are `nyxid-node-machine-work-state` at
+`/var/lib/nyxid-machine` and `nyxid-node-machine-work-workspace` at `/workspace`.
+The recorded choice is `[machine].separation_choice` in
+`/var/lib/nyxid-machine/node/config.toml`; the CLI does not mount or modify the
+host's `~/.nyxid-node/profiles/work` profile. `docker stop --machine` retains the
+stopped container so a subsequent start preserves its selection and identity.
+To retire it, remove that container explicitly; its named volumes remain until
+you explicitly remove them. If you remove the container but keep its volumes,
+the next start performs fresh preflight and requires an explicit legacy choice
+on an unsupported host before it can reopen a legacy identity.
+
+For a self-hosted browserless node-only image, explicitly set
+`NYXID_MACHINE_MANAGED=0` and `NYXID_MACHINE_SEPARATION=shared-legacy` after
+reviewing the warning above. Missing selection defaults to automatic and
+refuses before registration because this image has no managed Chromium;
+`require-separated` also refuses. Unknown or empty selections are rejected.
+Existing node-only config volumes retain their stored intent. **A separate
+container per agent is the recommended isolation model for node-only
+containers**; containers share the host kernel and do not provide a VM boundary.
+Full machine images also read `NYXID_MACHINE_SEPARATION` during first setup.
+
 The profile adds clone/unshare/setns to the Moby default; no additional
 capabilities are needed. Agent commands, file workers, cua and Chromium inherit
 NoNewPrivs. The container test verifies nested renderer namespaces, seccomp and

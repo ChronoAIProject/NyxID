@@ -512,6 +512,7 @@ pub struct AssistantNotificationsUpdateRequest {
     pub action_request_id: String,
     pub telegram_enabled: Option<bool>,
     pub approval_required: Option<bool>,
+    pub global_approval_mode: Option<crate::services::approval_policy::GlobalApprovalMode>,
     pub approval_timeout_secs: Option<u32>,
     pub grant_expiry_days: Option<u32>,
     pub push_enabled: Option<bool>,
@@ -1561,6 +1562,8 @@ enum Wave4Fingerprint<'a> {
     NotificationsUpdate {
         telegram_enabled: Option<bool>,
         approval_required: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        global_approval_mode: Option<crate::services::approval_policy::GlobalApprovalMode>,
         approval_timeout_secs: Option<u32>,
         grant_expiry_days: Option<u32>,
         push_enabled: Option<bool>,
@@ -3053,11 +3056,16 @@ async fn update_notifications_action(
     auth_user: AuthUser,
     Json(body): Json<AssistantNotificationsUpdateRequest>,
 ) -> AppResult<Json<AssistantNotificationResponse>> {
+    let requested_mode = crate::services::approval_policy::GlobalApprovalMode::from_update(
+        body.approval_required,
+        body.global_approval_mode,
+    )?;
     let actor = auth_user.user_id.to_string();
     let request_id = normalize_action_request_id(body.action_request_id)?;
     let fp = wave4_fingerprint(&Wave4Fingerprint::NotificationsUpdate {
         telegram_enabled: body.telegram_enabled,
         approval_required: body.approval_required,
+        global_approval_mode: body.global_approval_mode,
         approval_timeout_secs: body.approval_timeout_secs,
         grant_expiry_days: body.grant_expiry_days,
         push_enabled: body.push_enabled,
@@ -3085,9 +3093,7 @@ async fn update_notifications_action(
             let already_applied = body
                 .telegram_enabled
                 .is_none_or(|value| current.telegram_enabled == value)
-                && body
-                    .approval_required
-                    .is_none_or(|value| current.approval_required == value)
+                && requested_mode.is_none_or(|value| current.global_approval_mode == value)
                 && body
                     .approval_timeout_secs
                     .is_none_or(|value| current.approval_timeout_secs == value)
@@ -3116,6 +3122,7 @@ async fn update_notifications_action(
         Json(notifications::UpdateNotificationSettingsRequest {
             telegram_enabled: body.telegram_enabled,
             approval_required: body.approval_required,
+            global_approval_mode: body.global_approval_mode,
             approval_timeout_secs: body.approval_timeout_secs,
             grant_expiry_days: body.grant_expiry_days,
             push_enabled: body.push_enabled,
@@ -3447,6 +3454,122 @@ async fn connect_openclaw_action(
 mod wave4_effect_tests {
     use super::*;
     use chrono::Utc;
+
+    #[tokio::test]
+    async fn notification_interrupted_first_update_compares_modes_before_completing_receipt() {
+        use crate::models::assistant_action_receipt::{
+            AssistantActionReceipt, AssistantActionReceiptStatus, COLLECTION_NAME as RECEIPTS,
+        };
+        use crate::services::approval_policy::GlobalApprovalMode;
+        let db = crate::test_utils::connect_test_database("notification_first_update_receipt")
+            .await
+            .expect("real Mongo required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        for (legacy, mode) in [
+            (Some(true), None),
+            (None, Some(GlobalApprovalMode::All)),
+            (Some(false), None),
+        ] {
+            let actor = uuid::Uuid::new_v4().to_string();
+            let request = || AssistantNotificationsUpdateRequest {
+                action_request_id: "interrupted-first-update".to_string(),
+                telegram_enabled: None,
+                approval_required: legacy,
+                global_approval_mode: mode,
+                approval_timeout_secs: None,
+                grant_expiry_days: None,
+                push_enabled: None,
+            };
+            let fp = wave4_fingerprint(&Wave4Fingerprint::NotificationsUpdate {
+                telegram_enabled: None,
+                approval_required: legacy,
+                global_approval_mode: mode,
+                approval_timeout_secs: None,
+                grant_expiry_days: None,
+                push_enabled: None,
+            })
+            .unwrap();
+            let receipt = reserve_pending_wave4_receipt(
+                &db,
+                &actor,
+                NOTIFICATIONS_UPDATE_ACTION,
+                &request().action_request_id,
+                &fp,
+                actor.clone(),
+            )
+            .await;
+            // Crash after reservation, before a channel or settings update exists.
+            let result = update_notifications_action(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&actor),
+                Json(request()),
+            )
+            .await;
+            assert!(matches!(result, Err(AppError::Conflict(_))));
+            let persisted = db
+                .collection::<AssistantActionReceipt>(RECEIPTS)
+                .find_one(doc! {"_id": &receipt.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(persisted.status, AssistantActionReceiptStatus::Pending);
+            let Json(current) = notifications::get_settings(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&actor),
+            )
+            .await
+            .unwrap();
+            assert_eq!(current.global_approval_mode, GlobalApprovalMode::WritesOnly);
+            // Once the actual effect commits, the interrupted receipt can recover.
+            let Json(applied) = notifications::update_settings(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&actor),
+                Json(notifications::UpdateNotificationSettingsRequest {
+                    telegram_enabled: None,
+                    approval_required: legacy,
+                    global_approval_mode: mode,
+                    approval_timeout_secs: None,
+                    grant_expiry_days: None,
+                    push_enabled: None,
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                applied.global_approval_mode,
+                mode.unwrap_or_else(|| GlobalApprovalMode::from_stored(legacy))
+            );
+            let Json(replayed) = update_notifications_action(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&actor),
+                Json(request()),
+            )
+            .await
+            .unwrap();
+            assert!(replayed.replayed);
+            let persisted = db
+                .collection::<AssistantActionReceipt>(RECEIPTS)
+                .find_one(doc! {"_id": &receipt.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(persisted.status, AssistantActionReceiptStatus::Completed);
+            // Conflicting dual fields must fail even on a completed receipt.
+            let mut conflict = request();
+            conflict.approval_required = Some(true);
+            conflict.global_approval_mode = Some(GlobalApprovalMode::WritesOnly);
+            assert!(matches!(
+                update_notifications_action(
+                    State(state.clone()),
+                    crate::test_utils::test_auth_user(&actor),
+                    Json(conflict)
+                )
+                .await,
+                Err(AppError::ValidationError(_))
+            ));
+        }
+        db.drop().await.unwrap();
+    }
 
     async fn reserve_pending_wave4_receipt(
         db: &mongodb::Database,
@@ -5164,6 +5287,7 @@ mod wave4_effect_tests {
             action_request_id: "notifications-update-interrupted".to_string(),
             telegram_enabled: None,
             approval_required: None,
+            global_approval_mode: None,
             approval_timeout_secs: Some(75),
             grant_expiry_days: None,
             push_enabled: None,
@@ -5576,6 +5700,7 @@ mod wave4_effect_tests {
             Wave4Fingerprint::NotificationsUpdate {
                 telegram_enabled: Some(true),
                 approval_required: Some(true),
+                global_approval_mode: None,
                 approval_timeout_secs: Some(60),
                 grant_expiry_days: Some(30),
                 push_enabled: Some(false),

@@ -1127,7 +1127,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         ),
         (
             crate::models::nyxbot_channel::COLLECTION_NAME,
-            doc! {"user_id": 1, "channel_bot_id": 1},
+            doc! {"user_id": 1, "channel_bot_id": 1, "created_at": -1, "_id": -1},
             false,
         ),
         (
@@ -1277,6 +1277,20 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                     .build(),
             )
             .await?;
+    }
+    // Retire the prefix index only after its replacement has been created.
+    let channels = db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME);
+    let obsolete_keys = doc! {"user_id": 1, "channel_bot_id": 1};
+    let mut indexes = channels.list_indexes().await?;
+    while let Some(index) = indexes.try_next().await? {
+        // BSON document equality ignores key order; index identity does not.
+        if index.keys.iter().eq(obsolete_keys.iter())
+            && let Some(options) = index.options
+            && options.unique != Some(true)
+            && let Some(name) = options.name
+        {
+            channels.drop_index(name).await?;
+        }
     }
     for (collection, fields) in [
         (

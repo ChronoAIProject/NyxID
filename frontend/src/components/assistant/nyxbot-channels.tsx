@@ -23,6 +23,7 @@ import {
   useNyxBotChannels,
 } from "@/hooks/use-nyxbot-agents";
 import { agentTitle, channelPlatformName } from "@/lib/assistant/nyxbot-labels";
+import { nyxBotChannelError } from "@/lib/assistant/nyxbot-channel-errors";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils";
 import type {
   AssistantAgent,
@@ -130,6 +131,10 @@ export function ChannelBotsManager({
   }
 
   async function relink(row: NyxAgentChannelAgent, agentId: string) {
+    if (row.status === "failed") {
+      await requestLink(row.channel_bot_id, agentId);
+      return;
+    }
     if (agentId === agentOf(row)) return;
     setError(undefined);
     try {
@@ -167,6 +172,8 @@ export function ChannelBotsManager({
         <ul aria-label="Connected channel bots" className="space-y-2">
           {connected.map((row) => {
             const status = channelStatus[row.status];
+            const target = targets.find((candidate) => candidate.id === agentOf(row));
+            const live = row.status === "pending" || row.status === "active";
             return (
               <li key={row.id} className="space-y-2 rounded-lg border border-border px-3 py-2.5">
                 <div className="flex items-start justify-between gap-3 @max-[480px]/channel-bots:flex-col">
@@ -199,7 +206,12 @@ export function ChannelBotsManager({
                   />
                 </div>
                 {row.last_error ? (
-                  <p className="text-11 text-destructive">Last error: {row.last_error}</p>
+                  <div className="space-y-1">
+                    <p className="text-11 text-destructive">
+                      Last error: {nyxBotChannelError(row.last_error)}
+                    </p>
+                    <p className="text-11 text-text-tertiary">{row.last_error}</p>
+                  </div>
                 ) : null}
                 {!row.owner_linked && row.inbound_hint ? (
                   <p className="text-11 text-muted-foreground">{row.inbound_hint}</p>
@@ -216,7 +228,7 @@ export function ChannelBotsManager({
                     .
                   </p>
                 ) : null}
-                {row.status === "failed" ? null : (
+                {live ? (
                   <ChannelChats
                     channel={row}
                     agents={targets}
@@ -225,7 +237,7 @@ export function ChannelBotsManager({
                       return current ? agentLabel(current) : "NyxBot";
                     })()}
                   />
-                )}
+                ) : null}
                 {confirming === row.id ? (
                   <div className="flex flex-wrap items-center justify-end gap-2 rounded-lg bg-overlay px-3 py-2">
                     <span className="mr-auto text-12 text-muted-foreground">
@@ -245,14 +257,25 @@ export function ChannelBotsManager({
                   </div>
                 ) : (
                   <div className="flex justify-end gap-1.5 @max-[480px]/channel-bots:flex-wrap">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={busy}
-                      onClick={() => void requestLink(row.channel_bot_id, agentOf(row))}
-                    >
-                      {row.owner_linked ? "Link another account" : "Link account"}
-                    </Button>
+                    {row.status === "failed" ? (
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        disabled={busy || !target}
+                        onClick={() => void requestLink(row.channel_bot_id, target?.id)}
+                      >
+                        Reconnect
+                      </Button>
+                    ) : live ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() => void requestLink(row.channel_bot_id, agentOf(row))}
+                      >
+                        {row.owner_linked ? "Link another account" : "Link account"}
+                      </Button>
+                    ) : null}
                     <Button
                       size="sm"
                       variant="ghost"

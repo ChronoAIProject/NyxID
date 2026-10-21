@@ -46,6 +46,8 @@ export function Hero() {
       } else {
         const script = document.createElement("script");
         script.src = UNICORN_STUDIO_URL;
+        script.integrity = "sha384-d4dK+IxZvJP37ZvNJlZpz+rkiHpujVljmMBVKJ+r44LntdS4wpq0/NG3/XV9wM43";
+        script.crossOrigin = "anonymous";
         script.onload = () => setTimeout(tryInit, 500);
         document.head.appendChild(script);
       }

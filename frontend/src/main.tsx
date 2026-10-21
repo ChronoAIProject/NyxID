@@ -1,3 +1,4 @@
+import "./lib/zod-csp";
 import "./lib/platform-personal-handoff";
 import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
 import { StrictMode, useState, useEffect } from "react";

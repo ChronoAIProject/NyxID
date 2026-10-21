@@ -596,6 +596,12 @@ pub async fn llm_proxy_request(
         owner_for_approval.as_deref(),
         is_auto_connected_for_approval,
         llm_scope.guest,
+        crate::services::mcp_service::http_carries_method_override(
+            method.as_str(),
+            &headers,
+            query.as_deref(),
+            &body_bytes,
+        ),
     )
     .await?;
 
@@ -1357,6 +1363,12 @@ async fn gateway_provider_request(
         effective_owner_for_approval.as_deref(),
         is_auto_connected_for_approval,
         llm_scope.guest,
+        crate::services::mcp_service::http_carries_method_override(
+            method.as_str(),
+            &headers,
+            query.as_deref(),
+            &body_bytes,
+        ),
     )
     .await?;
 
@@ -2506,10 +2518,12 @@ async fn check_llm_approval(
     service_owner_user_id: Option<&str>,
     is_auto_connected: bool,
     operation_guest: bool,
+    method_override: bool,
 ) -> AppResult<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
-    let operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
+    let mut operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
+    operation_descriptor::apply_inference_contract(&mut operation, service, body, method_override);
     let (approval_outcome, automatic) = approval_service::evaluate_for_chat(
         &state.db,
         &approval_owner_user_id,
@@ -2753,6 +2767,146 @@ mod tests {
         extract::{Path, State},
         http::Request,
     };
+
+    #[tokio::test]
+    async fn new_user_stateless_llm_generation_does_not_wait_or_create_approval_settings() {
+        use crate::models::downstream_service::{
+            InferenceWireProtocol, ServiceInference, test_helpers::dummy_service,
+        };
+        use mongodb::bson::doc;
+        let db = crate::test_utils::connect_test_database("llm_default_read_generation")
+            .await
+            .expect("real Mongo required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut auth = crate::test_utils::test_auth_user(&owner);
+        auth.auth_method = AuthMethod::ApiKey;
+        auth.api_key_id = Some("new-user-llm-agent".into());
+        let mut service = dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.inference = Some(ServiceInference {
+            wire_protocol: InferenceWireProtocol::OpenaiCompletions,
+            model_list: true,
+            realtime: false,
+            voice: None,
+        });
+        let payload = br#"{"model":"test-model","messages":[{"role":"user","content":"hello"}]}"#;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            super::check_llm_approval(
+                &state,
+                &auth,
+                &service.id,
+                &service,
+                "chat/completions",
+                "POST",
+                Some(payload),
+                None,
+                false,
+                false,
+                false,
+            ),
+        )
+        .await
+        .expect("stateless inference must not wait for approval")
+        .unwrap();
+        for collection in ["approval_requests", "notification_channels"] {
+            assert_eq!(
+                db.collection::<mongodb::bson::Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+
+        // The ordinary read above is safe, but a caller-supplied method
+        // override must require write approval before any provider work.
+        db.collection::<crate::models::user::User>("users")
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            "downstream_services",
+        )
+        .insert_one(&service)
+        .await
+        .unwrap();
+        let method_override = crate::services::mcp_service::http_carries_method_override(
+            "GET",
+            &axum::http::HeaderMap::new(),
+            Some("_method=DELETE"),
+            &[],
+        );
+        assert!(method_override);
+        let request = super::check_llm_approval(
+            &state,
+            &auth,
+            &service.id,
+            &service,
+            "models",
+            "GET",
+            None,
+            None,
+            false,
+            false,
+            method_override,
+        );
+        tokio::pin!(request);
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::select! {
+                result = &mut request => panic!(
+                    "method override completed before write approval (error: {})",
+                    result.is_err()
+                ),
+                pending = async {
+                    loop {
+                        if let Some(row) = db
+                            .collection::<crate::models::approval_request::ApprovalRequest>("approval_requests")
+                            .find_one(doc! {"service_id": &service.id, "status": "pending"})
+                            .await
+                            .unwrap()
+                        {
+                            break row;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                } => pending,
+            }
+        })
+        .await
+        .expect("method override must persist a pending approval");
+        assert_eq!(pending.user_id, owner);
+        assert_eq!(pending.verb.as_deref(), Some("write"));
+        let axum::Json(decision) = crate::handlers::approvals::decide_request(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&owner),
+            Path(pending.id),
+            Default::default(),
+            axum::http::HeaderMap::new(),
+            axum::Json(crate::handlers::approvals::DecideRequest {
+                approved: false,
+                duration_sec: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(decision.status, "rejected");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), request)
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(AppError::ApprovalFailed { .. })));
+        let channel = db
+            .collection::<mongodb::bson::Document>("notification_channels")
+            .find_one(doc! {"user_id": &owner})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!channel.contains_key("approval_required"));
+    }
 
     #[tokio::test]
     async fn gateway_provider_selection_batches_grants_and_reuses_primary_and_fallback_providers() {

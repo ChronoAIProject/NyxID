@@ -754,6 +754,9 @@ async fn org_credential_request(platform_key: bool) {
     create_usage_index(&db).await;
     insert_fresh_rates(&db).await;
     let actor = insert_owner(&db).await;
+    // Keep payer/rollout assertions independent of the actor approval preference.
+    crate::test_utils::set_test_approval_preference(&db, &actor, false).await;
+
     let org = Uuid::new_v4().to_string();
     db.collection::<User>(USERS)
         .insert_one(test_user(&org, UserType::Org))
