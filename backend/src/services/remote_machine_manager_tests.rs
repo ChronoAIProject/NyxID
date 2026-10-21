@@ -370,7 +370,13 @@ async fn finalized_delete_scan_is_bounded_and_rotates_blocked_tombstones_indepen
         let evidence_id = uuid::Uuid::new_v4().to_string();
         tombstone.cleanup_evidence_digest = Some(evidence_id.clone());
         tombstone.delete_recovery = Some(DeleteRecoveryProgress {
-            evidence_version: crate::services::remote_machine_delete_recovery::EVIDENCE_VERSION,
+            // Old successful rows must enter the same fair, read-only scan
+            // so the versioned object contract can be freshly observed.
+            evidence_version: if index % 2 == 0 {
+                1
+            } else {
+                crate::services::remote_machine_delete_recovery::EVIDENCE_VERSION
+            },
             evidence_id,
             operation_id: tombstone.active_operation_id.clone().unwrap(),
             owner_id: tombstone.owner_id.clone(),
@@ -399,7 +405,7 @@ async fn finalized_delete_scan_is_bounded_and_rotates_blocked_tombstones_indepen
                 sandbox_generation: 0,
                 sandbox_resource_version: String::new(),
             }),
-            storage: DeleteStorageDisposition::ControlPlaneReleased,
+            storage: DeleteStorageDisposition::SandboxCascadeObserved,
             creation_terminal: true,
             resources_complete: true,
             blocker: None,
@@ -1395,7 +1401,7 @@ async fn manager_overdue_cleanup_notifies_once_and_preserves_pending_resources()
         .unwrap()
         .unwrap();
     assert!(operation.terminal_at.is_none());
-    assert_eq!(operation.error_code.as_deref(), Some("cleanup_overdue"));
+    assert!(operation.error_code.is_none());
     assert_eq!(f.db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
         .count_documents(doc!{"event_type":"machine_cleanup_overdue_operator_action","event_data.operation_id":operation_id})
         .await.unwrap(),1);
@@ -1643,14 +1649,20 @@ async fn mount_owned_resources(f: &Fixture, machine: &ManagedMachine, suspended:
             object["status"] = json!({"phase":if resource == "pods" {"Running"} else {"Bound"}});
             object
         });
-        let items: Vec<_> = object.iter().cloned().collect();
+        let items: Vec<_> = object
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                let fields = item.as_object_mut().unwrap();
+                fields.remove("kind");
+                fields.remove("apiVersion");
+                item
+            })
+            .collect();
         if resource == "pods" {
             Mock::given(method("GET"))
                 .and(path("/api/v1/pods"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "kind":"PodList","apiVersion":"v1",
-                    "metadata":{"resourceVersion":"17"},"items":items,
-                })))
+                .respond_with(ResponseTemplate::new(403))
                 .mount(&f.server)
                 .await;
         }
@@ -1680,7 +1692,6 @@ async fn mount_owned_resources(f: &Fixture, machine: &ManagedMachine, suspended:
     Mock::given(method("GET")).and(path("/api/v1/persistentvolumes"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "kind":"PersistentVolumeList","apiVersion":"v1","metadata":{"resourceVersion":"17"},"items":[{
-                "kind":"PersistentVolume","apiVersion":"v1",
                 "metadata":{"name":pv_name,"uid":machine.native_pv_uid.as_deref().unwrap_or(&machine.node_id),"resourceVersion":"13"},
                 "spec":{"claimRef":{"uid":machine.pvc_uid,"name":pvc_name,"namespace":machine.sandbox_namespace},"persistentVolumeReclaimPolicy":"Delete"},"status":{"phase":"Bound"}
             }]
@@ -2249,7 +2260,9 @@ async fn manager_async_stage_entries_have_bounded_inline_futures() {
         "size-fixture-sandbox",
     ))
     .unwrap();
+    let mut delete_snapshot = f.machine.clone();
     let sizes = [
+        std::mem::size_of_val(&f.manager.observe_delete_resource(&mut delete_snapshot)),
         std::mem::size_of_val(&f.manager.observe(&f.machine)),
         std::mem::size_of_val(&f.manager.observe_resource(&f.machine)),
         std::mem::size_of_val(&f.manager.record_observation(&f.machine, &observed)),

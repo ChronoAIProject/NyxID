@@ -851,6 +851,63 @@ pub fn log_reported_usage_async(context: UsageAuditContext, usage: ReportedLlmUs
     );
 }
 
+/// Inference execution endpoints, independent of price/capture configuration.
+pub(crate) fn inference_service(
+    service: &crate::models::downstream_service::DownstreamService,
+) -> bool {
+    service.inference.is_some()
+        || (service.slug.starts_with("llm-") && service.provider_config_id.is_some())
+}
+
+pub(crate) fn model_execution(
+    inference: bool,
+    method: &str,
+    path: &str,
+    websocket_upgrade: bool,
+) -> bool {
+    let path = path
+        .split('?')
+        .next()
+        .unwrap_or(path)
+        .trim_start_matches('/');
+    if inference
+        && method == "GET"
+        && websocket_upgrade
+        && (path == "realtime" || path.ends_with("/realtime"))
+    {
+        return true;
+    }
+    if !inference || method != "POST" {
+        return false;
+    }
+    let path = path.trim_start_matches('/');
+    [
+        "chat/completions",
+        "completions",
+        "responses",
+        "responses/compact",
+        "messages",
+        "embeddings",
+        "images/generations",
+        "images/edits",
+        "images/variations",
+        "audio/transcriptions",
+        "audio/translations",
+        "audio/speech",
+    ]
+    .iter()
+    .any(|suffix| path == *suffix || path.ends_with(&format!("/{suffix}")))
+        || [
+            ":generateContent",
+            ":streamGenerateContent",
+            ":predict",
+            ":embedContent",
+            ":batchEmbedContents",
+        ]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1684,5 +1741,78 @@ mod tests {
             )
             .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod model_execution_tests {
+    use super::model_execution;
+    #[test]
+    fn provider_linked_gateway_service_remains_inference_without_catalog_metadata() {
+        let mut service = crate::test_utils::test_auto_connected_catalog_service();
+        service.inference = None;
+        service.slug = "llm-provider".into();
+        service.provider_config_id = Some("provider".into());
+        assert!(super::inference_service(&service));
+        assert!(model_execution(
+            super::inference_service(&service),
+            "POST",
+            "/v1/responses",
+            false
+        ));
+        service.slug = "telnyx".into();
+        assert!(!model_execution(
+            super::inference_service(&service),
+            "POST",
+            "/v2/messages",
+            false
+        ));
+    }
+    #[test]
+    fn execution_requires_inference_semantics_and_execution_endpoint() {
+        assert!(!model_execution(false, "POST", "/v2/messages", false));
+        assert!(!model_execution(true, "GET", "/v1/models", false));
+        assert!(!model_execution(true, "POST", "/models/list", false));
+        assert!(model_execution(
+            true,
+            "GET",
+            "/v1/realtime?model=audio",
+            true
+        ));
+        assert!(!model_execution(true, "GET", "/v1/realtime", false));
+        assert!(!model_execution(false, "GET", "/v1/realtime", true));
+        assert!(!model_execution(
+            true,
+            "GET",
+            "/v1/realtime/client_secrets",
+            true
+        ));
+        assert!(model_execution(
+            true,
+            "POST",
+            "/v1/images/variations",
+            false
+        ));
+        assert!(model_execution(
+            true,
+            "POST",
+            "/v1beta/models/alias:embedContent",
+            false
+        ));
+        assert!(model_execution(
+            true,
+            "POST",
+            "/v1beta/models/alias:batchEmbedContents",
+            false
+        ));
+        // Requests pricing and disabled token capture do not change execution.
+        assert!(model_execution(true, "POST", "/v1/messages", false));
+        assert!(model_execution(true, "POST", "/v1/responses", false));
+        assert!(model_execution(
+            true,
+            "POST",
+            "/v1beta/models/alias:generateContent",
+            false
+        ));
     }
 }

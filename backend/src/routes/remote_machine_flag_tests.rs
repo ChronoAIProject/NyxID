@@ -669,7 +669,46 @@ async fn flag_runtime_rate_writes_require_human_admin_and_personal_enable_while_
         set_enabled(&f.db, person, true).await;
     }
     let id = Uuid::parse_str(&admin).unwrap();
-    let external = jwt::generate_oauth_access_token(
+    let external_client = "external-fixture";
+    let now = chrono::Utc::now();
+    f.db.collection::<crate::models::oauth_client::OauthClient>(
+        crate::models::oauth_client::COLLECTION_NAME,
+    )
+    .insert_one(crate::models::oauth_client::OauthClient {
+        id: external_client.into(),
+        client_name: "Runtime rate human-only fixture".into(),
+        client_secret_hash: String::new(),
+        redirect_uris: vec![],
+        allowed_scopes: "read write".into(),
+        scope_provenance: Default::default(),
+        grant_types: "authorization_code".into(),
+        client_type: "public".into(),
+        is_active: true,
+        delegation_scopes: String::new(),
+        default_service_catalog_slugs: vec![],
+        broker_capability_enabled: false,
+        revocation_webhook_url: None,
+        revocation_webhook_secret_encrypted: None,
+        connection_webhook_url: None,
+        connection_webhook_secret_encrypted: None,
+        connection_webhook_key_id: None,
+        connection_webhook_enabled: false,
+        created_by: None,
+        created_at: now,
+        updated_at: now,
+    })
+    .await
+    .unwrap();
+    let consent = crate::services::consent_service::grant_consent(
+        &f.db,
+        &admin,
+        external_client,
+        "read write",
+    )
+    .await
+    .unwrap();
+    let reference = crate::services::consent_service::protected_reference(&consent).unwrap();
+    let external = jwt::generate_oauth_access_token_with_consent(
         &f.state.jwt_keys,
         &f.state.config,
         &id,
@@ -679,9 +718,16 @@ async fn flag_runtime_rate_writes_require_human_admin_and_personal_enable_while_
         None,
         None,
         None,
-        "external-fixture",
+        external_client,
+        Some(&reference),
     )
     .unwrap();
+    let claims = jwt::verify_token(&f.state.jwt_keys, &f.state.config, &external).unwrap();
+    crate::services::oauth_token_authority_service::validate_claims(&f.db, &claims)
+        .await
+        .expect(
+            "external fixture must have live OAuth authority before testing the human-only gate",
+        );
     let delegated = jwt::generate_delegated_access_token(
         &f.state.jwt_keys,
         &f.state.config,

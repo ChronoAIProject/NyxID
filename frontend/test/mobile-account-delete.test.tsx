@@ -23,6 +23,7 @@ function harness() {
     error: "validation_error", error_code: 1000, message: "Fixture denial after request capture",
   }), { status: 400, headers: { "Content-Type": "application/json" } }));
   const cache = new Map<string, Record<string, unknown>>();
+  const deviceStorage = new Map<string, string>();
   const box = ({ children }: NativeProps) => <div>{children}</div>;
   const native = {
     Alert: { alert: (title: string, message: string, buttons: NativeButton[]) => alerts.push({ title, message, buttons }) },
@@ -56,13 +57,18 @@ function harness() {
         if (name === "react/jsx-runtime") return jsxRuntime;
         if (name === "@tanstack/react-query") return query;
         if (name === "react-native") return native;
+        if (name === "@react-native-async-storage/async-storage") return { __esModule: true, default: {
+          getItem: async (key: string) => deviceStorage.get(key) ?? null,
+          setItem: async (key: string, value: string) => { deviceStorage.set(key, value); },
+          removeItem: async (key: string) => { deviceStorage.delete(key); },
+        } };
         if (name === "react-native-svg") return { __esModule: true, default: box, Circle: () => null, Path: () => null };
         if (name === "expo-linear-gradient") return { LinearGradient: box };
         if (name === "expo-constants") return { __esModule: true, default: { expoConfig: { version: "test" } } };
         if (name.endsWith("/ThemeContext")) return { useTheme: () => ({ colors: load(resolve(mobileRoot, "theme/mobileTheme.ts")).darkColors, mode: "dark", preference: "dark", setPreference: vi.fn() }) };
         if (name.endsWith("/AuthSessionContext")) return { useAuthSession: () => ({ signOut: vi.fn() }) };
         if (name.endsWith("/useNetworkStatus")) return { useNetworkStatus: () => ({ isConnected: true, recheckConnection: vi.fn() }) };
-        if (name.endsWith("/sessionStore")) return { loadStoredAuthSession: async () => ({ accessToken: "fixture-token" }), clearStoredAuthSession: vi.fn(), persistAuthSession: vi.fn() };
+        if (name.endsWith("/sessionStore")) return { loadStoredAuthSession: async () => ({ accessToken: "fixture-token" }), clearStoredAuthSession: vi.fn(), persistAuthSession: vi.fn(), authSessionGeneration: () => 0, commitRefreshedAuthSession: vi.fn() };
         if (name.endsWith("/telemetry")) return { capture: vi.fn() };
         if (name.endsWith("/pushNotifications")) return { activatePushAfterLogin: vi.fn() };
         if (name.endsWith("/errorMessages")) return { resolveErrorMessage: vi.fn() };
@@ -86,7 +92,8 @@ function harness() {
   const client = new query.QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity }, mutations: { retry: false } } });
   client.setQueryData(["account", "profile"], { id: "owner", display_name: "Owner", email: "owner@example.test" });
   client.setQueryData(["account", "notificationSettings"], { push_device_count: 1, push_enabled: true, telegram_connected: false });
-  render(<query.QueryClientProvider client={client}><AccountSettingsScreen navigation={{ navigate: vi.fn() }} /></query.QueryClientProvider>);
+  const MobileConsentProvider = load(resolve(mobileRoot, "lib/consent.tsx")).MobileConsentProvider as React.ComponentType<React.PropsWithChildren>;
+  render(<query.QueryClientProvider client={client}><MobileConsentProvider><AccountSettingsScreen navigation={{ navigate: vi.fn() }} /></MobileConsentProvider></query.QueryClientProvider>);
   return { alerts, transport, client };
 }
 
@@ -129,7 +136,7 @@ describe("actual mobile account deletion confirmation", () => {
     await act(async () => alerts[0]!.buttons.find((button) => button.style === "destructive")!.onPress!());
     await waitFor(() => expect(transport).toHaveBeenCalledWith("https://mobile.example.test/api/v1/users/me", expect.objectContaining({
       method: "DELETE",
-      headers: expect.objectContaining({ "X-NyxID-Account-Deletion-Policy": "machine-data" }),
+      headers: expect.objectContaining({ "X-NyxID-Account-Deletion-Policy": "machine-data-provider-revocation-v2" }),
     })));
     client.clear();
   });

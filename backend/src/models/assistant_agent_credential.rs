@@ -6,6 +6,8 @@ pub const COLLECTION_NAME: &str = "assistant_agent_credentials";
 /// NyxAgent binds context to the original key. Never serialize this model to an API.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantAgentCredential {
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,

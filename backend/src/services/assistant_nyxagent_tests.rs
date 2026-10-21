@@ -5177,6 +5177,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
     };
     let watch = AsyncServiceOperation {
+        secret_context_versions: Default::default(),
         id: "watch".into(),
         user_id: row.user_id.clone(),
         conversation_id: row.id.clone(),

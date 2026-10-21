@@ -394,8 +394,8 @@ pub(crate) fn validate_body(operation: &PublicModelOperation, body: &[u8]) -> Ap
         || object.get("stream").is_some_and(|v| !v.is_boolean())
         || object.get("tools").is_some_and(|v| {
             !(fixed_tools(operation.protocol).is_ok_and(|expected| v == &expected)
-                || operation.protocol == PublicModelProtocol::OpenAiResponses
-                    && is_local_compaction(&value))
+                || (operation.protocol == PublicModelProtocol::OpenAiResponses
+                    && is_local_compaction(&value)))
         })
         || (value["instructions"] == super::platform_public_tools::COMPACT_INSTRUCTIONS
             && !is_local_compaction(&value))

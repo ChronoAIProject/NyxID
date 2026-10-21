@@ -181,7 +181,9 @@ async fn disable_credentials_in_session(
 
 /// Retire one snapshot while writing the inactive owner. The final transaction
 /// revokes ordinary credentials before releasing the reactivation barrier.
-async fn retire_batch(db: &Database, owner: &str, deleted: bool) -> AppResult<bool> {
+pub(crate) async fn retire_batch(db: &Database, owner: &str, deleted: bool) -> AppResult<bool> {
+    let durable = super::transaction_service::durable_database(db);
+    let db = &durable;
     let users = db.collection::<Document>(crate::models::user::COLLECTION_NAME);
     let Some(user) = users
         .find_one(doc! {"_id": owner, "is_active": false,
@@ -217,6 +219,8 @@ async fn retire_batch(db: &Database, owner: &str, deleted: bool) -> AppResult<bo
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
         .and_run((db, owner, deleted), |session, (db, owner, deleted)| {
             Box::pin(async move {
                 let result: AppResult<bool> = async {
@@ -336,6 +340,63 @@ pub async fn recover_pending(db: &Database, limit: usize) -> AppResult<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn no_personal_state_completion_uses_majority_effects_and_evidence() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{Arc, Mutex};
+        let commands = Arc::new(Mutex::new(Vec::<Document>::new()));
+        let recorded = commands.clone();
+        let db = crate::test_utils::connect_test_database_with_command_handler(
+            "personal_retirement_durability",
+            EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event {
+                    recorded.lock().unwrap().push(event.command);
+                }
+            }),
+        )
+        .await
+        .expect("isolated MongoDB required");
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id":&owner,"is_active":false,"platform_personal_retirement_pending":true,
+                "platform_personal_deleting":true,"platform_personal_effect_revision":1_i64,
+            })
+            .await
+            .unwrap();
+        commands.lock().unwrap().clear();
+        assert!(retire_batch(&db, &owner, true).await.unwrap());
+        // Lost scheduler checkpoint: rerunning reads the committed marker.
+        assert!(
+            retire_batch(&db.client().database(db.name()), &owner, true)
+                .await
+                .unwrap()
+        );
+        let observed = commands.lock().unwrap().clone();
+        let reads: Vec<_> = observed.iter().filter(|c| c.contains_key("find")).collect();
+        assert!(!reads.is_empty());
+        for read in reads {
+            assert_eq!(
+                read.get_document("readConcern")
+                    .unwrap()
+                    .get_str("level")
+                    .unwrap(),
+                "majority"
+            );
+        }
+        let update = observed.iter().find(|c| c.contains_key("update")).unwrap();
+        assert_eq!(
+            update
+                .get_document("writeConcern")
+                .unwrap()
+                .get_str("w")
+                .unwrap(),
+            "majority"
+        );
+        drop(observed);
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn disable_and_reenable_cannot_restore_previous_personal_consent() {
         let (db, update, owner) = bindings::tests::fixture("personal_owner_retirement").await;
@@ -750,7 +811,7 @@ mod tests {
             retired.revocation_reason,
             Some(crate::models::platform_personal_binding::PersonalRevocationReason::OwnerDeleted)
         );
-        super::super::admin_user_service::delete_current_user_cascade(
+        crate::test_utils::accept_and_process_owner_erasure(
             &db,
             &owner,
             super::super::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,

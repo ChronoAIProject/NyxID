@@ -884,6 +884,7 @@ async fn run_billing_route_coverage_smoke() {
                         .to_string(),
                     digest: execution_authority_digest,
                 }),
+                optional_provider_authority_digest: None,
                 redemption: None,
             }),
             created_at: now,
@@ -2223,6 +2224,7 @@ async fn insert_route_node(state: &crate::AppState, owner_id: &str, name: &str) 
         status: NodeStatus::Online,
         auth_token_hash: crate::crypto::token::hash_token("billing-route-node-token"),
         signing_secret_encrypted: None,
+        signing_secret_context_version: None,
         signing_secret_hash: String::new(),
         last_heartbeat_at: Some(now),
         connected_at: Some(now),
@@ -2531,6 +2533,7 @@ async fn insert_llm_route_service(
 ) -> DownstreamService {
     let now = Utc::now();
     let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
         id: Uuid::new_v4().to_string(),
         slug: "deepseek".to_string(),
         name: "DeepSeek".to_string(),
@@ -2596,6 +2599,7 @@ async fn insert_llm_route_service(
     .await;
     db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
         .insert_one(UserProviderToken {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),
             provider_config_id: provider.id,

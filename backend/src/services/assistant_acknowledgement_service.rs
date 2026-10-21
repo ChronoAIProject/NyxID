@@ -1474,6 +1474,7 @@ pub(crate) async fn fence(
     ApiKey,
     Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
 )> {
+    super::erasure_admission::fence_in_session(db, &chat.user_id, session).await?;
     if !super::assistant_invocation_service::fence_in_session(
         db,
         session,

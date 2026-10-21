@@ -4447,6 +4447,7 @@ dependencies = [
  "serde-saphyr",
  "serde_bytes",
  "serde_json",
+ "serde_urlencoded",
  "sha1 0.10.6",
  "sha2 0.10.9",
  "siphasher",
@@ -4571,6 +4572,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -7589,6 +7591,7 @@ dependencies = [
  "sha2 0.10.9",
  "url",
  "urlencoding",
+ "zeroize",
 ]
 
 [[package]]

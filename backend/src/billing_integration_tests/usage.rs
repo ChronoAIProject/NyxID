@@ -19,6 +19,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         wallet_id: Some("wallet".into()),
         actor_user_id: owner.to_string(),
         api_key_id: None,
+        assistant_source: None,
         user_service_id: None,
         service_id: Some("service".into()),
         service_slug: Some("llm-test".into()),

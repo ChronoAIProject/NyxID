@@ -63,6 +63,64 @@ struct SourceFixture {
     endpoint_id: String,
 }
 
+async fn move_source_to_org(
+    f: &crate::services::assistant_authority_tests::Fixture,
+    org: &str,
+    instance: &str,
+    endpoint: &str,
+    key: &crate::models::user_api_key::UserApiKey,
+) {
+    use crate::services::{credential_record_service as records, service_history};
+    let mut rebound = records::rebind_key_owner(&f.state.encryption_keys, key, org)
+        .await
+        .unwrap();
+    rebound.insert("user_id", org);
+    service_history::transaction::run(&f.state.db, async |tx| {
+        let keys = service_history::collection::<bson::Document>(&f.state.db, "user_api_keys")
+            .update_one(
+                doc! {"_id":&key.id,"user_id":&key.user_id},
+                doc! {"$set":rebound.clone()},
+            )
+            .session(tx)
+            .await?;
+        assert_eq!(keys.matched_count, 1);
+        for (collection, id) in [("user_services", instance), ("user_endpoints", endpoint)] {
+            service_history::collection::<bson::Document>(&f.state.db, collection)
+                .update_one(
+                    doc! {"_id":id,"user_id":&key.user_id},
+                    doc! {"$set":{"user_id":org}},
+                )
+                .session(tx)
+                .await?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let moved = user_api_key_service::get_api_key(&f.state.db, org, &key.id)
+        .await
+        .unwrap();
+    let raw = records::CredentialRecord::key(&moved)
+        .text(
+            &f.state.encryption_keys,
+            "credential_encrypted",
+            moved.credential_encrypted.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(raw.as_str(), "fixture-token");
+    assert!(
+        records::CredentialRecord::key(key)
+            .text(
+                &f.state.encryption_keys,
+                "credential_encrypted",
+                moved.credential_encrypted.as_deref().unwrap()
+            )
+            .await
+            .is_err()
+    );
+}
+
 async fn source_fixture(prefix: &str, source_reads: u64, media_reads: u64) -> SourceFixture {
     let f = crate::services::assistant_authority_tests::orchestrator_fixture(prefix).await;
     let server = MockServer::start().await;
@@ -288,13 +346,16 @@ async fn resource_source_hook_direct_and_wrapped_calls_retain_one_image_and_rech
         )
         .await
         .unwrap();
-    let encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(b"replacement-token")
-        .await
-        .unwrap();
-    f.state.db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME).update_one(doc!{"_id":&key.id},doc!{"$set":{"credential_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
+    user_api_key_service::update_api_key(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &key.id,
+        None,
+        Some("replacement-token"),
+    )
+    .await
+    .unwrap();
     let drift = call(
         &f.state,
         &auth,
@@ -482,18 +543,7 @@ async fn org_resource_journey(
         ))
         .await
         .unwrap();
-    for (collection, id) in [
-        ("user_services", &instance_id),
-        ("user_endpoints", &endpoint_id),
-        ("user_api_keys", &key.id),
-    ] {
-        f.state
-            .db
-            .collection::<bson::Document>(collection)
-            .update_one(doc! {"_id":id}, doc! {"$set":{"user_id":&org}})
-            .await
-            .unwrap();
-    }
+    move_source_to_org(&f, &org, &instance_id, &endpoint_id, &key).await;
     settings::update(
         &f.state.db,
         &f.owner,
@@ -822,18 +872,7 @@ async fn resource_explicit_org_card_remains_authority_bound_in_full_access() {
             ))
             .await
             .unwrap();
-        for (collection, id) in [
-            ("user_services", &instance_id),
-            ("user_endpoints", &endpoint_id),
-            ("user_api_keys", &key.id),
-        ] {
-            f.state
-                .db
-                .collection::<bson::Document>(collection)
-                .update_one(doc! {"_id":id}, doc! {"$set":{"user_id":&org}})
-                .await
-                .unwrap();
-        }
+        move_source_to_org(&f, &org, &instance_id, &endpoint_id, &key).await;
         settings::update(
             &f.state.db,
             &f.owner,

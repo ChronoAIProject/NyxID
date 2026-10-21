@@ -42,8 +42,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 argon2 = "0.5.3"
-aes-gcm = "0.10.3"
-aes = "0.8.4"
+aes-gcm = { version = "0.10.3", features = ["zeroize"] }
+aes = { version = "0.8.4", features = ["zeroize"] }
 cbc = "0.1.2"
 sha2 = "0.10.9"
 sha1 = "0.10"
@@ -53,7 +53,7 @@ hex = "0.4.3"
 base64 = "0.22.1"
 rsa = { version = "0.9.10", features = ["pem"] }
 p256 = "0.13"
-totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
+totp-rs = { version = "5.7.1", features = ["qr", "gen_secret", "zeroize"] }
 validator = { version = "0.20", features = ["derive"] }
 governor = "0.10"
 reqwest = { version = "0.12.28", features = ["json", "stream", "rustls-tls", "http2", "multipart"], default-features = false }
@@ -116,6 +116,7 @@ google-cloud-gax = { package = "gcloud-gax", version = "1.4" }
 tonic = { version = "0.14", features = ["transport"] }
 tonic-prost = "0.14"
 tokio-stream = { version = "0.1", features = ["net"] }
+serde_urlencoded = "0.7.1"
 nyxid-machine-updater = { path = "../machine-updater", features = ["test-support"] }
 flate2 = "1"
 # TLS echo proxy for multi-origin routing and redirect acceptance tests.

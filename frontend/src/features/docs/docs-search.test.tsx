@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -71,6 +71,31 @@ describe("DocsSearch keyboard navigation", () => {
     expect(selectedOptionHref()).toBe(`/docs/${SLUGS[2]}`);
     await user.keyboard("{ArrowUp}");
     expect(selectedOptionHref()).toBe(`/docs/${SLUGS[1]}`);
+  });
+
+  it("preserves keyboard selection across deferred loading and focus, resetting only on reopen", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveIndex!: (value: typeof INDEX) => void;
+      const index = new Promise<typeof INDEX>((resolve) => { resolveIndex = resolve; });
+      vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: () => index })));
+      const onClose = vi.fn();
+      const view = render(<DocsSearch open onClose={onClose} />);
+      const input = screen.getByRole("combobox");
+      fireEvent.change(input, { target: { value: "service" } });
+      await act(async () => { resolveIndex(INDEX); await index; });
+      expect(screen.getAllByRole("option")).toHaveLength(4);
+      fireEvent.keyDown(input, { key: "ArrowDown" });
+      expect(selectedOptionHref()).toBe(`/docs/${SLUGS[1]}`);
+      await act(async () => { vi.advanceTimersByTime(20); });
+      expect(input).toHaveFocus();
+      expect(selectedOptionHref()).toBe(`/docs/${SLUGS[1]}`);
+      view.rerender(<DocsSearch open={false} onClose={onClose} />);
+      view.rerender(<DocsSearch open onClose={onClose} />);
+      expect(selectedOptionHref()).toBe(`/docs/${SLUGS[0]}`);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("wraps around at both ends", async () => {

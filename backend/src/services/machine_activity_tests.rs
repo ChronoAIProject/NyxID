@@ -384,6 +384,7 @@ async fn machine_preview_consent_encryption_acl_expiry_and_late_result() {
         .db
         .collection::<AssistantAttachment>(ATTACHMENTS)
         .insert_one(AssistantAttachment {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             origin: "machine_preview".into(),
             user_id: f.owner.clone(),
@@ -396,13 +397,11 @@ async fn machine_preview_consent_encryption_acl_expiry_and_late_result() {
         })
         .await
         .unwrap();
-    Box::pin(
-        super::super::admin_user_service::delete_current_user_cascade(
-            &f.state.db,
-            &f.owner,
-            crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
-        ),
-    )
+    Box::pin(crate::test_utils::accept_and_process_owner_erasure(
+        &f.state.db,
+        &f.owner,
+        crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+    ))
     .await
     .unwrap();
     assert_eq!(

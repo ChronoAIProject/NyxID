@@ -340,7 +340,7 @@ function ConnectionPanel({
         toast.success(
           response?.upstream_revocation_scheduled === true
             ? "Removed from NyxID. Upstream revocation scheduled."
-            : "Removed from NyxID. Upstream access remains active.",
+            : "Removed from NyxID. Upstream revocation is not confirmed.",
         );
         setCascadeDetails(null);
         // A service with other connections keeps the modal open on what's

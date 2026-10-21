@@ -5,6 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
+        **Security vulnerability?** Please use [private vulnerability reporting](https://github.com/ChronoAIProject/NyxID/security/advisories/new), not this public form. Do not include credentials or exploit details here.
+
         Thank you for reporting a bug. Please fill out the sections below so we can reproduce and fix the issue.
 
   - type: textarea

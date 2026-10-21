@@ -492,7 +492,8 @@ pub async fn poll_auth_device_web(
             method: "device_code_web".to_string(),
             mfa_required: false,
         },
-    );
+    )
+    .await;
 
     tracing::info!(
         client_ip_hash = %client_ip_hash,

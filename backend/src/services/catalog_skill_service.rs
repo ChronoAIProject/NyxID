@@ -695,6 +695,11 @@ pub async fn replay_create(
         .ok_or_else(|| AppError::NotFound("Created service no longer exists".into()))
 }
 
+pub struct CreateIntent<'a> {
+    pub request_id: &'a str,
+    pub fingerprint: &'a str,
+}
+
 pub async fn create(
     db: &Database,
     service: &DownstreamService,
@@ -703,7 +708,18 @@ pub async fn create(
     request_id: &str,
     fingerprint: &str,
 ) -> AppResult<DownstreamService> {
-    create_with_endpoints(db, service, actor_id, input, request_id, fingerprint, &[]).await
+    create_with_endpoints(
+        db,
+        service,
+        actor_id,
+        input,
+        CreateIntent {
+            request_id,
+            fingerprint,
+        },
+        &[],
+    )
+    .await
 }
 
 pub async fn create_with_endpoints(
@@ -711,10 +727,13 @@ pub async fn create_with_endpoints(
     service: &DownstreamService,
     actor_id: &str,
     input: &SkillUpdate,
-    request_id: &str,
-    fingerprint: &str,
+    intent: CreateIntent<'_>,
     endpoints: &[crate::models::service_endpoint::ServiceEndpoint],
 ) -> AppResult<DownstreamService> {
+    let CreateIntent {
+        request_id,
+        fingerprint,
+    } = intent;
     let desired = resolve_update(&SkillState::default(), input)?;
     if let Some(replay) = replay_create(db, actor_id, request_id, fingerprint).await? {
         return Ok(replay);
@@ -724,28 +743,36 @@ pub async fn create_with_endpoints(
     service.recommended_skills = desired.recommended_skills.clone();
     service.recommended_skill_refs = desired.recommended_skill_refs.clone();
     service.skills_revision = i64::from(changed);
-    let mut session = db.client().start_session().await?;
     let created = service.clone();
     let transaction_db = db.clone();
     let transaction_actor = actor_id.to_owned();
     let transaction_request = request_id.to_owned();
     let transaction_fingerprint = fingerprint.to_owned();
     let endpoints = endpoints.to_vec();
-    let committed = session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let db = &transaction_db;
-            let actor_id = transaction_actor.as_str();
-            let request_id = transaction_request.as_str();
-            let fingerprint = transaction_fingerprint.as_str();
+    let context = (
+        &transaction_db,
+        &transaction_actor,
+        &transaction_request,
+        &transaction_fingerprint,
+        &service,
+        &endpoints,
+        &desired,
+        changed,
+    );
+    let committed = super::transaction_service::run_db_only(db, &context, |session, context| {
+        let &(db, actor, request, fingerprint, service, endpoints, desired, changed) = context;
+        Box::pin(async move {
+            let actor_id = actor.as_str();
+            let request_id = request.as_str();
+            let fingerprint = fingerprint.as_str();
             #[cfg(test)]
             if let Ok(hook) = COLLISION.try_with(Clone::clone) {
                 hook.begin_attempt();
                 hook.after_reads().await;
             }
 
-            let result: AppResult<()> = async {
-                let mut endpoints = endpoints.clone();
+            {
+                let mut endpoints = endpoints.to_vec();
                 if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
                     let admin =
                         super::tools_manager_service::fence_authority(db, session, actor_id)
@@ -819,13 +846,13 @@ pub async fn create_with_endpoints(
                         db,
                         provider_id,
                         &service.id,
-                        Some(&service),
+                        Some(service),
                         session,
                     )
                     .await?;
                 } else {
                     db.collection::<DownstreamService>(SERVICES)
-                        .insert_one(&service)
+                        .insert_one(service)
                         .session(&mut *session)
                         .await?;
                 }
@@ -872,11 +899,9 @@ pub async fn create_with_endpoints(
                     .await?;
                 Ok(())
             }
-            .await;
-            transactions::transaction_result(result)
         })
-        .await
-        .map_err(transactions::map_transaction_error);
+    })
+    .await;
     if let Err(error) = committed {
         if duplicate_key(&error) {
             if let Some(replay) = replay_create(db, actor_id, request_id, fingerprint).await? {

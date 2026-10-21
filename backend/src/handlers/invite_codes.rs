@@ -188,7 +188,8 @@ pub async fn create_invite_code(
         TelemetryEvent::InviteCodeGenerated {
             generated_by_role: "admin".to_string(),
         },
-    );
+    )
+    .await;
 
     // A freshly-created code has no usages, so the empty user map is fine.
     Ok(Json(to_response(invite, &HashMap::new())))

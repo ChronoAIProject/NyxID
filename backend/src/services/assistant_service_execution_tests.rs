@@ -607,7 +607,9 @@ fn held_execution_fingerprint_binds_credentials_within_the_process_and_preserves
         base_url: "https://example.invalid".into(),
         auth_method: "bearer".into(),
         auth_key_name: "Authorization".into(),
-        credential: super::super::api_key_credential_service::generate_secret().to_string(),
+        credential: super::super::api_key_credential_service::generate_secret()
+            .to_string()
+            .into(),
         catalog_default_headers: Vec::new(),
         user_service_default_headers: Vec::new(),
         ws_frame_injections: Vec::new(),
@@ -622,7 +624,9 @@ fn held_execution_fingerprint_binds_credentials_within_the_process_and_preserves
         "unchanged held authority"
     );
     assert!(pool == execution_projection_digest(&target, false));
-    target.credential = super::super::api_key_credential_service::generate_secret().to_string();
+    target.credential = super::super::api_key_credential_service::generate_secret()
+        .to_string()
+        .into();
     assert!(held != execution_digest(&target), "replacement must differ");
     assert!(pool == execution_projection_digest(&target, false));
     target.base_url.push_str("/different");

@@ -245,7 +245,7 @@ impl Fixture {
         .unwrap()
         .unwrap()
     }
-    async fn service(&self, owner: &str, slug: &str) -> String {
+    pub(crate) async fn service(&self, owner: &str, slug: &str) -> String {
         let endpoint = Uuid::new_v4().to_string();
         let id = Uuid::new_v4().to_string();
         self.state
@@ -269,7 +269,7 @@ impl Fixture {
             .unwrap();
         id
     }
-    async fn key(&self, row: &AssistantConversation) -> ApiKey {
+    pub(crate) async fn key(&self, row: &AssistantConversation) -> ApiKey {
         self.state
             .db
             .collection(crate::models::api_key::COLLECTION_NAME)
@@ -1824,8 +1824,9 @@ async fn org_agent_machine_gateway_checks_member_and_node_owner_live() {
     let row = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
         .await
         .unwrap();
-    let (_, token, _) = super::node_service::create_registration_token(
+    let (_, token, _) = super::node_service::create_registration_token_for_actor(
         &f.state.db,
+        &f.admin,
         &f.org,
         "org-machine",
         100,
@@ -2469,6 +2470,19 @@ async fn org_specialist_access_request_is_denied_by_default_and_routed_when_allo
             .await
             .unwrap(),
         0
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {
+                "event_type": "mcp_tool_call",
+                "event_data.service_id": &service,
+            })
+            .await
+            .unwrap(),
+        0,
+        "a service-gate refusal must not reach upstream execution or MCP audit"
     );
     let audit = f
         .state

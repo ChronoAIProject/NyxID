@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { isTelemetryActive } from "@/lib/telemetry";
+import { identify, initTelemetry, reset as resetTelemetry } from "@/lib/telemetry";
+import { useConsentStore } from "@/stores/consent-store";
 import {
   assignAssistantResponseConversation,
   assistantHttp,
@@ -10,10 +11,6 @@ import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
 
-vi.mock("@/lib/telemetry", async (importOriginal) => {
-  const original = await importOriginal<typeof import("@/lib/telemetry")>();
-  return { ...original, isTelemetryActive: vi.fn(() => false) };
-});
 
 const ACTOR_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
 const WIRE_LOG_ID = "d7dbbf38-a31c-4331-8ddb-13fda5a70d12";
@@ -63,7 +60,8 @@ describe("assistantHttp", () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     globalThis.__nyxidAssistantHttpMock = undefined;
-    vi.mocked(isTelemetryActive).mockReturnValue(false);
+    resetTelemetry();
+    useConsentStore.getState().bindAccount(null);
     useAssistantWireLogStore.setState({
       featureEnabled: false,
       captureEnabled: false,
@@ -75,7 +73,11 @@ describe("assistantHttp", () => {
   });
 
   it("uses cookie auth and conditionally identifies the UI client", async () => {
-    vi.mocked(isTelemetryActive).mockReturnValue(true);
+    useAuthStore.setState({ user: { id: ACTOR_ID } as User });
+    useConsentStore.getState().bindAccount(ACTOR_ID);
+    useConsentStore.getState().setConsent(true);
+    identify(ACTOR_ID);
+    initTelemetry({ dsn: "test-fixture", consent: true });
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -87,6 +89,8 @@ describe("assistantHttp", () => {
     );
     expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({
       "X-NyxID-Client": "ui",
+      "X-NyxID-Analytics": "enabled",
+      "X-NyxID-Analytics-Account": ACTOR_ID,
     });
   });
 

@@ -789,7 +789,8 @@ pub async fn create_request(
                 .clone()
                 .unwrap_or_else(|| "in_app".to_string()),
         },
-    );
+    )
+    .await;
 
     Ok((
         axum::http::StatusCode::CREATED,
@@ -908,7 +909,8 @@ pub async fn decide_request(
                 .unwrap_or_else(|| "in_app".to_string()),
             decided_via,
         },
-    );
+    )
+    .await;
 
     Ok(Json(DecideResponse {
         id: updated.id,
@@ -1109,7 +1111,8 @@ pub async fn revoke_grant(
         auth_user.api_key_id.as_deref(),
         &tele,
         TelemetryEvent::ApprovalGrantRevoked { service_slug },
-    );
+    )
+    .await;
 
     Ok(Json(MessageResponse {
         message: "Grant revoked".to_string(),
@@ -1820,7 +1823,8 @@ pub async fn set_service_config(
             service_slug: telemetry_service_slug,
             mode: telemetry_mode,
         },
-    );
+    )
+    .await;
 
     Ok(Json(ServiceApprovalConfigItem {
         service_id: config.service_id,

@@ -107,8 +107,8 @@ async fn service_concurrency_rest_slug_uuid_mcp_and_stream_share_catalog_capacit
     )
     .unwrap();
     let ctx = mcp_service::McpExecContext {
-            assistant_chat: None,
-            response_body_limit: None,
+        assistant_chat: None,
+        response_body_limit: None,
         actor_user_id: None,
         caller_token: None,
         delegation_restrictions: Default::default(),
@@ -117,6 +117,7 @@ async fn service_concurrency_rest_slug_uuid_mcp_and_stream_share_catalog_capacit
         agent_owner: None,
         operation_scopes: None,
         api_key_id: None,
+        api_key_credential_id: None,
         allow_all_nodes: true,
         allowed_node_ids: &[],
     };

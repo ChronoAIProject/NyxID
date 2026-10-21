@@ -168,11 +168,11 @@ impl McpSessionStore {
             .collect();
         let active_auth_sessions: Vec<mongodb::bson::Document> = db
             .collection::<mongodb::bson::Document>("sessions")
-            .find(doc! {
+            .find(crate::services::session_authority::authenticated(doc! {
                 "user_id": { "$in": user_ids.iter().copied().collect::<Vec<_>>() },
                 "revoked": false,
                 "expires_at": { "$gt": now },
-            })
+            }))
             .await?
             .try_collect()
             .await?;
@@ -1440,6 +1440,34 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_never_uses_pending_challenges_as_login_authority() {
+        let db = crate::test_utils::connect_transaction_test_database("mcp_pending_denied").await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut persisted = record(&user_id);
+        persisted.session_fallback_allowed = true;
+        db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+            .insert_one(&persisted)
+            .await
+            .unwrap();
+        let challenge = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&user_id,"revoked":false,
+        "purpose":"mfa_pending","expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(5))};
+        db.collection::<bson::Document>(crate::models::session::MFA_CHALLENGES)
+            .insert_one(challenge.clone())
+            .await
+            .unwrap();
+        let mut legacy = challenge;
+        legacy.remove("purpose");
+        legacy.insert("user_agent", "mfa_pending");
+        db.collection::<bson::Document>("sessions")
+            .insert_one(legacy)
+            .await
+            .unwrap();
+        let store = McpSessionStore::with_db(db);
+        assert_eq!(store.load_from_db().await.unwrap(), 0);
+        assert!(!store.validate(&persisted.id, &user_id).await.unwrap());
     }
 
     #[tokio::test]

@@ -1714,84 +1714,88 @@ pub(super) async fn prepare_post(
     chat_id: &str,
     agent_id: Option<&str>,
 ) -> AppResult<PostTarget> {
-    let (row, chat) = load_chat(state, owner, chat_id).await?;
-    if row.status != "active" {
-        return Err(AppError::Conflict("The channel bot is not active".into()));
-    }
-    if let Some(agent_id) = agent_id {
-        let answering = match chat.agent_id.as_deref().or(row.agent_id.as_deref()) {
-            Some(id) => id.to_owned(),
-            None => team::ensure_nyxbot(&state.db, owner).await?.id,
-        };
-        if answering != agent_id {
+    // Keep this multi-stage delivery future on the heap. Its callers include
+    // Tokio workers and nested image/automation delivery on normal stacks.
+    Box::pin(async move {
+        let (row, chat) = load_chat(state, owner, chat_id).await?;
+        if row.status != "active" {
+            return Err(AppError::Conflict("The channel bot is not active".into()));
+        }
+        if let Some(agent_id) = agent_id {
+            let answering = match chat.agent_id.as_deref().or(row.agent_id.as_deref()) {
+                Some(id) => id.to_owned(),
+                None => team::ensure_nyxbot(&state.db, owner).await?.id,
+            };
+            if answering != agent_id {
+                return Err(AppError::Forbidden(
+                    "Only the agent that answers this chat (or NyxBot) posts there".into(),
+                ));
+            }
+        }
+        if !chat.allow_posts {
             return Err(AppError::Forbidden(
-                "Only the agent that answers this chat (or NyxBot) posts there".into(),
+                "Posting is off for this chat; the owner can allow it".into(),
             ));
         }
-    }
-    if !chat.allow_posts {
-        return Err(AppError::Forbidden(
-            "Posting is off for this chat; the owner can allow it".into(),
-        ));
-    }
-    let platform_chat_id = chat
-        .platform_chat_id
-        .clone()
-        .ok_or_else(|| AppError::Conflict("NyxID has not seen this chat's address yet".into()))?;
-    let route_id = row
-        .route_id
-        .clone()
-        .ok_or_else(|| AppError::Conflict("The channel bot has no route".into()))?;
-    if !org_access_holds(state, &row).await? {
-        release_org_channel(state, &row).await?;
-        return Err(AppError::Forbidden("org_access_lost".into()));
-    }
-    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
-    if !bot.is_active || bot.status == "suspended" {
-        return Err(AppError::ChannelBotInactive(
-            "Bot has been deactivated".to_string(),
-        ));
-    }
-    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
-    let adapter: std::sync::Arc<dyn crate::services::channel_platform::PlatformAdapter> =
-        std::sync::Arc::from(adapter);
-    #[cfg(test)]
-    let adapter = crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
-        .lock()
-        .unwrap()
-        .get(&bot.id)
-        .cloned()
-        .unwrap_or(adapter);
-    crate::handlers::channel_relay::check_initiate_rate_limit(state, &chat.id).await?;
-    let auth = super::route_key_auth(state, &row).await?;
-    let now = Utc::now();
-    // The bot's own route, addressed at this chat; nothing is stored.
-    let conversation = ChannelConversation {
-        activity_callback: None,
-        id: route_id,
-        user_id: bot.user_id.clone(),
-        channel_bot_id: Some(bot.id.clone()),
-        platform: bot.platform.clone(),
-        platform_conversation_id: platform_chat_id,
-        platform_conversation_type: chat.kind.clone().unwrap_or_else(|| "group".into()),
-        platform_sender_id: None,
-        agent_api_key_id: row.route_api_key_id.clone(),
-        default_agent: false,
-        allow_agent_initiated: true,
-        is_active: true,
-        last_message_at: None,
-        created_at: now,
-        updated_at: now,
-    };
-    Ok(PostTarget {
-        agent_id: agent_id.map(str::to_owned),
-        channel: row,
-        thread: chat,
-        bot,
-        auth,
-        conversation,
-        adapter,
+        let platform_chat_id = chat.platform_chat_id.clone().ok_or_else(|| {
+            AppError::Conflict("NyxID has not seen this chat's address yet".into())
+        })?;
+        let route_id = row
+            .route_id
+            .clone()
+            .ok_or_else(|| AppError::Conflict("The channel bot has no route".into()))?;
+        if !org_access_holds(state, &row).await? {
+            release_org_channel(state, &row).await?;
+            return Err(AppError::Forbidden("org_access_lost".into()));
+        }
+        let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+        if !bot.is_active || bot.status == "suspended" {
+            return Err(AppError::ChannelBotInactive(
+                "Bot has been deactivated".to_string(),
+            ));
+        }
+        let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+        let adapter: std::sync::Arc<dyn crate::services::channel_platform::PlatformAdapter> =
+            std::sync::Arc::from(adapter);
+        #[cfg(test)]
+        let adapter = crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .get(&bot.id)
+            .cloned()
+            .unwrap_or(adapter);
+        crate::handlers::channel_relay::check_initiate_rate_limit(state, &chat.id).await?;
+        let auth = super::route_key_auth(state, &row).await?;
+        let now = Utc::now();
+        // The bot's own route, addressed at this chat; nothing is stored.
+        let conversation = ChannelConversation {
+            activity_callback: None,
+            id: route_id,
+            user_id: bot.user_id.clone(),
+            channel_bot_id: Some(bot.id.clone()),
+            platform: bot.platform.clone(),
+            platform_conversation_id: platform_chat_id,
+            platform_conversation_type: chat.kind.clone().unwrap_or_else(|| "group".into()),
+            platform_sender_id: None,
+            agent_api_key_id: row.route_api_key_id.clone(),
+            default_agent: false,
+            allow_agent_initiated: true,
+            is_active: true,
+            last_message_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        Ok(PostTarget {
+            agent_id: agent_id.map(str::to_owned),
+            channel: row,
+            thread: chat,
+            bot,
+            auth,
+            conversation,
+            adapter,
+        })
     })
+    .await
 }
 
 pub(super) async fn send_post(
@@ -1916,6 +1920,9 @@ pub(crate) async fn post_automation_images(
     conversation_id: &str,
     text: &str,
 ) -> AppResult<Value> {
+    // Keep this multi-stage delivery future on the heap. Its callers include
+    // Tokio workers and nested image/automation delivery on normal stacks.
+    Box::pin(async move {
     let target = prepare_post(state, &run.user_id, chat_id, agent_id).await?;
     let mut report = super::images::ImageReport {
         app_visible: target.thread.owner_chat && target.thread.kind.as_deref() == Some("private"),
@@ -2155,6 +2162,8 @@ pub(crate) async fn post_automation_images(
         "message_id": sent.message_id,
         "images": super::images::image_result(&report),
     }))
+
+    }).await
 }
 
 /// Chats given to a destroyed agent go back to their bot's agent (in new

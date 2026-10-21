@@ -76,7 +76,9 @@ pub async fn connection_token(
         .access_token_encrypted
         .as_deref()
         .ok_or_else(|| reconnect("Connected OAuth credential has no access token"))?;
-    let bytes = Zeroizing::new(keys.decrypt(encrypted).await?);
+    let bytes = super::credential_record_service::CredentialRecord::key(&key)
+        .decrypt(keys, "access_token_encrypted", encrypted)
+        .await?;
     let token = std::str::from_utf8(&bytes)
         .map_err(|_| reconnect("Connected OAuth credential is invalid"))?;
     if token.is_empty() {

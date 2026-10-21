@@ -50,7 +50,7 @@ describe("MfaVerifyForm", () => {
     render(<MfaVerifyForm />);
 
     await user.type(
-      screen.getByLabelText("Enter 6-digit verification code"),
+      screen.getByLabelText("Authenticator or recovery code"),
       "123456",
     );
     await user.click(screen.getByRole("button", { name: "Verify" }));
@@ -64,6 +64,26 @@ describe("MfaVerifyForm", () => {
     expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" });
   });
 
+  it("submits an eight-character recovery code with the existing challenge", async () => {
+    const user = userEvent.setup(); mockVerifyMutateAsync.mockResolvedValue(undefined);
+    render(<MfaVerifyForm />);
+    await user.type(screen.getByLabelText("Authenticator or recovery code"), "R3c-v_12");
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+    await waitFor(() => expect(mockVerifyMutateAsync).toHaveBeenCalledWith({ code: "R3c-v_12", mfa_token: "mfa-session-token" }));
+  });
+
+  it("submits the complete 32-hex recovery code", async () => {
+    const user = userEvent.setup();
+    mockVerifyMutateAsync.mockResolvedValue(undefined);
+    render(<MfaVerifyForm />);
+    const code = "9b7130d2e5a6417780c9fd2e54b602ad";
+    await user.type(screen.getByLabelText("Authenticator or recovery code"), code);
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+    await waitFor(() => expect(mockVerifyMutateAsync).toHaveBeenCalledWith({
+      code, mfa_token: "mfa-session-token",
+    }));
+  });
+
   it("preserves the approval code query in a same-origin returnTo after MFA", async () => {
     const user = userEvent.setup();
     mockVerifyMutateAsync.mockResolvedValue(undefined);
@@ -75,7 +95,7 @@ describe("MfaVerifyForm", () => {
     render(<MfaVerifyForm returnTo={returnTo} />);
 
     await user.type(
-      screen.getByLabelText("Enter 6-digit verification code"),
+      screen.getByLabelText("Authenticator or recovery code"),
       "654321",
     );
     await user.click(screen.getByRole("button", { name: "Verify" }));
@@ -101,7 +121,7 @@ describe("MfaVerifyForm", () => {
     render(<MfaVerifyForm returnTo={returnTo} />);
 
     await user.type(
-      screen.getByLabelText("Enter 6-digit verification code"),
+      screen.getByLabelText("Authenticator or recovery code"),
       "654321",
     );
     await user.click(screen.getByRole("button", { name: "Verify" }));
@@ -120,7 +140,7 @@ describe("MfaVerifyForm", () => {
     render(<MfaVerifyForm />);
 
     await user.type(
-      screen.getByLabelText("Enter 6-digit verification code"),
+      screen.getByLabelText("Authenticator or recovery code"),
       "123456",
     );
     await user.click(screen.getByRole("button", { name: "Verify" }));
@@ -144,7 +164,7 @@ describe("MfaVerifyForm", () => {
     render(<MfaVerifyForm />);
 
     await user.type(
-      screen.getByLabelText("Enter 6-digit verification code"),
+      screen.getByLabelText("Authenticator or recovery code"),
       "111111",
     );
     await user.click(screen.getByRole("button", { name: "Verify" }));

@@ -23,7 +23,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_
 
 // --- Request / Response types ---
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Deserialize, Validate)]
 pub struct RegisterRequest {
     #[validate(email(message = "Invalid email address"))]
     pub email: String,
@@ -45,7 +45,7 @@ pub struct RegisterResponse {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Deserialize, Validate)]
 pub struct LoginRequest {
     #[validate(email(message = "Invalid email address"))]
     pub email: String,
@@ -55,7 +55,7 @@ pub struct LoginRequest {
     pub client: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct LoginResponse {
     pub user_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,7 +66,7 @@ pub struct LoginResponse {
     pub refresh_token: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct RefreshResponse {
     pub access_token: String,
     pub expires_in: i64,
@@ -461,12 +461,7 @@ pub async fn register(
 
     // Telemetry: user.signed_up. Pre-auth path, so surface comes from
     // the `X-NyxID-Client` header rather than from `AuthUser`.
-    let tele = TelemetryContext::from_headers(
-        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
-        headers
-            .get("x-nyxid-client-version")
-            .and_then(|v| v.to_str().ok()),
-    );
+    let tele = TelemetryContext::pre_auth(&headers);
 
     // Skip telemetry on the fake-success enumeration-protection branch:
     // `result.actually_created` is false there and no real user exists.
@@ -492,7 +487,8 @@ pub async fn register(
                 via_org: None,
                 invite_code_used: invite_code_id.is_some(),
             },
-        );
+        )
+        .await;
 
         // Emit `invite.code_redeemed` after the user is actually created so
         // the funnel (`invite.code_generated` → `invite.code_redeemed`)
@@ -513,7 +509,8 @@ pub async fn register(
                     created_by_user_id: hash_short_id(&meta.created_by),
                     days_to_redemption: days,
                 },
-            );
+            )
+            .await;
         }
     }
 
@@ -539,6 +536,17 @@ pub async fn login(
 
     let user = auth_service::authenticate_user(&state.db, &body.email, &body.password).await?;
 
+    finish_password_login(state, peer, headers, body, user).await
+}
+
+pub(crate) async fn finish_password_login(
+    state: AppState,
+    peer: SocketAddr,
+    headers: HeaderMap,
+    body: LoginRequest,
+    user: crate::models::user::User,
+) -> AppResult<(HeaderMap, Json<LoginResponse>)> {
+    let mut mfa_completion = None;
     // Check MFA requirement
     if user.mfa_enabled {
         match &body.mfa_code {
@@ -546,15 +554,10 @@ pub async fn login(
                 // Build the telemetry context eagerly so both failure
                 // branches (length abuse + wrong code) can emit the same
                 // `mfa.challenge_failed` event before returning the error.
-                let tele_mfa = TelemetryContext::from_headers(
-                    headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
-                    headers
-                        .get("x-nyxid-client-version")
-                        .and_then(|v| v.to_str().ok()),
-                );
+                let tele_mfa = TelemetryContext::pre_auth(&headers);
 
-                // Validate MFA code length to prevent abuse
-                if code.len() > 10 {
+                // Share the bounded TOTP/legacy/new recovery-code contract.
+                if !crate::services::mfa_service::valid_login_code(code) {
                     emit_event(
                         state.telemetry.as_deref(),
                         &user.id.to_string(),
@@ -564,21 +567,23 @@ pub async fn login(
                             factor_type: "totp".to_string(),
                             reason: "wrong_code".to_string(),
                         },
-                    );
+                    )
+                    .await;
                     return Err(AppError::AuthenticationFailed(
                         "Invalid MFA code".to_string(),
                     ));
                 }
 
-                let valid = crate::services::mfa_service::verify_totp(
+                let mut factor = crate::services::mfa_service::begin_login_completion(
                     &state.db,
                     &state.encryption_keys,
                     &user.id,
                     code,
+                    None,
                 )
                 .await?;
 
-                if !valid {
+                if factor.is_none() {
                     emit_event(
                         state.telemetry.as_deref(),
                         &user.id.to_string(),
@@ -588,11 +593,25 @@ pub async fn login(
                             factor_type: "totp".to_string(),
                             reason: "wrong_code".to_string(),
                         },
-                    );
+                    )
+                    .await;
                     return Err(AppError::AuthenticationFailed(
                         "Invalid MFA code".to_string(),
                     ));
                 }
+
+                if let Some(completion) = factor.as_mut()
+                    && let Err(error) = auth_service::fence_password_proof(
+                        &state.db,
+                        &user,
+                        &mut completion.transaction,
+                    )
+                    .await
+                {
+                    factor.take().expect("verified factor").abort().await?;
+                    return Err(error);
+                }
+                mfa_completion = factor;
 
                 // Inline-MFA success: pair with the failure emit above so
                 // the MFA funnel sees both outcomes from the
@@ -606,7 +625,8 @@ pub async fn login(
                     TelemetryEvent::MfaChallengeSucceeded {
                         factor_type: "totp".to_string(),
                     },
-                );
+                )
+                .await;
             }
             None => {
                 // Store a temporary MFA session bound to the user.
@@ -616,8 +636,12 @@ pub async fn login(
                 let temp_token_hash = crate::crypto::token::hash_token(&temp_token);
 
                 // Store the MFA session as a short-lived session record
-                token_service::create_mfa_pending_session(&state.db, &user.id, &temp_token_hash)
-                    .await?;
+                token_service::create_mfa_pending_session_for_password(
+                    &state.db,
+                    &user,
+                    &temp_token_hash,
+                )
+                .await?;
 
                 return Err(AppError::MfaRequired {
                     session_token: temp_token,
@@ -634,12 +658,7 @@ pub async fn login(
     // state-changing session/token creation succeeds. Emitting
     // before-the-match risked reporting "logged in" on a request that
     // later failed inside `create_session*`.
-    let tele_login = TelemetryContext::from_headers(
-        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
-        headers
-            .get("x-nyxid-client-version")
-            .and_then(|v| v.to_str().ok()),
-    );
+    let tele_login = TelemetryContext::pre_auth(&headers);
     let client_mode = resolve_auth_client_mode(&headers, body.client.as_deref());
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
@@ -647,9 +666,66 @@ pub async fn login(
 
     match client_mode {
         AuthClientMode::BrowserSession => {
-            let session =
-                token_service::create_session(&state.db, &user.id, ip.as_deref(), ua.as_deref())
+            let mut password_transaction = if mfa_completion.is_none() {
+                let mut transaction = state.db.client().start_session().await?;
+                transaction
+                    .start_transaction()
+                    .write_concern(mongodb::options::WriteConcern::majority())
                     .await?;
+                if let Err(error) =
+                    auth_service::fence_password_proof(&state.db, &user, &mut transaction).await
+                {
+                    transaction.abort_transaction().await?;
+                    return Err(error);
+                }
+                Some(transaction)
+            } else {
+                None
+            };
+            let session_result = token_service::create_session_with_transaction(
+                &state.db,
+                &user.id,
+                ip.as_deref(),
+                ua.as_deref(),
+                mfa_completion
+                    .as_mut()
+                    .map(|completion| &mut completion.transaction)
+                    .or(password_transaction.as_mut()),
+            )
+            .await;
+            let session = match session_result {
+                Ok(session) => session,
+                Err(error) => {
+                    if let Some(completion) = mfa_completion {
+                        completion.abort().await?;
+                    }
+                    if let Some(mut transaction) = password_transaction {
+                        transaction.abort_transaction().await?;
+                    }
+                    return Err(error);
+                }
+            };
+            if let Err(error) = apply_browser_session_cookies(
+                &mut response_headers,
+                &session.session_token,
+                secure,
+                domain,
+            ) {
+                if let Some(completion) = mfa_completion {
+                    completion.abort().await?;
+                }
+                if let Some(mut transaction) = password_transaction {
+                    transaction.abort_transaction().await?;
+                }
+                return Err(error);
+            }
+            if let Some(mut transaction) = password_transaction {
+                crate::services::transaction_service::commit(&mut transaction).await?;
+            }
+            if let Some(completion) = mfa_completion {
+                let factor = completion.commit().await?;
+                crate::services::mfa_service::notify_recovery_use(&state, &user.id, factor);
+            }
 
             audit_service::log_async(
                 state.db.clone(),
@@ -662,13 +738,6 @@ pub async fn login(
                 None,
             );
 
-            apply_browser_session_cookies(
-                &mut response_headers,
-                &session.session_token,
-                secure,
-                domain,
-            )?;
-
             emit_event(
                 state.telemetry.as_deref(),
                 &user.id.to_string(),
@@ -678,7 +747,8 @@ pub async fn login(
                     method: "password".to_string(),
                     mfa_required: body.mfa_code.is_some(),
                 },
-            );
+            )
+            .await;
 
             Ok((
                 response_headers,
@@ -691,7 +761,7 @@ pub async fn login(
             ))
         }
         AuthClientMode::TokenClient => {
-            let tokens = token_service::create_session_and_issue_tokens(
+            let prepared_result = token_service::prepare_session_tokens(
                 &state.db,
                 &state.config,
                 &state.jwt_keys,
@@ -699,8 +769,53 @@ pub async fn login(
                 ip.as_deref(),
                 ua.as_deref(),
             )
-            .await?;
+            .await;
+            let prepared = match prepared_result {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    if let Some(completion) = mfa_completion {
+                        completion.abort().await?;
+                    }
+                    return Err(error);
+                }
+            };
 
+            let tokens = if let Some(mut completion) = mfa_completion {
+                if let Err(error) = token_service::insert_prepared_session(
+                    &state.db,
+                    &prepared,
+                    &mut completion.transaction,
+                )
+                .await
+                {
+                    completion.abort().await?;
+                    return Err(error);
+                }
+                let factor = completion.commit().await?;
+                crate::services::mfa_service::notify_recovery_use(&state, &user.id, factor);
+                prepared.tokens
+            } else {
+                let mut transaction = state.db.client().start_session().await?;
+                transaction
+                    .start_transaction()
+                    .write_concern(mongodb::options::WriteConcern::majority())
+                    .await?;
+                if let Err(error) =
+                    auth_service::fence_password_proof(&state.db, &user, &mut transaction).await
+                {
+                    transaction.abort_transaction().await?;
+                    return Err(error);
+                }
+                if let Err(error) =
+                    token_service::insert_prepared_session(&state.db, &prepared, &mut transaction)
+                        .await
+                {
+                    transaction.abort_transaction().await?;
+                    return Err(error);
+                }
+                crate::services::transaction_service::commit(&mut transaction).await?;
+                prepared.tokens
+            };
             audit_service::log_async(
                 state.db.clone(),
                 Some(user.id.clone()),
@@ -721,7 +836,8 @@ pub async fn login(
                     method: "password".to_string(),
                     mfa_required: body.mfa_code.is_some(),
                 },
-            );
+            )
+            .await;
 
             Ok((
                 response_headers,
@@ -761,7 +877,8 @@ pub async fn logout(
         auth_user.api_key_id.as_deref(),
         &tele,
         TelemetryEvent::AuthLoggedOut,
-    );
+    )
+    .await;
 
     audit_service::log_for_user(state.db.clone(), &auth_user, "logout", None);
 
@@ -803,7 +920,7 @@ pub async fn logout(
 
 /// Optional JSON body for /auth/refresh — mobile clients send the refresh
 /// token in the body since HttpOnly cookies are unreliable outside browsers.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Deserialize, Default)]
 pub struct RefreshRequest {
     pub refresh_token: Option<String>,
 }
@@ -837,19 +954,15 @@ pub async fn refresh(
     if let Ok(claims) =
         crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, &tokens.access_token)
     {
-        let tele = TelemetryContext::from_headers(
-            headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
-            headers
-                .get("x-nyxid-client-version")
-                .and_then(|v| v.to_str().ok()),
-        );
+        let tele = TelemetryContext::pre_auth(&headers);
         emit_event(
             state.telemetry.as_deref(),
             &claims.sub,
             None,
             &tele,
             TelemetryEvent::AuthTokenRefreshed,
-        );
+        )
+        .await;
     }
 
     Ok((
@@ -864,7 +977,7 @@ pub async fn refresh(
 
 // --- Verify Email ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct VerifyEmailRequest {
     pub token: String,
 }
@@ -886,19 +999,15 @@ pub async fn verify_email(
 
     // Telemetry: user.email_verified. Pre-auth path (token-gated), so
     // surface comes from the `X-NyxID-Client` header.
-    let tele = TelemetryContext::from_headers(
-        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
-        headers
-            .get("x-nyxid-client-version")
-            .and_then(|v| v.to_str().ok()),
-    );
+    let tele = TelemetryContext::pre_auth(&headers);
     emit_event(
         state.telemetry.as_deref(),
         &user_id,
         None,
         &tele,
         TelemetryEvent::UserEmailVerified,
-    );
+    )
+    .await;
 
     Ok(Json(VerifyEmailResponse {
         message: "Email verified successfully".to_string(),
@@ -932,13 +1041,8 @@ pub async fn forgot_password(
     // Always return success to prevent email enumeration
     let _token = auth_service::initiate_password_reset(&state.db, &body.email).await?;
 
-    // In production, send the reset token via email.
-    // In development, the token is logged for testing.
-    #[cfg(debug_assertions)]
-    if let Some(ref token) = _token {
-        tracing::debug!(token = %token, "Password reset token generated (dev only)");
-    }
-
+    // Delivery remains an operator integration concern. Reset material must
+    // never enter tracing, including development builds.
     // TODO(telemetry): blocked — see TELEMETRY.md §6.5 (auth.password_reset_requested).
     // `initiate_password_reset` returns `Option<String>` (the bare reset token)
     // and intentionally does not reveal whether the email matched a user,
@@ -954,7 +1058,7 @@ pub async fn forgot_password(
 
 // --- Reset Password ---
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Deserialize, Validate)]
 pub struct ResetPasswordRequest {
     pub token: String,
     #[validate(length(
@@ -995,7 +1099,7 @@ pub async fn reset_password(
 
 // --- Bootstrap Setup ---
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Deserialize, Validate)]
 pub struct SetupRequest {
     #[validate(email(message = "Invalid email address"))]
     pub email: String,
@@ -1155,7 +1259,7 @@ pub struct CliTokenRequest {
     pub client_ua: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct CliTokenResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -1484,4 +1588,45 @@ mod tests {
             Some("domain.com".into())
         );
     }
+}
+
+crate::errors::redacted_debug!(
+    RegisterRequest,
+    LoginRequest,
+    LoginResponse,
+    RefreshResponse,
+    RefreshRequest,
+    VerifyEmailRequest,
+    ResetPasswordRequest,
+    SetupRequest,
+    CliTokenResponse
+);
+
+#[cfg(test)]
+#[test]
+fn auth_dto_debug_never_discloses_credentials_but_wire_format_is_preserved() {
+    let secret = "distinctive-auth-plaintext-a947";
+    let login: LoginRequest = serde_json::from_value(serde_json::json!({
+        "email":"user@example.test","password":secret,"mfa_code":secret,"client":"web"
+    }))
+    .unwrap();
+    let register: RegisterRequest = serde_json::from_value(serde_json::json!({
+        "email":"user@example.test","password":secret,"invite_code":secret
+    }))
+    .unwrap();
+    let reset: ResetPasswordRequest =
+        serde_json::from_value(serde_json::json!({"token":secret,"new_password":secret})).unwrap();
+    let response = LoginResponse {
+        user_id: "user".into(),
+        access_token: Some(secret.into()),
+        refresh_token: Some(secret.into()),
+        expires_in: Some(900),
+    };
+    for value in [&login as &dyn std::fmt::Debug, &register, &reset, &response] {
+        assert!(!format!("{value:?}").contains(secret));
+    }
+    assert_eq!(
+        serde_json::to_value(response).unwrap()["access_token"],
+        secret
+    );
 }

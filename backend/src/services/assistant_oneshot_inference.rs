@@ -290,9 +290,23 @@ async fn resolve(state: &AppState, actor: &str, service: &DownstreamService) -> 
             resolution.credential_source.as_deref(),
             &resolution.target,
         );
+        let delegated = if resolution.node_id.is_none() {
+            delegation_service::resolve_optional_auto_provision_credentials(
+                &state.db,
+                &state.encryption_keys,
+                actor,
+                &resolution.user_service_id,
+                &service.id,
+                &resolution.target,
+                Some(&state.connection_expiry_notifier),
+            )
+            .await?
+        } else {
+            vec![]
+        };
         return Ok(Route {
             target: resolution.target,
-            delegated: vec![],
+            delegated,
             class,
         });
     }

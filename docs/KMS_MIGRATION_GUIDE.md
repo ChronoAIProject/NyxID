@@ -1,6 +1,8 @@
 # Cloud KMS Migration Guide
 
-Step-by-step guide for migrating NyxID's encryption backend from the local `KeyProvider` to AWS KMS or GCP Cloud KMS, including rollback procedures.
+Guide for migrating NyxID's encryption backend from the local `KeyProvider` to AWS KMS or GCP Cloud KMS. Complete [HMAC preparation](security/KEY_LIFECYCLE.md) before changing encryption sources. Follow the [reader-first encryption cutover and migration API](SECURITY.md#encrypted-record-migration) for contextual records; pending family adapters still block complete readiness.
+
+A provider switch changes new writes. Deploy readers able to read both providers before any new-provider writes, or stop/drain all writers while preparing them. Do not perform a mixed rollout against local-only readers. The shipped KMS configuration provides KMS primary plus optional local fallback, not an arbitrary reversible pair of cloud providers.
 
 ---
 
@@ -51,7 +53,7 @@ flowchart LR
     end
 
     subgraph "Phase B: Rewrap"
-        B1["Background job:<br/>rewrap() all v2 records<br/>from local to KMS"]
+        B1["Operator-driven bounded migration<br/>of converted families"]
     end
 
     subgraph "Phase C: KMS-Only"
@@ -68,8 +70,8 @@ flowchart LR
 The migration uses a **fallback provider** to ensure zero downtime:
 
 1. **Phase A**: Deploy with `KEY_PROVIDER=aws-kms` (or `gcp-kms`) while keeping `ENCRYPTION_KEY` set. New encryptions use KMS. Old v2 ciphertexts decrypt via the fallback local provider. Legacy v0/v1 decrypt via `LegacyKeys`.
-2. **Phase B**: Run a background rewrap job to re-wrap all existing v2 DEKs from the local provider to the KMS provider. This only touches the ~60-byte wrapped DEK per record, not the data.
-3. **Phase C**: Once all records are rewrapped and `decrypt_stats()` shows zero `v2_fallback` hits, remove `ENCRYPTION_KEY` to eliminate the fallback provider.
+2. **Phase B**: Run the explicit migration API for converted fields. v2 same-context rewrap can preserve the encrypted data; legacy-to-context conversion requires authenticated decrypt/re-encrypt. Resolve per-field findings and pending adapters.
+3. **Phase C**: Remove the local fallback only after authenticated inventory, legacy-reader, rollback and retained-backup dependencies permit it. Zero `v2_fallback` traffic is insufficient evidence.
 
 ---
 
@@ -134,16 +136,11 @@ At startup, NyxID will:
 
 ### Step 5: Run Rewrap Job
 
-Execute a background job that reads all encrypted records and calls `rewrap()` on each. The `rewrap()` method:
-- Unwraps the DEK from the fallback (local) provider
-- Re-wraps it with the primary (KMS) provider
-- Replaces only the header + wrapped DEK portion (data is unchanged)
-
-Monitor `decrypt_stats()` to track progress -- the `v2_fallback` counter should decrease to zero.
+Use the [encrypted-record migration API](SECURITY.md#encrypted-record-migration). It holds a durable lease/cursor and uses exact-source CAS so a concurrent refresh, credential replacement or ownership transfer is not overwritten. It authenticates converted fields and records failures; pending adapters prevent complete readiness. Rewrap preserves payload bytes only when the envelope/context contract allows it. Traffic counters are diagnostics, not a complete inventory.
 
 ### Step 6: Remove Local Key (KMS-Only)
 
-Once `v2_fallback == 0` and all records are rewrapped:
+Only after authenticated field inventory, strict-reader readiness and retained-backup/rollback review permit local-key retirement:
 
 ```bash
 # Remove local key -- KMS is now the sole provider
@@ -201,7 +198,7 @@ GCP_KMS_KEY_NAME=projects/my-project/locations/us-east1/keyRings/nyxid-ring/cryp
 
 ### Step 5: Run Rewrap Job
 
-Same as AWS -- run `rewrap()` on all records. Monitor `v2_fallback` until zero.
+Use the same explicit bounded migration and authenticated readiness review as AWS. Keep the local fallback while any field, legacy reader, rollback binary or retained backup needs it.
 
 ### Step 6: Remove Local Key
 
@@ -223,23 +220,23 @@ The `EncryptionDecryptStats` struct (accessible via `decrypt_stats()`) provides 
 |---------|-------------|----------------------|
 | `v2_current` | Decrypted with current KMS key | Increasing (normal traffic) |
 | `v2_previous` | Decrypted with previous KMS key | 0 (after KMS rotation) |
-| `v2_fallback` | Decrypted via fallback local provider | **0** (migration complete) |
+| `v2_fallback` | Decrypted via fallback local provider | 0 expected after migration; not readiness evidence |
 | `v1_current` | Legacy v1 with current local key | 0 (after re-encryption) |
 | `v1_previous` | Legacy v1 with previous local key | 0 |
 | `v0_current` | Legacy v0 with current local key | 0 (after re-encryption) |
 | `v0_previous` | Legacy v0 with previous local key | 0 |
 
-Migration is complete when `v2_fallback == 0` and all v0/v1 counters are zero.
+These counters observe recent decrypt traffic only. Complete migration requires authenticated field inventory and resolved findings, including untouched records. Pending adapters block readiness, and cloud-internal versions/backups require separate operator evidence.
 
 ### Startup Log Indicators
 
 On startup with KMS provider:
 ```
-INFO  AWS KMS provider initialized key_id=0xab has_previous=false
+INFO  AWS KMS provider initialized has_previous=false
 ```
 or:
 ```
-INFO  GCP Cloud KMS provider initialized key_id=0xcd has_previous=false
+INFO  GCP Cloud KMS provider initialized has_previous=false
 ```
 
 During decrypt of fallback records:
@@ -253,33 +250,11 @@ WARN  Decrypted v2 envelope via fallback provider; migration from previous provi
 
 ### Rollback: KMS Back to Local
 
-If issues arise after switching to KMS, you can roll back to the local provider. This requires that `ENCRYPTION_KEY` was preserved.
+If issues arise after switching to KMS, preserve access to both local and KMS ciphertext before changing configuration. Keeping `ENCRYPTION_KEY` alone does not make KMS-written records readable by a local-only process.
 
-**Scenario A: During migration window (dual-provider config)**
+Keep KMS primary plus the original local fallback while recovering. Switching directly to `KEY_PROVIDER=local` cannot decrypt KMS-written records, and the shipped configuration has no KMS-as-fallback setting. A return to local requires a separately reviewed migration that preserves access to both ciphertext sets; do not remove cloud access first.
 
-Simply revert the config:
-
-```bash
-# Roll back to local-only
-KEY_PROVIDER=local
-ENCRYPTION_KEY=<your 64 hex chars>
-# Remove AWS/GCP vars
-```
-
-Records encrypted with KMS during the migration window will need re-encryption. The fallback chain will not decrypt them because the local provider does not know the KMS key ID. To handle this:
-
-1. Keep the KMS config temporarily as the fallback
-2. Or accept that records encrypted during the KMS window need manual intervention
-
-**Scenario B: After full migration (no local key)**
-
-If `ENCRYPTION_KEY` was removed, you cannot directly roll back. Recovery requires:
-
-1. Re-export the original local encryption key from your secrets manager
-2. Deploy with dual config (KMS primary + local fallback) in reverse
-3. Run rewrap from KMS to local
-
-**Best practice**: Always preserve `ENCRYPTION_KEY` in your secrets manager even after removing it from runtime config.
+Restore only a reader compatible with every stored contextual version and retain the matching HMAC keyset. Restoring an old database backup also requires its original provider/key dependencies. Preserve the original local key in the deployment's secret backup even after runtime retirement when backups still depend on it.
 
 ### Rollback: KMS Key Rotation
 
@@ -301,7 +276,7 @@ The provider will try the current key first, then fall back to the previous key 
 
 | Scenario | Action | Data Impact |
 |----------|--------|-------------|
-| KMS latency too high | Roll back to `KEY_PROVIDER=local` | Records encrypted with KMS need rewrap back |
+| KMS latency too high | Keep both readers; investigate or use a reviewed reverse migration | Local-only rollback cannot read KMS-written records |
 | KMS auth failure | Fix IAM/credentials; keep KMS config | No data impact |
 | Cross-provider key ID collision at startup | Use a different KMS key | No data impact (caught at startup) |
 | KMS key accidentally disabled | Re-enable key in cloud console | Temporary 503 errors until re-enabled |
@@ -356,7 +331,7 @@ GCP_KMS_KEY_NAME=projects/.../cryptoKeys/new-key
 GCP_KMS_KEY_NAME_PREVIOUS=projects/.../cryptoKeys/old-key
 ```
 
-Then run `rewrap()` on all records, and once `v2_previous == 0`, remove the `_PREVIOUS` config.
+First stage both-key readers on every replica, then switch the active key. Use the explicit migration/readiness procedure; remove `_PREVIOUS` only after authenticated inventory, legacy readers, rollback and backup dependencies allow it. A logical KMS key ID can still serve historical cloud-internal versions; successful decrypt does not prove those versions retired.
 
 ---
 
@@ -375,7 +350,7 @@ A: LocalKeyProvider produces 60-byte wrapped DEKs. AWS KMS produces ~170-200 byt
 A: The v2 header format is unchanged. The `wrapped_dek_len` field (2-byte big-endian u16) accommodates variable wrapped DEK sizes. KMS-wrapped records are larger due to the bigger wrapped DEK blob.
 
 **Q: Can I run the rewrap job while the application is serving traffic?**
-A: Yes. `rewrap()` is safe to run concurrently with encrypt/decrypt. The fallback provider remains available throughout.
+A: The explicit runner uses exact-source CAS for converted families and can run with concurrent credential operations after reader/writer cutover. Keep fallback/previous keys and resolve findings; the raw primitive alone does not provide concurrency or inventory guarantees.
 
 **Q: What if I get a key ID collision at startup?**
 A: NyxID checks for collisions between the primary and fallback provider key IDs at startup and panics if one is detected (1-in-256 chance). Use a different KMS key or generate a new local key.

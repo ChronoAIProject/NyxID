@@ -346,27 +346,29 @@ pub async fn sweep(db: &Database, now: DateTime<Utc>) -> AppResult<()> {
         } else {
             None
         };
-        let accepted_message = match stop_reason.as_deref().or(op.error_code.as_deref()) {
-            Some("runtime_funding_unavailable" | "runtime_funding_expired") => {
-                "Runtime funding stopped. Your workspace is retained. Restore funds or billing availability, then review a new quote and resume manually."
+        // Delete has the same evidence contract for every account-safety reason
+        // and after transient progress replaces that reason. Never promise
+        // retained workspaces or unobserved physical storage reclamation here.
+        let accepted_message = if op.action == LifecycleAction::Delete {
+            "Machine access stopped and runtime and workspace deletion was queued. Cleanup remains pending until applicable control-plane stop or absence, Sandbox object-cascade checks, creation obligations, and accounting are verified. Underlying storage follows its reclaim policy; physical storage release is not verified."
+        } else {
+            match stop_reason.as_deref().or(op.error_code.as_deref()) {
+                Some("runtime_funding_unavailable" | "runtime_funding_expired") => {
+                    "Runtime funding stopped. Your workspace is retained. Restore funds or billing availability, then review a new quote and resume manually."
+                }
+                Some("expansion_deadline_exceeded") => {
+                    "Provisioning exceeded its deadline and was stopped. Your existing workspace is retained; check platform status before retrying."
+                }
+                Some(
+                    "account_deletion_pending" | "owner_not_found" | "owner_deletion_basis_missing",
+                ) => {
+                    "Machine access stopped because the account is unavailable or owner deletion consent is missing. Your workspace is retained; platform investigation is required before further action."
+                }
+                Some("account_inactive" | "machine_security_restriction") => {
+                    "Machine access stopped because the account is unavailable or restricted. Your workspace is retained; resolve the account status before resuming."
+                }
+                _ => "Lifecycle operation accepted",
             }
-            Some("expansion_deadline_exceeded") => {
-                "Provisioning exceeded its deadline and was stopped. Your existing workspace is retained; check platform status before retrying."
-            }
-            Some("account_deletion_pending" | "owner_not_found")
-                if op.action == LifecycleAction::Delete =>
-            {
-                "Account deletion stopped Machine access and queued runtime and workspace deletion. Cleanup remains pending until physical stop, storage reclamation, and accounting are verified."
-            }
-            Some(
-                "account_deletion_pending" | "owner_not_found" | "owner_deletion_basis_missing",
-            ) => {
-                "Machine access stopped because the account is unavailable or owner deletion consent is missing. Your workspace is retained; platform investigation is required before further action."
-            }
-            Some("account_inactive" | "machine_security_restriction") => {
-                "Machine access stopped because the account is unavailable or restricted. Your workspace is retained; resolve the account status before resuming."
-            }
-            _ => "Lifecycle operation accepted",
         };
         record(db, &op, "accepted", accepted_message, true).await?;
         if let Some(terminal) = op.terminal_at {
@@ -383,9 +385,14 @@ pub async fn sweep(db: &Database, now: DateTime<Utc>) -> AppResult<()> {
         {
             record(db,&op,"cleanup_overdue","Cleanup remains pending beyond the 24-hour target; platform investigation is required",true).await?;
             escalate_cleanup(db, &op).await?;
-            db.collection::<Document>(OPERATIONS).update_one(doc! {"_id":&op.id,"terminal_at":bson::Bson::Null},doc! {"$set":{"deadline_at":bson::DateTime::from_chrono(op.created_at+Duration::hours(24)),"cleanup_state":"pending","error_code":"cleanup_overdue","error_message":"Cleanup remains pending; no completion is inferred from the deadline"}}).await?;
+            db.collection::<Document>(OPERATIONS).update_one(doc! {"_id":&op.id,"terminal_at":bson::Bson::Null},doc! {"$set":{"deadline_at":bson::DateTime::from_chrono(op.created_at+Duration::hours(24)),"cleanup_state":"pending"}}).await?;
         } else if now >= op.created_at + Duration::minutes(15) {
-            record(db,&op,"reconciliation_delayed","Platform reconciliation is taking longer than expected; retained work data will not be deleted automatically",true).await?;
+            let message = if op.action == LifecycleAction::Delete {
+                "Machine deletion reconciliation is taking longer than expected. Cleanup remains pending; platform investigation may be required."
+            } else {
+                "Platform reconciliation is taking longer than expected; retained work data will not be deleted automatically"
+            };
+            record(db, &op, "reconciliation_delayed", message, true).await?;
         }
         db.collection::<Document>(OPERATIONS)
             .update_one(
@@ -529,6 +536,195 @@ mod pagination_tests {
         op
     }
 
+    async fn overdue_delete_operation(
+        db: &Database,
+        error: Option<(&str, &str)>,
+    ) -> MachineOperation {
+        let op = account_safety_operation(db, LifecycleAction::Delete, "fixture").await;
+        let (code, message) = error.unzip();
+        db.collection::<Document>(OPERATIONS)
+            .update_one(
+                doc! {"_id":&op.id},
+                doc! {"$set":{
+                    "created_at":bson::DateTime::from_chrono(Utc::now()-Duration::hours(25)),
+                    "deadline_at":bson::Bson::Null,
+                    "error_code":code,
+                    "error_message":message
+                }},
+            )
+            .await
+            .unwrap();
+        db.collection::<MachineOperation>(OPERATIONS)
+            .find_one(doc! {"_id":&op.id})
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn assert_overdue_projection(
+        db: &Database,
+        original: &MachineOperation,
+        error: Option<(&str, &str)>,
+    ) {
+        let op = db
+            .collection::<MachineOperation>(OPERATIONS)
+            .find_one(doc! {"_id":&original.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let (code, message) = error.unzip();
+        assert_eq!(op.error_code.as_deref(), code);
+        assert_eq!(op.error_message.as_deref(), message);
+        assert_eq!(op.state, original.state);
+        assert!(op.terminal_at.is_none());
+        assert_eq!(
+            op.cleanup_state,
+            crate::models::remote_machine_operation::CleanupState::Pending
+        );
+        assert_eq!(op.deadline_at, Some(op.created_at + Duration::hours(24)));
+        assert_eq!(op.retry_count, original.retry_count);
+        assert_eq!(
+            db.collection::<Document>(EVENTS)
+                .count_documents(
+                    doc! {"operation_id":&op.id,"kind":"cleanup_overdue","notification":true}
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"event_type":"machine_cleanup_overdue_operator_action","event_data.operation_id":&op.id})
+                .await
+                .unwrap(),
+            1
+        );
+        let row = db
+            .collection::<Document>(OPERATIONS)
+            .find_one(doc! {"_id":&op.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.get_datetime("operator_escalated_at").is_ok());
+        assert_eq!(row.get_str("operator_escalation"), Ok("cleanup_overdue"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_overdue_preserves_specific_error_before_sweep() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("machine_overdue_specific").await;
+        ensure_indexes(&db).await.unwrap();
+        let error = Some((
+            "delete_kubernetes_access_denied",
+            "Kubernetes access denied while observing cleanup resources",
+        ));
+        let op = overdue_delete_operation(&db, error).await;
+        for _ in 0..2 {
+            sweep(&db, Utc::now()).await.unwrap();
+            assert_overdue_projection(&db, &op, error).await;
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_overdue_preserves_specific_error_after_earlier_sweep() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("machine_overdue_order").await;
+        ensure_indexes(&db).await.unwrap();
+        // A pre-upgrade overdue code is replaced only by a real observation;
+        // the projection does not infer what the previous failure meant.
+        let legacy = Some((
+            "cleanup_overdue",
+            "Cleanup remains pending; no completion is inferred from the deadline",
+        ));
+        let op = overdue_delete_operation(&db, legacy).await;
+        sweep(&db, Utc::now()).await.unwrap();
+        assert_overdue_projection(&db, &op, legacy).await;
+        let (code, message) = (
+            "delete_kubernetes_response_invalid",
+            "Kubernetes cleanup observation response is invalid",
+        );
+        let error = Some((code, message));
+        db.collection::<Document>(OPERATIONS)
+            .update_one(
+                doc! {"_id":&op.id,"terminal_at":bson::Bson::Null},
+                doc! {"$set":{"error_code":code,"error_message":message}},
+            )
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            sweep(&db, Utc::now()).await.unwrap();
+            assert_overdue_projection(&db, &op, error).await;
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_overdue_does_not_invent_an_error_when_none_is_known() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("machine_overdue_no_error").await;
+        ensure_indexes(&db).await.unwrap();
+        let op = overdue_delete_operation(&db, None).await;
+        for _ in 0..2 {
+            sweep(&db, Utc::now()).await.unwrap();
+            assert_overdue_projection(&db, &op, None).await;
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_overdue_does_not_reopen_a_terminal_delete() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("machine_overdue_terminal").await;
+        ensure_indexes(&db).await.unwrap();
+        let op = overdue_delete_operation(&db, None).await;
+        let terminal = bson::DateTime::now();
+        db.collection::<Document>(OPERATIONS)
+            .update_one(
+                doc! {"_id":&op.id},
+                doc! {"$set":{"state":"succeeded","cleanup_state":"complete","terminal_at":terminal}},
+            )
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            sweep(&db, Utc::now()).await.unwrap();
+            let retained = db
+                .collection::<MachineOperation>(OPERATIONS)
+                .find_one(doc! {"_id":&op.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                retained.state,
+                crate::models::remote_machine_operation::OperationState::Succeeded
+            );
+            assert_eq!(
+                retained.cleanup_state,
+                crate::models::remote_machine_operation::CleanupState::Complete
+            );
+            assert_eq!(retained.terminal_at, Some(terminal.to_chrono()));
+            assert_eq!(retained.deadline_at, None);
+            assert_eq!(retained.error_code, None);
+            assert_eq!(retained.error_message, None);
+            assert_eq!(retained.retry_count, op.retry_count);
+            assert_eq!(
+                db.collection::<Document>(EVENTS)
+                    .count_documents(doc! {"operation_id":&op.id,"kind":"cleanup_overdue"})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+                    .count_documents(doc! {"event_type":"machine_cleanup_overdue_operator_action","event_data.operation_id":&op.id})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn account_safety_pause_projection_discloses_retention_and_replays_once() {
         let db =
@@ -576,22 +772,121 @@ mod pagination_tests {
         let db =
             crate::test_utils::connect_transaction_test_database("machine_delete_disclosure").await;
         ensure_indexes(&db).await.unwrap();
-        for reason in ["account_deletion_pending", "owner_not_found"] {
-            let op = account_safety_operation(&db, LifecycleAction::Delete, reason).await;
-            sweep(&db, Utc::now()).await.unwrap();
-            let event = db
-                .collection::<MachineLifecycleEvent>(EVENTS)
-                .find_one(doc! {"operation_id":&op.id,"kind":"accepted"})
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(
-                event
-                    .message
-                    .contains("queued runtime and workspace deletion")
-            );
-            assert!(event.message.contains("Cleanup remains pending until physical stop, storage reclamation, and accounting are verified"));
-            assert!(event.notification);
+        // All owner_ineligibility reasons plus the retained-recovery reason.
+        // Delete selection depends on deletion authority, not on the reason.
+        // Include ordinary Delete, replaced progress and shared non-Delete
+        // disclosures to ensure none can promise retention on a Delete.
+        for reason in [
+            "account_deletion_pending",
+            "owner_not_found",
+            "organization_not_eligible",
+            "account_inactive",
+            "machine_security_restriction",
+            "owner_deletion_basis_missing",
+            "delete_sandbox_gc_pending",
+            "runtime_funding_unavailable",
+            "runtime_funding_expired",
+            "expansion_deadline_exceeded",
+            "fixture",
+            "no_error_code",
+        ] {
+            for phase in ["accepted", "delayed", "overdue", "succeeded", "failed"] {
+                let mut op = account_safety_operation(&db, LifecycleAction::Delete, reason).await;
+                if reason == "no_error_code" {
+                    op.error_code = None;
+                }
+                let now = Utc::now();
+                let age = match phase {
+                    "delayed" => Duration::minutes(16),
+                    "overdue" => Duration::hours(25),
+                    _ => Duration::zero(),
+                };
+                let terminal = matches!(phase, "succeeded" | "failed");
+                db.collection::<Document>(OPERATIONS).update_one(doc! {"_id":&op.id},
+                    doc! {"$set":{
+                        "created_at":bson::DateTime::from_chrono(now-age),
+                        "error_code":&op.error_code,
+                        "terminal_at":if terminal { bson::Bson::DateTime(bson::DateTime::from_chrono(now)) } else { bson::Bson::Null },
+                        "state":if terminal { phase } else { "accepted" },
+                        "cleanup_state":if phase == "succeeded" { "complete" } else { "pending" },
+                    }}).await.unwrap();
+                for _ in 0..2 {
+                    sweep(&db, now).await.unwrap();
+                    let events: Vec<MachineLifecycleEvent> = db
+                        .collection(EVENTS)
+                        .find(doc! {"operation_id":&op.id})
+                        .await
+                        .unwrap()
+                        .try_collect()
+                        .await
+                        .unwrap();
+                    let accepted = events.iter().find(|e| e.kind == "accepted").unwrap();
+                    assert!(
+                        accepted
+                            .message
+                            .contains("runtime and workspace deletion was queued"),
+                        "{reason}/{phase}"
+                    );
+                    assert!(accepted.message.contains("applicable control-plane stop or absence, Sandbox object-cascade checks, creation obligations, and accounting"));
+                    assert!(
+                        accepted
+                            .message
+                            .contains("physical storage release is not verified")
+                    );
+                    assert!(
+                        accepted
+                            .message
+                            .contains("Underlying storage follows its reclaim policy")
+                    );
+                    let expected_kind = match phase {
+                        "delayed" => Some("reconciliation_delayed"),
+                        "overdue" => Some("cleanup_overdue"),
+                        "succeeded" | "failed" => Some("completed"),
+                        _ => None,
+                    };
+                    assert_eq!(
+                        events.len(),
+                        if expected_kind.is_some() { 2 } else { 1 },
+                        "{reason}/{phase}: replay must not duplicate notices"
+                    );
+                    if let Some(kind) = expected_kind {
+                        assert!(events.iter().any(|e| e.kind == kind));
+                    }
+                    for event in events {
+                        assert!(event.notification);
+                        assert!(
+                            !event.message.contains("physical stop"),
+                            "{reason}/{phase}: {}",
+                            event.message
+                        );
+                        assert!(!event.message.contains("storage reclamation"));
+                        assert!(!event.message.contains("workspace is retained"));
+                        assert!(!event.message.contains("will not be deleted automatically"));
+                        if matches!(
+                            event.kind.as_str(),
+                            "cleanup_overdue" | "reconciliation_delayed"
+                        ) {
+                            assert!(event.message.contains("pending"));
+                        }
+                    }
+                    let retained = db
+                        .collection::<MachineOperation>(OPERATIONS)
+                        .find_one(doc! {"_id":&op.id})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(retained.terminal_at.is_some(), terminal);
+                    assert_eq!(
+                        retained.cleanup_state.as_str(),
+                        if phase == "succeeded" {
+                            "complete"
+                        } else {
+                            "pending"
+                        }
+                    );
+                    assert_eq!(retained.error_code, op.error_code);
+                }
+            }
         }
         db.drop().await.unwrap();
     }

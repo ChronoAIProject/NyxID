@@ -8,6 +8,48 @@ use tokio::sync::RwLock;
 
 use crate::errors::{AppError, AppResult};
 
+// Provider responses can contain the submitted device token or credentials.
+// Only fixed protocol reason codes cross the diagnostic boundary.
+async fn response_reason(mut response: reqwest::Response, provider: &str) -> &'static str {
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) if bytes.len().saturating_add(chunk.len()) <= 16 * 1024 => {
+                bytes.extend_from_slice(&chunk)
+            }
+            Ok(Some(_)) | Err(_) => return "invalid_response",
+            Ok(None) => break,
+        }
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return "invalid_response";
+    };
+    let code = if provider == "apns" {
+        value.get("reason").and_then(serde_json::Value::as_str)
+    } else {
+        value
+            .pointer("/error/status")
+            .and_then(serde_json::Value::as_str)
+    };
+    match (provider, code) {
+        ("apns", Some("BadDeviceToken")) => "BadDeviceToken",
+        ("apns", Some("ExpiredProviderToken")) => "ExpiredProviderToken",
+        ("apns", Some("Unregistered")) => "Unregistered",
+        ("apns", Some("DeviceTokenNotForTopic")) => "DeviceTokenNotForTopic",
+        ("apns", Some("TooManyRequests")) => "TooManyRequests",
+        ("apns", Some("ServiceUnavailable")) => "ServiceUnavailable",
+        ("apns", Some("InvalidProviderToken")) => "InvalidProviderToken",
+        ("fcm", Some("INVALID_ARGUMENT")) => "INVALID_ARGUMENT",
+        ("fcm", Some("NOT_FOUND")) => "NOT_FOUND",
+        ("fcm", Some("UNAUTHENTICATED")) => "UNAUTHENTICATED",
+        ("fcm", Some("PERMISSION_DENIED")) => "PERMISSION_DENIED",
+        ("fcm", Some("RESOURCE_EXHAUSTED")) => "RESOURCE_EXHAUSTED",
+        ("fcm", Some("UNAVAILABLE")) => "UNAVAILABLE",
+        ("fcm", Some("INTERNAL")) => "INTERNAL",
+        _ => "provider_rejected",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Dedicated HTTP/2 client for APNs
 // ---------------------------------------------------------------------------
@@ -35,11 +77,26 @@ struct CachedToken {
     expires_at: Instant,
 }
 
+// Google-issued FCM credentials normally last one hour. Accept at most one
+// day, retaining the existing 60-second refresh margin with checked arithmetic.
+fn fcm_token_expiry(expires_in: u64) -> AppResult<Instant> {
+    if expires_in > 24 * 60 * 60 {
+        return Err(AppError::Internal(
+            "FCM token lifetime is unsupported".into(),
+        ));
+    }
+    Instant::now()
+        .checked_add(std::time::Duration::from_secs(
+            expires_in.saturating_sub(60),
+        ))
+        .ok_or_else(|| AppError::Internal("FCM token lifetime is unsupported".into()))
+}
+
 // ---------------------------------------------------------------------------
 // FCM (Firebase Cloud Messaging) via HTTP v1 API
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct FcmServiceAccount {
     client_email: String,
     private_key: String,
@@ -54,12 +111,13 @@ pub struct FcmAuth {
 impl FcmAuth {
     /// Load and parse a Google service account JSON file.
     pub fn from_service_account_file(path: &str) -> AppResult<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            AppError::Internal(format!("Failed to read FCM service account at {path}: {e}"))
-        })?;
+        let content = zeroize::Zeroizing::new(
+            std::fs::read_to_string(path)
+                .map_err(|_| AppError::Internal("Failed to read FCM service account".into()))?,
+        );
 
         let sa: FcmServiceAccount = serde_json::from_str(&content)
-            .map_err(|e| AppError::Internal(format!("Invalid FCM service account JSON: {e}")))?;
+            .map_err(|_| AppError::Internal("Invalid FCM service account JSON".into()))?;
 
         Ok(Self {
             service_account: sa,
@@ -121,15 +179,13 @@ impl FcmAuth {
             ])
             .send()
             .await
-            .map_err(|e| AppError::Internal(format!("FCM token request failed: {e}")))?;
+            .map_err(|_| AppError::Internal("FCM token request failed".into()))?;
 
         if !resp.status().is_success() {
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "<no body>".to_string());
+            let status = resp.status().as_u16();
+            let code = response_reason(resp, "fcm").await;
             return Err(AppError::Internal(format!(
-                "FCM token exchange failed: {body}"
+                "FCM token exchange failed (HTTP {status}, {code})"
             )));
         }
 
@@ -142,10 +198,9 @@ impl FcmAuth {
         let token_resp: TokenResponse = resp
             .json()
             .await
-            .map_err(|e| AppError::Internal(format!("FCM token parse failed: {e}")))?;
+            .map_err(|_| AppError::Internal("FCM token parse failed".into()))?;
 
-        let expires_at = Instant::now()
-            + std::time::Duration::from_secs(token_resp.expires_in.saturating_sub(60));
+        let expires_at = fcm_token_expiry(token_resp.expires_in)?;
 
         let access_token = token_resp.access_token.clone();
 
@@ -232,6 +287,29 @@ pub async fn send_fcm_notification(
     body: &str,
     data: &HashMap<String, String>,
 ) -> AppResult<FcmSendResult> {
+    let endpoint = format!("https://fcm.googleapis.com/v1/projects/{project_id}/messages:send");
+    send_fcm_notification_to(
+        http_client,
+        fcm_auth,
+        device_token,
+        title,
+        body,
+        data,
+        &endpoint,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_fcm_notification_to(
+    http_client: &Client,
+    fcm_auth: &FcmAuth,
+    device_token: &str,
+    title: &str,
+    body: &str,
+    data: &HashMap<String, String>,
+    endpoint: &str,
+) -> AppResult<FcmSendResult> {
     let access_token = fcm_auth.get_access_token(http_client).await?;
 
     let payload = FcmMessagePayload {
@@ -259,15 +337,15 @@ pub async fn send_fcm_notification(
         },
     };
 
-    let url = format!("https://fcm.googleapis.com/v1/projects/{project_id}/messages:send");
+    let url = endpoint;
 
     let resp = http_client
-        .post(&url)
+        .post(url)
         .bearer_auth(&access_token)
         .json(&payload)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("FCM send request failed: {e}")))?;
+        .map_err(|_| AppError::Internal("FCM send request failed".into()))?;
 
     let status = resp.status();
 
@@ -275,7 +353,7 @@ pub async fn send_fcm_notification(
         return Ok(parse_fcm_success(resp).await);
     }
 
-    let resp_body = resp.text().await.unwrap_or_default();
+    let reason_code = response_reason(resp, "fcm").await;
 
     match status.as_u16() {
         404 => {
@@ -288,33 +366,34 @@ pub async fn send_fcm_notification(
             let new_token = fcm_auth.refresh_access_token(http_client).await?;
 
             let retry_resp = http_client
-                .post(&url)
+                .post(url)
                 .bearer_auth(&new_token)
                 .json(&payload)
                 .send()
                 .await
-                .map_err(|e| AppError::Internal(format!("FCM retry failed: {e}")))?;
+                .map_err(|_| AppError::Internal("FCM retry failed".into()))?;
 
             if retry_resp.status().is_success() {
                 Ok(parse_fcm_success(retry_resp).await)
             } else {
-                let retry_body = retry_resp.text().await.unwrap_or_default();
-                tracing::warn!("FCM retry also failed: {retry_body}");
+                let status = retry_resp.status().as_u16();
+                let reason_code = response_reason(retry_resp, "fcm").await;
+                tracing::warn!(status, reason_code, "FCM retry failed");
                 Ok(FcmSendResult::Failed {
-                    reason: format!("FCM retry failed (401): {retry_body}"),
+                    reason: format!("FCM retry failed (HTTP {status}, {reason_code})"),
                 })
             }
         }
         400 => {
-            tracing::warn!("FCM 400 bad request: {resp_body}");
+            tracing::warn!(reason_code, "FCM bad request");
             Ok(FcmSendResult::Failed {
-                reason: format!("FCM bad request: {resp_body}"),
+                reason: format!("FCM bad request ({reason_code})"),
             })
         }
         _ => {
-            tracing::warn!(status = %status, "FCM send failed: {resp_body}");
+            tracing::warn!(status = status.as_u16(), reason_code, "FCM send failed");
             Ok(FcmSendResult::Failed {
-                reason: format!("FCM error {status}: {resp_body}"),
+                reason: format!("FCM error (HTTP {}, {reason_code})", status.as_u16()),
             })
         }
     }
@@ -342,12 +421,12 @@ pub async fn send_fcm_silent(
     let url = format!("https://fcm.googleapis.com/v1/projects/{project_id}/messages:send");
 
     let resp = http_client
-        .post(&url)
+        .post(url)
         .bearer_auth(&access_token)
         .json(&payload)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("FCM silent send failed: {e}")))?;
+        .map_err(|_| AppError::Internal("FCM silent send failed".into()))?;
 
     if resp.status().is_success() {
         Ok(FcmSendResult::Success {
@@ -356,9 +435,10 @@ pub async fn send_fcm_silent(
     } else if resp.status().as_u16() == 404 {
         Ok(FcmSendResult::TokenInvalid)
     } else {
-        let body = resp.text().await.unwrap_or_default();
+        let status = resp.status().as_u16();
+        let reason_code = response_reason(resp, "fcm").await;
         Ok(FcmSendResult::Failed {
-            reason: format!("FCM silent error: {body}"),
+            reason: format!("FCM silent error (HTTP {status}, {reason_code})"),
         })
     }
 }
@@ -469,15 +549,26 @@ pub async fn send_apns_notification(
     body: &str,
     data: &HashMap<String, String>,
 ) -> AppResult<ApnsSendResult> {
-    let jwt = apns_auth.get_token().await?;
-
     let host = if sandbox {
         "api.sandbox.push.apple.com"
     } else {
         "api.push.apple.com"
     };
-
     let url = format!("https://{host}/3/device/{device_token}");
+    send_apns_notification_to(&APNS_HTTP_CLIENT, apns_auth, &url, topic, title, body, data).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_apns_notification_to(
+    http_client: &Client,
+    apns_auth: &ApnsAuth,
+    url: &str,
+    topic: &str,
+    title: &str,
+    body: &str,
+    data: &HashMap<String, String>,
+) -> AppResult<ApnsSendResult> {
+    let jwt = apns_auth.get_token().await?;
 
     // Store-and-forward for up to 5 minutes (matches typical approval timeout)
     let apns_expiration = format!("{}", chrono::Utc::now().timestamp() + 300);
@@ -501,8 +592,8 @@ pub async fn send_apns_notification(
         }
     }
 
-    let resp = APNS_HTTP_CLIENT
-        .post(&url)
+    let resp = http_client
+        .post(url)
         .bearer_auth(&jwt)
         .header("apns-topic", topic)
         .header("apns-push-type", "alert")
@@ -511,9 +602,9 @@ pub async fn send_apns_notification(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| {
-            tracing::error!("APNs send failed for {url}: {e:?}");
-            AppError::Internal(format!("APNs send failed: {e}"))
+        .map_err(|_| {
+            tracing::error!("APNs send failed");
+            AppError::Internal("APNs send failed".into())
         })?;
 
     let status = resp.status();
@@ -522,10 +613,10 @@ pub async fn send_apns_notification(
         return Ok(ApnsSendResult::Success);
     }
 
-    let resp_body = resp.text().await.unwrap_or_default();
+    let reason_code = response_reason(resp, "apns").await;
 
     match status.as_u16() {
-        400 if resp_body.contains("BadDeviceToken") => {
+        400 if reason_code == "BadDeviceToken" => {
             tracing::warn!("APNs BadDeviceToken, marking for removal");
             Ok(ApnsSendResult::TokenInvalid)
         }
@@ -533,13 +624,13 @@ pub async fn send_apns_notification(
             tracing::warn!("APNs 410 Unregistered, marking for removal");
             Ok(ApnsSendResult::TokenInvalid)
         }
-        403 if resp_body.contains("ExpiredProviderToken") => {
+        403 if reason_code == "ExpiredProviderToken" => {
             // Refresh JWT and retry once
             tracing::warn!("APNs ExpiredProviderToken: refreshing and retrying");
             let new_jwt = apns_auth.refresh_token().await?;
 
-            let retry_resp = APNS_HTTP_CLIENT
-                .post(&url)
+            let retry_resp = http_client
+                .post(url)
                 .bearer_auth(&new_jwt)
                 .header("apns-topic", topic)
                 .header("apns-push-type", "alert")
@@ -548,24 +639,25 @@ pub async fn send_apns_notification(
                 .json(&payload)
                 .send()
                 .await
-                .map_err(|e| {
-                    tracing::error!("APNs retry failed for {url}: {e:?}");
-                    AppError::Internal(format!("APNs retry failed: {e}"))
+                .map_err(|_| {
+                    tracing::error!("APNs retry transport failed");
+                    AppError::Internal("APNs retry transport failed".into())
                 })?;
 
             if retry_resp.status().is_success() {
                 Ok(ApnsSendResult::Success)
             } else {
-                let retry_body = retry_resp.text().await.unwrap_or_default();
+                let status = retry_resp.status().as_u16();
+                let reason_code = response_reason(retry_resp, "apns").await;
                 Ok(ApnsSendResult::Failed {
-                    reason: format!("APNs retry failed: {retry_body}"),
+                    reason: format!("APNs retry failed (HTTP {status}, {reason_code})"),
                 })
             }
         }
         _ => {
-            tracing::warn!(status = %status, "APNs send failed: {resp_body}");
+            tracing::warn!(status = status.as_u16(), reason_code, "APNs send failed");
             Ok(ApnsSendResult::Failed {
-                reason: format!("APNs error {status}: {resp_body}"),
+                reason: format!("APNs error (HTTP {}, {reason_code})", status.as_u16()),
             })
         }
     }
@@ -605,7 +697,7 @@ pub async fn send_apns_silent(
     }
 
     let resp = APNS_HTTP_CLIENT
-        .post(&url)
+        .post(url)
         .bearer_auth(&jwt)
         .header("apns-topic", topic)
         .header("apns-push-type", "background")
@@ -614,9 +706,9 @@ pub async fn send_apns_silent(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| {
-            tracing::error!("APNs silent send failed for {url}: {e:?}");
-            AppError::Internal(format!("APNs silent send failed: {e}"))
+        .map_err(|_| {
+            tracing::error!("APNs silent send failed");
+            AppError::Internal("APNs silent send failed".into())
         })?;
 
     let resp_status = resp.status().as_u16();
@@ -624,13 +716,12 @@ pub async fn send_apns_silent(
     if resp.status().is_success() {
         Ok(ApnsSendResult::Success)
     } else {
-        // Read body once before branching to avoid losing error details
-        let body = resp.text().await.unwrap_or_default();
-        if resp_status == 410 || (resp_status == 400 && body.contains("BadDeviceToken")) {
+        let reason_code = response_reason(resp, "apns").await;
+        if resp_status == 410 || (resp_status == 400 && reason_code == "BadDeviceToken") {
             Ok(ApnsSendResult::TokenInvalid)
         } else {
             Ok(ApnsSendResult::Failed {
-                reason: format!("APNs silent error {resp_status}: {body}"),
+                reason: format!("APNs silent error (HTTP {resp_status}, {reason_code})"),
             })
         }
     }
@@ -639,6 +730,174 @@ pub async fn send_apns_silent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fcm_cache_expiry_bounds_provider_lifetime_and_preserves_refresh_margin() {
+        for ttl in [u64::MAX, 24 * 60 * 60 + 1] {
+            assert!(fcm_token_expiry(ttl).is_err());
+        }
+        let before = Instant::now();
+        let expiry = fcm_token_expiry(3600).unwrap();
+        assert!(expiry >= before + std::time::Duration::from_secs(3540));
+        assert!(expiry <= Instant::now() + std::time::Duration::from_secs(3540));
+    }
+
+    #[tokio::test]
+    async fn actual_push_transports_contain_provider_bodies_and_device_urls() {
+        use tracing::instrument::WithSubscriber;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let secret = "distinctive-push-device-response-546c";
+        let capture = tempfile::NamedTempFile::new().unwrap();
+        let writer = capture.reopen().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.try_clone().unwrap())
+            .finish();
+        let client = Client::new();
+        let server = MockServer::start().await;
+        let apns = ApnsAuth {
+            encoding_key: crate::crypto::dpop::test_dpop_keypair().0,
+            key_id: "fixture".into(),
+            team_id: "fixture".into(),
+            cached_token: RwLock::new(Some(CachedToken {
+                access_token: secret.into(),
+                expires_at: Instant::now() + std::time::Duration::from_secs(60),
+            })),
+        };
+        let fcm = FcmAuth {
+            service_account: FcmServiceAccount {
+                client_email: "fixture@example.test".into(),
+                private_key: "unused-fixture-key".into(),
+            },
+            cached_token: RwLock::new(Some(CachedToken {
+                access_token: secret.into(),
+                expires_at: Instant::now() + std::time::Duration::from_secs(60),
+            })),
+        };
+        let diagnostic =
+            async {
+                Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(400).set_body_json(
+                    serde_json::json!({"reason":secret,"error":{"status":secret,"message":secret}}),
+                ))
+                .mount(&server)
+                .await;
+                let endpoint = format!("{}/3/device/{secret}", server.uri());
+                let result = send_apns_notification_to(
+                    &client,
+                    &apns,
+                    &endpoint,
+                    "fixture.topic",
+                    "title",
+                    "body",
+                    &HashMap::new(),
+                )
+                .await
+                .unwrap();
+                let ApnsSendResult::Failed { reason } = result else {
+                    panic!("expected provider rejection")
+                };
+                assert!(!reason.contains(secret));
+                let result = send_fcm_notification_to(
+                    &client,
+                    &fcm,
+                    secret,
+                    "title",
+                    "body",
+                    &HashMap::new(),
+                    &endpoint,
+                )
+                .await
+                .unwrap();
+                let FcmSendResult::Failed { reason } = result else {
+                    panic!("expected provider rejection")
+                };
+                assert!(!reason.contains(secret));
+                server.reset().await;
+                Mock::given(method("POST"))
+                    .respond_with(ResponseTemplate::new(400).set_body_json(
+                        serde_json::json!({"reason":"BadDeviceToken","echo":secret}),
+                    ))
+                    .mount(&server)
+                    .await;
+                assert!(matches!(
+                    send_apns_notification_to(
+                        &client,
+                        &apns,
+                        &endpoint,
+                        "fixture.topic",
+                        "title",
+                        "body",
+                        &HashMap::new()
+                    )
+                    .await
+                    .unwrap(),
+                    ApnsSendResult::TokenInvalid
+                ));
+                server.reset().await;
+                let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let observed = requests.clone();
+                Mock::given(method("POST"))
+                    .respond_with(move |_: &wiremock::Request| {
+                        if observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                            ResponseTemplate::new(403).set_body_json(
+                                serde_json::json!({"reason":"ExpiredProviderToken","echo":secret}),
+                            )
+                        } else {
+                            ResponseTemplate::new(200)
+                        }
+                    })
+                    .mount(&server)
+                    .await;
+                assert!(matches!(
+                    send_apns_notification_to(
+                        &client,
+                        &apns,
+                        &endpoint,
+                        "fixture.topic",
+                        "title",
+                        "body",
+                        &HashMap::new()
+                    )
+                    .await
+                    .unwrap(),
+                    ApnsSendResult::Success
+                ));
+                assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let unavailable = format!(
+                    "http://{}/3/device/{secret}?credential={secret}",
+                    listener.local_addr().unwrap()
+                );
+                drop(listener);
+                let error = send_apns_notification_to(
+                    &client,
+                    &apns,
+                    &unavailable,
+                    "fixture.topic",
+                    "title",
+                    "body",
+                    &HashMap::new(),
+                )
+                .await
+                .err()
+                .unwrap();
+                assert!(!error.to_string().contains(secret));
+                let response = axum::response::IntoResponse::into_response(error);
+                let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .unwrap();
+                assert!(!String::from_utf8_lossy(&bytes).contains(secret));
+            };
+        diagnostic.with_subscriber(subscriber).await;
+        assert!(
+            !std::fs::read_to_string(capture.path())
+                .unwrap()
+                .contains(secret)
+        );
+    }
 
     #[test]
     fn fcm_send_result_variants() {

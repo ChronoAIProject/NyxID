@@ -164,6 +164,7 @@ impl OwnedHttpEgressGuard {
             if latest.billing != target.service.billing
                 || latest.base_url.trim_end_matches('/') != target.base_url.trim_end_matches('/')
                 || latest.credential_encrypted != current.credential_encrypted
+                || latest.secret_context_versions != current.secret_context_versions
                 || latest.auth_method != current.auth_method
                 || latest.auth_key_name != current.auth_key_name
                 || latest.auth_scheme != current.auth_scheme

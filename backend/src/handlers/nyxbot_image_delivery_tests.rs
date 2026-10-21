@@ -118,6 +118,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
     for index in 0..2 {
         let bytes = format!("pixels-{index}");
         let row = AssistantAttachment {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             origin: "tool".into(),
             user_id: OWNER.into(),

@@ -6,7 +6,7 @@ use super::bson_datetime;
 pub const COLLECTION_NAME: &str = "notification_channels";
 
 /// A registered push notification device token (FCM or APNs).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DeviceToken {
     /// Unique device ID (UUID v4 string, generated server-side)
     pub device_id: String,
@@ -99,6 +99,12 @@ fn default_approval_timeout() -> u32 {
 
 fn default_grant_expiry_days() -> u32 {
     30
+}
+
+impl std::fmt::Debug for DeviceToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceToken").finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]

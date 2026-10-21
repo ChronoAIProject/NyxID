@@ -6,8 +6,15 @@ import {
   useRef,
   useState,
   type ComponentProps,
+  type ReactNode,
 } from "react";
-import { FileText, Paperclip, X } from "lucide-react";
+import { FileText, Paperclip, Plus, X } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import {
@@ -54,12 +61,13 @@ type Pending = {
 };
 type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
   readonly scope: UploadScope;
+  readonly attachmentMenuItems?: ReactNode;
   readonly onVoice?: (conversationId: string, preparation?: PreparedMicrophone) => Promise<void>;
   readonly onSend: (text: string, uploads?: UploadedMessage) => Promise<void>;
 };
 
 /** Keyed by owner + conversation at the call site: drafts never cross threads. */
-export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
+export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ...props }: Props) {
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const [preview, setPreview] = useState<Pending>();
@@ -547,7 +555,22 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
               event.target.value = "";
             }}
           />
-          <TooltipProvider>
+          {attachmentMenuItems ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button ref={attach} type="button" variant="ghost" size="icon"
+                  className="shrink-0 text-muted-foreground" aria-label="Add context" disabled={locked}>
+                  <Plus aria-hidden className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent side="top" align="start" collisionPadding={12} aria-label="Add context">
+                <DropdownMenuItem disabled={files.length >= 10} onSelect={() => input.current?.click()}>
+                  <Paperclip aria-hidden className="size-4" />Attach files
+                </DropdownMenuItem>
+                {attachmentMenuItems}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -568,7 +591,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                 Up to 20 MB each, 10 files per message.
               </TooltipContent>
             </Tooltip>
-          </TooltipProvider>
+          </TooltipProvider>}
         </>
       }
       onSend={async (text) => {

@@ -5,7 +5,7 @@ use super::bson_datetime;
 
 pub const COLLECTION_NAME: &str = "oauth_states";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthState {
     #[serde(rename = "_id")]
     pub id: String,
@@ -225,3 +225,5 @@ mod tests {
         assert!(!reserialized.contains_key("authorization_nonce"));
     }
 }
+
+crate::errors::redacted_debug!(OAuthState);

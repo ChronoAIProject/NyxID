@@ -212,8 +212,66 @@ fn role_from_user(u: &Value) -> &str {
     })
 }
 
+const ERASURE_RETRY_DISCLOSURE: &str = "For a single-attempt revocation, any authorization granted since at the provider for this OAuth app will also be revoked. Retry re-arms one provider attempt and does not attest completion.";
+
+fn confirm_erasure_reconciliation(
+    action: &str,
+    yes: bool,
+    input: &mut impl std::io::BufRead,
+    output: &mut impl std::io::Write,
+) -> Result<bool> {
+    if matches!(action, "retry" | "retry_with_current_provider_config") {
+        writeln!(output, "{ERASURE_RETRY_DISCLOSURE}")?;
+    }
+    if yes {
+        return Ok(true);
+    }
+    write!(
+        output,
+        "Record this provider reconciliation decision? [y/N] "
+    )?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    Ok(answer.trim().eq_ignore_ascii_case("y"))
+}
+
 async fn run_user(command: AdminUserCommands) -> Result<()> {
     match command {
+        AdminUserCommands::ErasureReconcile {
+            user_id,
+            effect_id,
+            action,
+            expected_retry_generation,
+            idempotency_key,
+            evidence_reference,
+            yes,
+            auth,
+        } => {
+            if !confirm_erasure_reconciliation(
+                &action,
+                yes,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stderr().lock(),
+            )? {
+                return Ok(());
+            }
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api.post(&format!("/admin/users/{user_id}/erasure/reconcile"), &json!({
+                "effect_id":effect_id,"action":action,"expected_retry_generation":expected_retry_generation,
+                "idempotency_key":idempotency_key,"evidence_reference":evidence_reference,
+            })).await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => eprintln!(
+                    "{}",
+                    result["message"]
+                        .as_str()
+                        .unwrap_or("Reconciliation recorded.")
+                ),
+            }
+            Ok(())
+        }
         AdminUserCommands::Roles { user, auth } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let user_id = resolve_user_id(&mut api, &user).await?;
@@ -345,7 +403,8 @@ async fn run_user(command: AdminUserCommands) -> Result<()> {
                     } else {
                         "no"
                     };
-                    let mfa = if user["mfa_enabled"].as_bool().unwrap_or(false) {
+                    // Enrollment state only: "enabled" or "disabled".
+                    let enrollment = if user["mfa_enabled"].as_bool().unwrap_or(false) {
                         "enabled"
                     } else {
                         "disabled"
@@ -359,7 +418,7 @@ async fn run_user(command: AdminUserCommands) -> Result<()> {
                     eprintln!("Role:       {role}");
                     eprintln!("Active:     {active}");
                     eprintln!("Verified:   {verified}");
-                    eprintln!("MFA:        {mfa}");
+                    eprintln!("MFA:        {enrollment}");
                     eprintln!("Created:    {created}");
                     eprintln!("Last login: {last_login}");
                 }
@@ -869,5 +928,42 @@ mod tests {
     fn role_from_user_defaults_to_user_when_no_signals() {
         let u = serde_json::json!({ "email": "a@b.co" });
         assert_eq!(role_from_user(&u), "user");
+    }
+}
+
+#[cfg(test)]
+mod erasure_tests {
+    use super::*;
+    #[test]
+    fn both_retries_disclose_successor_revocation_even_with_yes() {
+        for action in ["retry", "retry_with_current_provider_config"] {
+            for yes in [true, false] {
+                let mut output = Vec::new();
+                assert!(
+                    confirm_erasure_reconciliation(
+                        action,
+                        yes,
+                        &mut std::io::Cursor::new(b"y\n"),
+                        &mut output
+                    )
+                    .unwrap()
+                );
+                let output = String::from_utf8(output).unwrap();
+                assert!(output.contains("any authorization granted since at the provider for this OAuth app will also be revoked"));
+                assert!(output.contains("does not attest completion"));
+            }
+        }
+    }
+    #[test]
+    fn reconciliation_requires_explicit_confirmation_without_yes() {
+        assert!(
+            !confirm_erasure_reconciliation(
+                "retry",
+                false,
+                &mut std::io::Cursor::new(b"\n"),
+                &mut Vec::new()
+            )
+            .unwrap()
+        );
     }
 }

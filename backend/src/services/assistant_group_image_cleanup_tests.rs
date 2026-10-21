@@ -57,18 +57,20 @@ async fn group_deletion_removes_its_image_claims_and_keeps_other_scopes() {
     ];
     let in_other = group_image(&state, &owner, &other.id).await;
     let in_thread = tool_image(&state, &owner, &thread, "turn-1", Duration::zero()).await;
+    // Deliveries are claimed under the persisted delivering thread; cleanup
+    // is keyed by the group's attachments, not by that thread.
     let plan = [
-        (&in_group[0], &group.id, 3),
-        (&in_group[1], &group.id, 2),
-        (&in_other, &other.id, 2),
-        (&in_thread, &thread, 1),
+        (&in_group[0], 3),
+        (&in_group[1], 2),
+        (&in_other, 2),
+        (&in_thread, 1),
     ];
-    for (attachment, conversation, audiences) in plan {
+    for (attachment, audiences) in plan {
         for i in 0..audiences {
             let claimed = images::claim(
                 &state.db,
                 &owner,
-                conversation,
+                &thread,
                 attachment,
                 &format!("bot\u{1f}chat-{i}\u{1f}"),
             )

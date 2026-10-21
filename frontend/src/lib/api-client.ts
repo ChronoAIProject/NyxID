@@ -67,16 +67,10 @@ const NO_AUTH_STATE_CLEAR_ENDPOINTS = new Set([
 export function buildFetchConfig(options: RequestOptions): RequestInit {
   const { method = "GET", body, headers = {}, signal } = options;
 
-  // Surface identification for server-side telemetry. Only attached
-  // once the runtime telemetry client has been constructed on this
-  // page load. Keying off the live `isTelemetryActive()` (not just
-  // persisted consent) means a browser with stale consent from an
-  // earlier telemetry-on deploy will NOT leak these headers after
-  // the operator turns telemetry off at the backend — the PostHog
-  // client never initialized this session, so the surface header is
-  // pointless anyway.
+  // This device header only narrows the persisted account permission. The
+  // backend rechecks it and consent revisions at admission and dispatch.
   const telemetryHeaders: Record<string, string> = isTelemetryActive()
-    ? { "X-NyxID-Client": "ui" }
+    ? { "X-NyxID-Client": "ui", "X-NyxID-Analytics": "enabled", "X-NyxID-Analytics-Account": useAuthStore.getState().user?.id ?? "" }
     : {};
 
   const config: RequestInit = {

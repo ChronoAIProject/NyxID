@@ -356,7 +356,8 @@ pub async fn telegram_disconnect(
             TelemetryEvent::NotificationChannelUnlinked {
                 channel: "telegram".to_string(),
             },
-        );
+        )
+        .await;
     }
 
     let message = if web_only {

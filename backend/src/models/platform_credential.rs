@@ -7,6 +7,8 @@ pub const COLLECTION_NAME: &str = "platform_credentials";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PlatformCredential {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secret_context_versions: BTreeMap<String, u8>,
     #[serde(default)]
     pub channel_observation_version: i64,
     #[serde(rename = "_id")]

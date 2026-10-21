@@ -1568,7 +1568,8 @@ pub async fn create_key(
             scope_mode: scope_mode.to_string(),
             rate_limit_per_second: created.rate_limit_per_second,
         },
-    );
+    )
+    .await;
 
     if scheduled {
         audit_service::log_for_user(
@@ -1706,7 +1707,8 @@ pub async fn delete_key(
         TelemetryEvent::ApiKeyDeleted {
             platform: pre_delete_platform,
         },
-    );
+    )
+    .await;
 
     Ok(Json(DeleteApiKeyResponse {
         message: "API key deleted".to_string(),
@@ -1755,7 +1757,8 @@ pub async fn rotate_key(
         TelemetryEvent::ApiKeyRotated {
             platform: created.platform.clone(),
         },
-    );
+    )
+    .await;
 
     Ok(Json(CreateApiKeyResponse {
         id: created.id,
@@ -2384,6 +2387,7 @@ mod tests {
                 status: NodeStatus::Online,
                 auth_token_hash: "auth-hash".to_string(),
                 signing_secret_encrypted: None,
+                signing_secret_context_version: None,
                 signing_secret_hash: "signing-hash".to_string(),
                 last_heartbeat_at: Some(now),
                 connected_at: Some(now),

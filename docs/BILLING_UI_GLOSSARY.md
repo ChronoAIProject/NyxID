@@ -593,3 +593,26 @@ numbers and no receipts.
   invoice/receipt data. The frontend does not infer that missing provider information is payment success.
 - The existing wallet provisioning/unconfigured behavior is retained; billing readiness must be
   verified before payment or provisioning actions become available.
+
+### NyxBot model reporting
+
+The NyxBot tab's **Cost and billing by model** shows exact gross, wallet, grant,
+and allowance credits for attributed model executions. Its daily chart can
+switch funding measure. **Traffic by model** separates request and token charts
+and tables; cache/audio/image counts overlap the documented input/output totals.
+Model names identify stored billing models or request aliases. **Unknown model**
+means no nonblank model identity was recorded on an execution.
+
+**Top billing accounts** ranks the complete population by known gross cost,
+requests, then account identity; each account shows model detail. Top model
+membership is stable across daily buckets. **Other** is the summed usage beyond
+the displayed model/account limit, including unavailable prices. **≥** marks a
+known cost subtotal with unpriced events; **Unavailable** means the selected
+amount could not be priced. Zero is reserved for known zero cost.
+
+Historical coverage notices distinguish unprovable platform candidates from
+confirmed assistant activity that cannot be classified as model execution.
+Both are excluded. Scope details show excluded orchestration, tool, and
+unclassified requests/costs. Recent activity is included alongside summaries;
+validation status indicates whether the reporting journal was stable for the
+read. Existing activity/outcome/feedback sections keep their own semantics.

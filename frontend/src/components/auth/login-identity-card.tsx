@@ -129,13 +129,14 @@ export function LoginIdentityCard({
               name="code"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Authenticator code</FormLabel>
+                  <FormLabel>Authenticator or recovery code</FormLabel>
                   <FormControl>
                     <Input
                       {...field}
-                      inputMode="numeric"
+                      inputMode="text"
                       autoComplete="one-time-code"
-                      maxLength={6}
+                      maxLength={32}
+                      className="min-w-0 font-mono text-xs tracking-normal sm:text-sm"
                       disabled={blocked}
                     />
                   </FormControl>

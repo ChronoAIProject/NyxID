@@ -679,6 +679,7 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
         let mut attachments = Vec::new();
         for _ in 0..2 {
             let attachment = AssistantAttachment {
+                secret_context_versions: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 origin: "tool".into(),
                 user_id: OWNER.into(),

@@ -6,6 +6,7 @@ import unittest
 
 
 SCRIPT = Path(__file__).with_name("prepare-backend-runner.sh").resolve()
+RESERVE_KIB = 24 * 1024**2
 
 
 class BackendReserveTests(unittest.TestCase):
@@ -40,7 +41,7 @@ sudo() {
 }
 ''')
 
-    def invoke(self, initial=3 * 1024**2, disk=80 * 1024**2, fail="", result=16 * 1024**2):
+    def invoke(self, initial=3 * 1024**2, disk=80 * 1024**2, fail="", result=RESERVE_KIB):
         (self.root / "swap-state").write_text(str(initial))
         return subprocess.run(
             ["bash", str(SCRIPT)], env={**os.environ, "BASH_ENV": str(self.harness),
@@ -50,7 +51,7 @@ sudo() {
         )
 
     def test_existing_capacity_needs_no_privileged_commands(self):
-        result = self.invoke(initial=16 * 1024**2)
+        result = self.invoke(initial=RESERVE_KIB)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.root / "calls").exists())
 

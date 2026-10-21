@@ -1793,6 +1793,7 @@ mod tests {
             status: NodeStatus::Online,
             auth_token_hash: "auth-hash".to_string(),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "signing-hash".to_string(),
             last_heartbeat_at: Some(now),
             connected_at: Some(now),

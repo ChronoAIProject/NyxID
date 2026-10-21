@@ -1897,3 +1897,25 @@ so a losing sweep race emits no false reclamation line. These identities let
 operators correlate a lost turn with startup logs and other activity from that
 process. A missing startup/activity record alone cannot prove a replica died;
 logs and deployment evidence are still needed when the process is absent.
+
+### Admin model cost and traffic
+
+The NyxBot tab also reports daily cost and traffic by recorded billing model,
+with exact tables and complete-population billing-account rankings. It shares
+the existing Daily UTC window (at most 31 days) and preserves activity, outcome,
+and feedback sections. The model filter applies to cost, traffic, trends, and
+account model detail. Admin/operator authorization is unchanged.
+
+Meters use trusted assistant turn context for provider children, trusted MCP
+assistant-chat context for MCP inference transports, and internal NyxAgent
+admission or the direct `assistant_nyxagent_egress` transport for the initial
+`llm-nyx` orchestration hop. The parent is separate
+from model totals even when its response reports aggregate child tokens. Ordinary
+tools are also separate; Requests pricing does not exclude a real model call.
+New meter snapshots survive credential revoke/delete. Historical recovery uses
+actor-bound credential/conversation/audit/rotation metadata, never transcripts
+or user-selected platform labels. Legacy free summaries lack attribution, and
+old records without retained proof remain excluded platform-wide candidates;
+confirmed assistant records without execution evidence have separate excluded
+costs. See [Billing analytics](../BILLING_ANALYTICS.md#nyxbot-model-usage) for the
+precise population, ranking, and coverage contract.

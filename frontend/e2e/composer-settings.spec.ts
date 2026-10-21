@@ -16,7 +16,7 @@ for (const width of [1280, 390, 320]) {
     });
     await expect(trigger).toBeVisible();
     await input.fill("Review the latest changes\nand explain the next steps.");
-    const attach = page.getByRole("button", { name: "Attach files" });
+    const attach = page.getByRole("button", { name: "Add context" });
     const send = page.getByRole("button", {
       name: "Send message",
       exact: true,
@@ -36,8 +36,8 @@ for (const width of [1280, 390, 320]) {
     await trigger.click();
     const menu = page.getByRole("menu", { name: "Model and permissions" });
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole("menuitem")).toHaveCount(4);
-    await expect(menu.getByRole("menuitem", { name: /Next message connection/ })).toBeVisible();
+    await expect(menu.getByRole("menuitem")).toHaveCount(3);
+    await expect(menu.getByRole("menuitem", { name: /Next message connection/ })).toHaveCount(0);
     await expect(
       menu.getByRole("menuitemcheckbox", { name: "Thinking mode" }),
     ).toHaveCount(0);
@@ -163,7 +163,7 @@ test("narrow steering composer keeps settings, Stop, and Steer reachable", async
   await composerInput(page).fill("Focus on this detail\nand check the result");
   const trigger = page.getByRole("button", { name: /Model and permissions:/ });
   const controls = [
-    page.getByRole("button", { name: "Attach files" }),
+    page.getByRole("button", { name: "Add context" }),
     trigger,
     page.getByRole("button", { name: "Stop assistant turn" }),
     page.getByRole("button", { name: "Send guidance" }),
@@ -216,7 +216,7 @@ for (const width of [1280, 320]) {
       name: /Model and permissions:/,
     });
     const controls = [
-      page.getByRole("button", { name: "Attach files" }),
+      page.getByRole("button", { name: "Add context" }),
       trigger,
       voice,
     ];
@@ -296,8 +296,8 @@ for (const width of [1280, 320]) {
     await expect(trigger).toHaveText("Auto");
     await trigger.click();
     const menu = page.getByRole("menu", { name: "Thinking and permissions" });
-    await expect(menu.getByRole("menuitem")).toHaveCount(2);
-    await expect(menu.getByRole("menuitem", { name: /Next message connection/ })).toBeVisible();
+    await expect(menu.getByRole("menuitem")).toHaveCount(1);
+    await expect(menu.getByRole("menuitem", { name: /Next message connection/ })).toHaveCount(0);
     await expect(
       menu.getByRole("menuitem", { name: /^Permissions/ }),
     ).toBeVisible();
@@ -541,11 +541,16 @@ for (const width of [1280, 320]) {
       };
     });
     const trigger = page.getByRole("button", { name: /Model and permissions:/ });
-    await trigger.click();
-    await page.getByRole("menuitem", { name: /Next message connection/ }).click();
-    await page.getByRole("menuitemradio", { name: /ChronoAI.*Shared GPT-4o/ }).click();
-    await expect(trigger).toHaveAccessibleName(/Connection: ChronoAI.*Shared GPT-4o/);
-    const bounds = (await trigger.boundingBox())!;
+    await page.getByRole("button", { name: "Add context" }).click();
+    await page.getByRole("menuitem", { name: "Use a connection" }).click();
+    const picker = page.getByRole("dialog", { name: "Connection for this message" });
+    await picker.getByRole("textbox", { name: "Search connections" }).fill("Shared GPT-4o");
+    await picker.getByRole("button", { name: /Shared GPT-4o.*ChronoAI/ }).click();
+    const chip = page.getByRole("group", { name: "Connection for this message" });
+    await expect(chip).toContainText("Shared GPT-4o");
+    await expect(chip).toContainText("This message");
+    await expect(trigger).not.toHaveAccessibleName(/Connection:/);
+    const bounds = (await chip.boundingBox())!;
     expect(bounds.x).toBeGreaterThanOrEqual(0);
     expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
     await page.screenshot({ path: testInfo.outputPath("connection-selected.png") });
@@ -556,7 +561,7 @@ for (const width of [1280, 320]) {
       return request.text === "/service key-0008\nUse the selected organization account";
     })).toBe(true);
     await expect(page).toHaveURL(/c=nyxa-/);
-    await expect(trigger).not.toHaveAccessibleName(/Connection:/);
+    await expect(chip).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Stop assistant turn" })).toHaveCount(0);
     await composerInput(page).fill("Use the saved order next time");
     await page.getByRole("button", { name: "Send message", exact: true }).click();

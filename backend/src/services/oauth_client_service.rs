@@ -1243,13 +1243,19 @@ async fn apply_client_update(
         .to_owned();
     let mut session = db.client().start_session().await?;
     let db = db.clone();
-    session.start_transaction().and_run2(async move |session| {
+    session.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
         let db = &db;
         let result: AppResult<mongodb::results::UpdateResult> = async {
             let result = db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(filter.clone(),
                 doc! { "$set": set_doc.clone(), "$inc": { "machine_external_security_revision": 1_i64 } })
                 .session(&mut *session).await?;
             if result.matched_count != 0 {
+                if set_doc.get_bool("is_active").ok() == Some(false) {
+                    for collection in [CONSENTS,REFRESH_TOKENS,AUTH_CODES] {
+                        db.collection::<bson::Document>(collection).delete_many(doc! {"client_id":&client_id})
+                            .session(&mut *session).await?;
+                    }
+                }
                 super::machine_external_grant_service::invalidate_client_in_session(
                     db, &client_id, "oauth_client_security_changed", 100, session).await?;
             }
@@ -1443,9 +1449,7 @@ pub async fn admin_update_client(
         || update.allowed_scopes.is_some()
         || update.broker_capability_enabled.is_some();
 
-    if update.is_active == Some(false) {
-        cascade_client_deactivation(db, client_id).await?;
-    } else if clears_pending_auth_codes {
+    if update.is_active != Some(false) && clears_pending_auth_codes {
         delete_unused_authorization_codes(db, client_id).await?;
     }
 
@@ -1469,8 +1473,6 @@ pub async fn delete_client(db: &mongodb::Database, client_id: &str) -> AppResult
     if result.matched_count == 0 {
         return Err(AppError::NotFound("OAuth client not found".to_string()));
     }
-
-    cascade_client_deactivation(db, client_id).await?;
 
     Ok(())
 }
@@ -1496,30 +1498,18 @@ pub async fn delete_client_for_creator(
         return Err(AppError::NotFound("OAuth client not found".to_string()));
     }
 
-    cascade_client_deactivation(db, client_id).await?;
-
     Ok(())
 }
 
 // Mirrors org-delete cascade in org_service.rs so stale consents/refresh tokens
 // do not linger after a single client is deactivated (issue #498).
-async fn cascade_client_deactivation(db: &mongodb::Database, client_id: &str) -> AppResult<()> {
-    db.collection::<bson::Document>(CONSENTS)
-        .delete_many(doc! { "client_id": client_id })
-        .await?;
-    db.collection::<bson::Document>(REFRESH_TOKENS)
-        .delete_many(doc! { "client_id": client_id })
-        .await?;
-    delete_unused_authorization_codes(db, client_id).await?;
-    Ok(())
-}
-
 async fn delete_unused_authorization_codes(
     db: &mongodb::Database,
     client_id: &str,
 ) -> AppResult<()> {
     db.collection::<bson::Document>(AUTH_CODES)
         .delete_many(doc! { "client_id": client_id, "used": false })
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
     Ok(())
 }

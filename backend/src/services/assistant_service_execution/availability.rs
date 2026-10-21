@@ -188,18 +188,37 @@ impl Admission {
                     "in":{"$cond":[{"$lt":[{"$size":"$$remaining"},MAX_EVIDENCE as i64]},
                         {"$concatArrays":["$$remaining",{"$literal":[entry]}]},"$$remaining"]}}},
             }}];
-            let collection = db.collection::<Document>(COLLECTION);
-            let result = collection
-                .update_one(doc! {"_id": &bucket}, update.clone())
-                .upsert(true)
-                .await;
-            match result {
-                Ok(_) => {}
-                Err(error) if crate::services::service_pool_service::is_duplicate_key(&error) => {
-                    collection.update_one(doc! {"_id": &bucket}, update).await?;
-                }
-                Err(error) => return Err(error.into()),
-            }
+            let transaction_db = crate::services::transaction_service::durable_database(db);
+            let owned_db = transaction_db.clone();
+            let owner = chat.user_id.clone();
+            crate::services::service_history::transaction::run_send(
+                &transaction_db,
+                &(),
+                move |tx, _| {
+                    let (db, owner, bucket, update) = (
+                        owned_db.clone(),
+                        owner.clone(),
+                        bucket.clone(),
+                        update.clone(),
+                    );
+                    Box::pin(async move {
+                        let result: AppResult<()> = async {
+                            crate::services::erasure_admission::fence_in_session(&db, &owner, tx)
+                                .await?;
+                            db.collection::<Document>(COLLECTION)
+                                .update_one(doc! {"_id":bucket}, update)
+                                .upsert(true)
+                                .session(&mut **tx)
+                                .await?;
+                            Ok(())
+                        }
+                        .await;
+                        crate::services::api_key_mutation_service::transaction_result(result)
+                    })
+                },
+            )
+            .await
+            .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
             Ok(())
         })
     }
