@@ -1,60 +1,52 @@
 import { describe, expect, it } from "vitest";
-import { hasOnlyConfiguredEgress, isTelemetryRequest, observeTelemetryEgress } from "../e2e/telemetry-request";
+import { hasOnlyRelayEgress, isTelemetryRequest, observeTelemetryEgress } from "../e2e/telemetry-request";
+
+const app = "https://app.example";
+const relay = `${app}/api/v1/users/me/analytics/events`;
 
 describe("production telemetry request observation", () => {
-  it.each([
-    "https://posthog.com/i/v0/e/",
-    "https://us.i.posthog.com/i/v0/e/",
-    "https://us-assets.i.posthog.com/static/array.js",
-    "https://analytics.example/i/v0/e/",
-    "https://ANALYTICS.EXAMPLE:443/i/v0/e/",
-  ])("observes the actual vendor domains or configured origin: %s", (url) => {
-    expect(isTelemetryRequest(url, "https://analytics.example")).toBe(true);
+  it.each([relay, "https://APP.EXAMPLE:443/api/v1/users/me/analytics/events"])("recognizes only the same-origin relay: %s", (url) => {
+    expect(isTelemetryRequest(url, app)).toBe(true);
   });
 
   it.each([
-    "https://notposthog.com/i/v0/e/",
-    "https://posthog.com.attacker.example/i/v0/e/",
-    "https://analytics.example.attacker.example/i/v0/e/",
-    "https://attacker.example/posthog.com",
-    "https://posthog.com@attacker.example/i/v0/e/",
-    "https://analytics.example@attacker.example/i/v0/e/",
-    "https://analytics.example:444/i/v0/e/",
-    "http://analytics.example/i/v0/e/",
-  ])("does not confuse substrings, userinfo or other origins: %s", (url) => {
-    expect(isTelemetryRequest(url, "https://analytics.example")).toBe(false);
-  });
-
-  it("continues observing unexpected insecure vendor requests for the egress assertion", () => {
-    expect(isTelemetryRequest("http://us.i.posthog.com/i/v0/e/", "https://analytics.example"))
-      .toBe(true);
+    "https://us.i.posthog.com/i/v0/e/", "https://eu.i.posthog.com/i/v0/e/",
+    "https://analytics.example/api/v1/users/me/analytics/events",
+    "https://app.example.attacker.example/api/v1/users/me/analytics/events",
+    "https://app.example@attacker.example/api/v1/users/me/analytics/events",
+    "https://user@app.example/api/v1/users/me/analytics/events",
+    "https://app.example:444/api/v1/users/me/analytics/events",
+    "http://app.example/api/v1/users/me/analytics/events",
+    `${relay}/`, `${relay}?secret=fixture`, `${relay}#fixture`,
+    `${app}/api/v1/users/me/preferences/analytics`, `${app}/api/v1/public/config`,
+  ])("does not admit vendors, lookalikes or other API requests: %s", (url) => {
+    expect(isTelemetryRequest(url, app)).toBe(false);
+    expect(hasOnlyRelayEgress([url], app)).toBe(false);
   });
 
   it.each([
-    "https://notposthog.com/i/v0/e/",
-    "https://posthog.com.attacker.example/i/v0/e/",
-    "https://analytics.example.attacker.example/i/v0/e/",
-    "https://attacker.example/posthog.com",
-    "https://connect.facebook.net/allowed-by-csp",
-  ])("retains unexpected data egress and fails the final assertion: %s", (url) => {
-    for (const resource of ["fetch", "xhr"]) {
+    "https://notposthog.com/i/v0/e/", "https://posthog.com.attacker.example/i/v0/e/",
+    "https://connect.facebook.net/allowed-by-csp", "http://us.i.posthog.com/i/v0/e/",
+    "https://analytics.example/i/v0/e/", "https://us-assets.i.posthog.com/lazy.js",
+  ])("retains unexpected external data and scripts: %s", (url) => {
+    for (const resource of ["fetch", "xhr", "script", "eventsource", "websocket", "ping", "other"]) {
       const requests: string[] = [];
-      observeTelemetryEgress(requests, url, resource, "https://app.example", "https://analytics.example");
+      observeTelemetryEgress(requests, url, resource, app);
       expect(requests).toEqual([url]);
-      expect(hasOnlyConfiguredEgress(requests, "https://analytics.example")).toBe(false);
+      expect(hasOnlyRelayEgress(requests, app)).toBe(false);
     }
   });
 
-  it("collects configured data egress and vendor scripts while allowing ordinary app data and fonts", () => {
+  it("collects relay delivery while allowing ordinary app assets/data and fonts", () => {
     const requests: string[] = [];
     for (const [url, resource] of [
-      ["https://app.example/api/v1/public/config", "fetch"],
+      [`${app}/api/v1/public/config`, "fetch"],
+      [`${app}/assets/app.js`, "script"],
       ["https://fonts.gstatic.com/font.woff2", "font"],
-      ["https://analytics.example/i/v0/e/", "fetch"],
-      ["https://us-assets.i.posthog.com/lazy.js", "script"],
-    ] as const) observeTelemetryEgress(requests, url, resource, "https://app.example", "https://analytics.example");
-    expect(requests).toEqual(["https://analytics.example/i/v0/e/", "https://us-assets.i.posthog.com/lazy.js"]);
-    expect(hasOnlyConfiguredEgress(requests.slice(0, 1), "https://analytics.example")).toBe(true);
-    expect(hasOnlyConfiguredEgress(requests, "https://analytics.example")).toBe(false);
+      ["https://fonts.googleapis.com/font.css", "stylesheet"],
+      [relay, "fetch"],
+    ] as const) observeTelemetryEgress(requests, url, resource, app);
+    expect(requests).toEqual([relay]);
+    expect(hasOnlyRelayEgress(requests, app)).toBe(true);
   });
 });

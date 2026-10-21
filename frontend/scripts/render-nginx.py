@@ -53,7 +53,6 @@ def render(env: dict[str, str], template: str, output: Path, root: Path,
         "'self'", "https://api.telegram.org", "https://aevatar-console-backend-api.aevatar.ai",
         "https://www.facebook.com", "https://connect.facebook.net", "https://graph.facebook.com",
         "https://assets.unicorn.studio", "https://storage.googleapis.com/unicornstudio-production/",
-        "https://us.i.posthog.com", "https://eu.i.posthog.com",
         "https://oauth.telegram.org",
     }
     # Explicit self WS sources are necessary in browsers that do not consistently

@@ -35,10 +35,10 @@ class PolicyInputs(unittest.TestCase):
 
     def test_split_origin_websockets_and_response_specific_policies(self):
         files = self.render({"NYXID_PUBLIC_ORIGIN": "https://app.example",
-                             "NYXID_BROWSER_CONNECT_ORIGINS": "https://api.example:8443 https://analytics.example"})
+                             "NYXID_BROWSER_CONNECT_ORIGINS": "https://api.example:8443"})
         spa, proxy = files["spa-headers.conf"], files["proxy-headers.conf"]
         self.assertIn("wss://api.example:8443", spa)
-        self.assertIn("https://analytics.example", spa)
+        self.assertIn("https://api.example:8443", spa)
         self.assertIn("microphone=(self)", spa)
         self.assertNotIn("'unsafe-inline'", spa.split("script-src ", 1)[1].split(";", 1)[0])
         self.assertNotIn("unsafe-eval", spa)
@@ -48,6 +48,17 @@ class PolicyInputs(unittest.TestCase):
         self.assertNotIn("includeSubDomains", spa)
         self.assertNotIn("preload", spa)
         self.assertIn('Strict-Transport-Security ""', self.render({})["spa-headers.conf"])
+
+    def test_default_connect_sources_exclude_browser_analytics_vendors(self):
+        spa = self.render({})["spa-headers.conf"]
+        connect = spa.split("connect-src ", 1)[1].split('"', 1)[0].split()
+        self.assertEqual(set(connect), {
+            "'self'", "http://localhost:8080", "ws://localhost:8080",
+            "https://api.telegram.org", "https://aevatar-console-backend-api.aevatar.ai",
+            "https://www.facebook.com", "https://connect.facebook.net", "https://graph.facebook.com",
+            "https://assets.unicorn.studio", "https://storage.googleapis.com/unicornstudio-production/",
+            "https://oauth.telegram.org",
+        })
 
     @staticmethod
     def render(env):

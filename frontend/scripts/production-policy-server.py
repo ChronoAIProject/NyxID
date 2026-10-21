@@ -109,10 +109,10 @@ def main():
     parser.add_argument("--port", type=int, default=18089)
     parser.add_argument("--upstream-port", type=int, default=18489)
     parser.add_argument("--public-origin")
-    parser.add_argument("--connect-origins", help="explicit HTTP(S) deployment origins; defaults include fixture API/analytics and upstream WebSocket origin")
+    parser.add_argument("--connect-origins", help="explicit HTTP(S) deployment origins; defaults include fixture API and upstream WebSocket origin")
     args = parser.parse_args()
     if args.connect_origins is None:
-        args.connect_origins = f"https://api.nyxid.example https://analytics.example http://127.0.0.1:{args.upstream_port}"
+        args.connect_origins = f"https://api.nyxid.example http://127.0.0.1:{args.upstream_port}"
     frontend = Path(__file__).resolve().parents[1]
     dist = frontend / "dist"
     output = args.evidence_dir.resolve()

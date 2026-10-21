@@ -12,7 +12,7 @@ stops inheriting `add_header` when a child defines one.
 |---|---|
 | `BACKEND_URL` | Internal HTTP(S) origin, default `http://backend:3001`; no path, credentials, query or fragment. |
 | `NYXID_PUBLIC_ORIGIN` | Public frontend HTTP(S) origin, default `http://localhost:8080`. HTTPS enables `Strict-Transport-Security: max-age=31536000`. Compose production supplies `FRONTEND_URL`. |
-| `NYXID_BROWSER_CONNECT_ORIGINS` | Up to 16 additional HTTP(S) origins separated by spaces; matching WS(S) origins are derived. Set for custom API/telemetry origins. These are destinations, never directive text. |
+| `NYXID_BROWSER_CONNECT_ORIGINS` | Up to 16 additional HTTP(S) origins separated by spaces; matching WS(S) origins are derived. Set for custom API origins; analytics uses the same-origin relay. These are destinations, never directive text. |
 | Backend `BASE_URL` | Trusted public backend URL. HTTPS enables backend HSTS; request `Host` and forwarded proto headers never enable it. |
 
 HSTS has neither `includeSubDomains` nor `preload`. A TLS terminator should
@@ -35,9 +35,10 @@ values**, including client-supplied Referer headers. The app's existing claim
 capture/removal and short-lived login handoff remain in place.
 
 Runtime API configuration accepts HTTP(S) origins; manifest URLs accept
-credential-free HTTP(S) URLs without fragments. Telemetry hosts must be
-HTTP(S) origins. Admission into a runtime config does not widen CSP: custom
-origins must also appear in the explicit deployment connect list.
+credential-free HTTP(S) URLs without fragments. The telemetry host returned by
+public config selects backend ingestion only; it never admits browser vendor
+egress. Admission into a runtime config does not widen CSP: custom API origins
+must also appear in the explicit deployment connect list.
 
 ## Supported resource inventory
 
@@ -52,7 +53,7 @@ origins must also appear in the explicit deployment connect list.
 | Telegram bot setup | Browser `api.telegram.org/bot…/getMe` validation. Bearer bot tokens are not logged by this policy harness. |
 | Aevatar onboarding | Fixed `aevatar-console-backend-api.aevatar.ai` connection origin. |
 | API / OAuth popup | Self and explicit runtime API origin; popups retain their own backend response policy. OAuth completion scripts continue to use their handler-specific CSP. |
-| PostHog | Bundled `module.no-external` client; consent/DNT and existing redaction remain. No remote config, flags, surveys, replay or lazy dependency scripts. Default US/EU ingest or a validated explicitly admitted custom host. |
+| Product analytics | Authenticated same-origin NyxID relay only: a fresh `GET /api/v1/users/me/preferences/analytics` gates each `POST /api/v1/users/me/analytics/events`. Account permission, account-bound device opt-in and DNT retain their existing gates. No browser vendor SDK, anonymous events, autocapture, pageviews, replay, remote config, flags, surveys or lazy vendor scripts. No third-party analytics origin in the default CSP; a custom backend ingestion host never widens browser policy. |
 | Voice / dictation | Self websocket transports, plus explicit deployment WS(S) origins. Microphone allowed only for self; both PCM paths load the shipped self AudioWorklet through `worker-src 'self'`. Voice WebRTC uses negotiated media, which CSP does not turn into an HTTP allowlist. |
 | Standalone credential accept | Backend-packaged HTML, script bytes and release manifest, independently generated strict SRI CSP and `no-referrer`. Both Docker builds use the same Node, npm lockfile, source commit and epoch inputs. Release publication must additionally compare actual shipped manifests (see RELEASE_INTEGRITY.md). |
 
@@ -73,7 +74,9 @@ without a real Meta account.
 From the repository root (use an external writable evidence directory):
 
 ```sh
-export NYXID_POLICY_EVIDENCE=/tmp/nyxid-policy-evidence
+export NYXID_POLICY_EVIDENCE="$HOME/Library/Caches/nyxid-targets/w5-telemetry-evidence"
+export TMPDIR="$NYXID_POLICY_EVIDENCE/tmp"
+mkdir -p "$TMPDIR"
 mkdir -p "$NYXID_POLICY_EVIDENCE"
 python3 frontend/scripts/prepare-production-policy-fixtures.py "$NYXID_POLICY_EVIDENCE/fixtures"
 python3 frontend/scripts/test-nginx-policy.py
@@ -97,9 +100,11 @@ NYXID_CHROME_EXECUTABLE=/path/to/chrome \
 npm exec playwright test -- --config playwright.production.config.ts
 ```
 
-The normal browser UA and test-only WebDriver property in the telemetry probe
-model a human browser: PostHog intentionally drops automated traffic. Product
-bot/DNT filtering is unchanged. The microphone probe uses Chromium's fake
+The analytics probe restores an authenticated fixture account and submits real
+reply feedback through the built UI. It verifies fresh consent admission, the
+exact revision-bound relay body, device off/account off/DNT/withdrawal behavior,
+and zero vendor data or script egress, including with a custom ingestion host.
+Anonymous pages never send analytics. The microphone probe uses Chromium's fake
 device while executing actual `getUserMedia`, AudioContext, shipped worklet
 module and WebSocket handshake. Successful MFA verification is one-shot: a failed
 session refresh retries only the session check, a 401 restarts login with a new
