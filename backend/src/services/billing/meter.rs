@@ -715,6 +715,7 @@ pub(super) fn reserved_row(
         wallet_id,
         actor_user_id: ctx.actor_user_id.clone(),
         api_key_id: ctx.api_key_id.clone(),
+        assistant_source: ctx.assistant_source.clone(),
         user_service_id: ctx.user_service_id.clone(),
         service_id: ctx
             .catalog_service_id

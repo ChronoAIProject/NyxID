@@ -680,6 +680,16 @@ pub async fn llm_proxy_request(
                 .inspect_err(|error| request_audit.admission_error(error))?
         };
     let billing_ctx = billing_ctx
+        .with_assistant_provenance(
+            auth_user.assistant_turn_fence.is_some(),
+            false,
+            crate::services::llm_usage_service::model_execution(
+                true,
+                &request_method_str,
+                &operation_path,
+                false,
+            ),
+        )
         .with_operation(priced_operation.as_deref())
         .with_request_body(Some(&body_bytes));
     let metered = state
@@ -1420,6 +1430,16 @@ async fn gateway_provider_request(
                 .inspect_err(|error| request_audit.admission_error(error))?
         };
     let billing_ctx = billing_ctx
+        .with_assistant_provenance(
+            auth_user.assistant_turn_fence.is_some(),
+            false,
+            crate::services::llm_usage_service::model_execution(
+                true,
+                "POST",
+                &requested_path,
+                false,
+            ),
+        )
         .with_operation(priced_operation.as_deref())
         .with_request_body(Some(&body_bytes));
     let metered = state

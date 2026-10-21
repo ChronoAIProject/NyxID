@@ -430,3 +430,93 @@ For mixed historical data, normalize each amount before summing (the backend's
 Exact keys take precedence, including explicit null. Numeric legacy `*_micros`
 values always use microcredits, including Decimal128 query mirrors.
 Rollup `legacy_grant_cost` replaces legacy integer `legacy_grant`.
+
+## NyxBot model usage
+
+The NyxBot tab at `/admin/usage` adds cost and traffic reporting to the existing
+activity, outcomes, and feedback views. `GET /api/v1/admin/assistant/model-usage`
+is restricted to admins and operators, including when an account separately has
+the Usage Viewer role. It uses the tab's positive UTC window of at most 31 days.
+An exact `model` filter (trimmed, case sensitive, 1–256 characters) or
+`unknown_model=true` applies to the entire billing/traffic snapshot and account
+rankings. Missing, empty, and whitespace-only recorded models share the unknown
+bucket. No string is reserved as an unknown sentinel. Model names are stored
+billing identities, which may be request aliases; they do not assert a resolved
+provider model. Conversation settings and transcript length are never usage
+sources.
+
+The response reuses the journal-validated reporting engine: raw boundary hours,
+unfolded tail, hourly summaries, and daily summaries have the same pricing and
+primary-row counting rules. Exact credit strings preserve twelve fractional
+digits. Missing historical prices yield unavailable costs or a known subtotal
+with `unknown_cost_events`; they never turn an unpriced event into free usage.
+Known exact funding survives an unavailable legacy rate even inside the same
+actor/owner/service/model/key group. The new `ModelStats` DTO contains only
+computed requests, events, token measures, price-coverage counts, and exact
+costs, avoiding unsupported quantities, distinct counts, and duplicate legacy
+money projections.
+
+Model requests and tokens count the primary platform row only. Component and
+resale rows contribute their independent charges without copying request/token
+counts. Total tokens equal provider-reported input plus output. Cache read and
+write can overlap input; audio/image tokens are reported subsets. The cost scope
+is the charges attached to model executions, including wallet, grant, allowance,
+and independent resale charges. NyxAgent orchestration and ordinary tools have
+separate excluded cost/request totals, so a parent aggregate token report cannot
+be added to its provider children as another model execution.
+
+One report snapshot returns full-period Top 20 models, their daily UTC series,
+and summed Other; full-period membership stays fixed across days. Charts separate
+credits, requests, and tokens, with exact daily tables and exact tooltip values.
+The Top 10 billing accounts are ranked across the complete server population by
+known gross cost, requests, then account identity. Each selected account has its
+own Top 20 model breakdown and an exact summed Other row; remaining accounts
+have a summed Other total. Null cost sorts below a known zero, and partial cost
+can affect ranking. Exact model search reaches models outside the Top 20. These
+NyxBot model options do not expand the generic saved-workspace breakdown schema.
+
+### Attribution and historical coverage
+
+Modern meters snapshot a server-authored `assistant_source`: `model`, `tool`,
+`orchestration`, or `other`. Model/tool provenance requires a live trusted
+assistant turn fence or trusted MCP assistant-chat context. The internal
+NyxAgent admission marker identifies the human-authenticated orchestration hop;
+the direct `assistant_nyxagent_egress` transport snapshots the same orchestration
+source on its own outer-hop billing context.
+Inference execution classification combines trusted gateway ingress, catalog
+inference metadata, or a provider-linked `llm-*` service identity with a supported
+execution endpoint. It includes realtime GET only with a WebSocket upgrade;
+model listing, discovery, and session-token endpoints are excluded. Pricing
+configuration and token-capture enablement do not decide whether a request is
+model execution. No unrelated proxy path adds a credential lookup.
+
+The user-editable API-key `platform=nyxid-assistant` label is never proof.
+Historical billable partitions can recover an actor-bound key through current
+encrypted-credential metadata, conversation credential metadata, server-authored
+provision/replacement audit events, or a durable server-only API-key marker.
+Rotation recovery walks predecessors and successors, including an old revoked
+key whose only remaining proof is on its current successor, in bounded walks of up to 32 records in
+each direction. The metadata-only lineage view excludes credential material.
+Successor traversal explicitly requires a string predecessor, making the existing
+partial unique predecessor index usable. Every proof lookup projects metadata
+and returns at most one match; duplicate audit/conversation rows do not fan out
+usage. Historical execution recovery additionally requires retained inference
+service evidence and token-family/image metering or reported tokens. Confirmed
+assistant activity lacking that evidence is returned as `unclassified`, with
+excluded requests and costs, rather than presented as unknown-model inference.
+
+Legacy free summaries lack API-key attribution. Their root-only measures remain
+an explicit unattributed residual when new source partitions are added to the
+same stable root. Raw records may still permit a separate bounded recovery; this
+page does not scan all raw interior hours or claim all such identities were
+irreversibly deleted. Other old billed records may also lack retained proof.
+`unattributable_legacy` therefore describes **platform-wide historical candidates**
+whose NyxBot share is unknown, not confirmed missing NyxBot usage. Their counts
+are excluded and visibly disclosed. Neither user-wide activity nor a guessed
+identity fills this gap.
+
+Full provenance preservation requires every rollup writer to be upgraded. During
+a mixed-version rollout, an old writer ignores the new source field and can fold
+newly captured free usage into a summary without attribution. Those summaries
+remain uncovered and excluded by the scoped report; a recent meter timestamp
+alone does not establish coverage.

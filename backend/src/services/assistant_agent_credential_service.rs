@@ -339,6 +339,13 @@ pub async fn adopt_rotated_key(
         .map_err(|_| unavailable())?
         .is_some();
     if exists {
+        db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .update_many(
+                doc! { "_id": { "$in": [predecessor_id, successor_id] }, "user_id": user_id },
+                doc! { "$set": { "assistant_usage": true } },
+            )
+            .session(&mut *session)
+            .await?;
         require_ordinary_key(db, user_id, predecessor_id, Some(&mut *session)).await?;
         require_ordinary_key(db, user_id, successor_id, Some(&mut *session)).await?;
         let ciphertext = keys
@@ -568,6 +575,13 @@ pub async fn load_or_provision_in_session(
     )
     .await?;
     apply_authority(db, user_id, &created.id, authority, session).await?;
+    db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": &created.id, "user_id": user_id },
+            doc! { "$set": { "assistant_usage": true } },
+        )
+        .session(&mut *session)
+        .await?;
     let raw = Zeroizing::new(created.full_key);
     let now = Utc::now();
     let row = AssistantAgentCredential {
@@ -1472,6 +1486,16 @@ mod tests {
         assert_eq!(key.scopes, format!("proxy {ASSISTANT_ACCOUNT_SCOPE}"));
         assert!(key.allow_all_nodes && key.allow_all_services);
         assert!(key.allowed_service_ids.is_empty());
+        for key_id in [&old.api_key_id, &successor.id] {
+            let key = db
+                .collection::<bson::Document>(KEYS)
+                .find_one(doc! {"_id": key_id, "user_id": &owner})
+                .projection(doc! {"assistant_usage": 1})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(key.get_bool("assistant_usage"), Ok(true));
+        }
         assert_eq!(
             db.collection::<ApiKey>(KEYS)
                 .count_documents(doc! {"user_id": &owner})
