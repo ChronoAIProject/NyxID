@@ -155,6 +155,36 @@ export function nyxbotModelFixture(
         : [];
     }),
     other_accounts: null,
+    services: [
+      {
+        id: "svc-chrono",
+        slug: "chrono-llm-public",
+        name: "Chrono LLM (public)",
+        models: ["gpt-5.4", null],
+      },
+      {
+        id: "svc-anthropic",
+        slug: "llm-anthropic",
+        name: "Anthropic",
+        models: ["claude-sonnet-4-5"],
+      },
+    ].flatMap(({ id, slug, name, models }) => {
+      const selected = rows.filter((r) => models.includes(r.model));
+      return selected.length
+        ? [
+            {
+              service: {
+                service_id: id,
+                service_slug: slug,
+                service_name: name,
+              },
+              is_other: false,
+              groups: 1,
+              usage: sumModelStats(selected.map((r) => r.usage)),
+            },
+          ]
+        : [];
+    }),
     excluded: [],
   };
 }

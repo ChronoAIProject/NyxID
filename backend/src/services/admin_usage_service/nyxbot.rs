@@ -4,6 +4,7 @@ use super::*;
 
 const TOP_MODELS: i64 = 20;
 const TOP_ACCOUNTS: i64 = 10;
+const TOP_SERVICES: i64 = 20;
 
 pub(super) fn attribution_stages() -> Vec<Document> {
     let mut stages = vec![
@@ -127,10 +128,23 @@ pub(super) fn facets(
         { let mut group = sum_group("$_id".into()); group.insert("groups", doc! { "$sum": 1_i64 }); doc! { "$group": group } },
         mask_costs(), doc! { "$sort": { "_id.bucket": 1, "_id.is_other": 1, "_id.model": 1 } },
     ]);
+    // The inference service is recorded on every model execution, including
+    // history settled before models were captured.
+    let mut services = scoped(&["service_id", "service_slug"]);
+    services.push(sort.clone());
+    let mut service_top = services.clone();
+    service_top.push(doc! { "$limit": TOP_SERVICES });
+    let mut service_other = services;
+    service_other.extend([
+        doc! { "$skip": TOP_SERVICES },
+        sum_stats_group(),
+        mask_costs(),
+    ]);
     let mut excluded = reduced(&["assistant_population"]);
     excluded.insert(0, doc! { "$match": { "_id.assistant_population": { "$in": ["orchestration", "tool", "unclassified", "unattributable_legacy"] } } });
     doc! { "totals": scoped(&[]), "models": model_top, "models_other": model_other,
         "accounts": account_top, "accounts_other": account_other, "daily": daily,
+        "services": service_top, "services_other": service_other,
         "excluded": excluded,
         "freshness": [{ "$group": { "_id": null, "tail_rows": { "$sum": "$tail_rows" } } }],
     }
@@ -238,6 +252,14 @@ pub struct AccountUsage {
     pub other_model_count: i64,
 }
 #[derive(Debug, Serialize, ToSchema)]
+pub struct ServiceUsage {
+    /// Absent for the summed Other row.
+    pub service: Option<UsageServiceIdentity>,
+    pub is_other: bool,
+    pub groups: i64,
+    pub usage: ModelStats,
+}
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ExcludedUsage {
     pub population: String,
     pub usage: ModelStats,
@@ -251,6 +273,8 @@ pub struct Response {
     pub daily: Vec<DailyUsage>,
     pub accounts: Vec<AccountUsage>,
     pub other_accounts: Option<ModelUsage>,
+    /// Model executions by inference service, Top 20 plus a summed Other row.
+    pub services: Vec<ServiceUsage>,
     pub excluded: Vec<ExcludedUsage>,
 }
 fn model_row(row: &Document, other: bool) -> AppResult<ModelUsage> {
@@ -331,6 +355,7 @@ async fn get_inner(db: &mongodb::Database, params: UsageParams) -> AppResult<Res
             other_model_count,
         });
     }
+    let services = service_rows(db, &result).await?;
     Ok(Response {
         window: params.window,
         freshness,
@@ -357,6 +382,7 @@ async fn get_inner(db: &mongodb::Database, params: UsageParams) -> AppResult<Res
             .first()
             .map(|r| model_row(r, true))
             .transpose()?,
+        services,
         excluded: documents(&result, "excluded")?
             .iter()
             .map(|r| {
@@ -370,4 +396,63 @@ async fn get_inner(db: &mongodb::Database, params: UsageParams) -> AppResult<Res
             })
             .collect::<AppResult<_>>()?,
     })
+}
+
+async fn service_rows(db: &mongodb::Database, result: &Document) -> AppResult<Vec<ServiceUsage>> {
+    let rows = documents(result, "services")?;
+    let keys = rows
+        .iter()
+        .map(|row| id(row).map(service_key))
+        .collect::<AppResult<Vec<_>>>()?;
+    let ids: Vec<_> = keys.iter().filter_map(|(id, _)| id.clone()).collect();
+    let slugs: Vec<_> = keys.iter().filter_map(|(_, slug)| slug.clone()).collect();
+    let catalog: Vec<Document> = db
+        .collection::<Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .find(doc! { "$or": [{ "_id": { "$in": ids } }, { "slug": { "$in": slugs } }] })
+        .projection(doc! { "name": 1, "slug": 1 })
+        .max_time(QUERY_TIMEOUT)
+        .await
+        .map_err(query_error)?
+        .try_collect()
+        .await
+        .map_err(query_error)?;
+    let name = |id: &Option<String>, slug: &Option<String>| {
+        catalog
+            .iter()
+            .find(|row| id.as_deref().is_some_and(|id| row.get_str("_id") == Ok(id)))
+            .or_else(|| {
+                catalog.iter().find(|row| {
+                    slug.as_deref()
+                        .is_some_and(|slug| row.get_str("slug") == Ok(slug))
+                })
+            })
+            .and_then(|row| row.get_str("name").ok())
+            .unwrap_or("Unknown service")
+            .to_owned()
+    };
+    let mut services = rows
+        .iter()
+        .zip(keys)
+        .map(|(row, (service_id, service_slug))| {
+            Ok(ServiceUsage {
+                service: Some(UsageServiceIdentity {
+                    service_name: name(&service_id, &service_slug),
+                    service_id,
+                    service_slug,
+                }),
+                is_other: false,
+                groups: 1,
+                usage: model_stats(row)?,
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    for row in documents(result, "services_other")? {
+        services.push(ServiceUsage {
+            service: None,
+            is_other: true,
+            groups: number(&row, "groups"),
+            usage: model_stats(&row)?,
+        });
+    }
+    Ok(services)
 }

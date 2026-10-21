@@ -801,6 +801,7 @@ mod tests {
             operation: None,
             credential_class: CredentialClass::UserOwned,
             model: None,
+            reported_model: None,
             token_breakdown: None,
             audio_tokens: None,
             image_tokens: None,

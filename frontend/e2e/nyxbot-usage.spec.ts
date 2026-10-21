@@ -329,6 +329,10 @@ for (const mobile of [false, true]) {
         page.getByRole("heading", { name: "Traffic by model", exact: true }),
       ],
       [
+        "services",
+        page.getByRole("heading", { name: "Model services", exact: true }),
+      ],
+      [
         "accounts",
         page.getByRole("heading", {
           name: "Top billing accounts",
@@ -345,7 +349,16 @@ for (const mobile of [false, true]) {
             24;
       });
       await expect(target).toBeInViewport();
+      if (section === "services") {
+        await expect(
+          page.getByRole("table", { name: "Model services data" }),
+        ).toBeVisible();
+      }
       if (section === "accounts") {
+        await expect(
+          page.getByRole("table", { name: "Top billing accounts data" }),
+        ).toBeVisible();
+        await page.getByText("Models by billing account").click();
         await expect(
           page.getByRole("heading", { name: "Alice Research" }),
         ).toBeVisible();

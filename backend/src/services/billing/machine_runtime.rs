@@ -735,6 +735,7 @@ impl BillingService {
             operation: None,
             credential_class: CredentialClass::NoAuth,
             model: None,
+            reported_model: None,
             token_breakdown: None,
             audio_tokens: None,
             image_tokens: None,
