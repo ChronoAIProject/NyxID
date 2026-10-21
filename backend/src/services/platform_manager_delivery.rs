@@ -1713,7 +1713,7 @@ async fn send_claimed(
         _ => (row.id.as_str(), row.profile_id.as_str(), String::new()),
     };
     let credential = if let CapturedMaterial::Telegram(credential) = &material {
-        let values = super::platform_credential_service::decrypt_snapshot(
+        let values = super::platform_credential_service::decrypt_platform_snapshot(
             &state.encryption_keys,
             Some(credential.as_ref()),
         )

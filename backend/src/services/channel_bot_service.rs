@@ -1364,7 +1364,7 @@ pub async fn apply_manager_configuration_status(
         };
         if bot.credential_source == "telegram_manager"
             && bot.is_active
-            && !manager_channel_ready(bot, manager.as_deref())
+            && !manager_channel_ready(bot, manager.as_ref())
         {
             bot.status = "failed".into();
             bot.webhook_registered = false;
@@ -2440,7 +2440,7 @@ pub(crate) async fn erase_personal_bot(
                     return Ok("connection_webhook_removed");
                 }
                 if bot.platform=="telegram-new" {
-                    return super::telegram_new_service::TelegramNewService {db,config,keys,
+                    return super::telegram_new_service::TelegramNewService {db,config,keys,manager_id:None,
                         api:super::telegram_new_api::TelegramApi::new(http)}.remove_owned_webhook(&bot).await;
                 }
                 if bot.platform=="telegram" && (bot.credential_source=="telegram_manager"
