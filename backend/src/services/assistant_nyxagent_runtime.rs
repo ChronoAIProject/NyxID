@@ -150,6 +150,7 @@ impl contract::NyxAgentExecutionProducer for ExecutionProducer {
             )),
             permit,
             Events {
+                checkpoint: None,
                 sender,
                 cursor: 0,
                 reset_notified: false,
@@ -181,6 +182,8 @@ impl contract::NyxAgentExecutionProducer for ExecutionProducer {
 }
 
 pub(crate) struct Events {
+    pub(crate) checkpoint:
+        Option<tokio::sync::watch::Sender<crate::models::assistant_conversation::StreamReply>>,
     pub(crate) sender: broadcast::Sender<Value>,
     pub(crate) cursor: u64,
     pub(crate) reset_notified: bool,
@@ -190,6 +193,10 @@ impl Events {
         self.cursor += 1;
         data["event"] = json!(event);
         data["cursor"] = json!(self.cursor);
+        if let Some(checkpoint) = &self.checkpoint {
+            checkpoint
+                .send_modify(|reply| super::assistant_stream_checkpoint::observe(reply, &data));
+        }
         let _ = self.sender.send(data);
     }
     pub(crate) fn notice(&mut self) {
@@ -710,6 +717,15 @@ pub(crate) async fn run_owner_turn(
         .clone();
     let message_id = Uuid::new_v4().to_string();
     let block_id = format!("{message_id}-text");
+    let (checkpoint, _checkpoint_task) = super::assistant_stream_checkpoint::start(
+        state.db.clone(),
+        &row.id,
+        &row.user_id,
+        &turn_id,
+        message_id.clone(),
+        block_id.clone(),
+    );
+    events.checkpoint = Some(checkpoint);
     tracing::info!(turn_id = %turn_id,
         worker_instance = %super::assistant_engine_worker::instance().id,
         worker_hostname = super::assistant_engine_worker::instance().hostname.as_deref(),
@@ -744,7 +760,8 @@ pub(crate) async fn run_owner_turn(
     }));
     events.emit(
         "turn.status",
-        json!({"conversation_id": row.id, "turn_id": turn_id, "status": "running"}),
+        json!({"conversation_id": row.id, "turn_id": turn_id, "status": "running",
+            "started_at": row.active_turn.as_ref().expect("claimed turn").started_at}),
     );
     events.emit(
         "message.started",
@@ -867,16 +884,12 @@ async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str
 }
 
 /// Typed proxy failures collapse to `assistant_unavailable`, except a billing
-/// refusal, which keeps its stable code so the client can offer a top-up.
+/// failure, which keeps its stable code and specific recovery guidance.
 pub(crate) fn proxy_turn_error(error: AppError) -> TurnError {
-    match error {
-        AppError::InsufficientCredits => TurnError::internal("insufficient_credits", "connect"),
-        AppError::WalletSuspended => TurnError::internal("wallet_suspended", "connect"),
-        AppError::PlanEntitlementRequired(_) => {
-            TurnError::internal("plan_entitlement_required", "connect")
-        }
-        _ => TurnError::internal("assistant_unavailable", "connect"),
-    }
+    TurnError::internal(
+        super::assistant_model_observer::refusal_code(&error).unwrap_or("assistant_unavailable"),
+        "connect",
+    )
 }
 
 /// Reads the NyxAgent `error.code` envelope, or NyxID's own flat envelope
@@ -887,9 +900,9 @@ pub(crate) fn upstream_error_code(status: u16, envelope: &Value) -> &str {
         return code;
     }
     if status == 402
-        && let Some(
-            code @ ("insufficient_credits" | "wallet_suspended" | "plan_entitlement_required"),
-        ) = envelope["error"].as_str()
+        && let Some(code) = envelope["error"]
+            .as_str()
+            .and_then(super::assistant_model_observer::billing_failure_code)
     {
         return code;
     }

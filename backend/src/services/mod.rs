@@ -32,6 +32,7 @@ pub(crate) mod assistant_record_service;
 pub mod assistant_resource_service;
 pub mod assistant_service;
 pub mod assistant_skill_authoring;
+pub(crate) mod assistant_stream_checkpoint;
 pub mod assistant_turn_observability;
 pub mod assistant_wire_log_service;
 pub mod audit_chain_service;

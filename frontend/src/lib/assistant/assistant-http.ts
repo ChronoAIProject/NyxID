@@ -13,6 +13,7 @@ import {
 } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { assistantRequestErrorMessage, withAssistantTrace } from "./request-error";
+import { billingError } from "./billing-error";
 
 const DEBUG_REQUEST_HEADER = "X-NyxID-Debug-Upstream";
 const DEBUG_ID_HEADER = "X-NyxID-Debug-Upstream-Id";
@@ -267,7 +268,8 @@ export async function assistantHttp(
   throw new ApiError(response.status, {
     ...errorBody,
     message: withAssistantTrace(
-      assistantRequestErrorMessage(response.status, errorBody.message),
+      (response.status === 402 ? billingError(errorBody.error)?.message : undefined)
+        ?? assistantRequestErrorMessage(response.status, errorBody.message),
       response.headers.get("X-NyxID-Trace-Id"),
     ),
   });

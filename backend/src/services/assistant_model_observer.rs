@@ -186,10 +186,16 @@ impl ModelRequest {
 }
 
 pub fn refusal_code(error: &AppError) -> Option<&'static str> {
-    match error {
-        AppError::InsufficientCredits => Some("insufficient_credits"),
-        AppError::WalletSuspended => Some("wallet_suspended"),
-        AppError::PlanEntitlementRequired(_) => Some("plan_entitlement_required"),
+    billing_failure_code(error.error_key())
+}
+
+pub fn billing_failure_code(code: &str) -> Option<&'static str> {
+    match code {
+        "insufficient_credits" => Some("insufficient_credits"),
+        "wallet_suspended" => Some("wallet_suspended"),
+        "plan_entitlement_required" => Some("plan_entitlement_required"),
+        "billing_not_configured" => Some("billing_not_configured"),
+        "billing_provider_unavailable" => Some("billing_provider_unavailable"),
         _ => None,
     }
 }
@@ -199,7 +205,9 @@ pub fn attribute(error: &TurnError, turn: &ActiveTurn, now: DateTime<Utc>) -> Tu
         && error.upstream_code.is_some()
         && matches!(error.stage, "stream" | "upstream_response"))
         || (error.code == "invalid_stream" && error.stage == "stream");
-    if !generic || turn.model_attribution_uncertain {
+    let billing_wrapper =
+        error.code == "nyxid_error" && matches!(error.stage, "stream" | "upstream_response");
+    if !(generic || billing_wrapper) || turn.model_attribution_uncertain {
         return error.clone();
     }
     let recent = |at: DateTime<Utc>| {
@@ -214,17 +222,13 @@ pub fn attribute(error: &TurnError, turn: &ActiveTurn, now: DateTime<Utc>) -> Tu
         .filter(|fact| {
             turn.model_attempt_id.as_deref() == Some(&fact.attempt_id) && recent(fact.at)
         })
-        .and_then(|fact| match fact.code.as_str() {
-            "insufficient_credits" => Some("insufficient_credits"),
-            "wallet_suspended" => Some("wallet_suspended"),
-            "plan_entitlement_required" => Some("plan_entitlement_required"),
-            _ => None,
-        })
+        .and_then(|fact| billing_failure_code(&fact.code))
         .or_else(|| {
             turn.model_stream_fault
                 .as_ref()
                 .filter(|fact| {
-                    turn.model_attempt_id.as_deref() == Some(&fact.attempt_id)
+                    generic
+                        && turn.model_attempt_id.as_deref() == Some(&fact.attempt_id)
                         && fact.attributable
                         && recent(fact.at)
                         && matches!(

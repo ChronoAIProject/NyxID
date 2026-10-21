@@ -225,9 +225,9 @@ export function useNyxAgentAssistantChat({
     // fallback without it and a slow backstop with it. A turn NyxID (not
     // this page) starts here reaches the thread row first: `streaming`.
     refetchInterval: (query) =>
-      livePollInterval(
-        streaming ||
-          query.state.data?.conversation.active_turn ||
+      streaming || query.state.data?.conversation.active_turn
+        ? (live ? 5000 : 2000)
+        : livePollInterval(
           query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
           (query.state.data?.approvals.length ?? 0) > 0
           ? 2000

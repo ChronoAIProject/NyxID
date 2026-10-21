@@ -38,6 +38,21 @@ export const NYXAGENT_LIVE_BACKOFF_MS = [1000, 2000, 5000, 10_000, 30_000] as co
 /** An unsupported answer (e.g. an older replica mid-deploy) is retried this late. */
 export const NYXAGENT_LIVE_UNSUPPORTED_RETRY_MS = 5 * 60_000;
 const REOPEN_MS = 250;
+export const NYXAGENT_LIVE_IDLE_MS = 45_000;
+
+async function deadline<T>(operation: Promise<T>, milliseconds: number, controller: AbortController): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([operation, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error("The live connection stopped responding."));
+        controller.abort();
+      }, milliseconds);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 let status: NyxAgentLiveStatus = "idle";
 const statusListeners = new Set<() => void>();
@@ -67,16 +82,15 @@ export function parseNyxAgentLiveEvent(payload: string): NyxAgentLiveEvent | und
 }
 
 function wait(ms: number, signal: AbortSignal) {
+  if (signal.aborted) return Promise.resolve();
   return new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal.addEventListener("abort", finish, { once: true });
   });
 }
 
@@ -115,12 +129,16 @@ function deliver(event: NyxAgentLiveEvent) {
 async function run(signal: AbortSignal) {
   let attempt = 0;
   while (!signal.aborted) {
+    const request = new AbortController();
+    const abort = () => request.abort();
+    signal.addEventListener("abort", abort, { once: true });
     if (status !== "live" && status !== "unsupported") setStatus("connecting");
     try {
-      const response = await assistantHttp(NYXAGENT_LIVE_PATH, {
+      const response = await deadline(assistantHttp(NYXAGENT_LIVE_PATH, {
         headers: { Accept: "text/event-stream" },
-        signal,
-      });
+        signal: request.signal,
+      }), 15_000, request);
+      if (signal.aborted) return;
       if (!response.headers.get("content-type")?.includes("text/event-stream")) {
         // Something other than the live stream answered (an older server).
         setStatus("unsupported");
@@ -131,16 +149,17 @@ async function run(signal: AbortSignal) {
       const reader = response.body.getReader();
       let ready = false;
       const cancel = () => void reader.cancel().catch(() => undefined);
-      signal.addEventListener("abort", cancel, { once: true });
+      request.signal.addEventListener("abort", cancel, { once: true });
       const decoder = new TextDecoder();
       let buffer = "";
       try {
         for (;;) {
-          const { done, value } = await reader.read();
+          const { done, value } = await deadline(reader.read(), NYXAGENT_LIVE_IDLE_MS, request);
           if (done || signal.aborted) break;
           buffer += decoder.decode(value, { stream: true });
           const drained = drainDirectSseBuffer(buffer);
           buffer = drained.rest;
+          if (buffer.length > 64 * 1024) throw new Error("The live event exceeded its limit.");
           for (const payload of drained.payloads) {
             const event = parseNyxAgentLiveEvent(payload);
             if (!event) continue;
@@ -153,11 +172,15 @@ async function run(signal: AbortSignal) {
           }
         }
       } finally {
-        signal.removeEventListener("abort", cancel);
+        request.signal.removeEventListener("abort", cancel);
+        await reader.cancel().catch(() => undefined);
+        reader.releaseLock();
       }
       if (!ready && !signal.aborted) throw new Error("The live stream closed before it was ready.");
       // The server closes streams after a while: reopen promptly. The next
       // `ready` makes views re-read anything that changed in between.
+      if (signal.aborted) return;
+      setStatus("connecting");
       await wait(REOPEN_MS, signal);
     } catch (error) {
       if (signal.aborted) return;
@@ -173,6 +196,9 @@ async function run(signal: AbortSignal) {
         NYXAGENT_LIVE_BACKOFF_MS[0];
       attempt += 1;
       await wait(delay, signal);
+    } finally {
+      signal.removeEventListener("abort", abort);
+      request.abort();
     }
   }
 }

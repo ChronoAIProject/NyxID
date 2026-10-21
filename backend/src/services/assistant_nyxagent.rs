@@ -2443,7 +2443,11 @@ pub(crate) async fn begin_owner_turn_in_session(
             seq: row.message_count,
             turn_id: lost.turn_id.clone(),
             role: "assistant".into(),
-            text: String::new(),
+            text: lost
+                .reply
+                .as_ref()
+                .map(|reply| reply.text.clone())
+                .unwrap_or_default(),
             status: "failed".into(),
             error_code: Some("turn_lost".into()),
             upstream_error_code: None,
@@ -2567,6 +2571,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .clone()
             .or_else(|| events.first().and_then(|e| e.invocation_id.clone())),
         resource_refs: Vec::new(),
+        reply: None,
         worker_instance: Some(super::assistant_engine_worker::instance().clone()),
         model_attempt_id: None,
         model_requests_active: 0,
@@ -3633,7 +3638,11 @@ async fn finish_turn_inner(
                     seq: current.message_count,
                     turn_id: turn_id.clone(),
                     role: "assistant".into(),
-                    text: result.text.clone(),
+                    text: if result.text.is_empty() && error.as_ref().is_some_and(|error| matches!(error.code, "cancelled" | "turn_lost")) {
+                        settled_turn.as_ref().and_then(|turn| turn.reply.as_ref()).map(|reply| reply.text.clone()).unwrap_or_default()
+                    } else {
+                        result.text.clone()
+                    },
                     status: if error.is_some() {
                         "failed"
                     } else {
@@ -5983,6 +5992,14 @@ impl TurnError {
                 "plan_entitlement_required",
                 "Your plan does not include this service. Check your plan in Billing & Usage.",
             ),
+            "billing_not_configured" => (
+                "billing_not_configured",
+                "Billing setup is incomplete, so NyxBot could not run this turn. Contact support to complete the billing configuration.",
+            ),
+            "billing_provider_unavailable" => (
+                "billing_provider_unavailable",
+                "NyxBot could not verify billing because the billing service is unavailable. Try again shortly; if this continues, contact support.",
+            ),
             "model_interrupted" => (
                 "model_interrupted",
                 "The model's response was interrupted. Some actions may already have completed — check them before retrying.",
@@ -6023,11 +6040,8 @@ pub enum RecoveryAction {
 }
 impl Recovery {
     pub fn decide(&mut self, status: u16, code: &str, bound: bool) -> RecoveryAction {
-        // A billing refusal is terminal: no new key, session or delay can fund the turn.
-        if matches!(
-            code,
-            "insufficient_credits" | "wallet_suspended" | "plan_entitlement_required"
-        ) {
+        // Billing failures need their own remedy, never a credential replacement or rebind.
+        if super::assistant_model_observer::billing_failure_code(code).is_some() {
             return RecoveryAction::Fail;
         }
         if (status == 401 || status == 403 || code == "agent_key_required") && !self.replaced {
