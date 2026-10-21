@@ -952,8 +952,11 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
         models::channel_message::StoredAttachment,
         services::channel_media_authority::{self as authority, MediaRequest},
     };
-    // Construct large handler futures outside the test's polling frame; inline
-    // Box::pin calls still reserve their construction temporaries on its stack.
+    // Construct large fixture and handler futures outside the test's polling
+    // frame; inline Box::pin still reserves construction temporaries on its stack.
+    fn fixture() -> futures::future::BoxFuture<'static, Fixture> {
+        Box::pin(Fixture::new("media_follow_barrier"))
+    }
     fn gateway_response<'a>(
         f: &'a Fixture,
         body: &'a Value,
@@ -974,7 +977,7 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
         ))
     }
     for gateway in [false, true] {
-        let mut f = Box::pin(Fixture::new("media_follow_barrier")).await;
+        let mut f = fixture().await;
         f.state
             .db
             .collection::<bson::Document>("feature_flag_overrides")
