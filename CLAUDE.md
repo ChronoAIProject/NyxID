@@ -752,6 +752,10 @@ rendered commands for 0.41.0 compatibility. Failures expose fixed stage/reason
 codes and guidance only. Production-image verification tests must exercise real
 TUF and attestation code under read-only/cap-drop/no-new-privileges restrictions.
 
+NyxBot's actor-scoped creator grant is restricted to the registered confidential
+gateway caller; its server-only creator bearer is separate from provider credentials.
+Preserve the contract in `docs/CHANNEL_EVENT_GATEWAY.md`.
+
 NyxBot owner settings include an enforced `access_mode` (`nyxmode`, `autopilot`,
 or `ask_every_time`) and optional specialist override. The backend acknowledgement
 service owns classification and approval; clients cannot bypass policy floors.

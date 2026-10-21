@@ -3298,6 +3298,24 @@ pub async fn introspect(
         Err(_) => return Json(inactive).into_response(),
     };
 
+    let creator_permissions =
+        match crate::services::nyxbot_gateway_service::creator_gateway_permissions(
+            &state.db, &claims, &client,
+        )
+        .await
+        {
+            Ok(permissions) => permissions,
+            Err(error) => return error.into_response(),
+        };
+    let mut permissions = rbac.permissions;
+    permissions.extend(
+        creator_permissions
+            .iter()
+            .map(|permission| (*permission).to_owned()),
+    );
+    let mut seen = std::collections::HashSet::new();
+    permissions.retain(|permission| seen.insert(permission.clone()));
+
     Json(IntrospectResponse {
         active: true,
         aud: None,
@@ -3313,7 +3331,7 @@ pub async fn introspect(
         jti: Some(claims.jti),
         roles: Some(rbac.role_slugs),
         groups: Some(rbac.group_slugs),
-        permissions: Some(rbac.permissions),
+        permissions: Some(permissions),
     })
     .into_response()
 }

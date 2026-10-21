@@ -998,6 +998,39 @@ pub const DELEGATED_TOKEN_TTL_SECS: i64 = 300;
 /// for long-running/agentic workflows.
 pub const MCP_DELEGATION_TOKEN_TTL_SECS: i64 = 300;
 
+/// Reserved creator identity, outside both catalog and user-service slug namespaces.
+pub(crate) const NYXBOT_GATEWAY_CREATOR_ACTOR: &str = "nyxid:nyxbot-gateway-creator";
+pub(crate) const NYXBOT_GATEWAY_CREATOR_TOKEN_TTL_SECS: i64 = 120;
+
+/// Mint the server-only bearer for NyxBot gateway management.
+pub(crate) fn generate_nyxbot_gateway_creator_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+) -> Result<String, AppError> {
+    generate_delegated_access_token_inner(
+        keys,
+        config,
+        user_id,
+        crate::mw::auth::ACCOUNT_READ_SCOPE,
+        NYXBOT_GATEWAY_CREATOR_ACTOR,
+        None,
+        NYXBOT_GATEWAY_CREATOR_TOKEN_TTL_SECS,
+        None,
+        DelegationOrigin::Service,
+    )
+    .map(|(token, _)| token)
+}
+
+fn validate_delegation_actor(actor: &str) -> Result<(), AppError> {
+    if actor == NYXBOT_GATEWAY_CREATOR_ACTOR {
+        return Err(AppError::ValidationError(
+            "Reserved delegation actor".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Generate a delegated access token (RFC 8693).
 ///
 /// Like a regular access token, but with:
@@ -1014,6 +1047,7 @@ pub fn generate_delegated_access_token(
     ttl_secs: i64,
     restrictions: Option<&TokenRestrictionClaims>,
 ) -> Result<String, AppError> {
+    validate_delegation_actor(acting_client_id)?;
     generate_delegated_access_token_inner(
         keys,
         config,
@@ -1042,6 +1076,7 @@ pub fn generate_delegated_access_token_for_client(
     ttl_secs: i64,
     restrictions: Option<&TokenRestrictionClaims>,
 ) -> Result<(String, String), AppError> {
+    validate_delegation_actor(acting_client_id)?;
     generate_delegated_access_token_inner(
         keys,
         config,
