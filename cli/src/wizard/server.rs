@@ -2831,9 +2831,10 @@ mod tests {
 
     #[test]
     fn base_security_headers_with_nonce_includes_csp() {
-        let h = base_security_headers_with_nonce("test-nonce");
+        let nonce = mint_nonce();
+        let h = base_security_headers_with_nonce(&nonce);
         let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
-        assert!(csp.contains("test-nonce"));
+        assert!(csp.contains(&format!("'nonce-{nonce}'")));
         assert_eq!(h.get("x-frame-options").unwrap(), "DENY");
     }
 
