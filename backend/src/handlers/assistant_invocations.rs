@@ -265,6 +265,7 @@ pub async fn create(
                 Some(super::assistant_nyxagent::SERVER_TURN_POLICY),
                 permit,
                 crate::services::assistant_nyxagent_runtime::Events {
+                    checkpoint: None,
                     sender,
                     cursor: 0,
                     reset_notified: false,

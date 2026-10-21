@@ -978,7 +978,7 @@ mod tests {
     async fn pool_reported_sse_usage_survives_cancellation_before_settlement_acknowledgment() {
         let (db, mut completion, finalization) = completion_fixture("pool_cancel_settlement").await;
         let request_id = completion.context.request_id.clone();
-        completion.observe(b"data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n");
+        completion.observe(b"data: {\"model\":\"gpt-5.5\",\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n");
         {
             let finish = completion.finish_inner(PoolCompletionCause::Complete);
             tokio::pin!(finish);
@@ -1002,6 +1002,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.quantity, Some(3));
+        // Recorded for reporting only; the pricing model stays unset.
+        assert_eq!(
+            (row.model.as_deref(), row.reported_model.as_deref()),
+            (None, Some("gpt-5.5"))
+        );
         assert_eq!(row.status, UsageStatus::Finalized);
         assert_eq!(
             row.pool_attempt.unwrap().outcome,

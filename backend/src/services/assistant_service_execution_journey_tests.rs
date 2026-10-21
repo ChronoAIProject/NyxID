@@ -358,6 +358,7 @@ pub(super) async fn execute(
             .unwrap();
     let (sender, _) = tokio::sync::broadcast::channel(32);
     let mut events = runtime::Events {
+        checkpoint: None,
         sender,
         cursor: 0,
         reset_notified: false,

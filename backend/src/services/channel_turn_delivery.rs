@@ -22,7 +22,7 @@ pub async fn bind_in_session(
         .collection::<bson::Document>(EVENTS)
         .update_one(
             doc! {"_id": event, "user_id": owner, "status": {"$in": ["running", "resuming", "queued"]},
-            "turn_id": bson::Bson::Null, "delivery.version": 1},
+            "turn_id": bson::Bson::Null, "media.interrupted": {"$ne": true}, "delivery.version": 1},
             doc! {"$set": {"conversation_id": conversation, "turn_id": turn}},
         )
         .session(session)
@@ -254,7 +254,7 @@ pub(crate) async fn enqueue_in_session(
         .update_one(
             doc! {
                 "_id": &source, "user_id": &owner, "status": {"$in": ["running", "resuming"]},
-                "turn_id": bson::Bson::Null, "delivery.version": 1,
+                "turn_id": bson::Bson::Null, "media.interrupted": {"$ne": true}, "delivery.version": 1,
             },
             doc! {"$set": {"status": "queued", "conversation_id": &conversation,
             "turn_id": bson::Bson::Null, "delivery.state": "pending"}},
@@ -326,7 +326,7 @@ pub async fn queued_origin_in_session(
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {
             "_id": source, "user_id": owner, "conversation_id": conversation,
-            "status": "queued", "turn_id": bson::Bson::Null, "delivery.version": 1,
+            "status": "queued", "turn_id": bson::Bson::Null, "media.interrupted": {"$ne": true}, "delivery.version": 1,
             "delivery.guest": false, "delivery.state": "pending",
             "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())},
         })

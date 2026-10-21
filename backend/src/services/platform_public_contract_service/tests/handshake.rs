@@ -342,6 +342,28 @@ impl Handshake {
             )
             .mount(&lago)
             .await;
+        // Verified zero-tax Lago configuration: wallet-funded probes need a
+        // fresh tax profile and fail closed without one.
+        for (route, body) in [
+            (
+                "/api/v1/customers/public-customer",
+                json!({"customer":{"external_id":"public-customer","billing_entity_code":"default","taxes":[]}}),
+            ),
+            (
+                "/api/v1/subscriptions/public-subscription",
+                json!({"subscription":{"external_id":"public-subscription","external_customer_id":"public-customer","plan":{"code":"standard","taxes":[],"charges":[]}}}),
+            ),
+            (
+                "/api/v1/billing_entities/default",
+                json!({"billing_entity":{"code":"default","taxes":[]}}),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&lago)
+                .await;
+        }
         let mut config = crate::test_utils::test_app_config();
         config.billing_enabled = true;
         config.lago_api_url = Some(lago.uri());

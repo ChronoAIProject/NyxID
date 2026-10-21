@@ -41,7 +41,7 @@ pub(super) async fn prepare(
     let events = state.db.collection::<NyxbotEvent>(EVENTS);
     let row = events
         .find_one(doc! {"_id": event, "channel_id": &channel.id,
-        "user_id": &channel.user_id, "turn_id": bson::Bson::Null})
+        "user_id": &channel.user_id, "media.interrupted": {"$ne":true}, "turn_id": bson::Bson::Null})
         .await?
         .ok_or_else(|| AppError::Conflict("Channel event already admitted".into()))?;
     let metadata = ChannelTurnDelivery {
@@ -66,8 +66,11 @@ pub(super) async fn prepare(
         target_ciphertext: None,
         target_expires_at: None,
     };
-    events.update_one(doc! {"_id": event, "turn_id": bson::Bson::Null},
+    let prepared = events.update_one(doc! {"_id": event, "media.interrupted": {"$ne":true}, "turn_id": bson::Bson::Null},
         doc! {"$set": {"delivery": bson::to_bson(&metadata).map_err(|_| AppError::Internal("Channel delivery unavailable".into()))?}}).await?;
+    if prepared.matched_count != 1 {
+        return Err(AppError::Conflict("Channel event already admitted".into()));
+    }
     Ok(())
 }
 

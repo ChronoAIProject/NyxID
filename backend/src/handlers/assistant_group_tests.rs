@@ -1433,6 +1433,7 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
         (org.id.clone(), false),
     ] {
         let start = TurnStart {
+            media_event_ids: Vec::new(),
             invocation_id: None,
             acknowledgement_id: None,
             retry_of: None,

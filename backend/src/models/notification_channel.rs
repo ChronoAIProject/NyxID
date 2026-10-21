@@ -62,7 +62,8 @@ pub struct NotificationChannel {
 
     // -- User preferences --
     /// How long to wait for user response before auto-rejecting (seconds).
-    /// Default: 30. Min: 10. Max: 300.
+    /// Legacy missing-field default: 30; newly created settings: 300.
+    /// Min: 10. Max: 300.
     #[serde(default = "default_approval_timeout")]
     pub approval_timeout_secs: u32,
 
@@ -71,11 +72,10 @@ pub struct NotificationChannel {
     #[serde(default = "default_grant_expiry_days")]
     pub grant_expiry_days: u32,
 
-    /// The user's global approval-protection preference. Enforcement is suspended
-    /// while no active notification channel is available and resumes when one returns.
-    /// Explicit per-service approval configuration is evaluated independently.
-    #[serde(default)]
-    pub approval_required: bool,
+    /// Explicit global preference: true gates all verbs, false gates none.
+    /// Absent means the distinct writes-only default; lazy creation preserves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_required: Option<bool>,
 
     // -- Push Notifications --
     /// Whether push notifications (FCM/APNs) are enabled
@@ -127,11 +127,36 @@ mod tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
-            approval_required: true,
+            approval_required: Some(true),
             push_enabled: false,
             push_devices: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn absent_preference_is_distinct_and_stored_booleans_roundtrip_unchanged() {
+        let mut doc = bson::to_document(&make_notification_channel()).unwrap();
+        doc.remove("approval_required");
+        let unset: NotificationChannel = bson::from_document(doc.clone()).unwrap();
+        assert_eq!(unset.approval_required, None);
+        assert!(
+            !bson::to_document(&unset)
+                .unwrap()
+                .contains_key("approval_required")
+        );
+        for explicit in [true, false] {
+            doc.insert("approval_required", explicit);
+            let row: NotificationChannel = bson::from_document(doc.clone()).unwrap();
+            assert_eq!(row.approval_required, Some(explicit));
+            assert_eq!(
+                bson::to_document(&row)
+                    .unwrap()
+                    .get_bool("approval_required")
+                    .unwrap(),
+                explicit
+            );
         }
     }
 

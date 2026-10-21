@@ -35,6 +35,8 @@ export const FEATURE_FLAG = {
   MACHINE_CAPABILITIES: "assistant:machine-capabilities",
   MACHINE_CONTEXTS: "assistant:machine-contexts",
   AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
+  CHANNEL_MEDIA: "assistant:channel-media",
+  ATTACHMENT_WRITES: "assistant:attachment-writes",
   AGENT_LEARNING: "assistant:agent-learning",
   SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
   NYXBOT_ADAPTERS: "nyxbot:service-adapters",

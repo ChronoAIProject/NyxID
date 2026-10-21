@@ -25,13 +25,25 @@ export function AgentKeyCreateForm({
 }) {
   const { colors } = useTheme();
   const styles = useMemo(() => createDeviceLoginStyles(colors), [colors]);
-  const [draft, setDraft] = useState(initialValues ?? defaultNewAgentKey);
+  const [draft, setDraft] = useState(() => initialValues ? {
+    ...initialValues,
+    expires_at: initialValues.never_expires ? null : initialValues.expires_at || defaultNewAgentKey().expires_at,
+  } : defaultNewAgentKey());
   const [expiry, setExpiry] = useState(
-    initialValues ? (initialValues.expires_at ? "custom" : "none") : "90",
+    initialValues?.never_expires ? "none" : initialValues?.expires_at ? "custom" : "90",
   );
   const [error, setError] = useState<string | null>(null);
   function update<K extends keyof NewAgentKey>(key: K, value: NewAgentKey[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
+  }
+  function changeOwner(target_org_id: string | undefined) {
+    setExpiry("90");
+    setDraft((current) => ({
+      ...current, target_org_id,
+      expires_at: defaultNewAgentKey().expires_at, never_expires: undefined,
+      allowed_service_ids: [], allowed_node_ids: [],
+      allow_all_services: false, allow_auto_connected_services: false, allow_all_nodes: false,
+    }));
   }
   const check = (
     label: string,
@@ -80,32 +92,14 @@ export function AgentKeyCreateForm({
       {check(
         "Personal",
         !draft.target_org_id,
-        () =>
-          setDraft({
-            ...draft,
-            target_org_id: undefined,
-            allowed_service_ids: [],
-            allowed_node_ids: [],
-            allow_all_services: false,
-            allow_auto_connected_services: false,
-            allow_all_nodes: false,
-          }),
+        () => changeOwner(undefined),
         true,
       )}
       {options.orgs.map((org) =>
         check(
           org.name,
           draft.target_org_id === org.id,
-          () =>
-            setDraft({
-              ...draft,
-              target_org_id: org.id,
-              allowed_service_ids: [],
-              allowed_node_ids: [],
-              allow_all_services: false,
-              allow_auto_connected_services: false,
-              allow_all_nodes: false,
-            }),
+          () => changeOwner(org.id),
           true,
         ),
       )}
@@ -230,6 +224,7 @@ export function AgentKeyCreateForm({
           expiry === choice,
           () => {
             setExpiry(choice);
+            update("never_expires", choice === "none");
             update(
               "expires_at",
               choice === "none"

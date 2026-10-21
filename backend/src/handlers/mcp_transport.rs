@@ -2116,6 +2116,17 @@ async fn handle_tools_list(
     };
 
     let mut services = catalog.services;
+    if let Err(error) = crate::services::lark_attachment_tool::filter_discovery(
+        &state.db,
+        auth.chat.as_ref(),
+        &mut services,
+    )
+    .await
+    {
+        tracing::warn!(code = error.error_code(), "Failed to filter tools");
+        return rpc_error(request.id.clone(), -32603, "Failed to load tools");
+    }
+
     crate::services::agent_operation_scope_service::filter_catalog(
         &auth.assistant_operation_scopes,
         &mut services,
@@ -3135,21 +3146,29 @@ fn dispatch_service_tool<'a>(
         }
 
         let execution_arguments = webhook_execution_arguments(auth, &arguments);
-        let mut prepared =
-            match mcp_service::prepare_proxy_tool_call(service, endpoint, &execution_arguments) {
-                Ok(prepared) => prepared.with_acknowledgement(
-                    auth.chat
-                        .as_ref()
-                        .and_then(|_| arguments["acknowledgement_id"].as_str()),
-                ),
-                Err(e) => {
-                    return tool_result(
-                        request.id.clone(),
-                        &format!("Invalid tool arguments: {e}"),
-                        true,
-                    );
-                }
-            };
+        let mut prepared = match mcp_service::prepare_chat_proxy_tool_call(
+            &state.db,
+            &state.encryption_keys,
+            auth.chat.as_ref(),
+            service,
+            endpoint,
+            &execution_arguments,
+        )
+        .await
+        {
+            Ok(prepared) => prepared.with_acknowledgement(
+                auth.chat
+                    .as_ref()
+                    .and_then(|_| arguments["acknowledgement_id"].as_str()),
+            ),
+            Err(e) => {
+                return tool_result(
+                    request.id.clone(),
+                    &format!("Invalid tool arguments: {e}"),
+                    true,
+                );
+            }
+        };
         if let Err(error) =
             prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)
         {
@@ -3912,6 +3931,8 @@ async fn webhook_service_gate(
         crate::services::assistant_nyxagent::identifier(&endpoint.name),
         crate::services::assistant_nyxagent::identifier(&service.service_slug),
     );
+    let materialized_args = prepared.attachment_confirmation_arguments(endpoint, args);
+    let args = materialized_args.as_ref().unwrap_or(args);
     let result = async {
         let gate = acks::confirmation_needed(&state.db, chat, facts, false).await?;
         if let Some(need) = gate.ask()
@@ -4381,17 +4402,25 @@ async fn handle_meta_call_tool(
     }
 
     let execution_arguments = webhook_execution_arguments(auth, &inner_args);
-    let prepared =
-        match mcp_service::prepare_proxy_tool_call(service, endpoint, &execution_arguments) {
-            Ok(prepared) => prepared.with_acknowledgement(
-                auth.chat
-                    .as_ref()
-                    .and_then(|_| inner_args["acknowledgement_id"].as_str()),
-            ),
-            Err(e) => {
-                return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
-            }
-        };
+    let prepared = match mcp_service::prepare_chat_proxy_tool_call(
+        &state.db,
+        &state.encryption_keys,
+        auth.chat.as_ref(),
+        service,
+        endpoint,
+        &execution_arguments,
+    )
+    .await
+    {
+        Ok(prepared) => prepared.with_acknowledgement(
+            auth.chat
+                .as_ref()
+                .and_then(|_| inner_args["acknowledgement_id"].as_str()),
+        ),
+        Err(e) => {
+            return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
+        }
+    };
     if let Err(error) =
         prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)
     {
@@ -4806,6 +4835,12 @@ async fn load_all_services_for_meta_tools(
         &auth.user_id,
         mcp_node_scope(auth),
         mcp_service_scope(auth),
+    )
+    .await?;
+    crate::services::lark_attachment_tool::filter_discovery(
+        &state.db,
+        auth.chat.as_ref(),
+        &mut services,
     )
     .await?;
     crate::services::agent_operation_scope_service::filter_catalog(
@@ -7369,7 +7404,7 @@ mod tests {
                 telegram_link_code_expires_at: None,
                 approval_timeout_secs: 0,
                 grant_expiry_days: 30,
-                approval_required: false,
+                approval_required: Some(false),
                 push_enabled: false,
                 push_devices: vec![],
                 created_at: now,
@@ -7575,9 +7610,81 @@ mod tests {
                 crate::services::billing::BillingIngress::Mcp,
             )
             .expect("MCP billing route classification");
-        let response =
-            handle_tools_call(&state, &auth, None, &cancellation_request, false, permit).await;
+        let cancellation = Box::pin(handle_tools_call(
+            &state,
+            &auth,
+            None,
+            &cancellation_request,
+            false,
+            permit,
+        ));
+        // The allowlisted operation must persist its required approval. Resolve
+        // it through the web handler so this ordering control does not wait for
+        // the production 300-second expiry or disable the explicit policy.
+        let web_rejection = async {
+            let pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(pending) = state
+                        .db
+                        .collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+                        .find_one(doc! {
+                            "user_id": &actor_id,
+                            "service_id": &service.id,
+                            "status": "pending",
+                        })
+                        .await
+                        .unwrap()
+                    {
+                        break pending;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("allowlisted MCP cancellation must reach required approval");
+            assert_eq!((pending.expires_at - pending.created_at).num_seconds(), 300);
+            assert_eq!(pending.approval_mode, ApprovalMode::PerRequest);
+            let axum::Json(decision) = crate::handlers::approvals::decide_request(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&actor_id),
+                Path(pending.id.clone()),
+                Default::default(),
+                axum::http::HeaderMap::new(),
+                axum::Json(crate::handlers::approvals::DecideRequest {
+                    approved: false,
+                    duration_sec: None,
+                }),
+            )
+            .await
+            .expect("reject allowlisted MCP request through the web handler");
+            assert_eq!(decision.status, "rejected");
+            let persisted = state
+                .db
+                .collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+                .find_one(doc! { "_id": &pending.id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(persisted.decision_channel.as_deref(), Some("web"));
+        };
+        let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(cancellation, web_rejection)
+        })
+        .await
+        .expect("web rejection must release the allowlisted MCP request");
         assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["result"]["isError"], true);
+        assert!(
+            result["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Approval request was rejected"),
+            "the MCP result must honor the web rejection"
+        );
         assert_eq!(
             db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
                 .count_documents(doc! { "service_id": &service.id })
@@ -10775,3 +10882,15 @@ mod image_handler_tests {
 #[cfg(test)]
 #[path = "mcp_resource_tests.rs"]
 mod resource_tests;
+
+#[cfg(test)]
+#[path = "approval_default_tests.rs"]
+mod approval_default_tests;
+
+#[cfg(test)]
+#[path = "mcp_attachment_upload_tests.rs"]
+mod attachment_upload_tests;
+
+#[cfg(test)]
+#[path = "mcp_lark_base_tests.rs"]
+mod lark_base_tests;

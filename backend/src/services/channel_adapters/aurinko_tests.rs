@@ -10,7 +10,7 @@ use axum::{
     Json, Router, body::Bytes, extract::State, http::Uri, response::IntoResponse, routing::any,
 };
 use std::{collections::BTreeMap, sync::Arc};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 const TOKEN: &str = "test-account-token";
 const SECRET: &str = "test-signing-secret";
@@ -40,10 +40,24 @@ fn account(id: u64) -> Value {
     json!({"id": id, "email": "mailbox@example.com", "tokenStatus": "active", "authScopes": ["Mail.Read", "Mail.Send"]})
 }
 
+#[derive(Default)]
+struct MessageGate {
+    entered: Notify,
+    released: Notify,
+}
+impl MessageGate {
+    async fn wait_until_entered(&self) {
+        tokio::time::timeout(Duration::from_secs(10), self.entered.notified())
+            .await
+            .unwrap();
+    }
+}
+
 struct Mock {
     messages: BTreeMap<String, Value>,
     statuses: BTreeMap<String, u16>,
     delays: BTreeMap<String, u64>,
+    gates: BTreeMap<String, Arc<MessageGate>>,
     subscriptions: Vec<Value>,
     callbacks: Vec<Value>,
     replies: Vec<Value>,
@@ -59,6 +73,7 @@ impl Default for Mock {
             messages: BTreeMap::new(),
             statuses: BTreeMap::new(),
             delays: BTreeMap::new(),
+            gates: BTreeMap::new(),
             subscriptions: vec![],
             callbacks: vec![],
             replies: vec![],
@@ -151,6 +166,7 @@ async fn mock_request(
                 .into_response();
         }
         let delay = mock.delays.get(id).copied().unwrap_or(0);
+        let gate = mock.gates.get(id).cloned();
         let status = *mock.statuses.get(id).unwrap_or(&200);
         let value = mock.messages.get(id).cloned().unwrap_or_else(|| mail(id));
         assert!(
@@ -159,6 +175,10 @@ async fn mock_request(
                 .contains("requireThreadId=true")
         );
         drop(mock);
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.released.notified().await;
+        }
         if delay > 0 {
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
@@ -1508,7 +1528,8 @@ async fn aurinko_owner_deletion_fences_delayed_ingress_and_reply() {
         } else {
             None
         };
-        f.mock.lock().await.delays.insert("one".into(), 400);
+        let gate = Arc::new(MessageGate::default());
+        f.mock.lock().await.gates.insert("one".into(), gate.clone());
         f.mock.lock().await.requests.clear();
         let effect = async {
             match original.as_ref() {
@@ -1521,22 +1542,7 @@ async fn aurinko_owner_deletion_fences_delayed_ingress_and_reply() {
             }
         };
         let deletion = async {
-            tokio::time::timeout(Duration::from_secs(3), async {
-                loop {
-                    if f.mock
-                        .lock()
-                        .await
-                        .requests
-                        .iter()
-                        .any(|(_, path)| path.starts_with("/v1/email/messages/one"))
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            })
-            .await
-            .unwrap();
+            gate.wait_until_entered().await;
             // Busy effects make deletion retryable before deactivation.
             // The user must still be able to authenticate to retry.
             assert!(f.erase_owner().await.is_err());
@@ -1550,6 +1556,7 @@ async fn aurinko_owner_deletion_fences_delayed_ingress_and_reply() {
                     .unwrap()
                     .is_active
             );
+            gate.released.notify_one();
         };
         tokio::join!(effect, deletion);
         f.erase_owner().await.unwrap();
@@ -1586,26 +1593,12 @@ async fn aurinko_owner_deletion_fences_delayed_ingress_and_reply() {
 #[tokio::test]
 async fn aurinko_individual_delete_busy_ingress_keeps_bot_visible_until_retry() {
     let f = Fixture::new().await;
-    f.mock.lock().await.delays.insert("one".into(), 400);
+    let gate = Arc::new(MessageGate::default());
+    f.mock.lock().await.gates.insert("one".into(), gate.clone());
     f.mock.lock().await.requests.clear();
     let effect = Box::pin(f.event(&["one"]));
     let deletion = Box::pin(async {
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if f.mock
-                    .lock()
-                    .await
-                    .requests
-                    .iter()
-                    .any(|(_, path)| path.starts_with("/v1/email/messages/one"))
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        gate.wait_until_entered().await;
         assert!(
             Box::pin(bots::delete_bot(
                 &f.state.db,
@@ -1638,6 +1631,7 @@ async fn aurinko_individual_delete_busy_ingress_keeps_bot_visible_until_retry() 
                 .unwrap()
                 .is_active
         );
+        gate.released.notify_one();
     });
     let (delivered, ()) = tokio::join!(effect, deletion);
     delivered.unwrap();
@@ -1688,31 +1682,18 @@ async fn aurinko_route_revocation_during_preflight_prevents_send() {
     let f = Fixture::new().await;
     f.event(&["one"]).await.unwrap();
     let original = f.original().await;
-    f.mock.lock().await.delays.insert("one".into(), 400);
+    let gate = Arc::new(MessageGate::default());
+    f.mock.lock().await.gates.insert("one".into(), gate.clone());
     f.mock.lock().await.requests.clear();
     let revoke = async {
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if f.mock
-                    .lock()
-                    .await
-                    .requests
-                    .iter()
-                    .any(|(_, path)| path.starts_with("/v1/email/messages/one"))
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        gate.wait_until_entered().await;
         f.state
             .db
             .collection::<ApiKey>(crate::models::api_key::COLLECTION_NAME)
             .update_one(doc! {"_id":&f.key.id}, doc! {"$set":{"is_active":false}})
             .await
             .unwrap();
+        gate.released.notify_one();
     };
     let (result, ()) = tokio::join!(f.reply(&original, None), revoke);
     assert!(result.is_err());

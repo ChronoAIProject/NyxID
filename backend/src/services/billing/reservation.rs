@@ -51,6 +51,8 @@ pub struct LayerReservation {
     pub reserved_credits: Credits,
     pub allowance_reservations: Vec<AllowanceReservationAllocation>,
     pub grant_reservations: Vec<GrantReservationAllocation>,
+    pub tax_cache_ttl_secs: u64,
+    pub applied_tax: Option<crate::models::billing_tax_profile::AppliedUsageTax>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,25 +116,20 @@ pub async fn gate_and_reserve(
     }
 
     let layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
-    if ctx.managed_admission.is_some() {
+    // Best effort before the transaction: benefit-only admissions must survive
+    // tax provider outages. Wallet funding checks freshness in the transaction.
+    let _ = super::taxes::ensure_fresh(db, lago, &wallet, rate_cache_ttl_secs).await;
+    let result = if ctx.managed_admission.is_some() {
         crate::services::managed_execution_service::validate_reserved_rates(ctx, &layers)?;
-        return super::funding::reserve_and_open_managed(db, ctx, &wallet, layers)
-            .await
-            .map(Some);
-    }
-    if ctx.public_admission.is_some() {
-        return super::funding::reserve_and_open_public(db, ctx, &wallet, layers)
-            .await
-            .map(Some);
-    }
-    if ctx.pool_attempt.is_some() {
-        return super::funding::reserve_and_open_pool(db, ctx, &wallet, layers)
-            .await
-            .map(Some);
-    }
-    super::funding::reserve_and_open_ordinary(db, ctx, &wallet, layers)
-        .await
-        .map(Some)
+        super::funding::reserve_and_open_managed(db, ctx, &wallet, layers).await
+    } else if ctx.public_admission.is_some() {
+        super::funding::reserve_and_open_public(db, ctx, &wallet, layers).await
+    } else if ctx.pool_attempt.is_some() {
+        super::funding::reserve_and_open_pool(db, ctx, &wallet, layers).await
+    } else {
+        super::funding::reserve_and_open_ordinary(db, ctx, &wallet, layers).await
+    };
+    result.map(Some)
 }
 
 #[cfg(test)]
@@ -1033,6 +1030,8 @@ pub(crate) async fn estimate_layer_reservations(
             reserved_credits: super::amounts::cost(rate_pico, estimated_quantity)?,
             allowance_reservations: Vec::new(),
             grant_reservations: Vec::new(),
+            tax_cache_ttl_secs: rate_cache_ttl_secs,
+            applied_tax: None,
         });
     }
 
@@ -1204,6 +1203,14 @@ mod tests {
 
     #[async_trait]
     impl LagoApi for EntitledLago {
+        async fn tax_config(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig>
+        {
+            Ok(crate::services::billing::taxes::zero_config())
+        }
         async fn ensure_customer(
             &self,
             owner: &OwnerProvisionInput,

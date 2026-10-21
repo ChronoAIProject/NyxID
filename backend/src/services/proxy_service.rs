@@ -181,6 +181,8 @@ pub async fn authorize_master_credential(
         ));
     }
     super::retired_service_service::require_available(service)?;
+    super::security_readiness_service::require_platform(db, actor_addressed_policy_required())
+        .await?;
     if service.platform_key.is_some() {
         super::platform_key_service::require(db, service, &actor.user_id).await?;
         validate_actor_addressed_master_credential_policy(service)?;
@@ -311,7 +313,7 @@ fn validate_master_credential_service(service: &DownstreamService) -> AppResult<
 /// `/proxy/s/{slug}` and `/llm/*`). Operators enable it after confirming, from real
 /// traffic, that every such row either carries a policy or receives no actor-addressed
 /// calls. Off by default so deploying this code is a no-op.
-fn actor_addressed_policy_required() -> bool {
+pub(crate) fn actor_addressed_policy_required() -> bool {
     std::env::var("PLATFORM_REQUIRE_OPERATION_POLICY")
         .ok()
         .map(|v| {
@@ -1120,6 +1122,7 @@ pub(crate) fn prepare_node_request(
     caller_token: Option<&str>,
     extra_outbound_headers: &[(String, String)],
 ) -> AppResult<PreparedNodeRequest> {
+    super::lark_attachment_tool::refuse_reserved_path(path)?;
     let mut node_delegated = delegated.to_vec();
     extend_with_path_credential(&mut node_delegated, target);
     let prepared = prepare_delegated_request(path, query, &node_delegated)?;
@@ -4332,6 +4335,7 @@ async fn forward_request_with_egress_guard_inner(
     egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
+    super::lark_attachment_tool::refuse_reserved_path(path)?;
     if super::telnyx_platform_service::contract(&target.service).is_some() {
         let proof = billing_egress_permit.managed_proof().ok_or_else(|| {
             AppError::BillingProviderUnavailable(
@@ -7443,6 +7447,42 @@ mod tests {
                 ("X-Provider-Key".to_string(), "secret".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn lark_base_write_reserved_routes_refuse_raw_and_node_forwarding_before_provider_effects()
+     {
+        let vendor = wiremock::MockServer::start().await;
+        let target = make_proxy_target(vendor.uri());
+        for path in [
+            "/nyxid/managed/bitable/apps/base/tables/table/records",
+            "nyxid/managed/bitable/apps/base/tables/table/records",
+            "/open-apis/nyxid/managed/bitable/apps/base/tables/table/records",
+        ] {
+            assert!(
+                super::forward_request(
+                    &Client::new(),
+                    &target,
+                    reqwest::Method::POST,
+                    path,
+                    None,
+                    reqwest::header::HeaderMap::new(),
+                    ProxyBody::Buffered(None),
+                    vec![],
+                    vec![],
+                    None,
+                    &empty_token_cache(),
+                    &empty_response_cache(),
+                    crate::services::billing::route_inventory::internal_node_dispatch_permit()
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                prepare_node_request(&target, path, None, vec![], &[], &[], None, &[]).is_err()
+            );
+        }
+        assert!(vendor.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

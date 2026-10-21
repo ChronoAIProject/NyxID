@@ -445,6 +445,21 @@ billing identities, which may be request aliases; they do not assert a resolved
 provider model. Conversation settings and transcript length are never usage
 sources.
 
+The pricing `model` on a usage row is the request model when the ingress already
+knows it (the `/llm` gateway and Codex translation); it selects model-specific
+cached rates and is sent to Lago. Proxy, node, service-pool and MCP inference
+settlements also record `reported_model`: the model the provider reported in the
+response that carried the usage (OpenAI/xAI `model`, Responses API
+`response.model`, Anthropic `message.model`, Gemini `modelVersion`), written on
+every row of the request. It is observability only: it never selects a rate, is
+never sent to Lago and is not part of ledger entries. Reports group by the
+pricing model, else the reported model; legacy-cost rows (estimated from a
+model-keyed cached rate) keep their pricing model alone. Only plain identifiers
+of at most 128 characters (ASCII letters, digits and `-._:/@+`) are recorded.
+Rows settled before this capture stay in the unknown bucket; there is no
+backfill because no model was stored. Upgrade every replica: rows settled or
+folded by an older replica are reported without the reported model.
+
 The response reuses the journal-validated reporting engine: raw boundary hours,
 unfolded tail, hourly summaries, and daily summaries have the same pricing and
 primary-row counting rules. Exact credit strings preserve twelve fractional
@@ -474,6 +489,11 @@ own Top 20 model breakdown and an exact summed Other row; remaining accounts
 have a summed Other total. Null cost sorts below a known zero, and partial cost
 can affect ranking. Exact model search reaches models outside the Top 20. These
 NyxBot model options do not expand the generic saved-workspace breakdown schema.
+`services` ranks the same model population by inference service (`service_id`
+and `service_slug` rollup dimensions, names resolved from the catalog) with the
+same ordering, a Top 20 and a summed Other row. It honours the model filter and
+needs no new stored data, so it covers history recorded before model names were
+captured.
 
 ### Attribution and historical coverage
 

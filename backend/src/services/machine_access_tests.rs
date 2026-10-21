@@ -14,12 +14,27 @@ use nyxid_machine::{Operation, authority::Capabilities};
 use serde_json::json;
 async fn node(f: &Fixture, owner: &str) -> crate::models::node::Node {
     let name = format!("machine-{}", uuid::Uuid::new_v4());
-    Box::pin(super::machine_integration_tests::ungranted_node_named(
+    // These authority fixtures model an owner's explicit legacy setup choice.
+    // W9.4 missing-choice tests clear it deliberately below.
+    let mut node = Box::pin(super::machine_integration_tests::ungranted_node_named(
         f, owner, &name,
     ))
-    .await
+    .await;
+    node.machine.as_mut().unwrap().separation_choice =
+        Some(nyxid_machine::context::Choice::SharedLegacy);
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&node.id},
+            doc! {"$set":{"machine":bson::to_bson(&node.machine).unwrap()}},
+        )
+        .await
+        .unwrap();
+    node
 }
 async fn enable(f: &Fixture) {
+    super::security_readiness_service::ready_test_replica(&f.state.db).await;
     access::ensure_indexes(&f.state.db).await.unwrap();
     super::feature_flag_service::set_platform_override(
         &f.state.db,
@@ -798,6 +813,7 @@ async fn machine_access_org_contexts_partition_people_and_recheck_membership() {
         authority_versions: vec![2],
         runtime_id: Uuid::new_v4().to_string(),
         files: true,
+        separation_choice: Some(nyxid_machine::context::Choice::SharedLegacy),
         ..Default::default()
     });
     f.state
@@ -1532,6 +1548,7 @@ async fn machine_access_separated_requires_support_flag_card_and_keeps_mode_with
         .is_err(),
         "v2 alone is insufficient"
     );
+    n.machine.as_mut().unwrap().separation_evidence = Some(supported_evidence());
     n.machine.as_mut().unwrap().separated = Some(nyxid_machine::context::Support {
         available: true,
         landlock_abi: Some(6),
@@ -1679,6 +1696,7 @@ async fn machine_access_separated_requires_support_flag_card_and_keeps_mode_with
 async fn machine_access_graphical_separated_action_does_not_require_capability_editor() {
     let f = orchestrator_fixture("machine_access_graphical_context").await;
     let mut n = v2(&f).await;
+    n.machine.as_mut().unwrap().separation_evidence = Some(supported_evidence());
     n.machine.as_mut().unwrap().separated = Some(nyxid_machine::context::Support {
         available: true,
         landlock_abi: Some(6),
@@ -1730,6 +1748,7 @@ async fn machine_access_separated_login_binding_and_delete_quarantine_are_atomic
     let f = orchestrator_fixture("machine_access_context_login").await;
     enable(&f).await;
     let mut n = v2(&f).await;
+    n.machine.as_mut().unwrap().separation_evidence = Some(supported_evidence());
     n.machine.as_mut().unwrap().separated = Some(nyxid_machine::context::Support {
         available: true,
         landlock_abi: Some(6),
@@ -2980,5 +2999,946 @@ async fn issue_1844_concurrent_renewals_retry_live_fences_without_replaying_cont
         "revoked authority sends no renewal control"
     );
     peer.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+fn supported_evidence() -> nyxid_machine::context::Evidence {
+    nyxid_machine::context::Evidence {
+        version: nyxid_machine::context::EVIDENCE_VERSION,
+        os: "linux".into(),
+        landlock_abi: Some(6),
+        separate_users: Some(true),
+        credential_custody: Some(true),
+        managed_browser_configured: Some(true),
+        command_seccomp: Some(true),
+        landlock_enforced: Some(true),
+        managed_browser_sandbox: Some(true),
+        managed_browser_policy: Some(true),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn machine_access_existing_separated_requires_current_custody_and_stays_visible() {
+    let f = orchestrator_fixture("machine_existing_custody").await;
+    enable(&f).await;
+    let mut machine = v2(&f).await;
+    let mut policy = model::Policy::default();
+    policy.assignments.insert(
+        machine.id.clone(),
+        model::Assignment {
+            mode: "separated".into(),
+            capabilities: Capabilities {
+                shell: true,
+                files: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    f.state.db.collection::<Document>(AGENTS).update_one(
+        doc! {"_id":&f.chat.agent_id},
+        doc! {"$set":{"machine_access":bson::to_bson(&policy).unwrap(),"machine_node_ids":[&machine.id]}},
+    ).await.unwrap();
+    for (evidence, reason) in [
+        (
+            Some(nyxid_machine::context::Evidence {
+                version: 3,
+                ..supported_evidence()
+            }),
+            Some("separated_probe_version_unsupported"),
+        ),
+        (
+            Some(nyxid_machine::context::Evidence {
+                credential_custody: None,
+                ..supported_evidence()
+            }),
+            Some("node_custody_unverified"),
+        ),
+        (
+            Some(nyxid_machine::context::Evidence {
+                credential_custody: Some(false),
+                ..supported_evidence()
+            }),
+            Some("node_custody_unverified"),
+        ),
+        (None, Some("separated_capabilities_not_reported")),
+        (Some(supported_evidence()), None),
+    ] {
+        let profile = machine.machine.as_mut().unwrap();
+        profile.separation_evidence = evidence;
+        profile.separated = Some(nyxid_machine::context::Support {
+            available: true,
+            landlock_abi: Some(6),
+            reason: None,
+        });
+        assert_eq!(access::supports_separated(profile), reason.is_none());
+        f.state
+            .db
+            .collection::<Document>(crate::models::node::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&machine.id},
+                doc! {"$set":{"machine":bson::to_bson(&machine.machine).unwrap()}},
+            )
+            .await
+            .unwrap();
+        let admitted = access::admit(
+            &f.state.db,
+            &f.chat,
+            &machine,
+            Operation::Exec,
+            &json!({}),
+            None,
+        )
+        .await;
+        if reason.is_some() {
+            let error = admitted.unwrap_err();
+            assert!(matches!(error, AppError::MachineAuthorityUnsupported));
+            assert_eq!(error.error_code(), 12419);
+            for collection in [model::CONTEXTS, model::LEASES] {
+                assert_eq!(
+                    f.state
+                        .db
+                        .collection::<Document>(collection)
+                        .count_documents(doc! {"node_id":&machine.id})
+                        .await
+                        .unwrap(),
+                    0,
+                    "refusal must precede context and lease effects"
+                );
+            }
+        } else {
+            assert_eq!(admitted.unwrap().unwrap().mode, "separated");
+        }
+        let visible = access::visible_assignments(&f.state.db, &f.chat)
+            .await
+            .unwrap();
+        let (projected, assignment) = visible.iter().find(|(n, _)| n.id == machine.id).unwrap();
+        assert_eq!(assignment, &policy.assignments[&machine.id]);
+        let support = projected
+            .machine
+            .as_ref()
+            .unwrap()
+            .separated
+            .as_ref()
+            .unwrap();
+        assert_eq!(support.available, reason.is_none());
+        assert_eq!(support.reason.as_deref(), reason);
+        let definitions = access::definitions(&f.state.db, &f.chat).await.unwrap();
+        assert_eq!(
+            definitions
+                .iter()
+                .any(|tool| super::machine_tools::operation(&tool.name)
+                    .is_some_and(|op| op != Operation::JobCancel)),
+            reason.is_none()
+        );
+        assert!(
+            definitions
+                .iter()
+                .any(|tool| super::machine_tools::operation(&tool.name)
+                    == Some(Operation::JobCancel)),
+            "cancellation remains available even when new execution is refused"
+        );
+        let list =
+            crate::handlers::machine_tools::call(&f.state, &f.chat, "nyx__machine_list", json!({}))
+                .await
+                .unwrap();
+        let row = list["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == machine.id)
+            .unwrap();
+        assert_eq!(row["access"]["mode"], "separated");
+        if let Some(reason) = reason {
+            assert_eq!(row["status"], "unavailable");
+            assert_eq!(row["unavailable_reason"], reason);
+        } else {
+            assert_eq!(
+                row["status"],
+                serde_json::to_value(&machine.status).unwrap()
+            );
+        }
+        let options = serde_json::to_value(
+            crate::handlers::machine_access::options(&f.state, &f.owner, &f.chat.agent_id)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let option = options
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["node_id"] == machine.id)
+            .unwrap();
+        let note = super::machine_tools::execution_note("separated", reason.is_none());
+        assert_eq!(row["execution_note"], note);
+        assert_eq!(option["execution_note"], note);
+        assert_eq!(option["separated"]["available"], reason.is_none());
+        assert_eq!(option["separated"]["reason"], json!(reason));
+        assert_eq!(option["separated_setup_note"].is_null(), reason.is_none());
+        assert_eq!(
+            access::policy(&f.state.db, &f.chat.agent_id).await.unwrap(),
+            policy
+        );
+        let stored: crate::models::node::Node = f
+            .state
+            .db
+            .collection(crate::models::node::COLLECTION_NAME)
+            .find_one(doc! {"_id":&machine.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.machine, machine.machine,
+            "derived support must never overwrite the node report"
+        );
+    }
+    // The same missing custody still permits an explicitly shared assignment.
+    let shared = v2(&f).await;
+    let mut shared_assignment = policy.assignments[&machine.id].clone();
+    shared_assignment.mode = "shared_legacy".into();
+    policy
+        .assignments
+        .insert(shared.id.clone(), shared_assignment);
+    f.state
+        .db
+        .collection::<Document>(AGENTS)
+        .update_one(
+            doc! {"_id":&f.chat.agent_id},
+            doc! {"$set":{"machine_access":bson::to_bson(&policy).unwrap(),"machine_node_ids":[&machine.id,&shared.id]}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        access::admit(
+            &f.state.db,
+            &f.chat,
+            &shared,
+            Operation::Exec,
+            &json!({}),
+            None
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .mode,
+        "shared_legacy"
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[test]
+fn machine_access_current_support_requires_advertisement_and_authority() {
+    let mut profile = nyxid_machine::MachineProfile {
+        authority_versions: vec![2],
+        separation_evidence: Some(supported_evidence()),
+        separated: Some(nyxid_machine::context::Support {
+            available: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(access::supports_separated(&profile));
+    profile.separated.as_mut().unwrap().available = false;
+    assert_eq!(
+        access::separated_support(&profile).reason.as_deref(),
+        Some("separated_context_unavailable")
+    );
+    profile.separated = None;
+    assert!(!access::supports_separated(&profile));
+    profile.authority_versions.clear();
+    assert_eq!(
+        access::separated_support(&profile).reason.as_deref(),
+        Some("machine_authority_upgrade_required")
+    );
+}
+
+#[test]
+fn machine_access_new_assignment_selection_matrix() {
+    use nyxid_machine::context::{Choice, EVIDENCE_VERSION};
+    for evidence in [
+        None,
+        Some(supported_evidence()),
+        Some(nyxid_machine::context::Evidence {
+            os: "macos".into(),
+            ..supported_evidence()
+        }),
+        Some(nyxid_machine::context::Evidence {
+            version: EVIDENCE_VERSION - 1,
+            ..supported_evidence()
+        }),
+    ] {
+        let supported = evidence
+            .as_ref()
+            .is_some_and(|e| e.unavailable_reason().is_none());
+        for choice in [
+            None,
+            Some(Choice::Automatic),
+            Some(Choice::RequireSeparated),
+            Some(Choice::SharedLegacy),
+        ] {
+            for editing in [false, true] {
+                let profile = nyxid_machine::MachineProfile {
+                    shell: true,
+                    files: true,
+                    authority_versions: vec![2],
+                    separation_evidence: evidence.clone(),
+                    separation_choice: choice,
+                    ..Default::default()
+                };
+                let assignment = access::selected_assignment(&profile, 7, editing, true);
+                let expected = if choice == Some(Choice::SharedLegacy) {
+                    "shared_legacy"
+                } else if choice.is_some() && supported {
+                    "separated"
+                } else {
+                    model::SELECTION_REQUIRED
+                };
+                assert_eq!(assignment.mode, expected, "{choice:?}/{evidence:?}");
+                assert_eq!(
+                    assignment.capabilities.shell,
+                    expected != model::SELECTION_REQUIRED && !editing
+                );
+                assert_eq!(assignment.revision, 7);
+                if expected == "separated" {
+                    assert!(!assignment.legacy);
+                    assert_eq!(assignment.saved_login_ids, Some(vec![]));
+                }
+                if expected == model::SELECTION_REQUIRED {
+                    assert_eq!(assignment.capabilities, Capabilities::default());
+                }
+            }
+        }
+    }
+    let profile = nyxid_machine::MachineProfile {
+        authority_versions: vec![2],
+        separation_evidence: Some(supported_evidence()),
+        separation_choice: Some(Choice::Automatic),
+        ..Default::default()
+    };
+    assert_eq!(
+        access::selected_assignment(&profile, 1, false, false).mode,
+        model::SELECTION_REQUIRED,
+        "context rollout flag never falls back to legacy"
+    );
+}
+
+#[tokio::test]
+async fn machine_access_durable_cutover_preserves_old_reachability_and_blocks_new_missing_choice() {
+    let f = orchestrator_fixture("machine_separation_cutover").await;
+    let mut old = node(&f, &f.owner).await;
+    old.machine.as_mut().unwrap().separation_choice = None;
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&old.id},
+            doc! {"$set":{"machine":bson::to_bson(&old.machine).unwrap()}},
+        )
+        .await
+        .unwrap();
+    access::ensure_indexes(&f.state.db).await.unwrap();
+    let marker = f
+        .state
+        .db
+        .collection::<Document>("platform_settings")
+        .find_one(doc! {"_id":model::SEPARATION_CUTOVER})
+        .await
+        .unwrap()
+        .unwrap();
+    // Skip the older capabilities migration to exercise W9.4 lazy compatibility.
+    f.state
+        .db
+        .collection::<Document>(AGENTS)
+        .update_one(
+            doc! {"_id":&f.chat.agent_id},
+            doc! {"$set":{"machine_access":bson::to_bson(&model::Policy::default()).unwrap()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        Box::pin(access::authorize(
+            &f.state.db,
+            &f.chat,
+            &old,
+            Operation::Exec,
+            &json!({})
+        ))
+        .await
+        .is_ok()
+    );
+    let mut new = node(&f, &f.owner).await;
+    new.machine.as_mut().unwrap().separation_choice = None;
+    // Strictly after the durable boundary, independent of clock resolution.
+    let after =
+        marker.get_datetime("created_at").unwrap().to_chrono() + chrono::Duration::milliseconds(1);
+    new.created_at = after;
+    f.state.db.collection::<Document>(crate::models::node::COLLECTION_NAME).update_one(doc! {"_id":&new.id},doc! {"$set":{"created_at":bson::DateTime::from_chrono(after),"machine":bson::to_bson(&new.machine).unwrap()}}).await.unwrap();
+    let error = Box::pin(access::authorize(
+        &f.state.db,
+        &f.chat,
+        &new,
+        Operation::Exec,
+        &json!({}),
+    ))
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error,AppError::ValidationError(ref message) if message.contains("machine_selection_required") && message.contains("Assistant → Machines"))
+    );
+    let rows = Box::pin(access::visible_assignments(&f.state.db, &f.chat))
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|(node, _)| node.id == new.id)
+            .unwrap()
+            .1
+            .mode,
+        model::SELECTION_REQUIRED
+    );
+    let result = crate::handlers::machine_tools::call(
+        &f.state,
+        &f.chat,
+        "nyx__machine_exec",
+        json!({"machine":new.id,"command":"true"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["status"], "selection_required");
+    assert!(result["settings_path"].as_str().unwrap().contains(&new.id));
+    let list =
+        crate::handlers::machine_tools::call(&f.state, &f.chat, "nyx__machine_list", json!({}))
+            .await
+            .unwrap();
+    assert!(
+        list["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == new.id && row["status"] == "selection_required")
+    );
+    // A later startup must not move the compatibility boundary.
+    access::ensure_indexes(&f.state.db).await.unwrap();
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>("platform_settings")
+            .find_one(doc! {"_id":model::SEPARATION_CUTOVER})
+            .await
+            .unwrap()
+            .unwrap(),
+        marker
+    );
+    // Explicit denial wins over the compatibility snapshot forever.
+    f.state.db.collection::<Document>(AGENTS).update_one(doc! {"_id":&f.chat.agent_id},doc! {"$set":{format!("machine_access.assignments.{}.capabilities",old.id):bson::to_bson(&Capabilities::default()).unwrap()}}).await.unwrap();
+    assert!(matches!(
+        Box::pin(access::authorize(
+            &f.state.db,
+            &f.chat,
+            &old,
+            Operation::Exec,
+            &json!({})
+        ))
+        .await,
+        Err(AppError::MachinePermissionRevoked)
+    ));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_access_cutover_does_not_infer_machine_enablement_or_org_promotion() {
+    use crate::{
+        models::{org_membership::OrgRole, user::UserType},
+        test_utils::{test_membership, test_user},
+    };
+    let f = orchestrator_fixture("machine_separation_snapshot").await;
+    let org = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    let membership = test_membership(&org, &f.owner, OrgRole::Viewer, None);
+    f.state
+        .db
+        .collection::<crate::models::org_membership::OrgMembership>(
+            crate::models::org_membership::COLLECTION_NAME,
+        )
+        .insert_one(&membership)
+        .await
+        .unwrap();
+    let mut org_node = node(&f, &org).await;
+    let mut dormant = node(&f, &f.owner).await;
+    org_node.machine.as_mut().unwrap().separation_choice = None;
+    dormant.machine = Some(nyxid_machine::MachineProfile {
+        version: 1,
+        ..Default::default()
+    });
+    for n in [&org_node, &dormant] {
+        f.state
+            .db
+            .collection::<Document>(crate::models::node::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&n.id},
+                doc! {"$set":{"machine":bson::to_bson(&n.machine).unwrap()}},
+            )
+            .await
+            .unwrap();
+    }
+    access::ensure_indexes(&f.state.db).await.unwrap();
+    f.state
+        .db
+        .collection::<Document>(AGENTS)
+        .update_one(
+            doc! {"_id":&f.chat.agent_id},
+            doc! {"$set":{"machine_access":bson::to_bson(&model::Policy::default()).unwrap()}},
+        )
+        .await
+        .unwrap();
+    dormant.machine.as_mut().unwrap().shell = true;
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&dormant.id},
+            doc! {"$set":{"machine":bson::to_bson(&dormant.machine).unwrap()}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
+        .update_one(doc! {"_id":membership.id}, doc! {"$set":{"role":"admin"}})
+        .await
+        .unwrap();
+    for n in [&org_node, &dormant] {
+        assert!(
+            matches!(Box::pin(access::authorize(&f.state.db,&f.chat,n,Operation::Exec,&json!({}))).await,
+            Err(AppError::ValidationError(message)) if message.starts_with("machine_selection_required:"))
+        );
+    }
+    // A restart cannot extend the snapshot to these now-enabled/live paths.
+    access::ensure_indexes(&f.state.db).await.unwrap();
+    assert!(
+        f.state
+            .db
+            .collection::<Document>(model::SEPARATION_COMPATIBILITY)
+            .find_one(doc! {"_id":&dormant.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        f.state
+            .db
+            .collection::<Document>(model::SEPARATION_COMPATIBILITY)
+            .find_one(doc! {"_id":format!("{org}:{}",f.owner)})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_access_old_node_requires_human_legacy_card_and_full_warning() {
+    use super::assistant_acknowledgement_service as acks;
+    use crate::handlers::machine_access::{
+        ContextRequestBody, apply_human_context_action, request_context,
+    };
+    let f = orchestrator_fixture("machine_selection_legacy_card").await;
+    access::ensure_indexes(&f.state.db).await.unwrap();
+    let mut node = node(&f, &f.owner).await;
+    node.machine.as_mut().unwrap().separation_choice = None;
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&node.id},
+            doc! {"$set":{"machine":bson::to_bson(&node.machine).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let response = request_context(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.owner),
+        axum::extract::Path((f.chat.agent_id.clone(), node.id.clone())),
+        axum::Json(ContextRequestBody {
+            selection: Selection {
+                mode: Some("shared_legacy".into()),
+                expected_revision: 1,
+                capabilities: Capabilities::default(),
+                saved_login_ids: None,
+            },
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let response = serde_json::to_value(response).unwrap();
+    assert_eq!(response["status"], "pending");
+    let id = response["acknowledgement_id"].as_str().unwrap();
+    let conversation = response["conversation_id"].as_str().unwrap();
+    let card = f
+        .state
+        .db
+        .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        card.summary
+            .contains(nyxid_machine::context::SHARED_LEGACY_WARNING)
+    );
+    assert!(
+        !Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+            .await
+            .unwrap()
+            .assignments
+            .contains_key(&node.id)
+    );
+    let allowed = acks::decide(&f.state.db, &f.owner, conversation, id, true)
+        .await
+        .unwrap();
+    apply_human_context_action(
+        &f.state,
+        &f.owner,
+        allowed.machine_context.as_ref().unwrap(),
+    )
+    .await
+    .unwrap();
+    let policy = Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+        .await
+        .unwrap();
+    let assignment = &policy.assignments[&node.id];
+    assert_eq!(assignment.mode, "shared_legacy");
+    assert!(assignment.legacy);
+    assert_eq!(
+        assignment.capabilities,
+        Capabilities::legacy(node.machine.as_ref().unwrap())
+    );
+    assert!(
+        Box::pin(access::authorize(
+            &f.state.db,
+            &f.chat,
+            &node,
+            Operation::Exec,
+            &json!({})
+        ))
+        .await
+        .is_ok()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_access_legacy_opt_out_requires_human_card_and_preserves_limits() {
+    use super::assistant_acknowledgement_service as acks;
+    use crate::handlers::machine_access::{
+        ContextRequestBody, apply_human_context_action, request_context,
+    };
+    let f = orchestrator_fixture("machine_legacy_opt_out").await;
+    access::ensure_indexes(&f.state.db).await.unwrap();
+    let machine = v2(&f).await;
+    let caps = Capabilities {
+        files: true,
+        browser: true,
+        ..Default::default()
+    };
+    let before = model::Policy {
+        revision: 7,
+        assignments: std::collections::BTreeMap::from([(
+            machine.id.clone(),
+            model::Assignment {
+                mode: "separated".into(),
+                capabilities: caps,
+                revision: 7,
+                saved_login_ids: Some(vec![]),
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    };
+    f.state
+        .db
+        .collection::<Document>(AGENTS)
+        .update_one(
+            doc! {"_id":&f.chat.agent_id},
+            doc! {"$set":{"machine_access":bson::to_bson(&before).unwrap(),"machine_node_ids":[&machine.id]}},
+        )
+        .await
+        .unwrap();
+    let context_id = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<model::Context>(model::CONTEXTS)
+        .insert_one(model::Context {
+            id: context_id.clone(),
+            node_id: machine.id.clone(),
+            agent_id: f.chat.agent_id.clone(),
+            owner_id: f.owner.clone(),
+            actor_id: f.owner.clone(),
+            group_id: None,
+            generation: 3,
+            mode: "separated".into(),
+        })
+        .await
+        .unwrap();
+    let forged = Selection {
+        mode: Some("shared_legacy".into()),
+        expected_revision: 7,
+        capabilities: Capabilities::legacy(machine.machine.as_ref().unwrap()),
+        saved_login_ids: Some(vec![uuid::Uuid::new_v4().to_string()]),
+    };
+    let (refusal, pending) = Box::pin(crate::handlers::machine_access::native(
+        &f.state,
+        &f.chat,
+        &json!({"machine":machine.id,"selection":forged}),
+    ))
+    .await
+    .unwrap();
+    assert!(pending);
+    assert_eq!(refusal["status"], "selection_required");
+    let response = request_context(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.owner),
+        axum::extract::Path((f.chat.agent_id.clone(), machine.id.clone())),
+        axum::Json(ContextRequestBody { selection: forged }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let response = serde_json::to_value(response).unwrap();
+    let id = response["acknowledgement_id"].as_str().unwrap();
+    let conversation = response["conversation_id"].as_str().unwrap();
+    assert_eq!(
+        Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+            .await
+            .unwrap(),
+        before
+    );
+    let card = acks::decide(&f.state.db, &f.owner, conversation, id, true)
+        .await
+        .unwrap();
+    assert!(
+        card.summary
+            .contains(nyxid_machine::context::SHARED_LEGACY_WARNING)
+    );
+    let action = card.machine_context.as_ref().unwrap();
+    assert_eq!(action.selection.capabilities, caps);
+    assert_eq!(action.selection.saved_login_ids, Some(vec![]));
+    apply_human_context_action(&f.state, &f.owner, action)
+        .await
+        .unwrap();
+    let after = Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+        .await
+        .unwrap();
+    assert_eq!(after.assignments[&machine.id].mode, "shared_legacy");
+    assert_eq!(after.assignments[&machine.id].capabilities, caps);
+    assert_eq!(after.assignments[&machine.id].saved_login_ids, Some(vec![]));
+    assert_eq!(after.revision, 8);
+    let context = f
+        .state
+        .db
+        .collection::<model::Context>(model::CONTEXTS)
+        .find_one(doc! {"_id":context_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(context.mode, "shared_legacy");
+    assert_eq!(context.generation, 4);
+    assert!(f.state.db.collection::<Document>(model::OUTBOX)
+        .find_one(doc! {"agent_id":&f.chat.agent_id,"node_id":&machine.id,"revision":8,"pending":true,"quarantine_profiles":true})
+        .await.unwrap().is_some());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_access_setup_selection_respects_context_gate_and_existing_denials() {
+    use super::machine_setup_service as setup;
+    let f = fixture("machine_setup_selection_gate").await;
+    access::ensure_indexes(&f.state.db).await.unwrap();
+    let mut machine = v2(&f).await;
+    let profile = machine.machine.as_mut().unwrap();
+    profile.separation_choice = Some(nyxid_machine::context::Choice::Automatic);
+    profile.separation_evidence = Some(supported_evidence());
+    let intent = setup::create_link(
+        &f.state.db,
+        &f.owner,
+        None,
+        crate::models::machine_setup::Choices {
+            separation: Some(nyxid_machine::context::Choice::Automatic),
+            legacy_warning_acknowledged: false,
+            automatic_updates: None,
+            owner_id: None,
+            name: "selection-gate".into(),
+            location: "vm".into(),
+            capabilities: vec!["shell".into()],
+            grant_to: Some(f.chat.agent_id.clone()),
+        },
+        &super::nyxbot_watch_service::ReportProvenance::LEGACY,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        Box::pin(setup::setup_selection_reason(
+            &f.state.db,
+            &intent,
+            &machine
+        ))
+        .await
+        .unwrap(),
+        Some("machine_context_setup_not_enabled")
+    );
+    super::security_readiness_service::ready_test_replica(&f.state.db).await;
+    super::feature_flag_service::set_platform_override(
+        &f.state.db,
+        access::CONTEXT_FLAG,
+        &super::feature_flag_service::FlagTarget::Global,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        Box::pin(setup::setup_selection_reason(
+            &f.state.db,
+            &intent,
+            &machine
+        ))
+        .await
+        .unwrap(),
+        None
+    );
+    machine.machine.as_mut().unwrap().separation_choice = None;
+    assert_eq!(
+        Box::pin(setup::setup_selection_reason(
+            &f.state.db,
+            &intent,
+            &machine
+        ))
+        .await
+        .unwrap(),
+        Some("machine_selection_required")
+    );
+    // A stored pending assignment is not replaced by the membership writer
+    // when the node later reports a usable choice. Setup must keep the owner
+    // action visible rather than claim the requested grant has completed.
+    f.state
+        .db
+        .collection::<Document>(AGENTS)
+        .update_one(
+            doc! {"_id":&f.chat.agent_id},
+            doc! {"$set":{
+                format!("machine_access.assignments.{}",machine.id):bson::to_bson(&access::unresolved_assignment(1)).unwrap(),
+            }},
+        )
+        .await
+        .unwrap();
+    for choice in [
+        nyxid_machine::context::Choice::Automatic,
+        nyxid_machine::context::Choice::SharedLegacy,
+    ] {
+        machine.machine.as_mut().unwrap().separation_choice = Some(choice);
+        assert_eq!(
+            Box::pin(setup::setup_selection_reason(
+                &f.state.db,
+                &intent,
+                &machine
+            ))
+            .await
+            .unwrap(),
+            Some("machine_selection_required")
+        );
+    }
+    machine.machine.as_mut().unwrap().separation_choice = None;
+    // A previously reviewed assignment, including an all-off denial, retains
+    // its stored authority even when the old node reports no setup intent.
+    let denial = model::Assignment {
+        legacy: true,
+        ..Default::default()
+    };
+    f.state
+        .db
+        .collection::<Document>(AGENTS)
+        .update_one(
+            doc! {"_id":&f.chat.agent_id},
+            doc! {"$set":{
+                format!("machine_access.assignments.{}",machine.id):bson::to_bson(&denial).unwrap(),
+            }},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        Box::pin(setup::setup_selection_reason(
+            &f.state.db,
+            &intent,
+            &machine
+        ))
+        .await
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+            .await
+            .unwrap()
+            .assignments[&machine.id],
+        denial
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_access_retained_denials_bound_new_assignment_history() {
+    let f = fixture("machine_assignment_history_bound").await;
+    access::ensure_indexes(&f.state.db).await.unwrap();
+    let n = v2(&f).await;
+    let mut policy = model::Policy::default();
+    for _ in 0..64 {
+        policy.assignments.insert(
+            uuid::Uuid::new_v4().to_string(),
+            model::Assignment::default(),
+        );
+    }
+    f.state
+        .db
+        .collection::<Document>(AGENTS)
+        .update_one(
+            doc! {"_id":&f.chat.agent_id},
+            doc! {"$set":{"machine_access":bson::to_bson(&policy).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let error = Box::pin(super::assistant_team_service::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        super::assistant_team_service::GrantChange::Machine {
+            base: Box::new(super::assistant_team_service::GrantChange::Add(
+                Default::default(),
+            )),
+            machines: Some(vec![n.id]),
+            logins: None,
+            mode: super::assistant_team_service::MachineGrantMode::Add,
+        },
+    ))
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error,AppError::ValidationError(message) if message.contains("history is full"))
+    );
+    assert_eq!(
+        Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+            .await
+            .unwrap(),
+        policy
+    );
     f.state.db.drop().await.unwrap();
 }

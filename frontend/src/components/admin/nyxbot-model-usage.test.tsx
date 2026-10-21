@@ -1,10 +1,11 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { NyxbotModelUsage } from "./nyxbot-model-usage";
 import { modelCost, modelDailyPoints } from "@/lib/nyxbot-model-usage";
 import { ModelTrends } from "./nyxbot-model-trends";
 import { useNyxbotModelUsage } from "@/hooks/use-nyxbot-model-usage";
+import { nyxbotModelUsageSchema } from "@/schemas/nyxbot-model-usage";
 import { modelStats, nyxbotModelFixture } from "@/test/nyxbot-model-fixture";
 vi.mock("@/hooks/use-nyxbot-model-usage", () => ({
   useNyxbotModelUsage: vi.fn(),
@@ -112,4 +113,93 @@ it("shows loading, retry and empty states", async () => {
   setQuery({ data });
   rerender(<NyxbotModelUsage from="a" to="b" />);
   expect(screen.getByText(/No attributed model usage/)).toBeInTheDocument();
+});
+it("shows top billing accounts as the dashboard panel with model detail on demand", async () => {
+  const data = nyxbotModelFixture();
+  data.other_accounts = {
+    model: null,
+    is_other: true,
+    groups: 4,
+    usage: modelStats({ gross_cost: "1.5", requests: 2 }),
+  };
+  setQuery({ data });
+  render(
+    <NyxbotModelUsage from="2026-10-10T00:00:00Z" to="2026-10-17T00:00:00Z" />,
+  );
+  const panel = screen.getByRole("article", { name: "Top billing accounts" });
+  expect(
+    within(panel).getByText("Gross cost · Billing account"),
+  ).toBeInTheDocument();
+  expect(within(panel).getByText("Top 10 + Other")).toBeInTheDocument();
+  const table = within(panel).getByRole("table", {
+    name: "Top billing accounts data",
+  });
+  expect(within(table).getAllByRole("row")).toHaveLength(
+    data.accounts.length + 2,
+  );
+  for (const { account } of data.accounts) {
+    expect(
+      within(table).getByRole("cell", { name: account.display_name }),
+    ).toBeInTheDocument();
+  }
+  expect(
+    within(table).getByRole("cell", { name: "Other" }),
+  ).toBeInTheDocument();
+  const detail = within(panel).getByText("Models by billing account");
+  expect(
+    within(panel).getByRole("table", {
+      name: "Alice Research usage by model",
+      hidden: true,
+    }),
+  ).not.toBeVisible();
+  await userEvent.click(detail);
+  expect(
+    within(panel).getByRole("table", { name: "Alice Research usage by model" }),
+  ).toBeVisible();
+  expect(
+    within(panel).getByText("Other · 4 billing accounts"),
+  ).toBeInTheDocument();
+});
+it("breaks model executions down by inference service, including unknown models", async () => {
+  const data = nyxbotModelFixture();
+  data.services.push({
+    service: null,
+    is_other: true,
+    groups: 3,
+    usage: modelStats({ requests: 5, gross_cost: null }),
+  });
+  setQuery({ data });
+  render(
+    <NyxbotModelUsage from="2026-10-10T00:00:00Z" to="2026-10-17T00:00:00Z" />,
+  );
+  const panel = screen.getByRole("article", { name: "Model services" });
+  expect(within(panel).getByText("Requests · Service")).toBeInTheDocument();
+  expect(within(panel).getByText("Top 20 + Other")).toBeInTheDocument();
+  const table = within(panel).getByRole("table", {
+    name: "Model services data",
+  });
+  for (const label of ["Chrono LLM (public)", "Anthropic", "Other"]) {
+    expect(
+      within(table).getByRole("cell", { name: label }),
+    ).toBeInTheDocument();
+  }
+  // Request counts are exact and never carry cost caveats.
+  expect(
+    within(panel).queryByText(/metering events have unknown cost/),
+  ).not.toBeInTheDocument();
+  await userEvent.click(within(panel).getByText("Cost and tokens by service"));
+  const detail = within(panel).getByRole("table", {
+    name: "Model services usage",
+  });
+  expect(
+    within(detail).getByRole("rowheader", { name: "Other · 3 services" }),
+  ).toBeVisible();
+  expect(
+    within(detail).getByRole("rowheader", { name: "Chrono LLM (public)" }),
+  ).toBeVisible();
+});
+it("accepts reports from servers without the service breakdown", () => {
+  const legacy: Record<string, unknown> = { ...nyxbotModelFixture() };
+  delete legacy.services;
+  expect(nyxbotModelUsageSchema.parse(legacy).services).toEqual([]);
 });

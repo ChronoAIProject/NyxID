@@ -324,6 +324,7 @@ fn account_service() -> McpToolService {
         endpoints: TOOL_NAMES
             .iter()
             .map(|name| McpToolEndpoint {
+                attachment_input: None,
                 async_operation: None,
                 endpoint_id: format!("nyxid__{name}"),
                 name: (*name).into(),
@@ -1486,6 +1487,7 @@ mod search_tests {
         home.service_name = "Home Assistant at office".into();
         home.endpoints = (0..40)
             .map(|i| McpToolEndpoint {
+                attachment_input: None,
                 async_operation: None,
                 endpoint_id: format!("home{i}"),
                 name: format!("get_states_{i}"),

@@ -20,6 +20,7 @@ use mongodb::{
 use nyxid_machine::{
     Operation,
     authority::{Authority, Capabilities},
+    context::{self, Choice, Mode},
 };
 
 pub const FLAG: &str = "assistant:machine-capabilities";
@@ -35,6 +36,217 @@ fn refused() -> AppError {
     AppError::MachinePermissionRevoked
 }
 
+/// Advertisements alone never authorize separated execution. Re-evaluate the
+/// current protocol and every observed prerequisite, including credential custody.
+pub fn separated_support(profile: &nyxid_machine::MachineProfile) -> context::Support {
+    let evidence = profile.separation_evidence.as_ref();
+    let reason = if !profile.authority_v2() {
+        Some("machine_authority_upgrade_required")
+    } else {
+        match evidence {
+            None => Some("separated_capabilities_not_reported"),
+            Some(evidence) => evidence.unavailable_reason().or_else(|| {
+                (!profile.separated.as_ref().is_some_and(|s| s.available))
+                    .then_some("separated_context_unavailable")
+            }),
+        }
+    };
+    context::Support {
+        available: reason.is_none(),
+        landlock_abi: evidence.and_then(|e| e.landlock_abi),
+        reason: reason.map(str::to_owned),
+    }
+}
+
+pub fn supports_separated(profile: &nyxid_machine::MachineProfile) -> bool {
+    separated_support(profile).available
+}
+
+/// Current reports are mandatory for a new separated assignment. Existing
+/// assignments are never passed through this selector or reinterpreted.
+pub fn select_profile(
+    profile: &nyxid_machine::MachineProfile,
+    choice: Option<Choice>,
+) -> Result<Mode, &'static str> {
+    let choice = choice.ok_or("machine_selection_required")?;
+    let mode = context::select_new(choice, profile.separation_evidence.as_ref())?;
+    if mode == Mode::Separated && !profile.authority_v2() {
+        return Err("machine_authority_upgrade_required");
+    }
+    Ok(mode)
+}
+
+pub fn selection_message(reason: &str) -> String {
+    if reason == "machine_context_setup_not_enabled" {
+        return "machine_selection_required: The recorded choice requires separated contexts, but context setup is not enabled for this account. Ask the administrator to enable it, or explicitly approve shared legacy access in Assistant → Machines after reviewing the warning. No shared fallback has been selected.".into();
+    }
+    if reason == "machine_selection_required" {
+        return "machine_selection_required: This assignment needs an owner separation selection before execution. Open Assistant → Machines to confirm supported automatic/required separation or explicitly approve shared legacy access after reviewing its warning.".into();
+    }
+    format!(
+        "machine_selection_required: {} Choose automatic or require-separated after confirming support, or explicitly approve shared legacy access after reviewing its warning in Assistant → Machines.",
+        context::unavailable_message(reason)
+    )
+}
+
+pub fn pending_selection_reason(
+    profile: &nyxid_machine::MachineProfile,
+    contexts: bool,
+) -> &'static str {
+    match select_profile(profile, profile.separation_choice) {
+        Err(reason) => reason,
+        Ok(Mode::Separated) if !contexts => "machine_context_setup_not_enabled",
+        Ok(_) => "machine_selection_required",
+    }
+}
+
+/// A denied placeholder makes an unresolved choice visible without granting
+/// execution. Capability editing still defaults new permissions to off.
+pub(super) fn selected_assignment(
+    profile: &nyxid_machine::MachineProfile,
+    revision: i64,
+    editing: bool,
+    contexts: bool,
+) -> Assignment {
+    let mode = select_profile(profile, profile.separation_choice)
+        .ok()
+        .filter(|mode| *mode != Mode::Separated || contexts);
+    Assignment {
+        mode: match mode {
+            Some(Mode::Separated) => "separated",
+            Some(Mode::SharedLegacy) => "shared_legacy",
+            None => model::SELECTION_REQUIRED,
+        }
+        .into(),
+        capabilities: if mode.is_some() && !editing {
+            Capabilities::legacy(profile)
+        } else {
+            Capabilities::default()
+        },
+        legacy: mode == Some(Mode::SharedLegacy) && !editing,
+        revision,
+        saved_login_ids: (mode == Some(Mode::Separated)).then(Vec::new),
+    }
+}
+
+pub fn unresolved_assignment(revision: i64) -> Assignment {
+    Assignment {
+        mode: model::SELECTION_REQUIRED.into(),
+        revision,
+        ..Default::default()
+    }
+}
+
+/// Freeze actual machine enablement and org management reachability, rather
+/// than inferring either from the creation time of a node or membership.
+/// The marker and snapshot commit together; a restart never extends the set.
+async fn ensure_separation_cutover(db: &Database) -> AppResult<()> {
+    // MongoDB cannot implicitly create a collection inside a transaction.
+    // Its unique _id index is also the only index these snapshot reads need.
+    db.collection::<Document>(model::SEPARATION_COMPATIBILITY)
+        .update_one(
+            doc! {"_id":"schema-v1"},
+            doc! {"$setOnInsert":{"version":1}},
+        )
+        .upsert(true)
+        .await?;
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    session.start_transaction().and_run2(async move |session| {
+        let result = Box::pin(async {
+            if let Some(marker) = db.collection::<Document>(SETTINGS)
+                .find_one(doc! {"_id":model::SEPARATION_CUTOVER})
+                .session(&mut *session).await? {
+                if marker.get_i32("snapshot_version").ok() != Some(1) || marker.get_datetime("created_at").is_err() {
+                    return Err(AppError::Internal("Machine separation cutover is unreadable".into()));
+                }
+                return Ok(());
+            }
+            db.collection::<Document>(SETTINGS).insert_one(doc! {
+                "_id":model::SEPARATION_CUTOVER,"created_at":bson::DateTime::now(),"snapshot_version":1,
+            }).session(&mut *session).await?;
+            let orgs: Vec<Document> = db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+                .find(doc! {"user_type":"org","is_active":true}).projection(doc! {"_id":1})
+                .session(&mut *session).await?.stream(&mut *session).try_collect().await?;
+            let org_ids: Vec<&str> = orgs.iter().filter_map(|org| org.get_str("_id").ok()).collect();
+            let mut memberships = db.collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
+                .find(doc! {"org_user_id":{"$in":org_ids},"role":"admin","revoked_at":bson::Bson::Null})
+                .batch_size(100).session(&mut *session).await?;
+            let mut snapshots = Vec::with_capacity(100);
+            loop {
+                let member = memberships.stream(&mut *session).try_next().await?;
+                let Some(member) = member else { break };
+                let (Ok(org),Ok(actor)) = (member.get_str("org_user_id"),member.get_str("member_user_id")) else {continue};
+                snapshots.push(doc! {"_id":format!("{org}:{actor}"),"owner_id":org,"actor_id":actor});
+                if snapshots.len() == 100 {
+                    db.collection::<Document>(model::SEPARATION_COMPATIBILITY)
+                        .insert_many(std::mem::take(&mut snapshots)).session(&mut *session).await?;
+                }
+            }
+            let mut nodes = db.collection::<Node>(NODES)
+                .find(doc! {"is_active":true,"machine":{"$ne":bson::Bson::Null}})
+                .batch_size(100).session(&mut *session).await?;
+            loop {
+                let node = nodes.stream(&mut *session).try_next().await?;
+                let Some(node) = node else { break };
+                if let Some(profile) = node.machine.filter(|p| p.enabled()) {
+                    snapshots.push(doc! {
+                        "_id":node.id,"owner_id":node.user_id,"capabilities":encode(&Capabilities::legacy(&profile))?,
+                    });
+                    if snapshots.len() == 100 {
+                        db.collection::<Document>(model::SEPARATION_COMPATIBILITY)
+                            .insert_many(std::mem::take(&mut snapshots)).session(&mut *session).await?;
+                    }
+                }
+            }
+            if !snapshots.is_empty() {
+                db.collection::<Document>(model::SEPARATION_COMPATIBILITY)
+                    .insert_many(snapshots).session(&mut *session).await?;
+            }
+            Ok(())
+        }).await;
+        transactions::transaction_result(result)
+    }).await.map_err(transactions::map_transaction_error)
+}
+
+async fn compatibility_capabilities(
+    db: &Database,
+    actor: &str,
+    nodes: &[Node],
+    session: &mut ClientSession,
+) -> AppResult<std::collections::BTreeMap<String, Capabilities>> {
+    let ids: Vec<String> = nodes
+        .iter()
+        .flat_map(|node| [node.id.clone(), format!("{}:{actor}", node.user_id)])
+        .collect();
+    let snapshots: Vec<Document> = db
+        .collection::<Document>(model::SEPARATION_COMPATIBILITY)
+        .find(doc! {"_id":{"$in":ids}})
+        .session(&mut *session)
+        .await?
+        .stream(&mut *session)
+        .try_collect()
+        .await?;
+    let rows: std::collections::BTreeMap<&str, &Document> = snapshots
+        .iter()
+        .filter_map(|row| row.get_str("_id").ok().map(|id| (id, row)))
+        .collect();
+    Ok(nodes
+        .iter()
+        .filter_map(|node| {
+            let snapshot = rows.get(node.id.as_str())?;
+            if snapshot.get_str("owner_id").ok() != Some(node.user_id.as_str())
+                || (node.user_id != actor
+                    && !rows.contains_key(format!("{}:{actor}", node.user_id).as_str()))
+            {
+                return None;
+            }
+            let caps = bson::from_bson(snapshot.get("capabilities")?.clone()).ok()?;
+            Some((node.id.clone(), caps))
+        })
+        .collect())
+}
+
 pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
     db.collection::<Document>(SETTINGS)
         .update_one(
@@ -43,6 +255,7 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
         )
         .upsert(true)
         .await?;
+    ensure_separation_cutover(db).await?;
     // The former unconditional index treated absent Assistant IDs as a shared
     // null identity. External contexts have their own typed grant identity.
     // Build the narrower replacement first, then retire the old definition.
@@ -170,16 +383,48 @@ pub async fn migrate_in_session(
             .batch_size(100)
             .session(&mut *session)
             .await?;
-        while let Some(node) = nodes.stream(&mut *session).try_next().await? {
-            if let Some(profile) = node.machine.as_ref() {
-                policy.assignments.insert(
-                    node.id,
-                    Assignment {
-                        capabilities: Capabilities::legacy(profile),
-                        legacy: true,
-                        ..Default::default()
-                    },
-                );
+        let contexts =
+            super::feature_flag_service::personal_flag_enabled(db, &agent.user_id, CONTEXT_FLAG)
+                .await?;
+        loop {
+            let mut batch = Vec::with_capacity(100);
+            while batch.len() < 100 {
+                match nodes.stream(&mut *session).try_next().await? {
+                    Some(node) => batch.push(node),
+                    None => break,
+                }
+            }
+            if batch.is_empty() {
+                break;
+            }
+            let compatibility = if agent.is_nyxbot() {
+                compatibility_capabilities(db, &agent.user_id, &batch, session).await?
+            } else {
+                Default::default()
+            };
+            for node in batch {
+                if let Some(profile) = node.machine.as_ref() {
+                    let assignment = if agent.is_nyxbot() {
+                        if profile.separation_choice.is_none()
+                            && compatibility.contains_key(&node.id)
+                        {
+                            Assignment {
+                                capabilities: compatibility[&node.id],
+                                legacy: true,
+                                ..Default::default()
+                            }
+                        } else {
+                            selected_assignment(profile, 1, false, contexts)
+                        }
+                    } else {
+                        Assignment {
+                            capabilities: Capabilities::legacy(profile),
+                            legacy: true,
+                            ..Default::default()
+                        }
+                    };
+                    policy.assignments.insert(node.id, assignment);
+                }
             }
         }
     }
@@ -233,7 +478,7 @@ pub async fn policy(db: &Database, id: &str) -> AppResult<Policy> {
 }
 
 /// Called only with machine selections already authorized by the grant flow.
-/// Snapshot legacy access for people who cannot yet use the capability editor.
+/// New authority always uses recorded intent and positively observed support.
 pub async fn new_assignments(
     db: &Database,
     actor: &str,
@@ -242,21 +487,14 @@ pub async fn new_assignments(
 ) -> AppResult<std::collections::BTreeMap<String, Assignment>> {
     let mut assignments = nodes
         .iter()
-        .map(|id| {
-            (
-                id.clone(),
-                Assignment {
-                    revision,
-                    ..Default::default()
-                },
-            )
-        })
+        .map(|id| (id.clone(), unresolved_assignment(revision)))
         .collect::<std::collections::BTreeMap<_, _>>();
-    if nodes.is_empty()
-        || super::feature_flag_service::personal_flag_enabled(db, actor, FLAG).await?
-    {
+    if nodes.is_empty() {
         return Ok(assignments);
     }
+    let editing = super::feature_flag_service::personal_flag_enabled(db, actor, FLAG).await?;
+    let contexts =
+        super::feature_flag_service::personal_flag_enabled(db, actor, CONTEXT_FLAG).await?;
     let mut rows = db
         .collection::<Node>(NODES)
         .find(doc! {"_id":{"$in":nodes},"is_active":true})
@@ -266,12 +504,7 @@ pub async fn new_assignments(
         if let Some(profile) = node.machine {
             assignments.insert(
                 node.id,
-                Assignment {
-                    capabilities: Capabilities::legacy(&profile),
-                    legacy: true,
-                    revision,
-                    ..Default::default()
-                },
+                selected_assignment(&profile, revision, editing, contexts),
             );
         }
     }
@@ -314,17 +547,32 @@ async fn legacy_nyxbot_assignments(
                 return Ok((**policy).clone());
             }
             let owners = super::machine_service::usable_owners(&db, &actor).await?;
+            let cutoff = db.collection::<Document>(SETTINGS)
+                .find_one(doc! {"_id":model::SEPARATION_CUTOVER}).session(&mut *session).await?
+                .and_then(|d| d.get_datetime("created_at").ok().copied())
+                .ok_or_else(|| AppError::Internal("Machine separation migration not initialized".into()))?;
+            let contexts = super::feature_flag_service::personal_flag_enabled(&db, &actor, CONTEXT_FLAG).await?;
             let mut changed = false;
             let revision = policy.revision.checked_add(1).ok_or_else(refused)?;
-            for node in &nodes {
-                if node.is_active && owners.contains(&node.user_id)
-                    && !policy.assignments.contains_key(&node.id)
-                    && let Some(profile) = &node.machine
+            // Re-read the authorized batch in this transaction. Discovery's
+            // batched projection never becomes one database lookup per node.
+            let ids: Vec<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
+            let live_nodes: Vec<Node> = db.collection::<Node>(NODES)
+                .find(doc! {"_id":{"$in":ids},"is_active":true,"user_id":{"$in":&owners}})
+                .session(&mut *session).await?.stream(&mut *session).try_collect().await?;
+            let compatibility = compatibility_capabilities(&db,&actor,&live_nodes,session).await?;
+            for node in &live_nodes {
+                if !policy.assignments.contains_key(&node.id)
+                    && let Some(profile) = node.machine.as_ref()
                 {
-                    policy.assignments.insert(node.id.clone(), Assignment {
-                        capabilities: Capabilities::legacy(profile), legacy: true, revision,
-                        ..Default::default()
-                    });
+                    let preexisting = agent.created_at <= cutoff.to_chrono()
+                        && compatibility.contains_key(&node.id);
+                    let assignment = if preexisting && profile.separation_choice.is_none() {
+                        Assignment { capabilities: compatibility[&node.id], legacy:true, revision, ..Default::default() }
+                    } else {
+                        selected_assignment(profile, revision, false, contexts)
+                    };
+                    policy.assignments.insert(node.id.clone(), assignment);
                     changed = true;
                 }
             }
@@ -369,17 +617,25 @@ pub async fn assignment(db: &Database, chat: &ChatAuthority, node: &Node) -> App
         .assignments
         .get(&node.id)
         .cloned()
-        .ok_or_else(refused)?;
+        .unwrap_or_else(|| unresolved_assignment(policy.revision));
     if !agent.is_nyxbot() && !agent.machine_node_ids.contains(&node.id) {
         return Err(refused());
     }
     match assignment.mode.as_str() {
+        model::SELECTION_REQUIRED => {
+            let contexts =
+                super::feature_flag_service::personal_flag_enabled(db, &chat.user_id, CONTEXT_FLAG)
+                    .await?;
+            let reason = node
+                .machine
+                .as_ref()
+                .map(|p| pending_selection_reason(p, contexts))
+                .unwrap_or("machine_selection_required");
+            return Err(AppError::ValidationError(selection_message(reason)));
+        }
         "shared_legacy" => {}
         "separated"
-            if !assignment.legacy
-                && node.machine.as_ref().is_some_and(|p| {
-                    p.authority_v2() && p.separated.as_ref().is_some_and(|s| s.available)
-                }) => {}
+            if !assignment.legacy && node.machine.as_ref().is_some_and(supports_separated) => {}
         _ => return Err(AppError::MachineAuthorityUnsupported),
     }
     if !node.machine.as_ref().is_some_and(|p| p.authority_v2()) && !assignment.legacy {
@@ -429,8 +685,8 @@ pub async fn authorize(
 }
 
 /// Preserve existing policy; new selections follow the acting person's editor flag.
-/// Separated assignments retain a bounded all-off preference on removal: a later
-/// Grants selection must not silently return that agent to the shared browser.
+/// Removed assignments retain a bounded all-off preference: a later Grants
+/// selection or implicit discovery must not resurrect revoked authority.
 pub async fn membership_changed(
     db: &Database,
     actor: &str,
@@ -474,8 +730,11 @@ pub async fn membership_changed(
                 )
                 .session(&mut *session)
                 .await?;
-        } else {
-            policy.assignments.remove(node);
+        } else if let Some(assignment) = policy.assignments.get_mut(node) {
+            assignment.capabilities = Capabilities::default();
+            assignment.revision = policy.revision;
+            // Preserve the mode and denial so implicit NyxBot discovery cannot
+            // recreate a revoked assignment, including pre-cutover nodes.
         }
         enqueue(db, &agent.id, node, policy.revision, session).await?;
         if separated {
@@ -488,6 +747,11 @@ pub async fn membership_changed(
         .filter(|node| !policy.assignments.contains_key(*node))
         .cloned()
         .collect();
+    if !added.is_empty() && added.len() > 64_usize.saturating_sub(policy.assignments.len()) {
+        return Err(AppError::ValidationError(
+            "Machine assignment history is full. At most 64 new choices, including removed assignments, may be retained. Reuse a previously selected machine or create another agent.".into(),
+        ));
+    }
     policy
         .assignments
         .extend(Box::pin(new_assignments(db, actor, &added, policy.revision)).await?);
@@ -639,26 +903,31 @@ pub async fn configure(
     node_id: &str,
     selection: Selection,
 ) -> AppResult<Policy> {
-    let context_action = selection.mode.as_deref() == Some("separated");
-    if !super::feature_flag_service::personal_flag_enabled(db, actor, FLAG).await?
-        && !context_action
-    {
+    let editing = super::feature_flag_service::personal_flag_enabled(db, actor, FLAG).await?;
+    let contexts =
+        super::feature_flag_service::personal_flag_enabled(db, actor, CONTEXT_FLAG).await?;
+    let context_action = selection.mode.is_some();
+    if !editing && !context_action {
         return Err(AppError::ValidationError(
             "Machine capability configuration is not enabled. Existing restrictions still apply."
                 .into(),
         ));
     }
+    if selection.mode.as_deref().is_some_and(|mode| {
+        !matches!(
+            mode,
+            "shared_legacy" | "separated" | "automatic" | "require_separated"
+        )
+    }) {
+        return Err(AppError::ValidationError(
+            "Choose automatic, require_separated or shared_legacy".into(),
+        ));
+    }
     if selection
         .mode
         .as_deref()
-        .is_some_and(|mode| !matches!(mode, "shared_legacy" | "separated"))
-    {
-        return Err(AppError::ValidationError(
-            "Choose shared_legacy or separated".into(),
-        ));
-    }
-    if selection.mode.is_some()
-        && !super::feature_flag_service::personal_flag_enabled(db, actor, CONTEXT_FLAG).await?
+        .is_some_and(|mode| mode != "shared_legacy")
+        && !contexts
     {
         return Err(AppError::ValidationError(
             "Machine context setup is not enabled; existing separation still applies".into(),
@@ -688,11 +957,21 @@ pub async fn configure(
     let profile = node
         .machine
         .as_ref()
-        .filter(|p| p.authority_v2())
-        .ok_or(AppError::MachineAuthorityUnsupported)?;
+        .ok_or(AppError::MachineCapabilityDisabled)?
+        .clone();
+    if !profile.authority_v2()
+        && (selection.mode.as_deref() != Some("shared_legacy")
+            || selection.capabilities != Capabilities::legacy(&profile)
+            || selection
+                .saved_login_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.is_empty()))
+    {
+        return Err(AppError::MachineAuthorityUnsupported);
+    }
     if !selection
         .capabilities
-        .subset_of(Capabilities::legacy(profile))
+        .subset_of(Capabilities::legacy(&profile))
     {
         return Err(AppError::MachineCapabilityDisabled);
     }
@@ -722,17 +1001,30 @@ pub async fn configure(
             if policy.version != 2 { return Err(AppError::MachineAuthorityUnsupported); }
             if policy.revision!=selection.expected_revision {return Err(AppError::Conflict("Machine access changed; reload before saving".into()));}
             if !policy.assignments.contains_key(&node_id) && policy.assignments.len()>=64 {return Err(AppError::ValidationError("At most 64 new machine assignments".into()));}
-            let old = policy.assignments.get(&node_id).cloned().unwrap_or_default();
-            let mode = selection.mode.as_deref().unwrap_or(&old.mode);
-            if mode == "separated" && (node.machine.as_ref().is_none_or(|p| !p.authority_v2() || p.separated.as_ref().is_none_or(|s| !s.available)) || selection.saved_login_ids.is_none()) {
-                return Err(AppError::ValidationError("Separate workspace and browser requires a supported Linux node and an explicit saved-login selection (empty is allowed)".into()));
+            let old = policy.assignments.get(&node_id).cloned().unwrap_or_else(|| selected_assignment(&profile, policy.revision, editing, contexts));
+            let mode = if let Some(requested) = selection.mode.as_deref() {
+                let choice = match requested {
+                    "shared_legacy" => Choice::SharedLegacy,
+                    "automatic" => Choice::Automatic,
+                    _ => Choice::RequireSeparated,
+                };
+                match select_profile(&profile, Some(choice)).map_err(|reason| AppError::ValidationError(selection_message(reason)))? {
+                    Mode::Separated => "separated",
+                    Mode::SharedLegacy => "shared_legacy",
+                }
+            } else { &old.mode };
+            if mode == model::SELECTION_REQUIRED {
+                return Err(AppError::ValidationError(selection_message("machine_selection_required")));
+            }
+            if mode == "separated" && selection.saved_login_ids.is_none() {
+                return Err(AppError::ValidationError("Separate workspace and browser requires an explicit saved-login selection (empty is allowed)".into()));
             }
             let reset = mode != old.mode || old.saved_login_ids != selection.saved_login_ids;
             if reset {
                 db.collection::<Document>(model::CONTEXTS).update_many(doc!{"agent_id":&agent_id,"node_id":&node_id}, doc!{"$set":{"mode":mode,"login_ids":[]},"$inc":{"generation":1}}).session(&mut *session).await?;
             }
             policy.revision=policy.revision.checked_add(1).ok_or_else(refused)?;
-            policy.assignments.insert(node_id.clone(),Assignment {capabilities:selection.capabilities,mode:mode.into(),revision:policy.revision,legacy:false,saved_login_ids:selection.saved_login_ids.clone()});
+            policy.assignments.insert(node_id.clone(),Assignment {capabilities:selection.capabilities,mode:mode.into(),revision:policy.revision,legacy:!profile.authority_v2(),saved_login_ids:selection.saved_login_ids.clone()});
             if !agent.machine_node_ids.contains(&node_id) {agent.machine_node_ids.push(node_id.clone());}
             db.collection::<Document>(AGENTS).update_one(doc!{"_id":&agent.id},doc!{"$set":{
                 "machine_access":encode(&agent.machine_access)?,"machine_node_ids":&agent.machine_node_ids}}).session(&mut *session).await?;
@@ -1470,8 +1762,9 @@ pub fn spawn(state: crate::AppState) {
     });
 }
 
-/// Discovery shares the same stored projection as execution. One agent/policy
-/// lookup plus the existing batched node ACL query; never one query per node.
+/// Discovery retains stored assignments and derives current support only on the
+/// returned report. One agent/policy lookup plus the existing batched node ACL
+/// query; never one query per node.
 pub async fn visible_assignments(
     db: &Database,
     chat: &ChatAuthority,
@@ -1486,17 +1779,28 @@ pub async fn visible_assignments(
     }
     Ok(nodes
         .into_iter()
-        .filter_map(|node| {
+        .filter_map(|mut node| {
             if !agent.is_nyxbot() && !agent.machine_node_ids.contains(&node.id) {
                 return None;
             }
-            let access = policy.assignments.get(&node.id)?.clone();
-            let supported = access.mode == "shared_legacy"
-                || (access.mode == "separated"
-                    && !access.legacy
-                    && node.machine.as_ref().is_some_and(|p| {
-                        p.authority_v2() && p.separated.as_ref().is_some_and(|s| s.available)
-                    }));
+            let access = policy
+                .assignments
+                .get(&node.id)
+                .cloned()
+                .unwrap_or_else(|| unresolved_assignment(policy.revision));
+            if access.mode == model::SELECTION_REQUIRED {
+                return Some((node, access));
+            }
+            if access.mode == "separated" && !access.legacy {
+                // Keep reviewed assignments discoverable during an upgrade or
+                // failed observation. This projection never rewrites storage.
+                let profile = node.machine.as_mut()?;
+                if !supports_separated(profile) {
+                    profile.separated = Some(separated_support(profile));
+                }
+                return Some((node, access));
+            }
+            let supported = access.mode == "shared_legacy";
             if !supported
                 || (!access.legacy && !node.machine.as_ref().is_some_and(|p| p.authority_v2()))
             {
@@ -1521,8 +1825,11 @@ pub async fn definitions(
                 return true;
             }
             rows.iter().any(|(node, access)| {
-                node.machine.as_ref().is_some_and(|p| op.allowed(p))
-                    && access.capabilities.allows(op, &serde_json::json!({}))
+                node.machine.as_ref().is_some_and(|p| {
+                    op.allowed(p)
+                        && (access.mode == "shared_legacy"
+                            || (access.mode == "separated" && supports_separated(p)))
+                }) && access.capabilities.allows(op, &serde_json::json!({}))
             })
         })
         .collect())

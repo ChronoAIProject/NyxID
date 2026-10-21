@@ -404,6 +404,8 @@ mod tests {
 
     fn inbound(native: Value) -> InboundMessage {
         InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: native["message_id"].to_string(),
             conversation_id: "-100999".into(),
             conversation_type: "group".into(),

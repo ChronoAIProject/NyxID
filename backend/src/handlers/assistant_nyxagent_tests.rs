@@ -59,6 +59,10 @@ fn stream_timeout_is_the_earlier_of_transport_idle_and_no_progress() {
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
         platform_delivery_recovery_queued: false,
         platform_reply: None,
         platform_origin: None,
@@ -138,6 +142,47 @@ async fn setup(
 ) -> (AppState, Captures, tokio::task::JoinHandle<()>) {
     setup_script(error, delay, Vec::new()).await
 }
+
+#[tokio::test]
+async fn new_user_nyxagent_chat_transport_completes_without_approval_preferences() {
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let mut auth = test_auth_user(OWNER);
+    auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+    auth.api_key_id = Some("new-user-assistant-agent".into());
+    let reply = tokio::time::timeout(Duration::from_secs(10), async {
+        let response = proxy_raw(
+            &state,
+            &auth,
+            "fixture-conversation-key",
+            "POST",
+            "v1/responses",
+            Some(json!({"input":"hello", "stream":true})),
+            Some("new-user-turn"),
+            Some(SERVER_TURN_POLICY),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        drain(response).await
+    })
+    .await
+    .expect("ordinary assistant chat must complete without an approval decision");
+    assert!(reply.contains("response.completed"));
+    assert_eq!(calls.lock().await.len(), 1);
+    for collection in ["notification_channels", "approval_requests"] {
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+        );
+    }
+    server.abort();
+}
+
 async fn setup_script(
     error: Option<(u16, &'static str)>,
     delay: Duration,
@@ -1604,6 +1649,7 @@ async fn panicking_turn_execution_settles_without_sweep_and_keeps_diagnostics_co
                     &result,
                     permit,
                     Events {
+                        checkpoint: None,
                         sender,
                         cursor: 0,
                         reset_notified: false,
@@ -1757,6 +1803,7 @@ async fn settlement_recovers_the_actual_saved_reply_after_an_ambiguous_finish() 
         &result,
         permit,
         Events {
+            checkpoint: None,
             sender,
             cursor: 0,
             reset_notified: false,
@@ -1814,6 +1861,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
             &result,
             permit,
             Events {
+                checkpoint: None,
                 sender,
                 cursor: 0,
                 reset_notified: false,
@@ -1856,6 +1904,7 @@ async fn lagged_browser_subscription_keeps_full_text_and_terminal_event() {
     let (sender, receiver) = broadcast::channel(256);
     let response = subscribe_events(receiver);
     let mut events = Events {
+        checkpoint: None,
         sender,
         cursor: 0,
         reset_notified: false,
@@ -2596,15 +2645,23 @@ fn proxy_errors_keep_all_billing_refusal_subtypes() {
             AppError::PlanEntitlementRequired("service".into()),
             "plan_entitlement_required",
         ),
+        (
+            AppError::BillingNotConfigured("SECRET configuration".into()),
+            "billing_not_configured",
+        ),
+        (
+            AppError::BillingProviderUnavailable("SECRET upstream body".into()),
+            "billing_provider_unavailable",
+        ),
     ] {
-        assert_eq!(proxy_turn_error(error).code, code);
+        let mapped = proxy_turn_error(error);
+        assert_eq!(mapped.code, code);
+        assert!(!mapped.message.contains("SECRET"));
     }
-    for error in [
-        AppError::BillingNotConfigured("detail".into()),
-        AppError::Internal("detail".into()),
-    ] {
-        assert_eq!(proxy_turn_error(error).code, "assistant_unavailable");
-    }
+    assert_eq!(
+        proxy_turn_error(AppError::Internal("detail".into())).code,
+        "assistant_unavailable"
+    );
 }
 
 #[test]
@@ -2626,6 +2683,11 @@ fn upstream_error_code_reads_nested_and_flat_billing_refusal_envelopes() {
     let unknown = json!({"error":{"code":"brand_new_code"}});
     assert_eq!(upstream_error_code(402, &unknown), "brand_new_code");
     assert_eq!(upstream_error_code(402, &Value::Null), "");
+    for code in ["billing_not_configured", "billing_provider_unavailable"] {
+        let flat = json!({"error": code, "message": "SECRET"});
+        assert_eq!(upstream_error_code(402, &flat), code);
+        assert_eq!(upstream_error_code(500, &flat), "");
+    }
 }
 
 #[tokio::test]
@@ -3052,6 +3114,7 @@ async fn channel_thread_execution_rechecks_orphaned_binding_before_upstream() {
     let auth = test_auth_user(OWNER);
     let (sender, _receiver) = broadcast::channel(256);
     let mut events = Events {
+        checkpoint: None,
         sender,
         cursor: 0,
         reset_notified: false,
@@ -3175,6 +3238,7 @@ async fn resumed_image_input_keeps_marked_context_and_image_parts() {
 fn instruction_refresh_and_upstream_recovery_emit_only_one_reset_notice() {
     let (sender, mut receiver) = broadcast::channel(8);
     let mut events = Events {
+        checkpoint: None,
         sender,
         cursor: 0,
         reset_notified: false,
@@ -3421,6 +3485,7 @@ async fn attachment_expiring_after_admission_is_announced_in_input() {
             .unwrap();
     let (sender, _receiver) = broadcast::channel(256);
     let mut events = Events {
+        checkpoint: None,
         sender,
         cursor: 0,
         reset_notified: false,
@@ -4525,6 +4590,7 @@ async fn slow_preparation_does_not_consume_first_request_admission_window() {
             .unwrap();
     let (sender, _receiver) = broadcast::channel(256);
     let mut events = Events {
+        checkpoint: None,
         sender,
         cursor: 0,
         reset_notified: false,
@@ -4780,6 +4846,7 @@ async fn capacity_retry_after_never_extends_trigger_grace_deadline() {
                 .unwrap();
         let (sender, _receiver) = broadcast::channel(256);
         let mut events = Events {
+            checkpoint: None,
             sender,
             cursor: 0,
             reset_notified: false,
@@ -4980,6 +5047,7 @@ async fn expired_or_nearly_expired_run_grace_preserves_dispatch_and_response_bou
                 .unwrap();
         let (sender, _receiver) = broadcast::channel(256);
         let mut events = Events {
+            checkpoint: None,
             sender,
             cursor: 0,
             reset_notified: false,

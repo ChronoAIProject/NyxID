@@ -1876,6 +1876,8 @@ mod tests {
 
         let catalog_author_id = uuid::Uuid::new_v4().to_string();
         let owner_id = uuid::Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &owner_id, false).await;
+
         let service_account_id = uuid::Uuid::new_v4().to_string();
         let service_id = uuid::Uuid::new_v4().to_string();
         let user_service_id = uuid::Uuid::new_v4().to_string();

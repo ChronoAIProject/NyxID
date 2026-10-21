@@ -913,6 +913,229 @@
           }
         }
       }
+    },
+    "/drive/v1/medias/upload_all": {
+      "post": {
+        "operationId": "bitable_media_upload",
+        "summary": "Upload a conversation attachment to Lark Base",
+        "description": "Upload one live-chat attachment and return its file_token. Creates no Base record. Requires docs:document.media:upload and access to the destination Base.",
+        "x-aevatar-tool": {
+          "name": "bitable_media_upload",
+          "description": "Upload a conversation attachment to a Base; returns a file_token without creating a record.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "x-nyxid-attachment-input": {
+          "field": "file",
+          "size_field": "size",
+          "filename_field": "file_name",
+          "version": 1
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "file_name",
+                  "parent_type",
+                  "parent_node",
+                  "size",
+                  "extra",
+                  "file"
+                ],
+                "properties": {
+                  "file_name": {
+                    "type": "string",
+                    "description": "Filename; defaults to the sanitized attachment label."
+                  },
+                  "parent_type": {
+                    "type": "string",
+                    "enum": [
+                      "bitable_image",
+                      "bitable_file"
+                    ]
+                  },
+                  "parent_node": {
+                    "type": "string",
+                    "description": "Destination Base app token."
+                  },
+                  "size": {
+                    "type": "integer",
+                    "description": "Byte length, derived by NyxID; a supplied value must match."
+                  },
+                  "extra": {
+                    "type": "string",
+                    "description": "JSON string containing drive_route_token equal to parent_node; derived by NyxID."
+                  },
+                  "file": {
+                    "type": "string",
+                    "description": "Materialized by NyxID from attachment_id in a live owner chat."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "code 0 and data.file_token on success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bitable/v1/apps/{app_token}/tables/{table_id}/fields": {
+      "get": {
+        "operationId": "bitable_fields_list",
+        "summary": "List Base table fields",
+        "x-aevatar-tool": {
+          "name": "bitable_fields_list",
+          "description": "List Base field types and select options before writing a record.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "app_token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lark API response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nyxid/managed/bitable/apps/{app_token}/tables/{table_id}/records": {
+      "post": {
+        "operationId": "bitable_record_create_with_attachments",
+        "summary": "Create one Base record with conversation attachments",
+        "description": "NyxID managed operation: validate fields, upload all attachments, then create at most one record for the retained photo identity. Owner chat only.",
+        "x-aevatar-tool": {
+          "name": "bitable_record_create_with_attachments",
+          "description": "Create a Base record after every required attachment has uploaded successfully.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "x-nyxid-managed-operation": {
+          "kind": "lark_bitable_record_with_attachments",
+          "version": 1,
+          "fields_operation": "bitable_fields_list",
+          "upload_operation": "bitable_media_upload",
+          "create_operation": "bitable_record_create"
+        },
+        "parameters": [
+          {
+            "name": "app_token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "fields",
+                  "attachments"
+                ],
+                "properties": {
+                  "fields": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "attachments": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Lark API response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

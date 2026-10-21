@@ -409,7 +409,11 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             if !super::assistant_invocation_service::fence_in_session(&db,session,&w.user_id,w.delivery.invocation_id.as_deref()).await? {return Ok(false);}
             if row.pending_events.len()>=super::assistant_nyxagent::MAX_PENDING_EVENTS {return Ok(false);}
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
-            let event = AgentEvent { invocation_id: w.delivery.invocation_id.clone(),
+            let event = AgentEvent {
+                media_event_ids: Vec::new(),
+                media_declared: None,
+                media_sent_at: None,
+                invocation_id: w.delivery.invocation_id.clone(),
                 id: w.id.clone(),
                 kind: EVENT_KIND.into(),
                 text: format!(

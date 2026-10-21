@@ -103,6 +103,9 @@ async fn setup_with_reply(
             }
         }),
     );
+    let upstream=upstream.route("/v1/capabilities",axum::routing::get(||async {
+        Json(json!({"protocol":"nyxagent-input-image-v1","input_image":{"version":1,"sources":["nyxid_attachment_url"],"max_images":10,"max_image_bytes":20971520,"max_total_bytes":20971520,"content_types":["image/png","image/jpeg"]}}))
+    }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -1248,6 +1251,8 @@ async fn inbound_of(
 
 fn admission(channel_id: &str, event_id: &str) -> NyxbotEvent {
     NyxbotEvent {
+        media: None,
+        source_media_declared: None,
         native_bot_budget_claimed: false,
         retry_request_sha256: None,
         delivery: None,
@@ -1397,6 +1402,8 @@ async fn lost_chat_app_messages_are_reported_to_the_agent_once() {
     // Once a message reaches the agent again, the channel is healthy.
     let arrived = inbound(&state, &route_id, "7", "delivered", None, 0).await;
     let admitted = NyxbotEvent {
+        media: None,
+        source_media_declared: None,
         native_bot_budget_claimed: false,
         retry_request_sha256: None,
         delivery: None,
@@ -2469,6 +2476,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            media_event_ids: Vec::new(),
             invocation_id: None,
             acknowledgement_id: None,
             retry_of: None,
@@ -3512,6 +3520,7 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            media_event_ids: Vec::new(),
             invocation_id: None,
             acknowledgement_id: None,
             retry_of: None,
@@ -4557,6 +4566,9 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
 async fn org_group_bots_moved_to_a_specialist_keep_answering() {
     use crate::models::org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgMembership, OrgRole};
     let (state, calls, server) = setup("nyxbot_org_specialist").await;
+    // The receiving human retains independent generic service approval preferences.
+    crate::test_utils::set_test_approval_preference(&state.db, OWNER, false).await;
+
     let org = Uuid::new_v4().to_string();
     state
         .db
@@ -5881,4 +5893,176 @@ async fn authenticated_telegram_directed_start_registers_group_without_a_welcome
         .unwrap();
     assert_eq!(source.delivery.unwrap().state, "silent");
     server.abort();
+}
+
+#[path = "nyxbot_media_tests.rs"]
+mod media_tests;
+
+#[test]
+fn gateway_problem_status_distinguishes_authentication_from_permission() {
+    for (status, expected) in [
+        (401, "gateway_not_authenticated"),
+        (403, "gateway_permission_required"),
+    ] {
+        let response = GatewayResponse {
+            status,
+            body: json!({
+                "type":"about:blank", "title":"Not Authenticated", "status":status,
+                "code":"not_authenticated", "detail":"Event Gateway permission is required.",
+            }),
+        };
+        assert_eq!(gateway_error_code(&response), expected);
+    }
+    for (status, body, expected) in [
+        (
+            400,
+            json!({"code":"invalid_request", "detail":"provider is not registered"}),
+            "gateway_provider_not_registered",
+        ),
+        (400, json!({}), "gateway_rejected_request"),
+        (409, json!({}), "gateway_conflict"),
+        (502, json!({}), "gateway_provider_rejected"),
+        (500, json!({}), "gateway_unavailable"),
+    ] {
+        assert_eq!(
+            gateway_error_code(&GatewayResponse { status, body }),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn active_for_bot_picks_newest_live_with_id_tie_break() {
+    let state = test_app_state(connect_transaction_test_database("channel_active").await);
+    let now = bson::DateTime::now();
+    let bot = Uuid::new_v4().to_string();
+    let mut ids = [Uuid::new_v4().to_string(), Uuid::new_v4().to_string()];
+    ids.sort();
+    for (id, status, created) in [
+        (ids[0].clone(), "active", now),
+        (ids[1].clone(), "pending", now),
+        (
+            Uuid::new_v4().to_string(),
+            "failed",
+            bson::DateTime::from_millis(now.timestamp_millis() + 1000),
+        ),
+        (
+            Uuid::new_v4().to_string(),
+            "active",
+            bson::DateTime::from_millis(now.timestamp_millis() - 1000),
+        ),
+    ] {
+        state.db.collection::<bson::Document>(CHANNELS).insert_one(doc! {
+            "_id":id,"user_id":OWNER,"channel_bot_id":&bot,"platform":"telegram","bot_label":"Bot",
+            "transport":"gateway","status":status,"route_api_key_id":Uuid::new_v4().to_string(),
+            "created_at":created,"updated_at":now,
+        }).await.unwrap();
+    }
+    assert_eq!(
+        active_for_bot(&state, OWNER, &bot)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        ids[1]
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn gateway_connect_refuses_missing_identity_and_attach_version() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, query_param},
+    };
+    let (mut state, _, upstream) = setup("gateway_invalid_json").await;
+    state.config.jwt_issuer = "http://localhost:3001".into();
+    let server = MockServer::start().await;
+    let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+    service.id = Uuid::new_v4().to_string();
+    service.slug = "cmaeg".into();
+    service.base_url = server.uri();
+    service.requires_user_credential = false;
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .insert_one(service)
+        .await
+        .unwrap();
+    let (row, key) = channel(&state, "gateway").await;
+    let bot = crate::services::channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    for response in [
+        json!({}),
+        json!({"channel_id":"", "version":1,"endpoints":{"nyxid_callback_url":"https://example.com"}}),
+        json!({"channel_id":"remote", "version":0,"endpoints":{"nyxid_callback_url":"https://example.com"}}),
+        json!({"channel_id":"remote", "version":1,"endpoints":{"nyxid_callback_url":""}}),
+    ] {
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/channels"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(response))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            connect_gateway(&state, &row, &bot, &key, "fixture-route-key")
+                .await
+                .unwrap_err(),
+            "gateway_invalid_response"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method.as_str() != "DELETE")
+        );
+    }
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .delete_many(doc! {"channel_bot_id":&row.channel_bot_id})
+        .await
+        .unwrap();
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/channels"))
+        .respond_with(
+            ResponseTemplate::new(201).set_body_json(json!({"channel_id":"remote","version":1,
+            "endpoints":{"nyxid_callback_url":format!("{}/callback",server.uri())}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/channels/remote"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/channels/remote"))
+        .and(query_param("expected_version", "1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        connect_gateway(&state, &row, &bot, &key, "fixture-route-key")
+            .await
+            .unwrap_err(),
+        "gateway_invalid_response"
+    );
+    server.verify().await;
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .count_documents(doc! {"channel_bot_id":&row.channel_bot_id,"is_active":true})
+            .await
+            .unwrap(),
+        0
+    );
+    upstream.abort();
+    state.db.drop().await.unwrap();
 }

@@ -2940,6 +2940,78 @@ async fn nyxbot_models_exact_primary_scope_filters_and_rollup_daily_parity() {
 }
 
 #[tokio::test]
+async fn nyxbot_reported_model_fills_a_missing_pricing_model_live_and_folded() {
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+    let db = connect_test_database("nyx_reported_model")
+        .await
+        .expect("real MongoDB required");
+    let end = hour(Utc::now());
+    let from = end - chrono::Duration::days(2);
+    let actor = uuid::Uuid::new_v4().to_string();
+    let at = end - chrono::Duration::hours(5);
+    let mut reported = nyx_meter(&actor, &actor, None, Some("1"), at);
+    reported.insert("reported_model", "gpt-5.5");
+    insert(&db, reported).await;
+    // A recorded pricing model keeps its identity over the reported one.
+    let mut priced = nyx_meter(&actor, &actor, Some("alias-x"), Some("1"), at);
+    priced.insert("reported_model", "gpt-5.5-2026-09-01");
+    insert(&db, priced).await;
+    insert(&db, nyx_meter(&actor, &actor, None, Some("1"), at)).await;
+    // Legacy-cost rows estimate from a model-keyed cached rate; a reported
+    // model must not change that lookup, so they stay unknown.
+    let mut legacy = nyx_meter(&actor, &actor, None, None, at);
+    legacy.insert("reported_model", "gpt-5.5");
+    insert(&db, legacy).await;
+    for folded in [false, true] {
+        if folded {
+            while fold_once(&db, end).await.unwrap() > 0 {}
+        }
+        let report = nyx_read(&db, from, end, None, false).await;
+        let mut models: Vec<_> = report
+            .models
+            .iter()
+            .map(|row| (row.model.clone(), row.usage.requests))
+            .collect();
+        models.sort();
+        assert_eq!(
+            models,
+            vec![
+                (None, 2),
+                (Some("alias-x".to_owned()), 1),
+                (Some("gpt-5.5".to_owned()), 1),
+            ],
+            "folded={folded}"
+        );
+        // Every model execution also reports its inference service, so the
+        // service breakdown covers unknown-model history too.
+        let services: Vec<_> = report
+            .services
+            .iter()
+            .map(|row| {
+                (
+                    row.is_other,
+                    row.service.as_ref().and_then(|s| s.service_slug.clone()),
+                    row.usage.requests,
+                )
+            })
+            .collect();
+        assert_eq!(services, vec![(false, Some("provider".to_owned()), 4)]);
+        assert_eq!(
+            nyx_read(&db, from, end, Some("gpt-5.5"), false)
+                .await
+                .totals
+                .requests,
+            1
+        );
+        assert_eq!(
+            nyx_read(&db, from, end, None, true).await.totals.requests,
+            2
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn nyxbot_top_accounts_and_unknown_only_other_models_are_honest() {
     let db = connect_test_database("nyx_other")
         .await

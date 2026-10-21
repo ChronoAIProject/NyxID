@@ -207,7 +207,26 @@ impl From<&crate::models::assistant_conversation::PlatformTurnOrigin>
     }
 }
 #[derive(Serialize)]
+pub struct StreamReplyResponse {
+    message_id: String,
+    block_id: String,
+    cursor: i64,
+    text: String,
+}
+impl From<crate::models::assistant_conversation::StreamReply> for StreamReplyResponse {
+    fn from(reply: crate::models::assistant_conversation::StreamReply) -> Self {
+        Self {
+            message_id: reply.message_id,
+            block_id: reply.block_id,
+            cursor: reply.cursor,
+            text: reply.text,
+        }
+    }
+}
+#[derive(Serialize)]
 pub struct ActiveTurnResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply: Option<StreamReplyResponse>,
     waiting_for_capacity: bool,
     capacity_wait_note_origin: Option<String>,
     engine_request_started_at: Option<DateTime<Utc>>,
@@ -312,6 +331,7 @@ impl ConversationResponse {
 impl From<AssistantConversation> for ConversationResponse {
     fn from(row: AssistantConversation) -> Self {
         let active_turn = engine::live_turn(&row, Utc::now()).map(|turn| ActiveTurnResponse {
+            reply: None,
             waiting_for_capacity: turn.waiting_for_capacity,
             capacity_wait_note_origin: turn.capacity_wait_note_origin.clone(),
             engine_request_started_at: turn.engine_request_started_at,
@@ -755,9 +775,16 @@ pub async fn history(
     )
     .await?;
     let chats = super::nyxbot::chats::thread_details(&state, &user_id, &[&conversation]).await?;
+    let reply = conversation
+        .active_turn
+        .as_mut()
+        .and_then(|turn| turn.reply.take());
     let mut conversation = ConversationResponse::from(conversation)
         .with_agent(agent_id.as_deref(), &agents)
         .with_chat(&chats);
+    if let Some(turn) = conversation.active_turn.as_mut() {
+        turn.reply = reply.map(Into::into);
+    }
     conversation.pending_acknowledgements = acknowledgements
         .iter()
         .filter(|ack| ack.status == "pending")
@@ -1586,8 +1613,12 @@ pub async fn turns(
             .await,
         );
     }
-    let (_, receiver) = start_turn(&state, auth, &start, policy, permit).await?;
-    Ok(subscribe_events(receiver))
+    let (row, receiver) = start_turn(&state, auth, &start, policy, permit).await?;
+    let mut response = subscribe_events(receiver);
+    if let Ok(id) = row.id.parse() {
+        response.headers_mut().insert("x-nyxid-conversation-id", id);
+    }
+    Ok(response)
 }
 
 /// The billing classification of a server-started turn: the same metered
@@ -1663,6 +1694,7 @@ pub(crate) async fn start_turn_with_voice(
             policy,
             permit,
             Events {
+                checkpoint: None,
                 sender,
                 cursor: 0,
                 reset_notified: false,

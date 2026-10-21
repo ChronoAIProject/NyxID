@@ -1,7 +1,9 @@
 import type {
   NyxbotModelUsage,
   NyxbotModelStats,
+  NyxbotUsageService,
 } from "@/schemas/nyxbot-model-usage";
+import type { AnalyticsResult } from "@/schemas/usage-analytics";
 export const modelLabel = (model: {
   model: string | null;
   is_other: boolean;
@@ -86,4 +88,92 @@ export function modelCost(usage: NyxbotModelStats, field: CostField) {
   const value = usage[field];
   const partial = usage.unknown_cost_events > 0 && field !== "grant_cost";
   return value === null ? "Unavailable" : `${partial ? "≥ " : ""}${value}`;
+}
+type BreakdownSlice = {
+  id: string | null;
+  label: string;
+  usage: NyxbotModelStats;
+  isOther: boolean;
+};
+/** A NyxBot breakdown in the dashboard's analytics shape, so the same panel renders it. */
+function breakdownAnalytics(
+  data: NyxbotModelUsage,
+  slices: BreakdownSlice[],
+  measure: "cost" | "requests",
+): AnalyticsResult {
+  const cost = measure === "cost";
+  return {
+    window: data.window,
+    freshness: data.freshness,
+    granularity: "day",
+    unit: cost ? "microcredits" : "requests",
+    total: cost ? null : data.totals.requests,
+    ...(cost ? { exact_total: data.totals.gross_cost } : {}),
+    totals: {
+      ...data.totals,
+      // Cost caveats only describe cost panels.
+      ...(cost ? {} : { unknown_cost_events: 0, legacy_cost_events: 0 }),
+      quantities: {},
+      unique_users: 0,
+      unique_services: 0,
+      gross_cost_micros: null,
+      wallet_cost_micros: null,
+      grant_cost_micros: null,
+      allowance_cost_micros: null,
+    },
+    points: [],
+    series: [],
+    slices: slices.map(({ id, label, usage, isOther }) => ({
+      id,
+      label,
+      ...(cost
+        ? { value: null, exact_value: usage.gross_cost }
+        : { value: usage.requests }),
+      unknown_cost_events: cost ? usage.unknown_cost_events : 0,
+      is_other: isOther,
+    })),
+  };
+}
+export function accountAnalytics(data: NyxbotModelUsage): AnalyticsResult {
+  return breakdownAnalytics(
+    data,
+    [
+      ...data.accounts.map(({ account, usage }) => ({
+        id: account.id,
+        label: account.display_name,
+        usage,
+        isOther: false,
+      })),
+      ...(data.other_accounts
+        ? [
+            {
+              id: null,
+              label: "Other",
+              usage: data.other_accounts.usage,
+              isOther: true,
+            },
+          ]
+        : []),
+    ],
+    "cost",
+  );
+}
+export function serviceLabel(row: NyxbotUsageService): string {
+  if (row.is_other || !row.service) return "Other";
+  const { service_name, service_slug, service_id } = row.service;
+  return service_name !== "Unknown service"
+    ? service_name
+    : (service_slug ?? service_id ?? service_name);
+}
+export function serviceAnalytics(data: NyxbotModelUsage): AnalyticsResult {
+  return breakdownAnalytics(
+    data,
+    data.services.map((row) => ({
+      id: row.service?.service_id ?? row.service?.service_slug ?? null,
+      label: serviceLabel(row),
+      usage: row.usage,
+      isOther: row.is_other,
+    })),
+    "requests",
+  );
 }

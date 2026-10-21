@@ -158,6 +158,7 @@ async fn v2_grants_are_invisible_to_legacy_poll_and_expiry_indexes() {
         .unwrap();
     assert_eq!(normalize_user_code(&request.user_code).unwrap().len(), 8);
     assert!(request.device_code.starts_with("nyx_adc2_"));
+    let approval_started = Utc::now();
     approve_with_agent_key(
         &state.db,
         &state.encryption_keys,
@@ -168,6 +169,7 @@ async fn v2_grants_are_invisible_to_legacy_poll_and_expiry_indexes() {
     )
     .await
     .unwrap();
+    let approval_completed = Utc::now();
     let legacy_codes = collection(&state.db);
     // This is the old replica's delivery filter and old startup TTL definition.
     assert!(legacy_codes.find_one_and_update(doc! {"device_code_hmac": hmac_hex(KEY, request.device_code.as_bytes()), "status":"approved"},
@@ -202,6 +204,37 @@ async fn v2_grants_are_invisible_to_legacy_poll_and_expiry_indexes() {
         .await
         .unwrap();
     assert!(delivered.credential.starts_with("nyxid_ag_"));
+    let parent = state
+        .db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {"_id": &delivered.api_key.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let child = state
+        .db
+        .collection::<ApiKeyCredential>(CHILDREN)
+        .find_one(doc! {"_id": &delivered.credential_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let expiry = parent.expires_at.expect("new parent has a finite expiry");
+    assert!(
+        expiry >= bson::DateTime::from_chrono(approval_started + Duration::days(90)).to_chrono()
+    );
+    assert!(
+        expiry <= bson::DateTime::from_chrono(approval_completed + Duration::days(90)).to_chrono()
+    );
+    assert_eq!(delivered.api_key.expires_at, Some(expiry.to_rfc3339()));
+    assert!(
+        child
+            .expires_at
+            .is_some_and(|expiry| expiry <= parent.expires_at.unwrap())
+    );
+    assert_eq!(
+        delivered.credential_expires_at,
+        child.expires_at.map(|value| value.to_rfc3339())
+    );
     approve(
         &state.db,
         &state.config,

@@ -776,6 +776,45 @@ async fn server_main() {
         config.instance_name.clone(),
         config.internal_advertise_url.clone(),
     ));
+    // Register before serving. Reuse the process generation, not node socket
+    // heartbeats: a replica can enforce policy without owning any node sockets.
+    services::security_readiness_service::ensure_indexes(&db)
+        .await
+        .expect("security replica indexes failed");
+    services::security_readiness_service::initialize(
+        services::security_readiness_service::Runtime {
+            identity: (*replica_identity).clone(),
+            config: config.security_rollout.clone(),
+            platform_policy_required: services::proxy_service::actor_addressed_policy_required(),
+        },
+    );
+    services::security_readiness_service::observe(
+        &db,
+        &replica_identity,
+        &config.security_rollout,
+        services::proxy_service::actor_addressed_policy_required(),
+    )
+    .await
+    .expect("security replica observation failed");
+    let readiness_db = db.clone();
+    let readiness_identity = replica_identity.clone();
+    let readiness_config = config.security_rollout.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            if let Err(error) = services::security_readiness_service::observe(
+                &readiness_db,
+                &readiness_identity,
+                &readiness_config,
+                services::proxy_service::actor_addressed_policy_required(),
+            )
+            .await
+            {
+                tracing::error!(%error, "Security replica observation failed");
+            }
+        }
+    });
     let internal_auth = services::internal_auth::InternalAuth::new(
         db.clone(),
         internal_dispatch_hmac_key,
@@ -1573,36 +1612,41 @@ async fn server_main() {
     // Applying it to one branch, or merging a router after it, would
     // silently exempt those routes.
     let internal_node_dispatch = state.node_dispatch.clone();
-    let app = mw::security_headers::with_response_headers(
-        public_oauth
-            .merge(private_api)
-            .with_state(state)
-            .layer(DefaultBodyLimit::max(1_048_576))
-            .layer(axum_mw::from_fn_with_state::<
-                _,
-                _,
-                (
-                    axum::extract::State<mw::rate_limit::DeviceCodeRateLimiters>,
-                    axum::http::Request<axum::body::Body>,
-                ),
-            >(
-                device_code_rate_limiters,
-                mw::rate_limit::device_code_rate_limit_middleware,
-            )),
-    )
-    .layer(axum_mw::from_fn(mw::rate_limit::rate_limit_middleware))
-    // Derive `TelemetryContext` from the `X-NyxID-Client` headers on
-    // every request and stash it in request extensions so handlers
-    // can read it when they emit events. Header-only; the
-    // `surface="agent"` override for api-key auth happens at emit
-    // time in `emit_event` (see `docs/TELEMETRY.md` §5.1).
-    .layer(axum_mw::from_fn(mw::telemetry::telemetry_mw))
-    .layer(Extension(per_ip_rate_limiter))
-    .layer(Extension(global_rate_limiter))
-    .layer(Extension(trusted_proxy_ranges))
-    .layer(Extension(rate_limit_exempt_ips))
-    .layer(TraceLayer::new_for_http().make_span_with(mw::request_trace::span::<axum::body::Body>))
-    .layer(axum_mw::from_fn(mw::assistant_trace::assistant_trace));
+    let public_backend_url = state.config.base_url.clone();
+    let app = public_oauth
+        .merge(private_api)
+        .with_state(state)
+        .layer(DefaultBodyLimit::max(1_048_576))
+        .layer(axum_mw::from_fn_with_state::<
+            _,
+            _,
+            (
+                axum::extract::State<mw::rate_limit::DeviceCodeRateLimiters>,
+                axum::http::Request<axum::body::Body>,
+            ),
+        >(
+            device_code_rate_limiters,
+            mw::rate_limit::device_code_rate_limit_middleware,
+        ))
+        .layer(axum_mw::from_fn(mw::rate_limit::rate_limit_middleware))
+        // Derive `TelemetryContext` from the `X-NyxID-Client` headers on
+        // every request and stash it in request extensions so handlers
+        // can read it when they emit events. Header-only; the
+        // `surface="agent"` override for api-key auth happens at emit
+        // time in `emit_event` (see `docs/TELEMETRY.md` §5.1).
+        .layer(axum_mw::from_fn(mw::telemetry::telemetry_mw))
+        .layer(Extension(per_ip_rate_limiter))
+        .layer(Extension(global_rate_limiter))
+        .layer(Extension(trusted_proxy_ranges))
+        .layer(Extension(rate_limit_exempt_ips))
+        .layer(
+            TraceLayer::new_for_http().make_span_with(mw::request_trace::span::<axum::body::Body>),
+        )
+        .layer(axum_mw::from_fn(mw::assistant_trace::assistant_trace));
+    // Wrap last so early middleware errors (including rate limits) receive
+    // the same deployment-controlled policy as handler responses.
+    let app = mw::security_headers::with_response_headers_for_origin(app, &public_backend_url)
+        .expect("BASE_URL must be a valid public HTTP(S) URL without credentials");
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.

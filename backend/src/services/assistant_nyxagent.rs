@@ -566,6 +566,7 @@ pub struct TurnRequest {
 /// subagent, a batch of NyxID events, or a channel message.
 #[derive(Clone)]
 pub struct TurnStart {
+    pub media_event_ids: Vec<String>,
     pub invocation_id: Option<String>,
     pub acknowledgement_id: Option<String>,
     pub retry_of: Option<String>,
@@ -735,6 +736,7 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            media_event_ids: Vec::new(),
             invocation_id: None,
             acknowledgement_id: request.acknowledgement_id.clone(),
             retry_of: request.retry_of.clone(),
@@ -1013,6 +1015,8 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    super::channel_media_events::ensure_indexes(db).await?;
+    super::assistant_channel_media::ensure_indexes(db).await?;
     super::async_service_operation::ensure_indexes(db).await?;
     super::assistant_resource_service::ensure_indexes(db).await?;
     let credentials =
@@ -1123,7 +1127,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         ),
         (
             crate::models::nyxbot_channel::COLLECTION_NAME,
-            doc! {"user_id": 1, "channel_bot_id": 1},
+            doc! {"user_id": 1, "channel_bot_id": 1, "created_at": -1, "_id": -1},
             false,
         ),
         (
@@ -1273,6 +1277,20 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                     .build(),
             )
             .await?;
+    }
+    // Retire the prefix index only after its replacement has been created.
+    let channels = db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME);
+    let obsolete_keys = doc! {"user_id": 1, "channel_bot_id": 1};
+    let mut indexes = channels.list_indexes().await?;
+    while let Some(index) = indexes.try_next().await? {
+        // BSON document equality ignores key order; index identity does not.
+        if index.keys.iter().eq(obsolete_keys.iter())
+            && let Some(options) = index.options
+            && options.unique != Some(true)
+            && let Some(name) = options.name
+        {
+            channels.drop_index(name).await?;
+        }
     }
     for (collection, fields) in [
         (
@@ -2055,7 +2073,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         {
             return Err(AppError::Forbidden("Thread sender changed".into()));
         }
-        super::channel_thread_follow_service::admit_turn(db, user_id, origin, &id, session).await?;
+        Box::pin(super::channel_thread_follow_service::admit_turn(
+            db, user_id, origin, &id, session,
+        ))
+        .await?;
         row.channel = Some(origin.clone());
     }
     if let Some(request) = start.group_request_id.as_deref() {
@@ -2110,11 +2131,13 @@ pub(crate) async fn begin_owner_turn_in_session(
         .any(|event| event.invocation_id.is_some())
     {
         let before = row.pending_events.len();
-        row.pending_events = super::assistant_invocation_service::filter_events_in_session(
-            db,
-            session,
-            user_id,
-            std::mem::take(&mut row.pending_events),
+        row.pending_events = Box::pin(
+            super::assistant_invocation_service::filter_events_in_session(
+                db,
+                session,
+                user_id,
+                std::mem::take(&mut row.pending_events),
+            ),
         )
         .await?;
         if row.pending_events.len() != before {
@@ -2133,6 +2156,10 @@ pub(crate) async fn begin_owner_turn_in_session(
     // queued): a guest turn leaves them for the owner's next turn.
     // A chat app thread's queued messages wait for a turn that
     // answers in that chat, never one the owner starts in the app.
+    let had_queued_media = row
+        .pending_events
+        .iter()
+        .any(|event| !event.media_event_ids.is_empty());
     let events = if start.invocation_id.is_some()
         || start.guest
         || start.origin == TurnOrigin::Trigger
@@ -2140,15 +2167,23 @@ pub(crate) async fn begin_owner_turn_in_session(
     {
         Vec::new()
     } else {
-        super::channel_thread_follow_service::filter_events(
+        Box::pin(super::channel_thread_follow_service::filter_events(
             db,
             user_id,
             &id,
             super::async_service_operation::select_events(&mut row, start.origin),
             session,
-        )
+        ))
         .await?
     };
+    if had_queued_media
+        && let Some(fresh) = collection
+            .find_one(owner_filter(user_id, &id)?)
+            .session(&mut *session)
+            .await?
+    {
+        row.message_count = row.message_count.max(fresh.message_count);
+    }
     if start.origin == TurnOrigin::Event && events.is_empty() {
         collection
             .update_one(
@@ -2233,7 +2268,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         );
     }
     row.guest_turn = guest;
-    let (role, text) = match start.origin {
+    let (role, mut text) = match start.origin {
         TurnOrigin::Event => {
             row.event_streak = row.event_streak.saturating_add(1);
             let mut text = events_text(&events);
@@ -2287,11 +2322,13 @@ pub(crate) async fn begin_owner_turn_in_session(
         && row.credential_invocation_id != next_invocation
         && !row.credential_api_key_id.is_empty()
     {
-        super::assistant_agent_credential_service::require_invocation_boundary_clear(
-            db,
-            user_id,
-            &row.id,
-            &mut *session,
+        Box::pin(
+            super::assistant_agent_credential_service::require_invocation_boundary_clear(
+                db,
+                user_id,
+                &row.id,
+                &mut *session,
+            ),
         )
         .await?;
         super::api_key_mutation_service::update_one(
@@ -2341,6 +2378,25 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.context_reset_reason = Some("credential_replaced".into());
     }
     let reclaimed = row.active_turn.clone();
+    if let Some(old) = &reclaimed {
+        Box::pin(super::assistant_channel_media::finalize_in_session(
+            db,
+            session,
+            user_id,
+            &id,
+            &old.turn_id,
+            "failed",
+        ))
+        .await?;
+        super::assistant_upload_retention::settled_in_session(
+            db,
+            session,
+            user_id,
+            &id,
+            &old.turn_id,
+        )
+        .await?;
+    }
     if let Some(lost) = row.active_turn.take() {
         let lost_turn = lost.clone();
         let lost_metadata = super::assistant_turn_observability::metadata(&lost_turn, now);
@@ -2365,6 +2421,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
         row.message_count += 1;
         let message = AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             platform_reply: lost.platform_reply.clone(),
             platform_origin: lost.platform_origin.clone(),
@@ -2383,7 +2443,11 @@ pub(crate) async fn begin_owner_turn_in_session(
             seq: row.message_count,
             turn_id: lost.turn_id.clone(),
             role: "assistant".into(),
-            text: String::new(),
+            text: lost
+                .reply
+                .as_ref()
+                .map(|reply| reply.text.clone())
+                .unwrap_or_default(),
             status: "failed".into(),
             error_code: Some("turn_lost".into()),
             upstream_error_code: None,
@@ -2421,9 +2485,9 @@ pub(crate) async fn begin_owner_turn_in_session(
             db, session, &row, &lost_turn, &message, now,
         ))
         .await?;
-        super::assistant_invocation_service::settle_in_session(
+        Box::pin(super::assistant_invocation_service::settle_in_session(
             db, session, user_id, &lost_turn, &message,
-        )
+        ))
         .await?;
         super::platform_personal_turn_service::settle_saved_reply_in_session(db, session, &message)
             .await?;
@@ -2507,6 +2571,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .clone()
             .or_else(|| events.first().and_then(|e| e.invocation_id.clone())),
         resource_refs: Vec::new(),
+        reply: None,
         worker_instance: Some(super::assistant_engine_worker::instance().clone()),
         model_attempt_id: None,
         model_requests_active: 0,
@@ -2619,6 +2684,31 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
         if let Some(event) = turn.events.iter().find(|e| !e.source_event_ids.is_empty()) {
             turn.question_key = event.question_key.clone();
+        }
+    }
+    if !start.guest {
+        let mut origins = Vec::new();
+        if let Some(origin) = start.reply_channel.as_ref().or(start.channel.as_ref()) {
+            origins.push(origin.clone());
+        }
+        if let Some(turn) = &row.active_turn {
+            for event in &turn.events {
+                origins.extend(event.reply_to.iter().cloned());
+            }
+        }
+        if Box::pin(super::channel_media_events::note_in_session(
+            db, session, user_id, &origins,
+        ))
+        .await?
+        {
+            let fixed = super::channel_media_events::INTERRUPTED_NOTE;
+            text.push_str(&format!("\n\n{fixed}"));
+            if let Some(turn) = row.active_turn.as_mut() {
+                turn.note = Some(match turn.note.take() {
+                    Some(note) => format!("{note}\n\n{fixed}"),
+                    None => fixed.to_owned(),
+                });
+            }
         }
     }
     Box::pin(super::async_service_operation::bind_in_session(
@@ -2754,7 +2844,50 @@ pub(crate) async fn begin_owner_turn_in_session(
             ));
         }
     }
+    let mut media_event_ids = if start.guest || start.origin == TurnOrigin::Trigger {
+        Vec::new()
+    } else {
+        start.media_event_ids.clone()
+    };
+    if let Some(turn) = &row.active_turn {
+        for event in &turn.events {
+            for id in &event.media_event_ids {
+                if !media_event_ids.contains(id) {
+                    media_event_ids.push(id.clone());
+                }
+            }
+        }
+    }
+    let mut media_declared = 0usize;
+    for event in &media_event_ids {
+        if let Some(event) = db
+            .collection::<crate::models::nyxbot_channel::NyxbotEvent>(
+                crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":event,"user_id":user_id,"conversation_id":&id,"turn_id":turn_id})
+            .session(&mut *session)
+            .await?
+        {
+            media_declared = media_declared.saturating_add(event.media.map_or(0, |m| m.declared));
+        }
+    }
+    if !media_event_ids.is_empty() {
+        if let Some(turn) = row.active_turn.as_mut() {
+            turn.question_key = None;
+        }
+        collection
+            .update_one(
+                doc! {"_id":&id,"user_id":user_id,"active_turn.turn_id":turn_id},
+                doc! {"$set":{"active_turn.question_key":bson::Bson::Null}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
     let message = AssistantMessage {
+        media_event_ids,
+        media_queue_notice_id: None,
+        media_pending: (media_declared > 0).then_some(media_declared),
+        media_bound: None,
         turn_metadata: None,
         platform_delivery_recovery_queued: false,
         platform_reply: row
@@ -3280,7 +3413,9 @@ async fn finish_turn_inner(
     let (error, settled) = session
         .start_transaction()
         .and_run2(async move |session| {
-            let operation: AppResult<_> = async {
+            // Settlement includes media finalization and invocation bookkeeping.
+            // Bound the transaction future independently of its retry-driver frames.
+            let operation: AppResult<_> = Box::pin(async {
                 // A retry after an ambiguous commit observes the durable reply.
                 if let Some(saved) = db
                     .collection::<AssistantMessage>(MESSAGES)
@@ -3446,6 +3581,12 @@ async fn finish_turn_inner(
                             update)
                         .session(&mut *session).await?;
                 }
+                let media_reason = match error.as_ref().map(|e| e.code) {
+                    Some("cancelled") => "stopped",
+                    Some("timeout" | "turn_timeout") => "timeout",
+                    _ => "failed",
+                };
+                Box::pin(super::assistant_channel_media::finalize_in_session(&db,session,&row.user_id,&row.id,&turn_id,media_reason)).await?;
                 let continuations = current.active_turn.as_ref().map_or(0, |t| t.continuations);
                 super::trigger_run_images::accumulate_in_session(&db, session, &current).await?;
                 let settled_turn = current.active_turn.take();
@@ -3475,6 +3616,10 @@ async fn finish_turn_inner(
                     current.credential_api_key_id = credential_id.clone();
                 }
                 let message = AssistantMessage {
+                    media_event_ids: Vec::new(),
+                    media_queue_notice_id: None,
+                    media_pending: None,
+                    media_bound: None,
                     platform_delivery_recovery_queued: false,
                     platform_reply: settled_turn.as_ref().and_then(|turn| turn.platform_reply.clone()),
                     platform_origin: settled_turn.as_ref().and_then(|turn| turn.platform_origin.clone()),
@@ -3493,7 +3638,11 @@ async fn finish_turn_inner(
                     seq: current.message_count,
                     turn_id: turn_id.clone(),
                     role: "assistant".into(),
-                    text: result.text.clone(),
+                    text: if result.text.is_empty() && error.as_ref().is_some_and(|error| matches!(error.code, "cancelled" | "turn_lost")) {
+                        settled_turn.as_ref().and_then(|turn| turn.reply.as_ref()).map(|reply| reply.text.clone()).unwrap_or_default()
+                    } else {
+                        result.text.clone()
+                    },
                     status: if error.is_some() {
                         "failed"
                     } else {
@@ -3528,7 +3677,7 @@ async fn finish_turn_inner(
                     .await?;
                 }
                 if let Some(turn) = settled_turn.as_ref() {
-                    super::assistant_invocation_service::settle_in_session(&db,session,&row.user_id,turn,&message).await?;
+                    Box::pin(super::assistant_invocation_service::settle_in_session(&db,session,&row.user_id,turn,&message)).await?;
                 }
                 super::platform_personal_turn_service::settle_saved_reply_in_session(&db, session, &message).await?;
                 db.collection::<AssistantMessage>(MESSAGES)
@@ -3541,7 +3690,7 @@ async fn finish_turn_inner(
                     .session(&mut *session)
                     .await?;
                 Ok((error, settled_turn))
-            }
+            })
             .await;
             transactions::transaction_result(operation)
         })
@@ -5843,6 +5992,14 @@ impl TurnError {
                 "plan_entitlement_required",
                 "Your plan does not include this service. Check your plan in Billing & Usage.",
             ),
+            "billing_not_configured" => (
+                "billing_not_configured",
+                "Billing setup is incomplete, so NyxBot could not run this turn. Contact support to complete the billing configuration.",
+            ),
+            "billing_provider_unavailable" => (
+                "billing_provider_unavailable",
+                "NyxBot could not verify billing because the billing service is unavailable. Try again shortly; if this continues, contact support.",
+            ),
             "model_interrupted" => (
                 "model_interrupted",
                 "The model's response was interrupted. Some actions may already have completed — check them before retrying.",
@@ -5883,11 +6040,8 @@ pub enum RecoveryAction {
 }
 impl Recovery {
     pub fn decide(&mut self, status: u16, code: &str, bound: bool) -> RecoveryAction {
-        // A billing refusal is terminal: no new key, session or delay can fund the turn.
-        if matches!(
-            code,
-            "insufficient_credits" | "wallet_suspended" | "plan_entitlement_required"
-        ) {
+        // Billing failures need their own remedy, never a credential replacement or rebind.
+        if super::assistant_model_observer::billing_failure_code(code).is_some() {
             return RecoveryAction::Fail;
         }
         if (status == 401 || status == 403 || code == "agent_key_required") && !self.replaced {

@@ -269,9 +269,94 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 }
 
 #[test]
+fn billing_failures_keep_their_cause_through_streaming_and_recovery() {
+    for code in ["billing_not_configured", "billing_provider_unavailable"] {
+        for status in [401, 402, 403, 409, 503] {
+            assert_eq!(
+                Recovery::default().decide(status, code, true),
+                RecoveryAction::Fail
+            );
+        }
+        let mut stream = ResponseStream::default();
+        let mut failed = terminal("response.failed", 1, "partial");
+        failed["response"]["error"] = json!({"code": code, "message": "SECRET body"});
+        stream.push(&frame(failed)).unwrap();
+        let result = stream.terminal.unwrap();
+        let error = result.error.unwrap();
+        assert_eq!(error.code, code);
+        assert_eq!(result.text, "partial");
+        assert!(error.message.contains("billing"));
+        assert!(!error.message.contains("SECRET"));
+    }
+}
+
+#[test]
+fn billing_attribution_recovers_wrapped_causes_only_with_current_evidence() {
+    use crate::models::assistant_conversation::ModelRefusal;
+    use crate::services::assistant_model_observer::{attribute, refusal_code};
+    let now = Utc::now();
+    let mut row = stale_test_row(now);
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.model_attempt_id = Some("attempt".into());
+    for (error, code) in [
+        (AppError::InsufficientCredits, "insufficient_credits"),
+        (AppError::WalletSuspended, "wallet_suspended"),
+        (
+            AppError::PlanEntitlementRequired("service".into()),
+            "plan_entitlement_required",
+        ),
+        (
+            AppError::BillingNotConfigured("SECRET".into()),
+            "billing_not_configured",
+        ),
+        (
+            AppError::BillingProviderUnavailable("SECRET".into()),
+            "billing_provider_unavailable",
+        ),
+    ] {
+        assert_eq!(refusal_code(&error), Some(code));
+        turn.model_refusal = Some(ModelRefusal {
+            code: code.into(),
+            attempt_id: "attempt".into(),
+            at: now,
+        });
+        for upstream in ["turn_failed", "nyxid_error", "invalid_stream"] {
+            let wrapped = TurnError::new(upstream);
+            let mapped = attribute(&wrapped, turn, now);
+            assert_eq!(mapped.code, code);
+            assert_eq!(mapped.upstream_code, wrapped.upstream_code);
+            assert!(!mapped.message.contains("SECRET"));
+        }
+        for code in ["cancelled", "capacity_exceeded", "credential_invalid"] {
+            assert_eq!(attribute(&TurnError::new(code), turn, now).code, code);
+        }
+        let wrapped = TurnError::new("nyxid_error");
+        turn.model_attribution_uncertain = true;
+        assert_eq!(attribute(&wrapped, turn, now).code, "nyxid_error");
+        turn.model_attribution_uncertain = false;
+        turn.model_attempt_id = Some("newer-attempt".into());
+        assert_eq!(attribute(&wrapped, turn, now).code, "nyxid_error");
+        turn.model_attempt_id = Some("attempt".into());
+        assert_eq!(
+            attribute(&wrapped, turn, now + chrono::Duration::seconds(121)).code,
+            "nyxid_error"
+        );
+    }
+    turn.model_refusal = None;
+    assert_eq!(
+        attribute(&TurnError::new("nyxid_error"), turn, now).code,
+        "nyxid_error"
+    );
+}
+
+#[test]
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             platform_reply: None,
             platform_origin: None,
@@ -404,6 +489,10 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             platform_reply: None,
             platform_origin: None,
@@ -437,6 +526,10 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             platform_reply: None,
             platform_origin: None,
@@ -481,6 +574,10 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
         platform_delivery_recovery_queued: false,
         platform_reply: None,
         platform_origin: None,
@@ -555,6 +652,10 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
         platform_delivery_recovery_queued: false,
         platform_reply: None,
         platform_origin: None,
@@ -616,6 +717,10 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
         platform_delivery_recovery_queued: false,
         platform_reply: None,
         platform_origin: None,
@@ -677,6 +782,10 @@ fn guest_recap_omits_owner_tool_metadata() {
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
         platform_delivery_recovery_queued: false,
         platform_reply: None,
         platform_origin: None,
@@ -959,6 +1068,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             channel_adapter_origin: None,
             invocation_id: None,
             resource_refs: Vec::new(),
+            reply: None,
             platform_reply: None,
             execution_started: false,
             machine_scopes: Vec::new(),
@@ -1766,6 +1876,7 @@ async fn orphan_sweep_reclaims_stale_heartbeat_but_keeps_fresh_and_legacy_turns(
         .update_one(
             doc! {"_id": &stale.id},
             doc! {"$set": {"active_turn.heartbeat_at": old,
+            "active_turn.reply": {"message_id":"partial", "block_id":"partial-text", "cursor":4_i64, "text":"Saved before the worker stopped 界"},
             "active_turn.worker_instance": {"id": "old-process-id", "hostname": "nyxid-old-pod"}}},
         )
         .await
@@ -1828,6 +1939,7 @@ async fn orphan_sweep_reclaims_stale_heartbeat_but_keeps_fresh_and_legacy_turns(
         .pop()
         .unwrap();
     assert_eq!(reclaimed.error_code.as_deref(), Some("turn_lost"));
+    assert_eq!(reclaimed.text, "Saved before the worker stopped 界");
     assert_eq!(
         reclaimed.upstream_error_code, None,
         "a NyxID class, not an upstream code"
@@ -3204,6 +3316,10 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 #[test]
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
         platform_delivery_recovery_queued: false,
         platform_reply: None,
         platform_origin: None,
@@ -4227,6 +4343,10 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 #[test]
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
         turn_metadata: None,
         platform_delivery_recovery_queued: false,
         platform_reply: None,
@@ -4284,6 +4404,10 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 #[test]
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
         turn_metadata: None,
         platform_delivery_recovery_queued: false,
         platform_reply: None,
@@ -6021,6 +6145,14 @@ async fn model_facts_are_attempt_and_turn_fenced_and_preserve_upstream_diagnosti
         (
             AppError::PlanEntitlementRequired("service".into()),
             "plan_entitlement_required",
+        ),
+        (
+            AppError::BillingNotConfigured("SECRET".into()),
+            "billing_not_configured",
+        ),
+        (
+            AppError::BillingProviderUnavailable("SECRET".into()),
+            "billing_provider_unavailable",
         ),
     ] {
         let attempt = ModelRequest::capture(

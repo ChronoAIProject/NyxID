@@ -541,6 +541,29 @@ fn discord_browser_consent_saved_personal_reply_history_continuation_and_logout_
             upstream.forward_access_token = true;
             upstream.streaming_supported = true;
             assert!(engine::row_contract(Some(&upstream), None).valid());
+            // The browser turn uses the admin-managed engine target, whose approval
+            // policy is independent of the personal auto-provisioned connection.
+            crate::services::approval_service::set_service_approval_config(
+                &j.state.db,
+                &j.personal,
+                &upstream.id,
+                "NyxAgent journey",
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(
+                crate::services::approval_service::user_requires_approval(
+                    &j.state.db,
+                    &j.personal,
+                    &crate::models::service_approval_config::ApprovalVerb::Write
+                )
+                .await
+                .unwrap()
+            );
             j.state
                 .db
                 .collection::<crate::models::downstream_service::DownstreamService>(

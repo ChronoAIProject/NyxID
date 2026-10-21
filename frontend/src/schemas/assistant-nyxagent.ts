@@ -90,6 +90,12 @@ export const nyxAgentConversationSchema = z.object({
     .object({
       platform_origin: platformTurnOriginSchema.nullish(),
       turn_id: z.string(),
+      reply: z.object({
+        message_id: z.string(),
+        block_id: z.string(),
+        cursor: z.number().int().nonnegative(),
+        text: z.string(),
+      }).nullish(),
       response_id: z.string().nullish(),
       waiting_for_capacity: z.boolean().optional(),
       capacity_wait_note_origin: z.string().nullish(),
@@ -264,6 +270,7 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     event: z.literal("turn.status"),
     conversation_id: conversationId,
     turn_id: z.string(),
+    started_at: z.string().optional(),
     status: z.enum(["running", "waiting"]),
     waiting_for_capacity: z.boolean().optional(),
     engine_accepted: z.boolean().optional(),
@@ -630,7 +637,7 @@ export const nyxAgentChannelAgentSchema = z.object({
   org_id: z.string().nullable().default(null),
   /** Who may talk to the agent in private chats with the bot. */
   private_chats: z.enum(["owner", "everyone"]).catch("owner"),
-  /** `ok` or `failing` once a message has been judged; null before. */
+  /** `ok`, `failing`, `interrupted`, or `media_failed`; null before a message is judged. */
   delivery_status: z.string().nullable().default(null),
   delivery_error: z.string().nullable().default(null),
   /** Plain words for `delivery_error`. */

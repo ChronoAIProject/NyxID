@@ -1120,6 +1120,8 @@ mod tests {
             assert!(adapter.dedup_inbound_by_platform_message_id());
             assert!(adapter.atomic_inbound_admission());
             let message = crate::services::channel_platform::InboundMessage {
+                embedded_attachments: Vec::new(),
+                embedded_attachments_omitted: 0,
                 platform_message_id: "500".into(),
                 conversation_id: "15551234567".into(),
                 conversation_type: "private".into(),
@@ -1530,6 +1532,7 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             instance_name: "test-backend".to_string(),
+            security_rollout: Default::default(),
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
             internal_dispatch_hmac_key: None,

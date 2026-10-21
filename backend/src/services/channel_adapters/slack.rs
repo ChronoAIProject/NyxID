@@ -258,6 +258,8 @@ fn parse_event(event: &serde_json::Value, raw: serde_json::Value) -> Option<Inbo
     let attachments = extract_attachments(event);
 
     Some(InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: ts.to_string(),
         conversation_id: channel.to_string(),
         conversation_type: map_conversation_type(channel).to_string(),

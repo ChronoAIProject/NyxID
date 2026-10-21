@@ -141,6 +141,11 @@ pub async fn get_mcp_config(
     )
     .await?;
 
+    for service in &mut catalog.services {
+        service.endpoints.retain(|endpoint| {
+            !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+        });
+    }
     crate::services::agent_operation_scope_service::filter_catalog(
         &auth_user.assistant_operation_scopes,
         &mut catalog.services,
@@ -328,6 +333,7 @@ mod tests {
             service_category: "user_service".to_string(),
             recommended_skills: Vec::new(),
             endpoints: vec![McpToolEndpoint {
+                attachment_input: None,
                 async_operation: None,
                 target_id: None,
                 endpoint_id: "endpoint-1".to_string(),

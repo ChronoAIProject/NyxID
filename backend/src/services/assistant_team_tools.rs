@@ -812,6 +812,7 @@ fn endpoints_for(names: &[&str]) -> Vec<McpToolEndpoint> {
     names
         .iter()
         .map(|name| McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             endpoint_id: format!("nyxid__{name}"),
             name: (*name).into(),

@@ -1,5 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
-import { gunzipSync } from "node:zlib";
+import { expect, type Page } from "@playwright/test";
+import { test } from "./production-policy-fixture";
 import {
   managedBot,
   managedBootstrap,
@@ -775,46 +775,22 @@ test("Telegram secrets stay out of live telemetry and storage", async ({
 }) => {
   await reviewFixture(page);
   const telemetry: string[] = [];
+  const enabledRequests: string[] = [];
   await page.addInitScript(() => {
-    // PostHog otherwise drops every event from WebDriver, making this check vacuous.
-    Object.defineProperty(navigator, "webdriver", { get: () => false });
-    const userAgent = navigator.userAgent.replace("HeadlessChrome", "Chrome");
-    Object.defineProperty(navigator, "userAgent", { get: () => userAgent });
-    Object.defineProperty(navigator, "userAgentData", { get: () => undefined });
-    localStorage.setItem(
-      "nyxid.telemetry_consent",
-      JSON.stringify({ state: { enabled: true, asked: true }, version: 1 }),
-    );
+    localStorage.setItem("nyxid.telemetry_consent.v3.test-user", JSON.stringify({ enabled: true, asked: true }));
   });
-  await page.route("**/api/v1/public/config", (route) =>
-    route.fulfill({
-      json: {
-        telemetry_dsn: "phc_review_fixture",
-        telemetry_host: "http://telemetry.test",
-      },
-    }),
-  );
-  await page.route("http://telemetry.test/**", (route) => {
-    const body = route.request().postDataBuffer();
-    if (body) {
-      const decoded = (
-        body[0] === 0x1f && body[1] === 0x8b ? gunzipSync(body) : body
-      ).toString();
-      telemetry.push(
-        decoded.startsWith("data=")
-          ? Buffer.from(
-              new URLSearchParams(decoded).get("data")!,
-              "base64",
-            ).toString()
-          : decoded,
-      );
-    }
-    if (new URL(route.request().url()).pathname.endsWith(".js"))
-      return route.fulfill({ contentType: "application/javascript", body: "" });
-    return route.fulfill({
-      json: { status: 1, featureFlags: {} },
-      headers: { "Access-Control-Allow-Origin": "*" },
-    });
+  await page.route("**/api/v1/public/config", (route) => route.fulfill({ json: {
+    telemetry_dsn: "policy-fixture-configured", telemetry_host: "https://analytics.example",
+  } }));
+  await page.route("**/api/v1/users/me/preferences/analytics", (route) => route.fulfill({ json: {
+    account_id: "test-user", enabled: true, revision: "policy-fixture-revision",
+  } }));
+  await page.route("**/api/v1/users/me/analytics/events", (route) => {
+    telemetry.push(route.request().postData() ?? "");
+    return route.fulfill({ status: 204 });
+  });
+  page.on("request", (request) => {
+    if (request.headers()["x-nyxid-analytics"] === "enabled") enabledRequests.push(request.url());
   });
   await context.route("https://t.me/**", (route) =>
     route.fulfill({ body: "Telegram" }),
@@ -832,10 +808,10 @@ test("Telegram secrets stay out of live telemetry and storage", async ({
     .getByLabel(/^Bot token$/i)
     .fill("private-bot-token-fixture");
   await dialog.getByLabel("Label", { exact: true }).click();
-  await expect
-    .poll(() => telemetry.join("\n"), { timeout: 12000 })
-    .toContain("$autocapture");
-  expect(telemetry.join("\n")).toContain("$pageview");
+  // Prove this account/device is eligible; this flow emits no explicit UI
+  // events. The production feedback probe separately proves live relay delivery.
+  expect(enabledRequests.some((url) => url.includes("/telegram-new/"))).toBe(true);
+  expect(telemetry).toEqual([]);
   expect(telemetry.join("\n")).not.toContain("review-challenge");
   expect(telemetry.join("\n")).not.toContain("private-bot-token-fixture");
   expect(page.url()).not.toMatch(/review-challenge|private-bot-token-fixture/);
@@ -852,7 +828,7 @@ test("Telegram secrets stay out of live telemetry and storage", async ({
       route.fulfill({
         json: {
           bot_username: "ClaimedBot",
-          expires_at: pendingRequest.expires_at,
+          expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
         },
       }),
   );
@@ -862,9 +838,7 @@ test("Telegram secrets stay out of live telemetry and storage", async ({
     page.getByRole("heading", { name: "Connect @ClaimedBot" }),
   ).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect
-    .poll(() => telemetry.join("\n"), { timeout: 12000 })
-    .toContain("$pageview");
+  expect(telemetry).toEqual([]);
   expect(telemetry.join("\n")).not.toContain(code);
   expect(page.url()).not.toContain(code);
   expect(

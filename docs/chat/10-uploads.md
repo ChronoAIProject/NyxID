@@ -1,7 +1,7 @@
 # Assistant uploads
 
-Normative contract for human uploads to NyxAgent conversations and owner-posted
-group messages. This extends [08](08-nyxagent-engine.md) and
+Normative contract for human uploads to NyxAgent conversations, owner-posted
+group messages and verified owner Lark/Feishu media. This extends [08](08-nyxagent-engine.md) and
 [09](09-nyxbot-orchestrator.md). Tool images are owner-readable and may also be fetched by the bound thread key
 during their producing live turn, including that same guest turn; see
 [Tool images](08-nyxagent-engine.md#tool-images). Their default retention is the
@@ -9,7 +9,7 @@ conversation lifetime. User-upload selection and access rules are unchanged.
 
 ## Admission and storage
 
-Only a first-party human owner may upload or remove a pending upload. Guest,
+Only a first-party human owner may use the browser routes to upload or remove a pending upload. Guest,
 OAuth-client, delegated and API-key callers cannot upload. Conversation uploads
 belong to that conversation; group uploads belong to the owner's group thread.
 Draft chats acquire a durable conversation before their first upload.
@@ -32,6 +32,158 @@ reused by another message, conversation, owner or group. Apply the runtime
 retention policy below to existing and new files. Conversation/group deletion
 and owner purge remove all payload chunks, extracted text and expiry markers.
 Removing an unsent attachment deletes it.
+
+## Inbound channel media
+
+The per-person `assistant:channel-media` flag defaults off. When enabled, verified
+owners can send images, files and rich `post` messages to a linked Lark/Feishu
+NyxBot or specialist through NyxID's relay or the Agent Event Gateway, including
+admitted followed threads. Other adapters, native Telegram input and Lark
+audio/video retain their existing behavior. Guests never download media or
+create uploads; their admitted turn receives the fixed note
+`attachments from guests are not shared with the assistant`. Media-bearing messages cannot answer
+approval cards or text decisions and do not enter duplicate-question coalescing.
+
+Admission records source selectors, not bytes. Gateway source IDs are accepted
+only from `nyxid_relay` Lark/Feishu activities and must match NyxID's own inbound
+row, owner, bot, route, chat, sender and thread/follow binding. Provider handles
+from the gateway are never dereferenced. A missing source produces a fixed
+unavailable-media note; a foreign source is refused. Each fetch rechecks live
+owner, org-admin, specialist and follow authority before resolving the bot
+credential. Revocation means no download.
+
+Ingestion is the first step of the consuming turn's run, after the conversation
+and user message exist. A busy conversation queues the media event IDs and sent
+time; no upload exists while queued. The run sniffs and validates each file,
+then stores it encrypted through the ordinary user-upload service with a unique
+source selector and a content digest. It binds uploads in one transaction that
+writes the active-turn conversation fence, rejects Stop, and records first use
+for retention. The immutable `media_bound` receipt holds the bound IDs and
+per-item outcomes. A retry reads that receipt first, so it cannot bind twice,
+reset retention dates or change a committed result. Bound images use the same
+upstream capability negotiation and explicit fallback as browser images.
+
+Stop, failure, timeout and orphan recovery call `media_finalize` outside the
+cancellable run. It clears `media_pending`, records terminal per-item outcomes
+and deletes known unbound uploads and chunks for that turn. Bound uploads retain
+the ordinary retention policy, including `images_delete_after_turn` on stopped
+or failed turns. An uncertain upload commit that lands after finalization stays
+unbound, can never be adopted by a later turn, and is purged by pending retention.
+
+| Limit | Channel behavior |
+| --- | --- |
+| Items | At most 10 ingested per event; extra items produce an omitted-count note |
+| Payload | At most `min(CHANNEL_MEDIA_MAX_BYTES, 20 MiB)` per item; ordinary upload type and rate limits apply |
+| Collection | At most 90 seconds to collect media; unfinished items receive timeout outcomes and a fixed note, successful items are still bound, and the turn continues. Stop cancels the turn |
+| Event retention / native dedup | 24 hours for text events; 7 days for media events. Native replays after that horizon are outside the dedup guarantee |
+| Queue lifetime | After 6 days, the maintenance sweep converts queued media to a durable owner transcript notice before removing it |
+
+Media admission and native dedup share one atomic event insert keyed by bot,
+platform, native chat and native message. A duplicate with a different relay
+UUID records an alias to the winning event and starts no fetch, turn or reply.
+Health reuses the winner's result. An accepted media event still without a turn
+or queue binding after five minutes is marked `interrupted`; the next owner
+turn in that chat receives its fixed interruption note once.
+
+Failures, omitted items and post text-cap notices appear in the current agent
+request and persisted message, including when every item fails. Expired queued
+media produces `a photo sent at HH:MM UTC expired before it could be processed;
+please resend` in the owner's app transcript. The original text is quoted
+history, never re-executed as a new request. Revoked queued authority is also
+removed with a durable notice. Guest and trigger turns never consume queued
+owner media.
+
+### Shared byte budget
+
+One process-wide weighted semaphore provides 192 MiB across owners, browser
+uploads, channel downloads and managed attachment egress. Each item reserves
+`2 × payload_limit` before reading or decrypting and holds that reservation
+through extraction/encryption or its outbound response. Readers enforce the
+payload limit, not the doubled reservation. Reservations are per item, never
+for a whole batch, and cancellation releases them.
+
+Browser requests reserve the full 20 MiB payload capacity before their single
+body read; four concurrent files reserve 160 MiB. Channel GETs begin at the
+smaller of a positive declared size, 4 MiB and the configured payload maximum;
+unknown, zero or invalid sizes begin at 4 MiB, capped by that maximum. If the
+body exceeds that limit, the reader drops its partial buffer, releases the
+reservation, rechecks live authority and retries once with the full channel
+maximum (up to 20 MiB). It acquires a fresh reservation before retrying. Egress
+reserves twice the exact stored size. Failed attempts still count against upload
+admission; no partially held reservation waits for a larger one.
+
+### Channel rollout and rollback
+
+Upgrade **all NyxID replicas** and drain pre-release workers before enabling
+`assistant:channel-media`. Gateway delivery also requires CMA at least
+`a570be21` and `CMAEG_MEDIA_ENABLED=true`. CMA's default provider header budget is
+30 seconds (`CMAEG_PROVIDER_REQUEST_TIMEOUT_MS`); admission performs no downloads,
+and ingestion begins only in the run after admission. For inbound downloads,
+the channel bot app needs any one of `im:message`, `im:message:readonly`, or
+`im:message.history:readonly`, configured in the Lark/Feishu developer console.
+The official [Obtain resource files in messages](https://open.larksuite.com/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-resource/get)
+API (`/reference/im-v1/message-resource/get`) lists these alternatives. These
+bot-app permissions are separate from the service connection's permissions
+for writing files to Base.
+
+For rollback, disable both `assistant:channel-media` and
+`assistant:attachment-writes`. The flags stop new admission/calls; normal turn
+processing and the media maintenance sweep continue draining accepted work.
+Keep the new binaries and sweep running. A first-party human platform admin may
+convert queued media early with:
+
+```http
+POST /api/v1/admin/assistant/channel-media/drain
+```
+
+The response is `{"converted": N}`. Repeat until `converted` is zero, then check
+the completion gates below on the application database. Each call is bounded
+and writes the durable expiry notice before removing a queued event; it neither
+downloads files nor executes the queued request.
+
+```javascript
+db.assistant_conversations.countDocuments({
+  pending_events: {$elemMatch: {"media_event_ids.0": {$exists: true}}}
+}) // must be 0
+db.assistant_messages.countDocuments({media_pending: {$ne: null}}) // must be 0
+db.lark_base_writes.countDocuments({
+  state: {$in: ["uploading", "dispatching"]}
+}) // must be 0
+```
+
+Without the admin conversion, queue conversion becomes eligible after six days.
+Orphan recovery uses the existing 75-second stale-heartbeat threshold; stale
+managed writes become eligible after their 180-second deadline. Bounded sweeps
+must finish; no fixed waiting period proves completion.
+
+After all three gates are zero, a human platform admin must delete the two
+attachment operation rows, `bitable_media_upload` and
+`bitable_record_create_with_attachments`, for **each** catalog slug `api-lark`,
+`api-lark-bot`, `api-feishu`, and `api-feishu-bot`. List each catalog's rows with:
+
+```bash
+nyxid catalog endpoint list <catalog-slug> --output json
+```
+
+Match the two operation names and retain their endpoint UUIDs. The listing's
+`service_id` is the catalog service UUID, not a UserService/connection UUID.
+Delete each matching row through the authenticated admin API:
+
+```http
+DELETE /api/v1/services/{service_id}/endpoints/{endpoint_id}
+```
+
+This physically deletes the operation row. The catalog CLI's `endpoint disable`
+command only pauses publication and is not this deletion step. Repeat the list
+for all four slugs and verify both names are absent. Keep the drained new
+replicas running until deletion is complete, then cut over to the old release
+without restarting a new replica or running new-release spec synchronization:
+startup additively upserts these compiled overlay rows and would recreate them.
+
+Before the old binary starts, also remove every scope using `JsonShape::Number`,
+including compiled key copies. See
+[operation-scope compatibility](../AGENT_OPERATION_SCOPES.md#compatibility)
+and the managed Base-write rollout in [API discovery](../API_DISCOVERY.md).
 
 ## Retention
 
@@ -210,8 +362,9 @@ textbox) and other files become their description. File names never add an
 Acceptance coverage includes spoofing, oversize, ZIP expansion, encrypted/malformed
 PDF, timeout, owner/guest/thread/specialist ACLs, atomic message binding, expiry,
 delete/purge, paging, prompt listing, upstream capability fallback, Codex image
-forwarding and composer behavior. Inbound channel media is a follow-up: its sender
-verification and download lifecycle require a separate ingress review.
+forwarding and composer behavior. Inbound channel coverage also exercises live
+sender/route authority, native dedup, queued media, Stop/finalization and the
+shared byte budget described above.
 
 ## HTTP and rollout
 
@@ -228,8 +381,9 @@ image PR independently: missing capability metadata is a supported fallback.
 Protocol version 1 advertises ten images, 8 MiB each and 16 MiB total; larger
 NyxID uploads remain downloadable and machine-transferable but are explicitly
 marked unviewable by that agent. This protocol version, not a guessed package
-version, is the compatibility boundary. Four upload requests and two parser
-workers may run concurrently per replica. Busy admission asks the owner to retry.
+version, is the compatibility boundary. The shared byte budget admits four full
+browser uploads concurrently when otherwise idle; two parser workers may run
+concurrently per replica. Budget waits are cancellable.
 
 ### Retention rollout
 
@@ -260,7 +414,7 @@ variables. Retention is the runtime admin policy above:
 | Raw upload body | 1 byte through 20 MiB (20,971,520 bytes), inclusive; larger bodies return HTTP 400 with `Attachment exceeds 20 MiB.` |
 | Attachments per message | 10 distinct files |
 | Owner rate | 30 attempts per UTC minute across replicas; excess returns HTTP 429 |
-| Concurrent work per replica | 4 upload handlers and 2 extraction workers; full upload admission returns HTTP 400 with a retry message |
+| Concurrent work per replica | 192 MiB shared byte budget (2 × payload capacity per item); four full browser uploads fit when idle; 2 extraction workers |
 | Extraction | 8-second worker wall deadline, 6 CPU seconds, 1 GiB address-space limit on Linux |
 | Document expansion | 200 PDF pages, 1,000,000 extracted characters, 40 MiB actual DOCX expansion and 1,000 ZIP entries |
 | Image decoding | 32 million pixels; 192 MiB decoder allocation budget |

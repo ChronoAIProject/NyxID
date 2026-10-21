@@ -42,7 +42,8 @@ export function newKeySummary(
     allowed_nodes: options.nodes.filter((item) =>
       input.allowed_node_ids.includes(item.id),
     ),
-    expires_at: input.expires_at ?? null,
+    expires_at: input.never_expires ? null
+      : input.expires_at ?? new Date(Date.now() + 90 * 86400000).toISOString(),
     rate_limit_per_second: input.rate_limit_per_second ?? null,
     rate_limit_burst: input.rate_limit_burst ?? null,
     platform: input.platform ?? null,

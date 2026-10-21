@@ -61,6 +61,10 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     let id = uuid::Uuid::new_v4().to_string();
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             platform_reply: None,
             platform_origin: None,
@@ -195,6 +199,10 @@ mod tests {
         let sources = HashMap::from([(
             "m1".into(),
             AssistantMessage {
+                media_event_ids: Vec::new(),
+                media_queue_notice_id: None,
+                media_pending: None,
+                media_bound: None,
                 platform_delivery_recovery_queued: false,
                 platform_reply: None,
                 platform_origin: None,

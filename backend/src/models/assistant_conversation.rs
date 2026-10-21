@@ -48,6 +48,16 @@ pub enum TurnOrigin {
 /// `text` is NyxID-authored and bounded; it never carries secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_declared: Option<usize>,
+    #[serde(
+        default,
+        with = "super::bson_datetime::optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub media_sent_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     pub id: String,
@@ -283,12 +293,23 @@ pub struct EngineWorkerInstance {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StreamReply {
+    pub message_id: String,
+    pub block_id: String,
+    pub cursor: i64,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     /// Bounded resource handles issued in this turn.
     #[serde(default)]
     pub resource_refs: Vec<String>,
+    /// Safe text already emitted to subscribers; removed with the turn at settlement.
+    #[serde(default)]
+    pub reply: Option<StreamReply>,
     /// Process incarnation that claimed execution; absent on older replicas' turns.
     #[serde(default)]
     pub worker_instance: Option<EngineWorkerInstance>,

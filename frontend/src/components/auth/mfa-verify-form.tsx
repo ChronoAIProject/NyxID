@@ -79,7 +79,9 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
           MFA verification
         </h1>
         <p className="text-12 text-muted-foreground">
-          Enter your authenticator code or a single-use recovery code
+          {verifyMutation.sessionConfirmationPending
+            ? "Verification was submitted. Confirm your session to continue."
+            : "Enter your authenticator code or a single-use recovery code"}
         </p>
       </div>
 
@@ -106,6 +108,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
                     maxLength={32}
                     autoComplete="one-time-code"
                     inputMode="text"
+                    disabled={verifyMutation.sessionConfirmationPending}
                     aria-label="Authenticator or recovery code"
                     className="min-w-0 font-mono text-xs tracking-normal sm:text-sm"
                     {...field}
@@ -124,7 +127,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
               className="w-full"
               isLoading={verifyMutation.isPending}
             >
-              Verify
+              {verifyMutation.sessionConfirmationPending ? "Retry session check" : "Verify"}
             </Button>
             <Button
               type="button"

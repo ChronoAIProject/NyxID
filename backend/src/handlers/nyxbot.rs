@@ -3,7 +3,7 @@
 //! NyxBot as the agent behind the owner's channel bots.
 //!
 //! Telegram bots go through the Agent Event Gateway (catalog slug `cmaeg`):
-//! NyxID creates the gateway channel with the owner's dedicated agent key and
+//! NyxID creates the gateway channel with the owner's delegated creator bearer and
 //! answers as the gateway's `nyxbot` provider (Agent Card, bindings,
 //! conversations, Responses SSE, event context). Platforms the gateway relay
 //! does not support yet (Lark, Feishu, Discord, Slack, WhatsApp, ...) use
@@ -276,7 +276,7 @@ fn sha256_hex(value: impl AsRef<[u8]>) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Gateway client (server-to-server, the owner's dedicated agent key as bearer)
+// Gateway client (server-to-server, the owner's delegated creator bearer)
 // ---------------------------------------------------------------------------
 
 pub(crate) use crate::services::nyxbot_gateway_service::cleanup_platform_gateway;
@@ -288,16 +288,19 @@ use crate::services::nyxbot_gateway_service::{
 
 /// Stable, prose-free code for a failed gateway call.
 fn gateway_error_code(response: &GatewayResponse) -> &'static str {
-    let code = response.body["code"].as_str().unwrap_or_default();
-    let detail = response.body["detail"].as_str().unwrap_or_default();
-    match (response.status, code) {
-        (400, "invalid_request") if detail.contains("provider") => {
+    match response.status {
+        401 => "gateway_not_authenticated",
+        403 => "gateway_permission_required",
+        400 if response.body["code"].as_str() == Some("invalid_request")
+            && response.body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("provider")) =>
+        {
             "gateway_provider_not_registered"
         }
-        (400, _) => "gateway_rejected_request",
-        (401, _) | (403, _) => "gateway_not_authenticated",
-        (409, _) => "gateway_conflict",
-        (502, _) => "gateway_provider_rejected",
+        400 => "gateway_rejected_request",
+        409 => "gateway_conflict",
+        502 => "gateway_provider_rejected",
         _ => "gateway_unavailable",
     }
 }
@@ -431,6 +434,7 @@ async fn active_for_bot(
         .collection::<NyxbotChannel>(CHANNELS)
         .find_one(doc! {"user_id": owner, "channel_bot_id": bot_id,
         "status": {"$in": ["pending", "active"]}})
+        .sort(doc! {"created_at": -1, "_id": -1})
         .await?)
 }
 
@@ -500,7 +504,9 @@ pub(crate) async fn create_gateway_agent_key(
         owner,
         &format!("NyxBot gateway agent {}", identifier(label)),
         "read proxy",
-        None,
+        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
+            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
+        ),
         Some("Authenticates the Agent Event Gateway to NyxBot. Managed by NyxBot."),
         Some(&[]),
         Some(&[]),
@@ -654,7 +660,9 @@ async fn connect_inner(
         &bot_owner_id,
         &format!("NyxBot channel route {}", identifier(&label)),
         "read proxy",
-        None,
+        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
+            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
+        ),
         Some("NyxBot channel route key. Managed by NyxBot; disconnect NyxBot to remove."),
         Some(&[]),
         Some(&[]),
@@ -947,7 +955,10 @@ async fn connect_inner(
                     (operator step). Telegram bots cannot use NyxBot until it is."
                         .into()
                 }
-                other => format!("Connecting NyxBot failed: {other}"),
+                "gateway_not_authenticated" => "The channel gateway could not authenticate NyxBot. Try reconnecting. If this continues, contact an administrator.".into(),
+                "gateway_permission_required" => "The channel gateway has not authorized NyxBot to manage this connection. An administrator needs to check the gateway configuration.".into(),
+                "gateway_unavailable" => "The channel gateway is temporarily unavailable. Try again shortly.".into(),
+                other => format!("Could not connect this bot. Try again. ({other})"),
             }))
         }
     }
@@ -1073,12 +1084,15 @@ async fn connect_gateway(
     }
     let channel_id = created.body["channel_id"]
         .as_str()
+        .filter(|value| !value.is_empty())
         .ok_or("gateway_invalid_response")?;
     let callback = created.body["endpoints"]["nyxid_callback_url"]
         .as_str()
+        .filter(|value| !value.is_empty())
         .ok_or("gateway_invalid_response")?;
     let version = created.body["version"]
         .as_i64()
+        .filter(|value| *value > 0)
         .ok_or("gateway_invalid_response")?;
     let binding_id = created.body["provider"]["binding_id"]
         .as_str()
@@ -1168,7 +1182,11 @@ async fn connect_gateway(
     .await;
     match attached {
         Ok(response) if response.status == 200 => {
-            let version = response.body["version"].as_i64().unwrap_or(version + 1);
+            let Some(version) = response.body["version"].as_i64().filter(|value| *value > 0) else {
+                let _ = channel_routing_service::delete_conversation(db, &route.id, bot_owner(row))
+                    .await;
+                return Err(failed("gateway_invalid_response").await);
+            };
             let _ = db
                 .collection::<NyxbotChannel>(CHANNELS)
                 .update_one(
@@ -1369,7 +1387,9 @@ async fn new_route_key(
         key_owner,
         &format!("NyxBot channel route {}", identifier(label)),
         "read proxy",
-        None,
+        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
+            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
+        ),
         Some("NyxBot channel route key. Managed by NyxBot; disconnect NyxBot to remove."),
         Some(&[]),
         Some(&[]),
@@ -1518,9 +1538,13 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         Err(_) => return Err(discard(None, "gateway_unavailable").await),
     };
     let (Some(channel_id), Some(callback), Some(version)) = (
-        created.body["channel_id"].as_str(),
-        created.body["endpoints"]["nyxid_callback_url"].as_str(),
-        created.body["version"].as_i64(),
+        created.body["channel_id"]
+            .as_str()
+            .filter(|value| !value.is_empty()),
+        created.body["endpoints"]["nyxid_callback_url"]
+            .as_str()
+            .filter(|value| !value.is_empty()),
+        created.body["version"].as_i64().filter(|value| *value > 0),
     ) else {
         return Err(discard(None, "gateway_invalid_response").await);
     };
@@ -1569,7 +1593,10 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     .await
     {
         Ok(response) if response.status == 200 => {
-            response.body["version"].as_i64().unwrap_or(version + 1)
+            match response.body["version"].as_i64().filter(|value| *value > 0) {
+                Some(version) => version,
+                None => return Err(discard(opened, "gateway_invalid_response").await),
+            }
         }
         Ok(response) => return Err(discard(opened, gateway_error_code(&response)).await),
         Err(_) => return Err(discard(opened, "gateway_unavailable").await),
@@ -1744,15 +1771,7 @@ pub async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Va
 }
 
 pub async fn list(state: &AppState, owner: &str) -> AppResult<Vec<NyxbotChannel>> {
-    Ok(state
-        .db
-        .collection::<NyxbotChannel>(CHANNELS)
-        .find(doc! {"user_id": owner, "status": {"$ne": "disconnected"}})
-        .sort(doc! {"created_at": -1})
-        .limit(50)
-        .await?
-        .try_collect()
-        .await?)
+    crate::services::nyxbot_channel_query_service::list_current(&state.db, owner).await
 }
 
 fn link_json(row: &NyxbotChannel, link: &LinkInstructions) -> Value {
@@ -3019,6 +3038,14 @@ async fn start_chat_turn(
         &row.channel_bot_id,
     )
     .await?;
+    let (declared, media_event_ids, media_sent_at) = Box::pin(
+        crate::services::channel_media_events::for_turn(&state.db, row, event_key),
+    )
+    .await?;
+    let had_media = declared > 0;
+    if text.trim().is_empty() && !had_media {
+        return Ok(Inbound::Silent);
+    }
     let private = chat.kind.as_deref() == Some("private");
     // An organization's bot never carries the owner's personal thread.
     let shared = private && !guest && row.bot_owner_id.is_none();
@@ -3063,12 +3090,16 @@ async fn start_chat_turn(
         )
         .await?;
     }
-    let question_key = engine::question_key(text);
+    let question_key = if had_media {
+        None
+    } else {
+        engine::question_key(text)
+    };
     // A chat app cannot show NyxID's confirmation cards: the verified owner
     // answers one in words (see `decide_reply` for which card it decides).
     // Nobody else can.
     let mut answered = None;
-    if exists && !guest {
+    if exists && !guest && !had_media {
         match reply_decision(state, row, &conversation_id, text).await {
             Ok(Some((_, true))) => {
                 return Ok(Inbound::Reply(
@@ -3102,6 +3133,14 @@ async fn start_chat_turn(
             identifier(&row.bot_label),
         )
     };
+    if had_media && guest {
+        note.push(' ');
+        note.push_str(crate::services::assistant_channel_media::GUEST_NOTE);
+    }
+    if had_media && !guest && media_event_ids.is_empty() {
+        note.push(' ');
+        note.push_str(crate::services::assistant_channel_media::FAILED_NOTE);
+    }
     if shared {
         note.push_str(
             " This is your own thread with the owner, which they also reach from the NyxID app \
@@ -3121,7 +3160,7 @@ async fn start_chat_turn(
             " With this message the owner declined the pending action; do not retry it."
         });
     }
-    let message = if private {
+    let mut message = if private {
         excerpt(text, engine::MAX_MESSAGE_CHARS - 16)
     } else {
         // Some platforms send no names: guests are still told apart.
@@ -3132,6 +3171,14 @@ async fn start_chat_turn(
             engine::MAX_MESSAGE_CHARS - 16,
         )
     };
+    if text.contains("[post truncated]") && !message.contains("[post truncated]") {
+        const MARKER: &str = "\n[post truncated]";
+        message = message
+            .chars()
+            .take(engine::MAX_MESSAGE_CHARS - MARKER.len())
+            .collect();
+        message.push_str(MARKER);
+    }
     let title = if shared {
         None
     } else if crate::services::channel_thread_follow_service::is_child(chat) {
@@ -3158,6 +3205,11 @@ async fn start_chat_turn(
     };
     late_delivery::prepare(state, event_key, row, &origin, sender, guest, addressed).await?;
     let start = TurnStart {
+        media_event_ids: if guest {
+            Vec::new()
+        } else {
+            media_event_ids.clone()
+        },
         invocation_id: None,
         acknowledgement_id: None,
         retry_of: None,
@@ -3258,6 +3310,9 @@ async fn start_chat_turn(
             event.question_key = question_key;
             event.reply_to = vec![origin.clone()];
             event.source_event_ids = vec![event_key.to_owned()];
+            event.media_event_ids = media_event_ids;
+            event.media_declared = had_media.then_some(declared);
+            event.media_sent_at = had_media.then_some(media_sent_at.unwrap_or_else(Utc::now));
             let queued = crate::services::channel_turn_delivery::enqueue(
                 &state.db,
                 &row.user_id,
@@ -3283,7 +3338,12 @@ async fn start_chat_turn(
             {
                 tracing::warn!("Accepted channel source retained without async reply preference");
             }
-            super::assistant_team::wake(state, &row.user_id, &conversation_id).await;
+            Box::pin(super::assistant_team::wake(
+                state,
+                &row.user_id,
+                &conversation_id,
+            ))
+            .await;
             Ok(Inbound::Queued)
         }
         // A concurrent first message created the chat: it now exists.
@@ -3876,6 +3936,38 @@ fn responses_with_producers(
     ))
 }
 
+async fn media_admission(
+    state: &AppState,
+    row: &NyxbotChannel,
+    source: &str,
+    chat: &str,
+    sender: &str,
+    native_thread: Option<&str>,
+    missing_media: bool,
+) -> AppResult<(usize, Option<crate::models::nyxbot_channel::EventMedia>)> {
+    let request = crate::services::channel_media_authority::MediaRequest {
+        channel: row.clone(),
+        source_message_id: source.to_owned(),
+        chat_id: chat.to_owned(),
+        sender_id: sender.to_owned(),
+        native_thread_id: native_thread.map(str::to_owned),
+        origin: None,
+        conversation_id: None,
+        agent_id: row.agent_id.clone(),
+    };
+    let presence = Box::pin(crate::services::channel_media_events::presence(
+        &state.db,
+        &request,
+        missing_media,
+    ))
+    .await?;
+    let media = Box::pin(crate::services::channel_media_events::admission(
+        &state.db, &request,
+    ))
+    .await?;
+    Ok((presence, media))
+}
+
 async fn responses_with_producers_impl(
     state: AppState,
     producers: Option<
@@ -4021,7 +4113,53 @@ async fn responses_with_producers_impl(
     };
     let mut now = Utc::now();
     let retry_digest = sha256_hex(request.to_string());
+    let media_text = crate::services::channel_media_events::gateway_text(activity, &row.platform);
+    let text = if feature_flag_service::personal_flag_enabled(
+        &state.db,
+        &row.user_id,
+        feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+    )
+    .await
+    .unwrap_or(false)
+    {
+        media_text.unwrap_or(&text).to_owned()
+    } else {
+        text
+    };
+    let (source_media_declared, media) = if media_text.is_some()
+        && activity["source"]["type"] == "nyxid_relay"
+        && activity["source"]["platform"].as_str() == Some(row.platform.as_str())
+        && activity["actor"]["kind"] == "human"
+    {
+        match Box::pin(media_admission(
+            &state,
+            &row,
+            &event_id,
+            activity["conversation"]["id"].as_str().unwrap_or_default(),
+            activity["actor"]["id"].as_str().unwrap_or_default(),
+            activity["conversation"]["thread_id"].as_str(),
+            true,
+        ))
+        .await
+        {
+            Ok(media) => media,
+            // A forged stored source is terminal; CMA must not retry it as an outage.
+            Err(AppError::Forbidden(_)) => {
+                return problem(StatusCode::FORBIDDEN, "media_source_refused");
+            }
+            Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+        }
+    } else {
+        (0, None)
+    };
+    let retention = if media.is_some() {
+        ChronoDuration::days(7)
+    } else {
+        ChronoDuration::hours(EVENT_RETENTION_HOURS)
+    };
     let admitted = NyxbotEvent {
+        media,
+        source_media_declared: Some(source_media_declared),
         native_bot_budget_claimed: false,
         retry_request_sha256: Some(retry_digest.clone()),
         delivery: None,
@@ -4039,12 +4177,23 @@ async fn responses_with_producers_impl(
         conversation_id: None,
         turn_id: None,
         created_at: now,
-        expires_at: now + ChronoDuration::hours(EVENT_RETENTION_HOURS),
+        expires_at: now + retention,
     };
     let events = state.db.collection::<NyxbotEvent>(EVENTS);
-    if let Err(error) = events.insert_one(&admitted).await {
+    if let Err(error) = Box::pin(crate::services::channel_media_events::insert_event(
+        &state.db, &admitted,
+    ))
+    .await
+    {
         if !is_duplicate(&error) {
             return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
+        }
+        match crate::services::channel_media_events::record_duplicate(&state.db, &admitted).await {
+            Ok(true) => return sse(futures::stream::iter(
+                std::iter::once(json!({"type":"response.created","response":{"id":&response_id,"status":"in_progress"}}))
+                    .chain(message_frames(&response_id, None)))),
+            Ok(false) => {},
+            Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
         // Only an identical, verified human request that previously started
         // no turn may resume. Keep its original budget claim and deadline;
@@ -4755,7 +4904,37 @@ pub async fn relay_callback(
     } else {
         partition
     };
+    let (source_media_declared, media) = if sender_kind
+        == crate::models::channel_thread::ThreadSenderKind::Human
+        && chats::native_owner_eligible(&row.platform, &payload["raw_platform_data"])
+    {
+        match Box::pin(media_admission(
+            &state,
+            &row,
+            &claims.message_id,
+            &chat_id,
+            payload["sender"]["platform_id"]
+                .as_str()
+                .unwrap_or_default(),
+            thread_id.as_deref(),
+            false,
+        ))
+        .await
+        {
+            Ok(media) => media,
+            Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+        }
+    } else {
+        (0, None)
+    };
+    let retention = if media.is_some() {
+        ChronoDuration::days(7)
+    } else {
+        ChronoDuration::hours(EVENT_RETENTION_HOURS)
+    };
     let admitted = NyxbotEvent {
+        media,
+        source_media_declared: Some(source_media_declared),
         native_bot_budget_claimed: false,
         retry_request_sha256: None,
         delivery: None,
@@ -4772,16 +4951,23 @@ pub async fn relay_callback(
         conversation_id: None,
         turn_id: None,
         created_at: now,
-        expires_at: now + ChronoDuration::hours(EVENT_RETENTION_HOURS),
+        expires_at: now + retention,
     };
-    match state
-        .db
-        .collection::<NyxbotEvent>(EVENTS)
-        .insert_one(&admitted)
-        .await
+    match Box::pin(crate::services::channel_media_events::insert_event(
+        &state.db, &admitted,
+    ))
+    .await
     {
         Ok(_) => {}
-        Err(error) if is_duplicate(&error) => return StatusCode::ACCEPTED.into_response(),
+        Err(error) if is_duplicate(&error) => {
+            if crate::services::channel_media_events::record_duplicate(&state.db, &admitted)
+                .await
+                .is_err()
+            {
+                return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
+            }
+            return StatusCode::ACCEPTED.into_response();
+        }
         Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
     let text = payload["content"]["text"]
@@ -4799,7 +4985,6 @@ pub async fn relay_callback(
         .as_str()
         .map(str::to_owned);
     let raw = payload["raw_platform_data"].clone();
-    let text = chats::named_mentions(&text, &raw);
     let raw_title = ["message", "edited_message", "channel_post"]
         .iter()
         .find_map(|key| raw.get(*key))
@@ -4827,6 +5012,38 @@ pub async fn relay_callback(
                     return Ok(());
                 }
             }
+            #[cfg(test)]
+            crate::services::assistant_channel_media::test_hooks::reach(
+                &state.db,
+                &message_id,
+                "relay_before_media_text",
+            )
+            .await;
+            let text = if matches!(row.platform.as_str(), "lark" | "feishu")
+                && raw
+                    .pointer("/event/message/message_type")
+                    .and_then(Value::as_str)
+                    == Some("post")
+                && (admitted.source_media_declared.unwrap_or(0) > 0
+                    || feature_flag_service::personal_flag_enabled(
+                        &state.db,
+                        &row.user_id,
+                        feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+                    )
+                    .await
+                    .unwrap_or(false))
+            {
+                let bot_id =
+                    match channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await {
+                        Ok(bot) => own_user_id(&state, &bot).await,
+                        Err(_) => None,
+                    };
+                crate::services::channel_adapters::lark::post_from_raw(&raw, bot_id.as_deref())
+                    .map(|post| post.text)
+                    .unwrap_or_default()
+            } else {
+                chats::named_mentions(&text, &raw)
+            };
             if Box::pin(thread_follow::inbound(
                 &state,
                 &row,
@@ -4870,7 +5087,9 @@ pub async fn relay_callback(
             if sender_kind == ThreadSenderKind::Human {
                 chats::spawn_title_lookup(&state, &row, &chat);
             }
-            if text.trim().is_empty() || sender_id.is_empty() {
+            if sender_id.is_empty()
+                || (text.trim().is_empty() && admitted.source_media_declared.unwrap_or(0) == 0)
+            {
                 return Ok(());
             }
             let addressed = if sender_kind == ThreadSenderKind::Bot {
@@ -4966,6 +5185,17 @@ pub async fn relay_callback(
         .await;
         if let Err(error) = result {
             tracing::debug!(%error, "NyxBot direct channel message not answered");
+        } else if admitted.media.is_some() {
+            // Intentional silence is a completed disposition, not a crash.
+            let _ = state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .update_one(
+                    doc! {"_id":&admitted.id,"status":"running","conversation_id":bson::Bson::Null,
+                    "media.interrupted":{"$ne":true}},
+                    doc! {"$set":{"status":"completed"}},
+                )
+                .await;
         }
         #[cfg(test)]
         tests::relay_callback_completed(&row.id, &message_id);
@@ -5137,6 +5367,24 @@ async fn machine_setup_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult
             )
         } else if profile.computer && !profile.computer_ready {
             ("permissions_missing", "The machine connected, but computer use is unavailable. Ask the owner to check Screen Recording/Accessibility or the Linux display using nyxid node machine status.".to_owned())
+        } else if let Some(reason) = Box::pin(
+            crate::services::machine_setup_service::setup_selection_reason(&state.db, &row, node),
+        )
+        .await?
+        {
+            (
+                "selection_required",
+                format!(
+                    "Machine {} ({}) connected, but owner separation selection is required before new access. {} Owner settings: {}. Do not retry execution or select legacy on the owner's behalf. Existing legacy assignments remain usable.",
+                    node.name,
+                    node.id,
+                    crate::services::machine_access_service::selection_message(reason),
+                    crate::services::assistant_links::AssistantPage::MachineSettings {
+                        node: &node.id
+                    }
+                    .path()
+                ),
+            )
         } else {
             (
                 "connected",

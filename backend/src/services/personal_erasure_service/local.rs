@@ -174,6 +174,11 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             m::assistant_attachment::COLLECTION_NAME,
             doc! {"user_id":owner},
         ),
+        (m::lark_base_write::COLLECTION_NAME, doc! {"user_id":owner}),
+        (
+            m::lark_base_write_photo::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
         (
             m::assistant_resource::COLLECTION_NAME,
             doc! {"user_id":owner},

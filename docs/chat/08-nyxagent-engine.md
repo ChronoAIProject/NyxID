@@ -777,6 +777,54 @@ and drop. Markdown accepts both `.md` and `.markdown`; JSON and CSV are validate
 before their verbatim text is retained. Empty MIME, `application/octet-stream`
 and Windows' `application/vnd.ms-excel` CSV MIME do not change classification.
 
+## Managed attachment writes
+
+`bitable_media_upload` is available for trusted Lark/Feishu catalog operations
+in a live, non-guest owner chat with the default-off, per-person
+`assistant:attachment-writes` flag enabled. It resolves an authorized
+`attachment_id` from the chat, derives its size, and uploads canonical
+multipart bytes to the selected Base. A successful response returns a
+`file_token`; it does not create a record. User uploads retain conversation,
+key, and retention checks, and tool images retain their producing-turn fence.
+Ordinary Agent Keys, external OAuth plugin connections, exact/durable/async execution,
+and mounted copies of the OpenAPI document cannot use this capability.
+
+The managed `bitable_record_create_with_attachments` accepts closed
+`{fields, attachments}` JSON, validates the schema and
+complete source photo set, reserves the content digests, uploads, then creates
+one record. One composite action card, when confirmation is required, binds
+the canonical JSON and all dependency contracts. Child requests run under the
+managed guard, without separate child grants or cards. Before each field page,
+upload attempt, and create, the guard revalidates the live turn, Stop, key and
+operation scopes, published contracts, destination, credential epoch, and
+agent override. The standalone upload does not provide these record-replay
+guarantees.
+
+The dispatch barrier durably records `dispatching` before the create send.
+There is no automatic create resend after that barrier. Success returns
+`{record_id, already_created:false}`; an authorized identical replay returns
+`{record_id, already_created:true}`, even after credential rotation. Active
+writes report `in progress; try again shortly`. An `uncertain` result reports
+`outcome unknown; check the Base; NyxID will not create it again`. Do not retry
+through plain create or another connection. Proven `failed_pre_dispatch` and
+`failed_definite` outcomes release reservations; `failed_definite` with
+`last_code: not_sent` means the create request never left NyxID, so a corrected
+new call may create once. Earlier uploads may have completed. A conflicting
+succeeded photo reports `Photo already belongs to record <record_id>; use
+bitable_record_update to change its fields`.
+
+An incomplete inbound photo set refuses with `N of M photos from that message
+could not be read; ask the owner to resend`. Attachment destinations must be
+attachment fields, number values must be finite JSON numbers, and selects must
+use existing options; receipt-specific bounds come from operation scopes.
+Managed permission errors identify the outbound service slug and connection
+label. Terminal metadata protects identical photos for 400 days within the same
+owner, Base, and table. See the [Lark Base guide](../site/cli/guides/connect-a-service.md#lark-base)
+for permissions, flag combinations, and the Receipt-Bot recipe, and
+[API discovery](../API_DISCOVERY.md) for trusted projection and discovery
+exclusions. Inbound media and rollback completion gates remain defined in
+[Assistant uploads](10-uploads.md#channel-rollout-and-rollback).
+
 ## Task completion and knowledge retrieval
 
 Both NyxBot and specialist base instructions favor the shortest sufficient
@@ -1028,6 +1076,26 @@ The remaining fence expires normally, including after a NyxID process crash.
 Body validation and ownership checks precede rate-limit admission, so rejected
 malformed or wrong-owner requests do not consume the user's turn allowance.
 
+While the worker runs, an independent task checkpoints the text already made
+safe for subscribers into `active_turn.reply` at most once a second. Writes
+coalesce through a watch channel, are bounded by the relay's output limit,
+and fence the owner, turn ID, Stop flag and increasing text cursor. Database
+delays cannot block the token reader. Settlement removes the checkpoint with
+the active turn; forced Stop and orphan reclamation retain its partial text.
+Only transcript history includes the checkpoint, not the conversation index.
+The POST response also identifies its conversation in `X-NyxID-Conversation-Id`,
+so a new thread remains recoverable if its first SSE event is lost.
+
+History checkpoints repair missing text or block-start events by cursor and
+provide partial replies after reload or connection loss, including across
+replicas. Delayed deltas and older polls cannot duplicate or rewind that text.
+A durable reply discovered through history immediately replaces a stalled live
+view and closes its reader. Recovery never resends the initiating request.
+History requests have a 15-second deadline and never pause the token reader;
+active turns retain a five-second polling backstop even with live notifications
+(two seconds without them). The notification stream reconnects after 45 seconds
+without bytes, including keepalive comments, and reports connecting while closed.
+
 Stop sets a durable flag on the exact active turn. Its worker polls every 250 ms,
 drops the upstream stream, saves partial text as failed/error `cancelled`, clears
 the binding with `stopped`, then emits `turn.completed(cancelled)`. A Stop
@@ -1163,7 +1231,11 @@ credential recovery emit a `turn.notice` with code `retrying`. Clients derive
 the visible phase from persisted approvals, activities, continuations, and the
 live stream, and clear it when the turn settles. A failed live stream
 adds an interruption notice while polling reports the turn active. Only the
-status dot animates (with motion-safe); a running tool shows elapsed time.
+status dot animates (with motion-safe). The main status clock shows total time
+since the server's turn start, across tools, phase changes, tab switches and
+reloads. Each action row shows its own tool duration; completed durations stop
+at `ended_at`. Parallel tool status follows the oldest running call. Returning
+to the tab refreshes the clock immediately after background timer throttling.
 Action summaries follow the turn status, retain recovered failures with warning
 copy, and show the total count separately from the retained latest 40 entries.
 Activity labels come from compiled native definitions or an authorized published
@@ -1197,6 +1269,7 @@ error is null or a stable `{code,message}`. The additive `turn.notice` carries
 | 401/403 or `agent_key_required` | Replace credential, clear binding, emit notice, retry once with recap |
 | `stale_response`, `outcome_unknown` | Fail without retry; discard binding |
 | `insufficient_credits`, `wallet_suspended`, `plan_entitlement_required` | Terminal billing refusal: no credential replacement, retry, backoff or rebind. Show top-up, suspended-wallet support/billing, or plan-entitlement guidance respectively |
+| `billing_not_configured`, `billing_provider_unavailable` | Terminal billing failure: preserve the cause without credential replacement, retry, backoff or rebind. Explain incomplete billing setup or unavailable billing verification, with support or later retry guidance respectively |
 | `tool_budget_exhausted`, `turn_timeout` | Continue automatically on the same session, with the same grants/TriggerRun, up to `max_auto_continuations` (default 8, hard cap 32). Preserve context if the bound is reached |
 | Identical full call/result sequence and unchanged reply text | Stop with `continuation_no_progress`; preserve the session |
 | Other failed turn or invalid stream | Persist failed partial reply; discard binding immediately with `turn_failed` |
@@ -1766,8 +1839,10 @@ diagnostic only. Failed cleanup also errs toward diagnostic-only facts. Facts
 from older attempts are diagnostics only. A 2xx admission conditionally clears
 any refusal.
 
-Billing admission records only `insufficient_credits`, `wallet_suspended` or
-`plan_entitlement_required`. On successful SSE responses the supported protocols
+Billing admission records `insufficient_credits`, `wallet_suspended`,
+`plan_entitlement_required`, `billing_not_configured` and
+`billing_provider_unavailable`. It records only the stable code, never raw
+provider errors or configuration details. On successful SSE responses the supported protocols
 are Responses (`response.completed/failed/incomplete`), Chat Completions (`[DONE]`)
 and Anthropic Messages (`message_stop`). Missing usage is valid. Body/transport
 errors, provider error events and missing supported terminal events are abnormal;
@@ -1787,12 +1862,19 @@ detection `unknown` for that attempt, even if a later frame appears valid; it
 cannot prove an interrupted stream. Repeated provider-error or unknown facts are
 recorded once per observer rather than on every later chunk.
 
-At settlement only a generic NyxAgent failure or broken stream can be attributed.
+At settlement a generic NyxAgent failure or broken stream can be attributed.
+A `nyxid_error` wrapper can also recover a billing refusal from the same
+current-attempt evidence; without that evidence its authorization error remains.
 A matching attempt's latest uncleared billing refusal within 120 seconds wins,
 then an attributable stream fault within 120 seconds (`model_interrupted`), then
 the generic error. Typed failures and Stop keep their cause. Attribution retains
 the original sanitized `upstream_error_code`, also exposed in the live terminal
 event and history. Details and its copied diagnostic ID include that code.
+The browser shows the specific billing cause and remedy before Details for both
+live failures and reloaded history, and uses the cause as the action summary.
+Insufficient credits, suspended wallets and missing plan access link to Billing
+& Usage. Setup and provider failures explain the service problem and offer
+support or later retry guidance without suggesting a credit purchase.
 Generic copy is “The assistant could not complete this turn. Try again.”;
 `model_interrupted` warns that some actions may already have completed and must
 be checked before retrying. Old rows and old clients remain readable; existing

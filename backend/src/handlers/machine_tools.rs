@@ -74,18 +74,36 @@ pub fn call<'a>(
             } else {
                 "No machine is available. Ask NyxBot for a machine setup link."
             };
+            let contexts = crate::services::feature_flag_service::personal_flag_enabled(
+                &state.db,
+                &chat.user_id,
+                access::CONTEXT_FLAG,
+            )
+            .await?;
             let visible = Box::pin(access::visible_assignments(&state.db, chat))
             .await?
             .into_iter()
             .map(|(node, assignment)| {
                 let mut row = machines::metadata(&node);
+                let support = node.machine.as_ref().map(access::separated_support);
                 row["execution_note"] = json!(tools::execution_note(
                     &assignment.mode,
-                    node.machine.as_ref().and_then(|p| p.separated.as_ref()).is_some_and(|s| s.available),
+                    support.as_ref().is_some_and(|s| s.available),
                 ));
                 if assignment.mode == "separated" {
                     row["machine"]["roots"] = json!(["."]);
                     row["context_note"] = json!("Paths are relative to this agent context workspace; the secure and developer browsers are separate from other contexts. Full isolation requires a separate machine container or VM.");
+                    if support.as_ref().is_none_or(|s| !s.available) {
+                        row["status"] = json!("unavailable");
+                        row["unavailable_reason"] = json!(support.as_ref().and_then(|s| s.reason.as_deref()).unwrap_or("separated_capabilities_not_reported"));
+                    }
+                }
+                if assignment.mode == crate::models::machine_access::SELECTION_REQUIRED {
+                    row["status"] = json!("selection_required");
+                    row["settings_path"] = json!(AssistantPage::MachineSettings {node:&node.id}.path());
+                    row["selection_reason"] = json!(node.machine.as_ref()
+                        .map(|p| access::pending_selection_reason(p,contexts))
+                        .map_or_else(|| access::selection_message("machine_selection_required"), access::selection_message));
                 }
                 row["access"] = json!(assignment);
                 row
@@ -123,6 +141,16 @@ pub fn call<'a>(
                 Ok(assignment) => separated = assignment.mode == "separated",
                 Err(AppError::MachinePermissionRevoked) => {
                     return permission(state, chat, "machine", &node.id, &node.name).await;
+                }
+                Err(AppError::ValidationError(message))
+                    if message.starts_with("machine_selection_required:") =>
+                {
+                    return Ok(json!({
+                        "status":"selection_required",
+                        "error":{"code":AppError::MachineAuthorityUnsupported.error_code(),"reason":"machine_selection_required","message":message},
+                        "settings_path":AssistantPage::MachineSettings {node:&node.id}.path(),
+                        "warning":nyxid_machine::context::SHARED_LEGACY_WARNING,
+                    }));
                 }
                 Err(error) => return Err(error),
             }

@@ -4,6 +4,12 @@
 
 ## Overview
 
+The passthrough storage rule applies to relay transport. When NyxBot is the
+consumer, its separately authorized assistant-media path can store verified
+owner Lark/Feishu files as encrypted assistant uploads under
+`assistant:channel-media`; relay history still contains routing metadata only.
+See [Lark/Feishu posts and NyxBot ingestion](#larkfeishu-posts-and-nyxbot-ingestion).
+
 NyxID Channel Bot Relay turns NyxID into a **multi-platform messaging gateway**. Users register bots or connect accounts (Telegram, Discord, Lark, Feishu, Slack, WhatsApp, X). Adapter-owned webhooks or polling normalize inbound messages into a common format, route each message to the correct AI agent's callback URL, and relay the agent's asynchronous response back to the chat.
 
 Combined with [Agent Isolation](./AGENT_ISOLATION.md), the same NyxID user can wire different messaging platforms (or even different conversations on the same platform) to different AI agents -- each with independent credentials, rate limits, and audit trails.
@@ -265,7 +271,7 @@ sequenceDiagram
     participant AG as AI Agent (callback URL)
 
     U->>P: Send message
-    P->>W: POST /api/v1/webhooks/channel/{platform}
+    P->>W: POST /api/v1/webhooks/channel/{platform}/{bot_id}
     W->>A: verify_webhook(headers, body)
     A-->>W: OK (signature valid)
     W->>A: parse_inbound(body)
@@ -487,7 +493,7 @@ graph TD
 
 ### Integration with Agent Isolation (PR #132)
 
-The callback URL lives on the **ApiKey** (the agent), not on individual conversation routes. When a user sets up an agent on NyxID (`nyxid ai-setup agent create --platform claude-code`), they register the agent's callback URL as part of the agent configuration. Conversation routes then just say "send to this agent" -- NyxID already knows how to reach it.
+The callback URL lives on the **ApiKey** (the agent), not on individual conversation routes. When a user sets up an agent on NyxID (`nyxid api-key create --platform claude-code --callback-url "https://my-agent.example.com/webhook"`), they register the agent's callback URL as part of the agent configuration. Conversation routes then just say "send to this agent" -- NyxID already knows how to reach it.
 
 This means:
 - **`ApiKey.callback_url`** (new field) -- where NyxID sends channel messages for this agent
@@ -734,7 +740,7 @@ classDiagram
 | **Slack** | Bot user OAuth token (`xoxb-`) + Signing Secret | HMAC-SHA256 over `v0:timestamp:body`, five-minute replay window | `url_verification` | `POST /api/chat.postMessage` |
 | **WhatsApp** | API Setup token for testing or System User token for ongoing operation; Phone Number ID + Meta App Secret; optional WABA ID | `X-Hub-Signature-256: sha256=<HMAC-SHA256(app_secret, raw_body)>` | GET subscription: constant-time SHA-256 Verify Token check, raw challenge as `text/plain` | `POST /{version}/{phone_number_id}/messages` with Bearer auth |
 
-Existing Lark/Feishu bots must grant `im:resource` in the developer console before attachment downloads work; until then downloads return `channel_media_fetch_failed`.
+For inbound attachment downloads, the channel bot app needs any one of `im:message`, `im:message:readonly`, or `im:message.history:readonly`, configured in the Lark/Feishu developer console. The official [Obtain resource files in messages](https://open.larksuite.com/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-resource/get) API (`/reference/im-v1/message-resource/get`) lists these alternatives. Missing permission causes `channel_media_fetch_failed`. These bot-app permissions are separate from the service connection's Base field/read/create and Drive upload permissions.
 
 Lark/Feishu registration requires `app_id`, `app_secret`, and `verification_token`, with optional `encrypt_key`. The form and CLI do not require `bot_token`; the API accepts omission and continues accepting the ignored placeholder from older clients. The adapter constructs its stored credential from App ID and App Secret and exchanges it for a tenant access token.
 
@@ -885,6 +891,56 @@ NyxID resolves the live bot credential and calls the adapter's `fetch_attachment
 | X | Media URL with user bearer | `pbs.twimg.com`, `video.twimg.com`, `ton.twitter.com` |
 
 Webhook URLs are untrusted input even after parsing. Adapter allowlists, HTTPS/443, public DNS/IP checks, address pinning, and disabled redirects prevent SSRF. Credentials are never sent to a rejected host. Fetch errors use locally authored messages and never echo a URL. A debug record includes only message ID, index and byte count; downloads are not audited.
+
+### Lark/Feishu posts and NyxBot ingestion
+
+The adapter parses rich `post` title and content in document order: text, links,
+mentions, emotion, code and horizontal rules become bounded text; image and
+media elements become image/file selectors. Pinned own-bot mentions are removed.
+Text is capped at 32 KiB with a cap marker, and at most ten embedded selectors
+are retained with an omitted count. Malformed posts produce bounded output
+without panicking. Embedded selectors live in additive
+`ChannelMessage.embedded_attachments`; they do not change `CallbackPayload`
+bytes or the existing indexed `/attachments/{index}` download contract.
+
+With `assistant:channel-media` enabled for the linking person, verified owner
+Lark/Feishu media on NyxID's relay or gateway becomes encrypted assistant uploads
+at the start of the consuming run. Relay posts recompute text from the native
+payload; supported gateway media uses `activity.kind.text` instead of CMA's
+rendered media fallback. Audio/video activities retain their previous input.
+Admission checks group addressing before any download, and every fetch rechecks
+the stored owner/bot/route/chat/sender/thread authority. Guests get the fixed
+note `attachments from guests are not shared with the assistant` with no download
+or upload. Media prevents card/text decision parsing and question coalescing.
+
+Native dedup is atomic with accepted media event insertion. Its key binds bot,
+platform, chat and native message; a second relay UUID records
+`duplicate_of_media_key` and starts no fetch, turn or reply. Media events retain
+seven days of dedup evidence; text events retain 24 hours. Replays later than
+that native-media horizon are outside the guarantee. Queued owner media converts
+to a durable quoted-history expiry notice after six days. An accepted event with
+no turn/queue binding after five minutes is `interrupted`, with a fixed note
+delivered once on the next owner turn in the chat.
+
+Gateway callback HTTP 202 bodies are parsed within 2 KiB into closed
+`accepted`/`refused` admission codes; malformed, unknown or oversized responses
+become `unknown`. Only status and a closed refusal reason are stored, never IDs
+or response prose. Deliberate refusals such as `group_not_addressed` are skipped
+by health. An accepted eligible owner-private image/post without a provider
+event after the existing two-minute grace is lost, within the twelve-hour judge
+window. Pending ingestion remains pending; per-item failures report
+`media_failed` with a fixed reason (size, source/authority, type, rate limit,
+fetch/store, timeout, stopped or expired). Interrupted events report
+`interrupted`. Suppressed duplicates reuse the winning event's pending or final
+outcome; an expired winner never becomes a lost-message resend recommendation.
+
+Gateway support requires CMA ≥ `a570be21`, `CMAEG_MEDIA_ENABLED=true`, and NyxID
+responding within `CMAEG_PROVIDER_REQUEST_TIMEOUT_MS` (default 30 seconds).
+Downloads happen after admission in the run, outside that header budget. Upgrade
+all replicas and drain old workers before enabling the default-off flag. See
+[inbound channel media](chat/10-uploads.md#inbound-channel-media) for immutable
+bind receipts, Stop/orphan cleanup, the 192 MiB shared byte budget, file/step
+limits and the admin rollback drain.
 
 ### Outbound attachments
 
@@ -1410,17 +1466,19 @@ A leaked reply token authorizes one reply, later edits of that reply, and reads 
 flowchart TD
     CB[Agent Callback POST] --> STATUS{Response Status?}
 
-    STATUS -->|2xx, body ignored| ASYNC[Mark callback_status = delivered]
+    STATUS -->|202| DISPOSITION[Parse bounded admission disposition]
+    DISPOSITION --> ASYNC[Mark callback_status = delivered]
+    STATUS -->|200 legacy, body ignored| ASYNC
     ASYNC --> WAIT[Agent calls /channel-relay/reply later]
     WAIT --> SEND[send_reply via adapter]
     SEND --> LOG_OUT[Store outbound routing metadata]
 
-    STATUS -->|4xx / 5xx| ERR[Mark callback_status = failed]
+    STATUS -->|other HTTP status| ERR[Mark callback_status = failed]
     ERR --> OPT{Send error<br/>msg to chat?}
     OPT -->|configurable| ERRMSG[Platform: 'Agent unavailable']
     OPT -->|no| DONE[Done]
 
-    STATUS -->|timeout| TO[Mark callback_status = timeout]
+    STATUS -->|timeout| TO[Mark callback_status = failed, no HTTP status]
     TO --> OPT
 ```
 

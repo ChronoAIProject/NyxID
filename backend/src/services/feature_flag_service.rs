@@ -175,6 +175,19 @@ const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_CHANNEL_MEDIA_FLAG_KEY: &str = "assistant:channel-media";
+const ASSISTANT_CHANNEL_MEDIA_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+    description: "Admit owner Lark/Feishu media after every replica supports channel uploads.",
+    default_enabled: false,
+};
+pub const ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY: &str = "assistant:attachment-writes";
+const ASSISTANT_ATTACHMENT_WRITES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
+    description: "Enable managed attachment writes after every replica supports their enforcement.",
+    default_enabled: false,
+};
+
 pub const ASSISTANT_INVOCATIONS_FLAG_KEY: &str = "assistant:owner-invocations";
 const ASSISTANT_INVOCATIONS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_INVOCATIONS_FLAG_KEY,
@@ -281,6 +294,8 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
     ASSISTANT_INVOCATIONS_FLAG,
     MACHINE_CAPABILITIES_FLAG,
@@ -316,6 +331,8 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
     ASSISTANT_INVOCATIONS_FLAG,
     MACHINE_CAPABILITIES_FLAG,
@@ -908,10 +925,14 @@ pub async fn personal_flag_enabled(
     user_id: &str,
     flag_key: &str,
 ) -> AppResult<bool> {
-    Ok(resolve_personal_features(db, user_id)
+    let enabled = resolve_personal_features(db, user_id)
         .await?
         .iter()
-        .any(|key| key == flag_key))
+        .any(|key| key == flag_key);
+    if enabled {
+        super::security_readiness_service::require(db, flag_key).await?;
+    }
+    Ok(enabled)
 }
 
 /// Who a flag can be on for, so background work can skip a flag nobody has
@@ -2491,6 +2512,8 @@ mod tests {
                 "nyxbot:thread-follow",
                 "nyxbot:service-adapters",
                 "assistant:operation-scopes",
+                "assistant:channel-media",
+                "assistant:attachment-writes",
                 "assistant:live-turn-gate",
                 "assistant:owner-invocations",
                 "assistant:machine-capabilities",
@@ -3012,5 +3035,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(replaced.owner.is_none());
+    }
+
+    #[test]
+    fn channel_media_and_attachment_writes_are_registered_default_off() {
+        for key in [
+            ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+            ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
+        ] {
+            let flag = FEATURE_FLAGS.iter().find(|flag| flag.key == key).unwrap();
+            assert!(!flag.default_enabled);
+        }
     }
 }

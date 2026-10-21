@@ -601,10 +601,18 @@ and allowance credits for attributed model executions. Its daily chart can
 switch funding measure. **Traffic by model** separates request and token charts
 and tables; cache/audio/image counts overlap the documented input/output totals.
 Model names identify stored billing models or request aliases. **Unknown model**
-means no nonblank model identity was recorded on an execution.
+means no nonblank model identity was recorded on an execution, including
+proxied executions settled before provider-reported models were captured.
 
-**Top billing accounts** ranks the complete population by known gross cost,
-requests, then account identity; each account shows model detail. Top model
+**Model services** charts requests by the inference service that handled each
+model execution (Top 20 + Other), with exact credits and tokens per service on
+expansion. The service is recorded for all history, so it also explains usage
+whose model is unknown.
+
+**Top billing accounts** uses the Usage dashboard panel (gross cost by billing
+account, Top 10 + Other, with its data table). It ranks the complete population
+by known gross cost, requests, then account identity; **Models by billing
+account** expands each account's model detail. Top model
 membership is stable across daily buckets. **Other** is the summed usage beyond
 the displayed model/account limit, including unavailable prices. **≥** marks a
 known cost subtotal with unpriced events; **Unavailable** means the selected
@@ -616,3 +624,32 @@ Both are excluded. Scope details show excluded orchestration, tool, and
 unclassified requests/costs. Recent activity is included alongside summaries;
 validation status indicates whether the reporting journal was stable for the
 read. Existing activity/outcome/feedback sections keep their own semantics.
+
+## Current bill, taxes and usage invoices
+
+The personal Billing tab includes **Current bill** and **Past usage invoices**.
+The current bill is the open calendar billing period in Lago: each wallet-funded
+charge shows its name, units and pre-tax amount, followed by subtotal, named tax
+rates/amounts, total tax and total so far. Lago's aggregate amounts are
+authoritative. Computed tax rows can differ because Lago rounds fees/taxes to
+cents; **Tax rounding** makes differences up to one cent per displayed tax row
+plus one cent explicit. If the difference exceeds that tolerance, the bill shows
+only Lago's aggregate **Tax**, omitting potentially outdated names and rates.
+The bill uses the current cached tax configuration and remains provisional until
+invoiced. Currency amounts use two decimals, dates use UTC, and invoice payment
+statuses appear as **Paid**, **Pending** or **Failed**.
+
+Past usage invoices are finalized subscription invoices. **Invoice total** is
+before prepaid credits. **Prepaid credits applied** explains how much the wallet
+paid; **Amount due** is the remaining payable balance. Each invoice includes its
+historical named tax rows and a **Download receipt** action. Top-up history
+continues to show the separate untaxed invoices for buying credits.
+
+Grant- and allowance-funded quantities never reach Lago, are not taxed and are
+intentionally absent from these bills. Usage remains the place to inspect those
+benefits. Wallet availability, reservations, pending debits and overdraft checks
+include tax on the wallet-funded share. The Usage funding split retains the
+pre-tax wallet share; the settlement ledger separately records tax.
+
+See [billing operations](BILLING_OPERATIONS.md) for manual merchant enablement,
+flag and owner resolution, Lago tax setup, and deployment order.

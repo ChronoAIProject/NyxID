@@ -169,6 +169,7 @@ async fn failed_issuance_rolls_back_claim_and_all_rows_then_can_retry() {
         let code = mint(&state.db, KEY, &actor, restricted.then(selection), None)
             .await
             .unwrap();
+        let frozen = status(&state.db, &actor, &code.id).await.unwrap();
         let collection = if restricted { CHILDREN } else { SESSIONS };
         state
             .db
@@ -197,7 +198,17 @@ async fn failed_issuance_rolls_back_claim_and_all_rows_then_can_retry() {
             .run_command(doc! {"collMod": collection, "validator": {}})
             .await
             .unwrap();
-        assert!(redeem_code(&state, &code.code, "192.0.2.1").await.is_ok());
+        let retried = redeem_code(&state, &code.code, "192.0.2.1").await.unwrap();
+        if let Delivery::AgentKey(delivery) = retried {
+            let Some(Selection::New(input)) = frozen.selection else {
+                panic!("new key intent")
+            };
+            assert_eq!(delivery.api_key.expires_at, input.expires_at);
+            assert_eq!(
+                delivery.credential_expires_at,
+                frozen.credential_expires_at.map(|value| value.to_rfc3339())
+            );
+        }
     }
 }
 
@@ -518,5 +529,69 @@ async fn third_party_oauth_cannot_mint_or_approve_human_login_grants() {
             .await
             .unwrap(),
         0
+    );
+}
+
+#[tokio::test]
+async fn mint_freezes_default_intent_and_old_shaped_pending_codes_remain_readable() {
+    let (state, actor) = fixture("w9_code_intent").await;
+    let code = mint(&state.db, KEY, &actor, Some(selection()), None)
+        .await
+        .unwrap();
+    let rows = state.db.collection::<LoginCode>(COLLECTION_NAME);
+    let row = rows
+        .find_one(doc! {"_id": &code.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let Selection::New(input) = row.selection.clone().unwrap() else {
+        panic!("new selection")
+    };
+    assert!(input.expires_at.is_some());
+    assert!(!input.never_expires);
+    assert!(
+        bson::to_document(&input)
+            .unwrap()
+            .get("never_expires")
+            .is_none()
+    );
+    let frozen_parent = input.expires_at.clone();
+    let frozen_child = row.credential_expires_at;
+    let Delivery::AgentKey(delivery) = redeem_code(&state, &code.code, "192.0.2.90").await.unwrap()
+    else {
+        panic!("agent delivery")
+    };
+    assert_eq!(delivery.api_key.expires_at, frozen_parent);
+    assert_eq!(
+        delivery.credential_expires_at,
+        frozen_child.map(|value| value.to_rfc3339())
+    );
+
+    let code = mint(&state.db, KEY, &actor, Some(selection()), None)
+        .await
+        .unwrap();
+    // Simulate an old replica's persisted intent: absent new field and no expiry.
+    let created_at = bson::DateTime::from_chrono(Utc::now() - Duration::hours(1));
+    rows.update_one(
+        doc! {"_id": &code.id},
+        doc! {"$set": {
+            "selection": {"kind": "new", "name": "Old pending", "scopes": "proxy"},
+            "credential_expires_at": bson::Bson::Null, "created_at": created_at,
+        }},
+    )
+    .await
+    .unwrap();
+    let Delivery::AgentKey(delivery) = redeem_code(&state, &code.code, "192.0.2.91").await.unwrap()
+    else {
+        panic!("agent delivery")
+    };
+    let expected = (created_at.to_chrono() + Duration::days(90)).to_rfc3339();
+    assert_eq!(
+        delivery.api_key.expires_at.as_deref(),
+        Some(expected.as_str())
+    );
+    assert_eq!(
+        delivery.credential_expires_at.as_deref(),
+        Some(expected.as_str())
     );
 }

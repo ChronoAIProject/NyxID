@@ -159,6 +159,8 @@ mod tests {
             "owner",
             "whatsapp",
             &super::super::channel_platform::InboundMessage {
+                embedded_attachments: Vec::new(),
+                embedded_attachments_omitted: 0,
                 platform_message_id: event.into(),
                 conversation_id: "789".into(),
                 conversation_type: "private".into(),

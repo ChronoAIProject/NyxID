@@ -132,7 +132,7 @@ export function NotificationSettingsPage() {
       ? {
           telegram_enabled: settings.telegram_enabled,
           push_enabled: settings.push_enabled,
-          approval_required: settings.approval_required,
+          global_approval_mode: settings.global_approval_mode ?? (settings.approval_required ? "all" : "off"),
           approval_timeout_secs: settings.approval_timeout_secs,
           grant_expiry_days: settings.grant_expiry_days,
         }
@@ -483,7 +483,10 @@ export function NotificationSettingsPage() {
               Boolean(settings?.push_enabled)
             }
             approvalEnabled={Boolean(settings?.approval_required)}
+            approvalMode={settings?.global_approval_mode}
             approvalSuspended={Boolean(settings?.approval_suspended)}
+            deliveryConfigured={settings?.approval_delivery_configured}
+            webAvailable={settings?.approval_web_available}
           />
 
           {/* Telegram Connection Card */}
@@ -650,27 +653,31 @@ export function NotificationSettingsPage() {
 
                   <FormField
                     control={form.control}
-                    name="approval_required"
+                    name="global_approval_mode"
                     render={({ field }) => (
                       <FormItem className="!space-y-0 flex items-center justify-between rounded-lg border border-border p-4">
                         <div className="space-y-0.5">
                           <FormLabel>
-                            Require Approval (Global Default)
+                            Approval (Global Default)
                           </FormLabel>
                           <FormDescription>
-                            When enabled, every proxy and LLM gateway request
-                            requires a fresh approval (per-request mode by
-                            default). Use per-service overrides below to switch
-                            individual services to time-based grants or to
-                            exempt them entirely.
+                            Writes only requires approval for changes and destructive
+                            operations. Reads and stateless model inference can proceed.
+                            Per-service and organization policies still apply.
                           </FormDescription>
                         </div>
-                        <FormControl>
-                          <Switch
-                            checked={field.value}
-                            onCheckedChange={field.onChange}
-                          />
-                        </FormControl>
+                        <Select value={field.value} onValueChange={field.onChange}>
+                          <FormControl>
+                            <SelectTrigger className="w-48" aria-label="Approval (Global Default)">
+                              <SelectValue />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
+                            <SelectItem value="writes_only">Writes only (default)</SelectItem>
+                            <SelectItem value="all">All requests</SelectItem>
+                            <SelectItem value="off">Off</SelectItem>
+                          </SelectContent>
+                        </Select>
                       </FormItem>
                     )}
                   />

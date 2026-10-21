@@ -219,6 +219,8 @@ fn parse_interaction(payload: &serde_json::Value) -> Option<InboundMessage> {
     };
 
     Some(InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: interaction_id.to_string(),
         conversation_id: channel_id.to_string(),
         conversation_type: map_conversation_type(channel_type).to_string(),
@@ -260,6 +262,8 @@ fn parse_gateway_message(payload: &serde_json::Value) -> Option<InboundMessage> 
 
     let attachments = extract_attachments(msg);
     Some(InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: message_id.to_string(),
         conversation_id: channel_id.to_string(),
         conversation_type: "group".to_string(),

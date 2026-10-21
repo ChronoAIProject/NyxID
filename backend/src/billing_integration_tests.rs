@@ -1,4 +1,6 @@
+mod bills;
 mod operations;
+mod taxes;
 mod usage;
 
 use std::collections::BTreeSet;
@@ -202,6 +204,13 @@ const COVERAGE_CASES: &[CoverageCase] = &[
 
 #[derive(Default)]
 pub(crate) struct FakeLago {
+    tax_rate: Option<String>,
+    tax_unavailable: bool,
+    tax_delay: Option<std::time::Duration>,
+    tax_fetches: AtomicUsize,
+    bill_data: Option<serde_json::Value>,
+    invoice_data: Option<serde_json::Value>,
+    invoice: Option<crate::services::billing::lago_client::InvoiceSummary>,
     wallet_creates: AtomicUsize,
     wallet_balance: Option<crate::models::credits::Credits>,
     wallet_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
@@ -227,6 +236,41 @@ impl FakeLago {
 
 #[async_trait]
 impl LagoApi for FakeLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        self.tax_fetches.fetch_add(1, Ordering::SeqCst);
+        if let Some(delay) = self.tax_delay {
+            tokio::time::sleep(delay).await;
+        }
+        if self.tax_unavailable {
+            return Err(AppError::BillingProviderUnavailable(
+                "test tax outage".into(),
+            ));
+        }
+        let mut config = crate::services::billing::taxes::zero_config();
+        if let Some(rate) = &self.tax_rate {
+            config.customer["taxes"] = serde_json::json!([{"code":"gst","name":"GST","rate":rate}]);
+        }
+        Ok(config)
+    }
+    async fn subscription_invoices(&self, _: &str, _: u32, _: u32) -> AppResult<serde_json::Value> {
+        Ok(self
+            .invoice_data
+            .clone()
+            .unwrap_or(serde_json::json!({"invoices":[], "meta":{"total_count":0}})))
+    }
+    async fn invoice_summary(
+        &self,
+        id: &str,
+    ) -> AppResult<Option<crate::services::billing::lago_client::InvoiceSummary>> {
+        Ok(self.invoice.clone().filter(|i| i.lago_id == id))
+    }
+    async fn invoice_download_url(&self, _: &str) -> AppResult<Option<String>> {
+        Ok(Some("https://example.test/invoice.pdf".into()))
+    }
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
         Ok(owner.external_customer_id.clone())
     }
@@ -272,7 +316,7 @@ impl LagoApi for FakeLago {
         Ok(LagoUsage {
             customer_id: customer_id.to_string(),
             subscription_id: subscription_id.to_string(),
-            raw: serde_json::json!({}),
+            raw: self.bill_data.clone().unwrap_or(serde_json::json!({})),
         })
     }
 
@@ -327,6 +371,9 @@ async fn run_billing_route_coverage_smoke() {
 
     let lago = Arc::new(FakeLago::default());
     let owner_id = insert_owner(&db).await;
+    // Billing-route tests select the owner's ordinary no-prompt preference.
+    // Fresh users otherwise require approval, including without delivery.
+    set_billing_fixture_approval_required(&db, &owner_id, false).await;
     let (downstream_url, downstream) = start_billing_downstream().await;
     let mut proxy_catalog = crate::models::downstream_service::test_helpers::dummy_service();
     proxy_catalog.id = Uuid::new_v4().to_string();
@@ -723,27 +770,36 @@ async fn run_billing_route_coverage_smoke() {
     exercised_routes.insert("/mcp (POST)");
 
     let now = Utc::now();
-    db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
-        .insert_one(NotificationChannel {
-            id: Uuid::new_v4().to_string(),
-            user_id: owner_id.clone(),
-            // Global approval protection is enforced only while a delivery
-            // channel is active; a linked Telegram chat keeps it enforced here.
-            telegram_chat_id: Some(4242),
-            telegram_username: Some("billing-smoke".to_string()),
-            telegram_enabled: true,
-            telegram_link_code: None,
-            telegram_link_code_expires_at: None,
-            approval_timeout_secs: 300,
-            grant_expiry_days: 30,
-            approval_required: true,
-            push_enabled: false,
-            push_devices: vec![],
-            created_at: now,
-            updated_at: now,
-        })
+    // Toggle the same stored preference to required for the exact redemption
+    // cases; notification delivery is independent of the approval requirement.
+    let channel = crate::services::notification_service::get_or_create_channel(&db, &owner_id)
+        .await
+        .expect("load billing owner approval preference");
+    let updated = db
+        .collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+        .update_one(
+            doc! { "_id": &channel.id, "user_id": &owner_id },
+            doc! { "$set": {
+                "approval_required": true,
+                "approval_timeout_secs": 300_i64,
+                "telegram_chat_id": 4242_i64,
+                "telegram_username": "billing-smoke",
+                "telegram_enabled": true,
+                "updated_at": bson::DateTime::from_chrono(now),
+            } },
+        )
         .await
         .expect("enable per-request approval for exact redemption smoke");
+    assert_eq!(updated.matched_count, 1);
+    assert!(
+        crate::services::approval_service::user_requires_approval(
+            &db,
+            &owner_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .unwrap()
+    );
     let exact_arguments = serde_json::json!({
         "method": "GET",
         "path": "/exact-billing?source=approval",
@@ -901,10 +957,9 @@ async fn run_billing_route_coverage_smoke() {
     assert_eq!(redeemed["state"], "redeemed");
     assert_route_settled_count(&db, &mcp.slug, BillingMetric::Requests, 2).await;
     exercised_routes.insert("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
-    db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
-        .delete_one(doc! { "user_id": &owner_id })
-        .await
-        .expect("clear exact redemption approval policy before later route smoke cases");
+    // Absence selects the fresh-user true default. Restore the explicit false
+    // preference for the remaining billing routes instead of deleting the row.
+    set_billing_fixture_approval_required(&db, &owner_id, false).await;
 
     let node_mcp = insert_route_service(
         &db,
@@ -1403,6 +1458,7 @@ async fn buffered_route_preserves_success_when_settlement_failure_is_replayed() 
     create_usage_index(&db).await;
     insert_fresh_rates(&db).await;
     let owner_id = insert_owner(&db).await;
+    set_billing_fixture_approval_required(&db, &owner_id, false).await;
     let (downstream_url, forwarded_request, release_response, downstream) =
         start_controlled_billing_downstream().await;
     // Platform charging is opt-in per catalog service, so the recovery
@@ -2855,6 +2911,43 @@ pub(crate) fn rate(metric: &str, synced_at: chrono::DateTime<Utc>) -> BillingRat
         synced_at,
         retired_at: None,
     }
+}
+
+async fn set_billing_fixture_approval_required(
+    db: &mongodb::Database,
+    owner_id: &str,
+    required: bool,
+) {
+    let channel = crate::services::notification_service::get_or_create_channel(db, owner_id)
+        .await
+        .expect("create or load billing fixture approval preference");
+    let updated = db
+        .collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+        .update_one(
+            doc! { "_id": &channel.id, "user_id": owner_id },
+            doc! { "$set": { "approval_required": required } },
+        )
+        .await
+        .expect("set explicit billing fixture approval preference");
+    assert_eq!(updated.matched_count, 1);
+    assert_eq!(
+        db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+            .count_documents(doc! { "user_id": owner_id })
+            .await
+            .unwrap(),
+        1,
+        "billing fixture must retain one authoritative preference row"
+    );
+    assert_eq!(
+        crate::services::approval_service::user_requires_approval(
+            db,
+            owner_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .unwrap(),
+        required
+    );
 }
 
 async fn insert_owner(db: &mongodb::Database) -> String {

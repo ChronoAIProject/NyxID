@@ -8,6 +8,13 @@ async fn service_pool_credential_fallback_checks_selected_member_scope() {
             let mut fixture =
                 fixture("pool_scoped_credentials", StatusCode::OK, strategy, true).await;
             bind_first_credential(&fixture).await;
+            crate::test_utils::set_test_approval_preference(
+                &fixture.state.db,
+                &fixture.auth.user_id.to_string(),
+                false,
+            )
+            .await;
+
             fixture
                 .state
                 .db
@@ -81,6 +88,13 @@ async fn service_pool_credential_fallback_checks_selected_member_scope() {
 async fn service_pool_selected_member_does_not_intersect_sibling_scopes() {
     for strategy in ["priority", "round_robin", "weighted"] {
         let mut fixture = fixture("pool_scoped_siblings", StatusCode::OK, strategy, true).await;
+        crate::test_utils::set_test_approval_preference(
+            &fixture.state.db,
+            &fixture.auth.user_id.to_string(),
+            false,
+        )
+        .await;
+
         let members: Vec<crate::models::user_service::UserService> = fixture
             .state
             .db

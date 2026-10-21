@@ -30,6 +30,9 @@ pub struct ReportedLlmUsage {
     pub cached_tokens_included_in_prompt: bool,
     pub images: u64,
     pub completed_image_index: Option<u64>,
+    /// Provider-reported model identifier; not a usage measure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl ReportedLlmUsage {
@@ -73,6 +76,7 @@ impl ReportedLlmUsage {
                 input_tokens: clamp(self.image_input_tokens),
                 output_tokens: clamp(self.image_output_tokens),
             }))
+            .with_reported_model(self.model.clone())
     }
 
     /// Per-class breakdown for the usage meter row, following each
@@ -105,6 +109,7 @@ pub struct ReportedLlmUsageAccumulator {
     cached_tokens_included_in_prompt: bool,
     images: u64,
     seen_image_indexes: HashSet<u64>,
+    model: Option<String>,
 }
 
 const MAX_REALTIME_RESPONSE_ID_LEN: usize = 256;
@@ -269,6 +274,7 @@ const FALLBACK_BYTES_PER_TOKEN: i64 = 4;
 
 impl ReportedLlmUsageAccumulator {
     pub fn observe_snapshot(&mut self, usage: ReportedLlmUsage) {
+        self.observe_model(&usage);
         self.cached_tokens_included_in_prompt |= usage.cached_tokens_included_in_prompt;
         if let Some(index) = usage.completed_image_index {
             if !self.seen_image_indexes.insert(index) {
@@ -298,6 +304,7 @@ impl ReportedLlmUsageAccumulator {
     }
 
     pub fn observe_delta(&mut self, usage: ReportedLlmUsage) {
+        self.observe_model(&usage);
         self.cached_tokens_included_in_prompt |= usage.cached_tokens_included_in_prompt;
         if let Some(index) = usage.completed_image_index {
             if !self.seen_image_indexes.insert(index) {
@@ -334,6 +341,12 @@ impl ReportedLlmUsageAccumulator {
         }
     }
 
+    fn observe_model(&mut self, usage: &ReportedLlmUsage) {
+        if self.model.is_none() {
+            self.model.clone_from(&usage.model);
+        }
+    }
+
     pub fn observe(&mut self, usage: ReportedLlmUsage, mode: UsageAggregationMode) {
         match mode {
             UsageAggregationMode::Snapshot => self.observe_snapshot(usage),
@@ -363,6 +376,7 @@ impl ReportedLlmUsageAccumulator {
             cached_tokens_included_in_prompt: self.cached_tokens_included_in_prompt,
             images: self.images,
             completed_image_index: None,
+            model: self.model,
         };
 
         (!usage.is_empty()).then_some(usage)
@@ -642,9 +656,35 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
         .any(|path| value.pointer(path).is_some()),
         images: 0,
         completed_image_index: None,
+        model: reported_model(value),
     };
 
     (!usage.is_empty()).then_some(usage)
+}
+
+const MAX_REPORTED_MODEL_LEN: usize = 128;
+
+/// Provider-reported model identifier (OpenAI/xAI `model`, Responses API
+/// `response.model`, Anthropic `message.model`, Gemini `modelVersion`).
+/// Anything that is not a plain bounded identifier is ignored, so response
+/// content can never be stored as a model name.
+fn reported_model(value: &serde_json::Value) -> Option<String> {
+    [
+        "/model",
+        "/response/model",
+        "/message/model",
+        "/modelVersion",
+    ]
+    .iter()
+    .find_map(|pointer| value.pointer(pointer)?.as_str())
+    .filter(|model| {
+        !model.is_empty()
+            && model.len() <= MAX_REPORTED_MODEL_LEN
+            && model
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-._:/@+".contains(&b))
+    })
+    .map(str::to_owned)
 }
 
 pub fn is_image_generation_path(path: &str) -> bool {
@@ -837,7 +877,7 @@ pub fn log_reported_usage_async(context: UsageAuditContext, usage: ReportedLlmUs
         Some(serde_json::json!({
             "provider_slug": context.provider_slug,
             "service_id": context.service_id,
-            "model": context.model,
+            "model": context.model.or_else(|| usage.model.clone()),
             "path": context.path,
             "prompt_tokens": usage.prompt_tokens,
             "completion_tokens": usage.completion_tokens,
@@ -911,10 +951,11 @@ pub(crate) fn model_execution(
 #[cfg(test)]
 mod tests {
     use super::{
-        RealtimeLlmUsageCollector, ReportedLlmUsage, ReportedLlmUsageAccumulator,
-        UsageAggregationMode, estimate_tokens_from_bytes, extract_realtime_response_done,
-        extract_reported_usage, extract_reported_usage_from_sse_event,
-        force_stream_options_include_usage, token_quantity_or_estimate,
+        BoundedUsageEvents, MAX_REPORTED_MODEL_LEN, RealtimeLlmUsageCollector, ReportedLlmUsage,
+        ReportedLlmUsageAccumulator, UsageAggregationMode, estimate_tokens_from_bytes,
+        extract_realtime_response_done, extract_reported_usage,
+        extract_reported_usage_from_sse_event, force_stream_options_include_usage,
+        token_quantity_or_estimate, usage_from_body,
     };
 
     #[test]
@@ -1531,6 +1572,85 @@ mod tests {
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["stream_options"]["another_option"], true);
         assert!(!force_stream_options_include_usage(&mut body));
+    }
+
+    #[test]
+    fn records_provider_reported_model_for_each_wire_format() {
+        let chat =
+            br#"{"model":"gpt-5.5-2026-09-01","usage":{"prompt_tokens":3,"completion_tokens":2}}"#;
+        assert_eq!(
+            usage_from_body(chat, "/v1/chat/completions", true)
+                .and_then(|usage| usage.model)
+                .as_deref(),
+            Some("gpt-5.5-2026-09-01")
+        );
+        let responses = concat!(
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5.5\",\"usage\":null}}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.5\",\"usage\":{\"input_tokens\":7,\"output_tokens\":4,\"total_tokens\":11}}}\n\n",
+        );
+        let mut events = BoundedUsageEvents::default();
+        events.push(responses.as_bytes());
+        let usage = events.finalize_success(true).expect("responses usage");
+        assert_eq!(
+            (usage.total_tokens, usage.model.as_deref()),
+            (11, Some("gpt-5.5"))
+        );
+        let anthropic = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-opus-5-5\",\"usage\":{\"input_tokens\":9}}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n",
+        );
+        let usage = usage_from_body(anthropic.as_bytes(), "/v1/messages", true).expect("anthropic");
+        assert_eq!(usage.model.as_deref(), Some("claude-opus-5-5"));
+        let gemini = br#"{"modelVersion":"gemini-3.0-pro","usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":1}}"#;
+        assert_eq!(
+            usage_from_body(gemini, "/v1beta/models/x:generateContent", true)
+                .and_then(|usage| usage.model)
+                .as_deref(),
+            Some("gemini-3.0-pro")
+        );
+    }
+
+    #[test]
+    fn reported_model_ignores_non_identifier_values() {
+        for model in [
+            serde_json::json!("private content with spaces"),
+            serde_json::json!("x".repeat(MAX_REPORTED_MODEL_LEN + 1)),
+            serde_json::json!(""),
+            serde_json::json!({"id": "gpt"}),
+        ] {
+            let value = serde_json::json!({"model": model, "usage": {"total_tokens": 1}});
+            let usage = extract_reported_usage(&value).expect("usage");
+            assert_eq!(usage.model, None);
+        }
+        assert_eq!(
+            extract_reported_usage(&serde_json::json!({"model": "gpt-5.5"})),
+            None
+        );
+    }
+
+    #[test]
+    fn reported_model_is_observability_only() {
+        let usage = ReportedLlmUsage {
+            prompt_tokens: 3,
+            completion_tokens: 2,
+            total_tokens: 5,
+            ..Default::default()
+        };
+        let named = ReportedLlmUsage {
+            model: Some("gpt-5.5".into()),
+            ..usage.clone()
+        };
+        let base = crate::models::service_billing::PlatformUsage::llm_completion(10, 5);
+        let priced = usage.apply_to(base.clone());
+        let observed = named.apply_to(base);
+        assert_eq!(observed.reported_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(
+            crate::models::service_billing::PlatformUsage {
+                reported_model: None,
+                ..observed
+            },
+            priced
+        );
     }
 
     #[test]

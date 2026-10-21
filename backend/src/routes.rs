@@ -1034,6 +1034,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .post(handlers::admin_feature_flags::create_feature_flag),
         )
         .route(
+            "/security-readiness",
+            get(handlers::health::security_readiness),
+        )
+        .route(
             "/feature-flag-targets",
             get(handlers::admin_feature_flags::list_feature_flag_targets),
         )
@@ -1223,6 +1227,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/assistant/analytics",
             get(handlers::admin_assistant::analytics),
+        )
+        .route(
+            "/assistant/channel-media/drain",
+            post(handlers::admin_assistant::drain_channel_media),
         )
         .route(
             "/assistant/feedback",
@@ -1841,6 +1849,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/topup", post(handlers::billing::create_topup))
         .route("/topups", get(handlers::billing::list_topups))
+        .route("/bill", get(handlers::billing::get_bill))
+        .route("/invoices", get(handlers::billing::list_invoices))
         .route("/grants", get(handlers::billing_credits::user_list_grants))
         .route(
             "/allowances",
