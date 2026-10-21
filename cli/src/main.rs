@@ -17,6 +17,9 @@ mod telemetry;
 #[cfg(test)]
 mod test_support;
 mod tls;
+#[cfg(unix)]
+#[path = "commands/update_attestation/trusted_directory.rs"]
+mod trusted_directory;
 mod update_check;
 mod wizard;
 

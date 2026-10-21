@@ -32,6 +32,9 @@ mod signing;
 #[path = "node/storage.rs"]
 pub(crate) mod storage;
 pub mod tls;
+#[cfg(unix)]
+#[path = "commands/update_attestation/trusted_directory.rs"]
+mod trusted_directory;
 
 pub mod ws_client {
     pub enum NodeWsMessage {
