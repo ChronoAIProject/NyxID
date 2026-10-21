@@ -57,9 +57,26 @@ Local verification is limited to serial tests, TypeScript and source/static chec
 
 Isolated CI performs the full build, 90-page artifact checks, HTTP/privacy and single-worker browser tests. Gates check effective markers/URLs, menu and activation controls, dormant feature code and unreviewed article exclusion. Live enabled services still need their own accepted target-environment evidence; current production defaults remain off.
 
-本轮最终 CI/工程 SHA/完整 artifact 证据将在验证完成后补入此处。独立验收由主对话转交；不把旧基线的复验结论沿用为本轮通过。真实后端、已审核新文章、实际方案接通和 field CWV 不在本轮完成范围。
+最终工程 SHA：**`fd00726ec086ed5cf3d8ad19a20e88a00555a2b0`**。[最终 CI](https://github.com/aelf-hzz780/NyxID/actions/runs/39578181573) 全通过：30 文件 / 232 单测、完整 TypeScript/生产构建、90 页产物、219 HTTP、日志隐私、10 项单 worker browser（0 skipped / 0 flaky）。[完整 artifact](https://github.com/aelf-hzz780/NyxID/actions/runs/39578181573/artifacts/12335496628) 已下载核对 digest：`sha256:d0f0bc5adb532428f9022061a9a8b896540a3527d1fcd69d057d1917c57fad32`。manifest、源码 SHA 和配置快照一致：四开关 false、solutions 空集合。contentRevision 为 `49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1`，configRevision 为 `a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27`。机器证据见 [verification.json](website-visibility-evidence/verification.json)，精简原始日志见 [ci-proof.txt](website-visibility-evidence/ci-proof.txt)。最终文档 Commit 只补证据，交付 HEAD 以包含本记录的最后 Commit 为准。
 
-Final CI/source/artifact evidence is recorded after verification. The main chat submits independent acceptance; prior results do not establish this increment's acceptance. Live services, newly approved articles, operational use cases and field CWV remain outside this delivery.
+Final engineering source **`fd00726ec086ed5cf3d8ad19a20e88a00555a2b0`** passed the linked CI: 232 tests in 30 files, complete build, 90-page gate, 219 HTTP checks, privacy and ten browser tests without skips/flakes. The complete artifact was downloaded and its digest, source SHA and all-off configuration verified. The final documentation commit records evidence only; delivery HEAD is the last commit containing this handoff.
+
+| 新增 Commit / Commit | 内容 / Change |
+|---|---|
+| `325068a8d` | 可恢复组件、独立发布配置、Blog 菜单隐藏、逐项方案 / Retained components and publication controls |
+| `46b3a5a78` | 配置 snapshot/revision、混装拒绝、产物与浏览器门禁 / Configuration-bound artifact and hydration checks |
+| `cbdcaa53e` | v4.2 原方案与原评审页/生成器同步 / Revised scope and reproducible original review |
+| `72500d639` | 恢复 Blog 导航时保留 active/query；适配默认隐藏断言 / Blog restoration context and menu assertions |
+| `fd00726ec` | 拒绝首页空 query/hash 的 Status 变体 / Reject homepage variants as Status destinations |
+| 最终文档 Commit / Final documentation commit | 核验后的交接与 artifact 证据 / Verified handoff and artifact evidence |
+
+最新 lab 单样本 `/security`：reduced-motion=true，73 resources，559843 transfer bytes，LCP 56ms，CLS≈1.951。只记录观察，CLS 仍值得单独排查；没有运行性能矩阵，也不宣称性能门槛、field CWV 或增长结果通过。
+
+The single lab sample records reduced-motion=true, 73 resources, 559843 transfer bytes, LCP 56ms and CLS≈1.951. High CLS remains a separate concern. No performance matrix, field-CWV or growth outcome is claimed.
+
+独立验收由主对话转交；不把旧基线的复验结论沿用为本轮通过。真实后端、已审核新文章、实际方案接通和 field CWV 不在本轮完成范围。
+
+Final source/artifact evidence is recorded above. The main chat submits independent acceptance; prior results do not establish this increment's acceptance. Live services, newly approved articles, operational use cases and field CWV remain outside this delivery.
 
 ## 文档与材料归属 / Document ownership
 
@@ -70,3 +87,7 @@ This commit selectively tracks this handoff, the requested v4.2 proposal and ori
 主对话维护的 [visibility-review.html](website-scope-v4.2/visibility-review.html)、`source/build-visibility-review.py`、`visibility-evidence.json` 不由本轮编辑或暂存。其余原有未跟踪方案/评审资产保持原状。旧 [SEO 交接](website-seo-ai-delivery.md) 保持历史可追溯；没有 merge、部署或代提组织 PR。
 
 The separate visibility review, generator and evidence belong to the main chat and are neither edited nor staged here. Other pre-existing untracked materials remain untouched, and the prior SEO handoff stays historical. No merge, deployment or organization PR is performed.
+
+历史图片与切片仍按要求保持未跟踪，因此单独 checkout 本次新增 review 文本并不包含其全部本机图片依赖；主对话的视觉材料后续提交由主对话负责。正式前端构建和四项开关的恢复不依赖这些原型文件，已生成的页面与可恢复组件均有受版本管理的源码。
+
+Historical images/excerpts remain untracked as requested, so this commit's review text alone does not include every local image dependency. The main chat owns subsequent visual-material submission. Production builds and feature restoration use tracked component/generated source and do not require those prototype assets.
