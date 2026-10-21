@@ -30,7 +30,7 @@ def check(image, database_url):
     with tempfile.TemporaryDirectory(prefix='nyxid-backend-health-') as temporary:
         keys = Path(temporary) / 'keys'
         keys.mkdir(mode=0o755)
-        run(['openssl', 'genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:2048', '-out', str(keys / 'private.pem')])
+        run(['openssl', 'genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:4096', '-out', str(keys / 'private.pem')])
         run(['openssl', 'pkey', '-in', str(keys / 'private.pem'), '-pubout', '-out', str(keys / 'public.pem')])
         for path in keys.iterdir(): path.chmod(0o444)
         with socket.socket() as reservation:
