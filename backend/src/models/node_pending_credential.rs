@@ -61,12 +61,34 @@ pub enum FanOutDecryptOutcome {
     Error,
 }
 
+/// Why an encrypted credential might have reached its node without bound completion.
+/// Adding reason variants carries an old-reader caveat: older binaries cannot
+/// deserialize an unknown reason even though they ignore this entire new field.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryUncertaintyReason {
+    DispatchInterrupted,
+    CancelledAfterDispatch,
+    LegacyInFlightAtUpgrade,
+}
+
+/// Permanent, content-free delivery evidence. Never cleared by expiry or retry.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryUncertainty {
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
+    pub reason: DeliveryUncertaintyReason,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FanOutNodeState {
     pub node_id: String,
     pub generation: i64,
     pub crypto: CryptoBundle,
     pub remote_state: Option<RemoteCryptoState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_uncertainty: Option<DeliveryUncertainty>,
     pub decrypt_outcome: Option<FanOutDecryptOutcome>,
     pub error_code: Option<u32>,
     pub error_kind: Option<String>,
@@ -128,6 +150,8 @@ pub struct NodePendingCredential {
     pub crypto: Option<CryptoBundle>,
     #[serde(default)]
     pub remote_state: Option<RemoteCryptoState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_uncertainty: Option<DeliveryUncertainty>,
     #[serde(default, with = "bson_datetime::optional")]
     pub ciphertext_queued_at: Option<DateTime<Utc>>,
     #[serde(default, with = "bson_datetime::optional")]
@@ -157,6 +181,7 @@ impl fmt::Debug for NodePendingCredential {
             .field("declined_at", &self.declined_at)
             .field("crypto", &self.crypto.as_ref().map(|_| "[REDACTED]"))
             .field("remote_state", &self.remote_state)
+            .field("delivery_uncertainty", &self.delivery_uncertainty)
             .field("ciphertext_queued_at", &self.ciphertext_queued_at)
             .field("ciphertext_expires_at", &self.ciphertext_expires_at)
             .field("is_active", &self.is_active)
@@ -173,6 +198,181 @@ fn is_zero_i64(value: &i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    pub struct OldFanOutNodeState {
+        pub node_id: String,
+        pub generation: i64,
+        pub crypto: CryptoBundle,
+        pub remote_state: Option<RemoteCryptoState>,
+        pub decrypt_outcome: Option<FanOutDecryptOutcome>,
+        pub error_code: Option<u32>,
+        pub error_kind: Option<String>,
+        #[serde(default, with = "bson_datetime::optional")]
+        pub pubkey_posted_at: Option<DateTime<Utc>>,
+        #[serde(default, with = "bson_datetime::optional")]
+        pub ciphertext_queued_at: Option<DateTime<Utc>>,
+        #[serde(default, with = "bson_datetime::optional")]
+        pub ciphertext_expires_at: Option<DateTime<Utc>>,
+        #[serde(default, with = "bson_datetime::optional")]
+        pub consumed_at: Option<DateTime<Utc>>,
+        #[serde(default, with = "bson_datetime::optional")]
+        pub declined_at: Option<DateTime<Utc>>,
+        #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+        pub updated_at: DateTime<Utc>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub struct OldPendingCredential {
+        #[serde(rename = "_id")]
+        pub id: String,
+        pub node_id: String,
+        pub service_slug: String,
+        pub injection_method: InjectionMethod,
+        pub field_name: String,
+        pub target_url: Option<String>,
+        pub label: Option<String>,
+        pub created_by_user_id: String,
+        pub owner_user_id: String,
+        #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+        pub created_at: DateTime<Utc>,
+        #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+        pub expires_at: DateTime<Utc>,
+        #[serde(default, with = "bson_datetime::optional")]
+        pub consumed_at: Option<DateTime<Utc>>,
+        #[serde(default, with = "bson_datetime::optional")]
+        pub declined_at: Option<DateTime<Utc>>,
+        #[serde(default)]
+        pub crypto: Option<CryptoBundle>,
+        #[serde(default)]
+        pub remote_state: Option<RemoteCryptoState>,
+        #[serde(default, with = "bson_datetime::optional")]
+        pub ciphertext_queued_at: Option<DateTime<Utc>>,
+        #[serde(default, with = "bson_datetime::optional")]
+        pub ciphertext_expires_at: Option<DateTime<Utc>>,
+        pub is_active: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub fan_out_nodes: Vec<OldFanOutNodeState>,
+        #[serde(default, skip_serializing_if = "is_zero_i64")]
+        pub fan_out_revision: i64,
+    }
+
+    #[test]
+    fn w8_node_delivery_uncertainty_preserves_old_reader_single_and_fanout_shapes() {
+        let now = DateTime::from_timestamp_millis(1_792_533_600_123).unwrap();
+        for reason in [
+            DeliveryUncertaintyReason::DispatchInterrupted,
+            DeliveryUncertaintyReason::CancelledAfterDispatch,
+            DeliveryUncertaintyReason::LegacyInFlightAtUpgrade,
+        ] {
+            for fanout in [false, true] {
+                let uncertainty = DeliveryUncertainty { at: now, reason };
+                let target = FanOutNodeState {
+                    delivery_uncertainty: Some(uncertainty.clone()),
+                    node_id: uuid::Uuid::new_v4().to_string(),
+                    generation: 7,
+                    crypto: CryptoBundle {
+                        version: "v1".into(),
+                        node_pubkey: String::new(),
+                        admin_pubkey: None,
+                        nonce: None,
+                        ciphertext: None,
+                    },
+                    remote_state: Some(RemoteCryptoState::Expired),
+                    decrypt_outcome: None,
+                    error_code: None,
+                    error_kind: None,
+                    pubkey_posted_at: None,
+                    ciphertext_queued_at: None,
+                    ciphertext_expires_at: None,
+                    consumed_at: None,
+                    declined_at: None,
+                    updated_at: now,
+                };
+                let pending = NodePendingCredential {
+                    delivery_uncertainty: Some(uncertainty.clone()),
+                    id: uuid::Uuid::new_v4().to_string(),
+                    node_id: target.node_id.clone(),
+                    service_slug: "fixture".into(),
+                    injection_method: InjectionMethod::Header,
+                    field_name: "Authorization".into(),
+                    target_url: None,
+                    label: None,
+                    created_by_user_id: uuid::Uuid::new_v4().to_string(),
+                    owner_user_id: uuid::Uuid::new_v4().to_string(),
+                    created_at: now,
+                    expires_at: now,
+                    consumed_at: None,
+                    declined_at: None,
+                    crypto: None,
+                    remote_state: Some(RemoteCryptoState::Expired),
+                    ciphertext_queued_at: None,
+                    ciphertext_expires_at: None,
+                    is_active: false,
+                    fan_out_revision: 8,
+                    fan_out_nodes: if fanout { vec![target] } else { vec![] },
+                };
+                let doc = bson::to_document(&pending).unwrap();
+                assert!(matches!(
+                    doc.get_document("delivery_uncertainty").unwrap().get("at"),
+                    Some(bson::Bson::DateTime(_))
+                ));
+                let new: NodePendingCredential = bson::from_document(doc.clone()).unwrap();
+                assert_eq!(new.delivery_uncertainty, Some(uncertainty.clone()));
+                assert_eq!(new.remote_state, Some(RemoteCryptoState::Expired));
+                assert!(!new.is_active);
+                // This is the complete pre-addition model shape. Unknown additive
+                // fields are ignored; the existing Expired enum still decodes.
+                let old: OldPendingCredential = bson::from_document(doc).unwrap();
+                assert_eq!(old.remote_state, Some(RemoteCryptoState::Expired));
+                assert!(!old.is_active);
+                assert_eq!(old.fan_out_nodes.len(), usize::from(fanout));
+                if fanout {
+                    assert_eq!(
+                        old.fan_out_nodes[0].remote_state,
+                        Some(RemoteCryptoState::Expired)
+                    );
+                    assert_eq!(new.fan_out_nodes[0].delivery_uncertainty, Some(uncertainty));
+                }
+                // Keep the old serializer compiled too; it cannot know the new
+                // field. Production old writers use partial/CAS updates, not
+                // replacement serialization of the entire pending document.
+                assert!(bson::to_document(&old).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn w8_node_delivery_uncertainty_reasons_are_closed_and_legacy_default_is_none() {
+        for (reason, wire) in [
+            (
+                DeliveryUncertaintyReason::DispatchInterrupted,
+                "dispatch_interrupted",
+            ),
+            (
+                DeliveryUncertaintyReason::CancelledAfterDispatch,
+                "cancelled_after_dispatch",
+            ),
+            (
+                DeliveryUncertaintyReason::LegacyInFlightAtUpgrade,
+                "legacy_in_flight_at_upgrade",
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(reason).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<DeliveryUncertaintyReason>(serde_json::json!(wire))
+                    .unwrap(),
+                reason
+            );
+        }
+        assert!(
+            serde_json::from_value::<DeliveryUncertaintyReason>(serde_json::json!("provider text"))
+                .is_err()
+        );
+        assert!(bson::from_document::<DeliveryUncertainty>(bson::doc! {
+            "at": bson::DateTime::now(), "reason": "dispatch_interrupted", "credential": "forbidden"
+        }).is_err());
+    }
 
     #[test]
     fn collection_name() {
@@ -295,6 +495,7 @@ mod tests {
         let restored: NodePendingCredential =
             bson::from_document(legacy_doc).expect("deserialize legacy");
 
+        assert!(restored.delivery_uncertainty.is_none());
         assert!(restored.crypto.is_none());
         assert!(restored.remote_state.is_none());
         assert!(restored.ciphertext_queued_at.is_none());
@@ -307,6 +508,7 @@ mod tests {
     fn single_node_bson_omits_fan_out_fields() {
         let now = Utc::now();
         let cred = NodePendingCredential {
+            delivery_uncertainty: None,
             id: "single".to_string(),
             node_id: "node-1".to_string(),
             service_slug: "openai".to_string(),
@@ -339,6 +541,7 @@ mod tests {
     fn fan_out_bson_includes_revision_and_nodes_with_chrono_helpers() {
         let now = Utc::now();
         let cred = NodePendingCredential {
+            delivery_uncertainty: None,
             id: "fanout".to_string(),
             node_id: "node-1".to_string(),
             service_slug: "openai".to_string(),
@@ -358,6 +561,7 @@ mod tests {
             ciphertext_expires_at: None,
             is_active: true,
             fan_out_nodes: vec![FanOutNodeState {
+                delivery_uncertainty: None,
                 node_id: "node-1".to_string(),
                 generation: 0,
                 crypto: CryptoBundle {
@@ -398,6 +602,7 @@ mod tests {
     fn queue_lifecycle_fields_bson_roundtrip() {
         let now = Utc::now();
         let cred = NodePendingCredential {
+            delivery_uncertainty: None,
             id: "queued".to_string(),
             node_id: "node-1".to_string(),
             service_slug: "openai".to_string(),
@@ -451,6 +656,7 @@ mod tests {
     fn node_pending_credential_debug_redacts_crypto_bundle() {
         let now = Utc::now();
         let cred = NodePendingCredential {
+            delivery_uncertainty: None,
             id: "queued".to_string(),
             node_id: "node-1".to_string(),
             service_slug: "openai".to_string(),
@@ -492,6 +698,7 @@ mod tests {
     fn node_pending_credential_debug_redacts_nested_fan_out_crypto() {
         let now = Utc::now();
         let cred = NodePendingCredential {
+            delivery_uncertainty: None,
             id: "fanout".to_string(),
             node_id: "node-1".to_string(),
             service_slug: "openai".to_string(),
@@ -511,6 +718,7 @@ mod tests {
             ciphertext_expires_at: None,
             is_active: true,
             fan_out_nodes: vec![FanOutNodeState {
+                delivery_uncertainty: None,
                 node_id: "node-1".to_string(),
                 generation: 0,
                 crypto: CryptoBundle {
@@ -545,6 +753,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let cred = NodePendingCredential {
+            delivery_uncertainty: None,
             id: uuid::Uuid::new_v4().to_string(),
             node_id: "node-1".to_string(),
             service_slug: "openai".to_string(),
@@ -577,6 +786,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_with_consumed_and_declined() {
         let cred = NodePendingCredential {
+            delivery_uncertainty: None,
             id: "id".to_string(),
             node_id: "n".to_string(),
             service_slug: "s".to_string(),

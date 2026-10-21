@@ -500,6 +500,7 @@ pub async fn create_pending_credential_with_id(
         ciphertext: None,
     });
     let pending = NodePendingCredential {
+        delivery_uncertainty: None,
         id: pending_id,
         node_id: node_id.to_string(),
         service_slug: input.service_slug,
@@ -647,6 +648,7 @@ pub async fn create_fan_out_pending_credential(
     let fan_out_nodes: Vec<FanOutNodeState> = targets
         .iter()
         .map(|target| FanOutNodeState {
+            delivery_uncertainty: None,
             node_id: target.node_id.clone(),
             generation: 0,
             crypto: CryptoBundle {
@@ -669,6 +671,7 @@ pub async fn create_fan_out_pending_credential(
         })
         .collect();
     let pending = NodePendingCredential {
+        delivery_uncertainty: None,
         id: Uuid::new_v4().to_string(),
         node_id: node_ids.first().cloned().ok_or_else(|| {
             AppError::Conflict("no active node targets for service fan-out".to_string())
@@ -2650,6 +2653,7 @@ mod tests {
     ) -> FanOutNodeState {
         let now = Utc::now();
         FanOutNodeState {
+            delivery_uncertainty: None,
             node_id: node_id.to_string(),
             generation,
             crypto: crate::models::node_pending_credential::CryptoBundle {
@@ -2709,6 +2713,7 @@ mod tests {
     ) -> NodePendingCredential {
         let now = Utc::now();
         let pending = NodePendingCredential {
+            delivery_uncertainty: None,
             id: Uuid::new_v4().to_string(),
             node_id: node_ids.first().expect("at least one node").clone(),
             service_slug: service_slug.to_string(),
@@ -2730,6 +2735,7 @@ mod tests {
             fan_out_nodes: node_ids
                 .iter()
                 .map(|node_id| FanOutNodeState {
+                    delivery_uncertainty: None,
                     node_id: node_id.clone(),
                     generation: 0,
                     crypto: CryptoBundle {
@@ -2924,6 +2930,7 @@ mod tests {
     fn store_pending_ciphertext_outcome_debug_redacts_pending_crypto() {
         let now = Utc::now();
         let pending = NodePendingCredential {
+            delivery_uncertainty: None,
             id: "pending-id".to_string(),
             node_id: "node-id".to_string(),
             service_slug: "openclaw".to_string(),
@@ -3417,6 +3424,7 @@ mod tests {
         insert_node(&db, &node).await;
         let now = Utc::now();
         let expired = NodePendingCredential {
+            delivery_uncertainty: None,
             id: Uuid::new_v4().to_string(),
             node_id: node.id.clone(),
             service_slug: "expired".to_string(),
@@ -4612,6 +4620,7 @@ mod tests {
         let now = Utc::now();
         for index in 0..(MAX_OFFLINE_CIPHERTEXT_QUEUE_PER_NODE - 1) {
             let pending = NodePendingCredential {
+                delivery_uncertainty: None,
                 id: Uuid::new_v4().to_string(),
                 node_id: node_id.clone(),
                 service_slug: format!("single-{index}"),

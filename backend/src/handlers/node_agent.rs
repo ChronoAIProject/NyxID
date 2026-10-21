@@ -291,6 +291,7 @@ mod tests {
     fn test_pending(crypto: Option<CryptoBundle>) -> NodePendingCredential {
         let now = Utc::now();
         NodePendingCredential {
+            delivery_uncertainty: None,
             id: "pending-1".to_string(),
             node_id: "node-1".to_string(),
             service_slug: "openclaw".to_string(),
@@ -411,6 +412,7 @@ mod tests {
             None
         };
         FanOutNodeState {
+            delivery_uncertainty: None,
             node_id: node_id.to_string(),
             generation: 0,
             crypto: CryptoBundle {
@@ -444,6 +446,7 @@ mod tests {
     ) -> NodePendingCredential {
         let now = Utc::now();
         let pending = NodePendingCredential {
+            delivery_uncertainty: None,
             id: Uuid::new_v4().to_string(),
             node_id: primary_node_id.to_string(),
             service_slug: service_slug.to_string(),

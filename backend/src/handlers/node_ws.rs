@@ -2571,6 +2571,7 @@ mod tests {
             None
         };
         FanOutNodeState {
+            delivery_uncertainty: None,
             node_id: node_id.to_string(),
             generation: 0,
             crypto: CryptoBundle {
@@ -2604,6 +2605,7 @@ mod tests {
     ) -> NodePendingCredential {
         let now = Utc::now();
         let pending = NodePendingCredential {
+            delivery_uncertainty: None,
             id: uuid::Uuid::new_v4().to_string(),
             node_id: primary_node_id.to_string(),
             service_slug: service_slug.to_string(),

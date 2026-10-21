@@ -6196,6 +6196,7 @@ mod tests {
     fn pending_pubkey_response_omits_admin_ciphertext_material() {
         let now = Utc::now();
         let pending = NodePendingCredential {
+            delivery_uncertainty: None,
             id: "pending-1".to_string(),
             node_id: "node-1".to_string(),
             service_slug: "openclaw".to_string(),
@@ -6239,6 +6240,7 @@ mod tests {
     fn pending_pubkey_response_returns_awaiting_until_pubkey_exists() {
         let now = Utc::now();
         let pending = NodePendingCredential {
+            delivery_uncertainty: None,
             id: "pending-awaiting".to_string(),
             node_id: "node-1".to_string(),
             service_slug: "openclaw".to_string(),
@@ -6343,6 +6345,7 @@ mod tests {
         let now = Utc::now();
         let expires = now + chrono::Duration::hours(1);
         let model = crate::models::node_pending_credential::NodePendingCredential {
+            delivery_uncertainty: None,
             id: "pc-map-1".to_string(),
             node_id: "node-map-1".to_string(),
             service_slug: "github".to_string(),
@@ -6386,6 +6389,7 @@ mod tests {
     fn pending_credential_info_includes_remote_state_metadata_only() {
         let now = Utc::now();
         let model = crate::models::node_pending_credential::NodePendingCredential {
+            delivery_uncertainty: None,
             id: "pc-map-state".to_string(),
             node_id: "node-map-state".to_string(),
             service_slug: "openclaw".to_string(),
