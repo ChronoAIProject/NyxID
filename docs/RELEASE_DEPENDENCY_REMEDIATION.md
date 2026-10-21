@@ -14,6 +14,13 @@ nix >=0.31.3 and libc >=0.2.186. The unused `utoipa-swagger-ui` dependency is
 removed, eliminating zip 3 and its mutable build-time GitHub asset download.
 The OpenAPI derives and JSON route remain provided by `utoipa`.
 
+The October 21 bundle audit also found the newly published emSign distrust
+advisories RUSTSEC-2026-0381, RUSTSEC-2026-0382 and RUSTSEC-2026-0383. The lock
+now uses `rustls-webpki` 0.103.16, `webpki-roots` 1.0.10 and
+`webpki-root-certs` 1.0.10, which reject the distrusted intermediates or remove
+the affected root. No disposition was added for these findings. The 0.26.11
+webpki-roots compatibility wrapper resolves to the patched 1.0.10 store.
+
 Managed bootstrap RSA generation, sealing and opening now use AWS-LC. The wire
 contract remains RSA-3072, OAEP-SHA256 with MGF1-SHA256 and the existing domain
 label, canonical PKCS#8 private persistence and SPKI public encoding. Borrowed
@@ -33,7 +40,7 @@ image and cross-platform consumer evidence.
 `security/dependency-dispositions.json` binds RUSTSEC-2023-0071 to both exact
 remaining rsa versions, registry checksums, affected package entries and reverse parent subgraphs, selected
 Linux/KMS features, resolved workspace parent chains and reviewed source hashes.
-The records expire on 2027-01-18, within 90 days of review.
+The records expire on 2026-11-19, matching the bundle's dependency review deadline.
 
 - rsa 0.9.10 remains through the backend's direct dependency and ssh-key 0.6.7,
   plus machine test-only interoperability. Backend uses are public parsing/JWKS
@@ -78,11 +85,15 @@ A new RSA reference, changed or duplicated private operation, changed production
 RSA context or new source file still fails admission. This remains a conservative
 change detector; reviewers must inspect types and call paths before refreshing.
 
-The October 20 refresh covers the PM-reviewed MFA AES helper consolidation and
-Mongo fixture cleanup. It also covers committed `f3d78472f`'s additional
-`cli/src/node/oauth/storage.rs` call: `decrypt_record` constructs `Aes256Gcm` and
-uses its authenticated `decrypt` with the recovery-record AAD; it introduces no
-RSA operation. Shared dirty node or audit edits were excluded from the refresh.
+The October 21 bundle refresh binds committed `c6b4c1837` after merging main's
+W1–W4 work. It removes excluded W8/W9.6 paths and their operation counts, and
+reviews main's contextual AES-GCM adapters, JWT key import/generation module,
+SSH CA context adapter and sanitized SigV4 call. JWT private signing remains
+AWS-LC; the SSH CA remains Ed25519; SigV4 is HMAC-SHA256. No new RustCrypto RSA
+private signing/decryption operation is admitted. The affected dependency
+subgraphs, checksums and selected Linux/KMS features are unchanged. The backend
+manifest binding includes the zeroization features and test dependency merged
+from main. The full source and finding delta is recorded with bundle validation.
 
 ## Mobile YAML compatibility
 

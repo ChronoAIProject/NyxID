@@ -210,7 +210,7 @@ def verify_rsa(root, policy, environment):
     validate_rsa_surface(root, policy)
     # Explicit target/features make this evidence independent of the audit host.
     env = {k: v for k, v in environment.items() if k != 'CARGO_HOME'}
-    env.update(CARGO_TARGET_DIR='/tmp/nyxid-shared-target', CARGO_BUILD_JOBS='4', CARGO_INCREMENTAL='0',
+    env.update(CARGO_BUILD_JOBS='4', CARGO_INCREMENTAL='0',
                CARGO_PROFILE_DEV_DEBUG='0', CARGO_PROFILE_TEST_DEBUG='0')
     result = run_required(['cargo', 'metadata', '--locked', '--format-version=1', '--filter-platform',
                           'x86_64-unknown-linux-gnu', '--features', 'nyxid/aws-kms,nyxid/gcp-kms'],

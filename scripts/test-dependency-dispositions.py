@@ -113,7 +113,7 @@ class UseDispositions(unittest.TestCase):
         with self.assertRaises(ValueError): d.validate_rsa_surface(self.root, policy)
 
     def test_reviewed_aes_integration_does_not_grant_new_private_operations(self):
-        source = self.root / 'cli/src/node/secret_operation.rs'; source.parent.mkdir(parents=True)
+        source = self.root / 'cli/src/node/secret_backend.rs'; source.parent.mkdir(parents=True)
         source.write_text('let value = file.decrypt(encoded)?;\n')
         policy = dict(rsa_guard=d.rsa_surface(self.root))
         d.validate_rsa_surface(self.root, policy)
@@ -122,8 +122,16 @@ class UseDispositions(unittest.TestCase):
         for extra in ('let other = file.decrypt(unreviewed)?;\n', 'use rsa as another;\n'):
             source.write_text('let value = file.decrypt(encoded)?;\n' + extra)
             with self.subTest(extra=extra), self.assertRaisesRegex(
-                    ValueError, 'surface changed.*cli/src/node/secret_operation.rs'):
+                    ValueError, 'surface changed.*cli/src/node/secret_backend.rs'):
                 d.validate_rsa_surface(self.root, policy)
+
+    def test_metadata_verification_preserves_the_callers_target_directory(self):
+        environment = dict(CARGO_TARGET_DIR=str(self.root / 'caller-target'), CARGO_HOME='isolated-audit-home')
+        with patch.object(d, 'run_required', return_value=subprocess.CompletedProcess([], 0, b'{}')) as run:
+            self.assertTrue(d.verify_rsa(self.root, dict(rsa_guard=d.rsa_surface(self.root), dispositions=[]), environment))
+        observed = run.call_args.kwargs['env']
+        self.assertEqual(observed['CARGO_TARGET_DIR'], environment['CARGO_TARGET_DIR'])
+        self.assertNotIn('CARGO_HOME', observed)
 
     def test_changed_reviewed_rsa_context_fails_even_if_operation_line_is_unchanged(self):
         source = self.root / 'cli/src/main.rs'; source.parent.mkdir(parents=True)
