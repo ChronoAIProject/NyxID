@@ -400,3 +400,36 @@ measurements of the integrated release.
 All window/filter cases passed the exact-oracle, index-coverage and median-budget
 assertions. The remaining overhead relative to the integer base is reflected in
 these measurements.
+
+### Assistant provenance in usage summaries
+
+Assistant provenance is additive display-partition metadata, not a root rollup
+identity. Existing root hashes/grouping and the exact-v2 normalization contract
+remain stable. Modern free meters retain the low-cardinality assistant source;
+they do not introduce per-key/ack partitions for unrelated free traffic. Existing
+connection attribution remains available. Source snapshots and zero-cost
+partitions survive API-key revoke/soft delete and credential removal.
+
+Upgrade all rollup writers to preserve this provenance through folding. An old
+writer ignores the source field and may fold newly captured free usage into a
+source-less summary during a mixed-version rollout. The scoped report excludes
+that uncovered summary even when its underlying meters were captured recently.
+
+A legacy free root can have measures but no cost partitions. When modern source
+partitions join that root, readers recover the root-minus-partitions residual
+for every additive measure. It remains unattributed and is never assigned to the
+new source. This calculation is on the atomic document read, including late old
+writers and daily bootstrap/promotion. A single-display accelerator is valid
+only when its sole partition accounts for all root rows. NyxBot free-summary
+reads always expand partitions plus residual, so an old writer rebuilding its
+older shortcut cannot assign the combined root to one new source. Normalization
+still writes exact money and scalar query mirrors atomically with concurrent
+folds; this reporting change adds no hot-path migration or money admission gate.
+
+Mixed exact and legacy groups preserve the exact gross/wallet/allowance subtotal
+when the legacy cached rate is absent. Cost presence remains null for an
+unknown-only group, while known zero exact settlements remain known. Model
+account Other rows subtract in Mongo before presentation count clamping and
+subtract cost-presence counts separately, retaining unknown-only remainders as
+unavailable. No quantities or distinct cardinalities are fabricated in the
+model-report DTO.

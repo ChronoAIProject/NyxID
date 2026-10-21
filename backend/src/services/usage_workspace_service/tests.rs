@@ -316,3 +316,13 @@ async fn workspace_handlers_enforce_admin_writes_and_usage_reader_reads() {
     }
     db.drop().await.unwrap();
 }
+
+#[test]
+fn nyxbot_internal_model_breakdown_does_not_expand_saved_workspace_contract() {
+    let mut value = config();
+    value.draft.panels[0].breakdown = "model".into();
+    assert!(validate(&value).is_err());
+    let mut json = serde_json::to_value(config()).unwrap();
+    json["draft"]["filters"]["model"] = serde_json::json!("alias");
+    assert!(serde_json::from_value::<WorkspaceConfig>(json).is_err());
+}

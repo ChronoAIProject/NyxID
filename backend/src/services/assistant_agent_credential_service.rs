@@ -341,6 +341,13 @@ pub async fn adopt_rotated_key(
         let mut row: AssistantAgentCredential =
             bson::from_document(stored.clone()).map_err(|_| unavailable())?;
         row.api_key_id = successor_id.to_owned();
+        db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .update_many(
+                doc! { "_id": { "$in": [predecessor_id, successor_id] }, "user_id": user_id },
+                doc! { "$set": { "assistant_usage": true } },
+            )
+            .session(&mut *session)
+            .await?;
         require_ordinary_key(db, user_id, predecessor_id, Some(&mut *session)).await?;
         require_ordinary_key(db, user_id, successor_id, Some(&mut *session)).await?;
         let ciphertext = super::assistant_record_service::encrypt_credential(
@@ -585,6 +592,13 @@ pub async fn load_or_provision_in_session(
     )
     .await?;
     apply_authority(db, user_id, &created.id, authority, session).await?;
+    db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": &created.id, "user_id": user_id },
+            doc! { "$set": { "assistant_usage": true } },
+        )
+        .session(&mut *session)
+        .await?;
     let raw = Zeroizing::new(created.full_key);
     let now = Utc::now();
     let mut row = AssistantAgentCredential {
@@ -1571,6 +1585,17 @@ mod tests {
                 .unwrap();
             assert_eq!(rotated.api_key_id, successor.id);
             assert_ne!(rotated.raw_key.as_str(), before.raw_key.as_str());
+            for key_id in [&before.api_key_id, &successor.id] {
+                let key = state
+                    .db
+                    .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+                    .find_one(doc! {"_id": key_id, "user_id": &owner})
+                    .projection(doc! {"assistant_usage": 1})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(key.get_bool("assistant_usage"), Ok(true));
+            }
             let raw = state
                 .db
                 .collection::<bson::Document>(CREDENTIALS)

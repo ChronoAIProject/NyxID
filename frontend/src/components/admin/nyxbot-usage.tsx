@@ -1,3 +1,4 @@
+import { NyxbotModelUsage } from "./nyxbot-model-usage";
 import { useId, useState } from "react";
 import {
   Bar,
@@ -120,7 +121,7 @@ export function NyxbotUsage() {
     <div className="analytics-visuals space-y-4">
       <div>
         <h2 className="font-display text-15 font-semibold tracking-tight">
-          NyxBot activity & feedback
+          NyxBot usage & feedback
         </h2>
         <p className="mt-1 text-12 text-muted-foreground">
           Understand how NyxBot and specialists are used, where work fails, and
@@ -181,6 +182,7 @@ export function NyxbotUsage() {
         </p>
       ) : (
         <>
+          <NyxbotModelUsage from={from} to={to} />
           <div
             className="flex flex-wrap items-center gap-2 text-11 text-text-tertiary"
             role="status"

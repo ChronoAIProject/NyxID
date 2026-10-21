@@ -70,9 +70,11 @@ billing from either services or linked providers. See [Service configuration and
 vendor retirement](docs/SERVICE_CONFIGURATION.md). They can also give a role read-only
 access to platform-wide usage reports, for example with the seeded **Usage
 Viewer** role, without granting other admin access. See [Admin usage](docs/BILLING_UI_GLOSSARY.md#admin-usage).
-Admins and operators can open **Usage → NyxBot** for active-session counts,
-turn outcomes, and reply feedback. See [NyxBot activity](docs/chat/08-nyxagent-engine.md#admin-nyxbot-activity)
-for metric definitions and access rules.
+Admins and operators can open **Usage → NyxBot** for cost and billing, token
+traffic, and top billing accounts split by model, alongside active-session
+counts, turn outcomes, and reply feedback. See [NyxBot model usage](docs/BILLING_ANALYTICS.md#nyxbot-model-usage)
+for exact values, attribution, and historical coverage, and
+[NyxBot activity](docs/chat/08-nyxagent-engine.md#admin-nyxbot-activity) for activity definitions.
 
 Feature flag access can be delegated to any user or group with
 `feature-flag-operator` (create flags and manage their own) or

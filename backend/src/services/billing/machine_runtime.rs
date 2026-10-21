@@ -708,6 +708,7 @@ impl BillingService {
             wallet_id: Some(reservation.wallet_id),
             actor_user_id: run.owner_id.clone(),
             api_key_id: None,
+            assistant_source: None,
             service_id: None,
             user_service_id: None,
             service_slug: Some(SKU.into()),
