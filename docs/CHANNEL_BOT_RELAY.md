@@ -2308,9 +2308,12 @@ independent of the destination.
 
 ### Telegram forwarded input and approval provenance
 
-NyxBot extracts full visible text/captions, hidden link URLs (using Telegram
-UTF-16 offsets), forward origin and quotes from authenticated Telegram input as
-third-party reference data. The relay envelope retains the exact provider text
+On direct NyxID delivery, NyxBot extracts visible text/captions, hidden link URLs
+(using Telegram UTF-16 offsets), forward origin and quotes as third-party reference
+data. Current `nyxid_relay` gateway delivery supplies only gateway plain text plus
+authenticated original-message eligibility and own/quoted file handles; it loses
+forward-origin names, quote/external-reply text and hidden link URLs. The product
+owner accepted this demo limitation; no body persistence or CMA change is included. The relay envelope retains the exact provider text
 for gateway verification. Opaque file handles resolve with the selected channel's
 current token. Manager setup/proof material is scrubbed before model input.
 `ChannelMessage.original_message` is optional boolean metadata. Only `true` from
@@ -2337,8 +2340,8 @@ authenticated ingress and bound into the activity digest/seal, without nested
 setup messages or keyboards. NyxID bounds this envelope to 64 KiB. Native-source
 events without it remain plain text and cannot decide actions, pair an owner or
 run controls. NyxID does not provision native Telegram gateway sources. Richer
-native-source forwarding and gateway rendering of quoted files are separate,
-optional [CMA follow-up work](plans/2026-10-21-cma-telegram-forwarding-followup.md).
+forwarding for both relay and native sources and gateway rendering of quoted
+files are separate, optional [CMA follow-up work](plans/2026-10-21-cma-telegram-forwarding-followup.md).
 
 The owner turn atomically binds encrypted inbound files with its message, checks
 owner isolation and applies existing upload retention. Unsupported binary media

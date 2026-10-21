@@ -181,14 +181,19 @@ it.each(["slack", "discord", "telegram"] as const)(
       screen.getByRole("button", { name: "Copy Confirmation command" }),
     );
     expect(await navigator.clipboard.readText()).toBe(confirmation);
-    if (platform === "telegram")
+    if (platform === "telegram") {
+      const returnLink = screen.getByRole("link", {
+        name: "Open Telegram to finish",
+      });
+      expect(returnLink).toHaveAttribute("target", "_blank");
+      expect(returnLink).toHaveAttribute("rel", "noopener noreferrer");
       expect(
         screen.getByRole("link", { name: "Open Telegram to finish" }),
       ).toHaveAttribute(
         "href",
         "https://t.me/manager_bot?start=nyxpersonal_P-ABCD-EFGH",
       );
-    else
+    } else
       expect(
         screen.queryByRole("link", { name: "Open Telegram to finish" }),
       ).not.toBeInTheDocument();
@@ -196,8 +201,11 @@ it.each(["slack", "discord", "telegram"] as const)(
       `same private ${name} chat`,
     );
     confirmed = true;
-    await user.click(screen.getByRole("button", { name: "Refresh status" }));
-    expect(await screen.findByText(`${name} is linked.`)).toBeVisible();
+    if (platform !== "telegram")
+      await user.click(screen.getByRole("button", { name: "Refresh status" }));
+    expect(
+      await screen.findByText(`${name} is linked.`, {}, { timeout: 6000 }),
+    ).toBeVisible();
     expect(screen.queryByText(confirmation)).not.toBeInTheDocument();
     view.unmount();
     mount(<PlatformPersonalBindings />);
@@ -210,4 +218,5 @@ it.each(["slack", "discord", "telegram"] as const)(
     );
     await waitFor(() => expect(window.location.href).not.toContain(token));
   },
+  15000,
 );

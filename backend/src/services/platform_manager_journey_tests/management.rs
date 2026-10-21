@@ -765,3 +765,98 @@ async fn bot_management_status_uses_live_health_at_listing_detail_and_final_send
     );
     j.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn opted_in_manager_onboarding_review_url_opens_the_exact_sent_request() {
+    use crate::{
+        handlers::platform_binding as browser, services::platform_binding_service as onboarding,
+    };
+    let j = Journey::new().await;
+    let mut profile = j.profile.clone();
+    profile.enabled = true;
+    j.state
+        .db
+        .collection::<PlatformBotConfig>(PROFILES)
+        .replace_one(doc! {"_id":&profile.id}, &profile)
+        .await
+        .unwrap();
+    assert_eq!(
+        onboarding::link_command(&j.state.db, &profile.id)
+            .await
+            .unwrap(),
+        "/onboarding"
+    );
+    assert!(
+        onboarding::chat_status(&j.state.db, &profile, "700", "700")
+            .await
+            .unwrap()
+            .contains("Send /onboarding")
+    );
+    let base = j.server.uri();
+    let service = telegram::service(&j.state, &base);
+    // Exercise the native legacy handler with runtime controls already present.
+    let update = j.update(5300, "/link", false);
+    let (bot, verified) = service
+        .webhook(
+            &telegram::headers(&j.state).await,
+            &serde_json::to_vec(&update).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        browser::handle_command(&j.state, &bot, &verified, &service)
+            .await
+            .unwrap()
+    );
+    let sends = j.sends().await;
+    let text = sends.last().unwrap()["text"].as_str().unwrap();
+    let url = reqwest::Url::parse(
+        text.split_whitespace()
+            .find(|s| s.starts_with("https://"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(url.path(), "/onboarding/link");
+    assert!(url.query().is_none());
+    let code = Zeroizing::new(
+        url.fragment()
+            .unwrap()
+            .strip_prefix("code=")
+            .unwrap()
+            .to_owned(),
+    );
+    let (_, axum::Json(preview)) = browser::preview(
+        axum::extract::State(j.state.clone()),
+        axum::extract::ConnectInfo("127.0.0.1:54321".parse().unwrap()),
+        axum::http::HeaderMap::new(),
+        axum::Json(browser::CodeInput { code: code.clone() }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(preview.manager_bot_id, "100");
+    assert_eq!(preview.requesting_sender_id, "700");
+    let approved = onboarding::decide(
+        &j.state.db,
+        j.state.auth_device_hmac_key.as_slice(),
+        &j.owner,
+        &code,
+        &code,
+        true,
+        false,
+    )
+    .await
+    .unwrap();
+    let proof = approved.confirmation_code.unwrap();
+    let command = Zeroizing::new(format!("/start nyxonboard_{}", proof.as_str()));
+    j.webhook(&j.update(5301, &command, false)).await;
+    assert_eq!(
+        onboarding::live_for_sender(&j.state.db, &profile, "700", "700")
+            .await
+            .unwrap()
+            .unwrap()
+            .user_id,
+        j.owner
+    );
+    j.state.db.drop().await.unwrap();
+}

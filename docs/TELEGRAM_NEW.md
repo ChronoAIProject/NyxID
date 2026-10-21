@@ -64,7 +64,7 @@ NyxID keeps the manager webhook and its verification secret. Ordinary private, g
 
 **Every manager-channel callback carries only delivery authentication and a message-bound reply token.** NyxID never adds `X-NyxID-User-Token` for this credential source, including explicit conversation and sender routes. The receiving agent can reply through `POST /api/v1/channel-relay/reply`, but an inbound Telegram message does not delegate the channel owner's NyxID service permissions. Other channel bots retain their existing scoped owner-token behavior. Scope any credentials held directly by the public agent separately. Telegram senders are not automatically mapped to NyxID accounts; account-specific operations require a separate authenticated workflow.
 
-A plain `/start` welcomes chat users and offers **Create bot** when the manager channel is active. Payload-bearing setup links and `/recover` keep their existing workflow, including commands addressed to the configured manager username. Creation events, manager commands, and callback queries remain reserved and are never forwarded to the agent. Generic agent inline-button callbacks are not supported. Ordinary replies retain the referenced message ID and safely extracted forwarded/quoted content, including visible text, captions, hidden link destinations and available author information. The manager's own setup messages remain excluded. Forwarded and quoted material is labelled as third-party reference data. Recognizable claim codes are removed from ordinary text, captions, and supported link metadata before relay; claim messages use Telegram's protected-content option. This reduces accidental disclosure, but is not a general secret detector: users must still enter claim codes only in NyxID. Neither raw updates nor message bodies are persisted by NyxID.
+A plain `/start` welcomes chat users and offers **Create bot** when the manager channel is active. Payload-bearing setup links and `/recover` keep their existing workflow, including commands addressed to the configured manager username. Creation events, manager commands, and callback queries remain reserved and are never forwarded to the agent. Generic agent inline-button callbacks are not supported. Ordinary replies retain the referenced message ID. Direct NyxID delivery can extract forwarded/quoted text, captions, hidden link destinations and available author information; NyxBot gateway delivery has the limitation described below. The manager's own setup messages remain excluded. Forwarded and quoted material is labelled as third-party reference data. Recognizable claim codes are removed from ordinary text, captions, and supported link metadata before relay; claim messages use Telegram's protected-content option. This reduces accidental disclosure, but is not a general secret detector: users must still enter claim codes only in NyxID. Neither raw updates nor message bodies are persisted by NyxID.
 
 After authentication and classification, ordinary messages are acknowledged without waiting for the agent callback. Ordinary lookup, parsing, and callback failures are logged with metadata and dropped. Authentication and management-event failures still return errors so Telegram can retry them. Each backend process allows **32 concurrent background deliveries**, each bounded by the existing callback timeout plus ten seconds for other work. At capacity, NyxID acknowledges and drops the ordinary message with a metadata-only warning. This limit is deliberately retained in this version. Deliveries can complete out of order; a process shutdown or callback failure can lose a reply, with no durable queue or automatic replay. Telegram may redeliver if it does not receive the acknowledgement, so agents must also tolerate duplicates. Telegram's shared pending-update and delivery-error checks still apply to creation: heavy ingress or a shared outage can delay or prevent automatic connection. With a remote KMS, per-request credential decryption also adds network work; no production throughput guarantee is implied.
 
@@ -393,16 +393,27 @@ change the message type; a text-only external reply remains admissible with
 gateway media disabled. The gateway's existing `CMAEG_MEDIA_ENABLED=true` setting
 is needed for the sending message's own top-level media.
 
+Known demo limitation: on `nyxid_relay` gateway channels, NyxBot receives the
+gateway's plain text plus `relay_input`'s authenticated original-message flag and
+own/quoted file handles. Forward-origin names, quote/external-reply text and
+hidden link URLs are **not available** there. The product owner accepted this gap;
+NyxID adds no body persistence and makes no CMA change. Forwarded/quoted or
+unverified input still cannot authorize card, pairing or control decisions.
+The [forwarding follow-up](plans/2026-10-21-cma-telegram-forwarding-followup.md)
+tracks the gateway envelope needed to close the gap and the five deferred demo
+review items (F2, F3, F5, F7, F8).
+
 Native gateway Telegram sources without a sealed `telegram_input` envelope use
 plain text and cannot make card, pairing or control decisions. NyxID does not
 create those sources, so this fail-closed compatibility behavior does not block
 NyxID-managed channels. The optional [CMA forwarding follow-up](plans/2026-10-21-cma-telegram-forwarding-followup.md)
-describes richer native-source input and gateway rendering of quoted files; it
-is not required for this NyxID change. The manager's direct Telegram path is
+describes the missing rich input for both relay and native sources, plus gateway
+rendering of quoted files; the demo ships with the stated limitation. The manager's direct Telegram path is
 independent of the gateway media setting.
 
 After `/login` (or `/link` for personal access), review the account in NyxID and
-choose **Open Telegram to finish**. Telegram sends a purpose-specific `/start`
+choose **Open Telegram to finish**. It opens a new tab/window so this review page
+keeps polling and shows completion. Telegram sends a purpose-specific `/start`
 payload. It must come from the same original private sender and manager; browser
 approval alone grants no chat authority. A **Copy** button supplies the equivalent
 `/confirm P-…` command. `/check` reports pending approval, waiting confirmation,

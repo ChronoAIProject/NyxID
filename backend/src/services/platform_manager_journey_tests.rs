@@ -2111,7 +2111,10 @@ async fn asynchronous_public_failure_sends_only_fixed_notice_and_live_revocation
             assert_eq!(sends.len(), 1);
             assert_eq!(
                 sends[0]["text"],
-                delivery::fixed_text(UnavailableReason::PublicTurnFailed)
+                delivery::fixed_text(
+                    UnavailableReason::PublicTurnFailed,
+                    super::super::platform_chat_presentation::ChatPresentation::Telegram
+                )
             );
             // The saved failure reference is idempotent and cannot emit another notice.
             let _ = deliver_saved(&j.state, &j.producers, &destination, &reply).await;

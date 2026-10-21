@@ -952,6 +952,27 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
         models::channel_message::StoredAttachment,
         services::channel_media_authority::{self as authority, MediaRequest},
     };
+    // Construct large handler futures outside the test's polling frame; inline
+    // Box::pin calls still reserve their construction temporaries on its stack.
+    fn gateway_response<'a>(
+        f: &'a Fixture,
+        body: &'a Value,
+        id: &'a str,
+    ) -> futures::future::BoxFuture<'a, Response> {
+        Box::pin(respond(&f.state, &f.key, body, id))
+    }
+    fn direct_response(
+        f: &Fixture,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> futures::future::BoxFuture<'static, Response> {
+        Box::pin(relay_callback(
+            State(f.state.clone()),
+            Path(f.row.id.clone()),
+            headers,
+            body,
+        ))
+    }
     for gateway in [false, true] {
         let mut f = Box::pin(Fixture::new("media_follow_barrier")).await;
         f.state
@@ -1019,8 +1040,8 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
         }
         if gateway {
             let (a, b) = tokio::join!(
-                Box::pin(respond(&f.state, &f.key, &a, &id_a)),
-                Box::pin(respond(&f.state, &f.key, &b, &id_b))
+                gateway_response(&f, &a, &id_a),
+                gateway_response(&f, &b, &id_b)
             );
             assert_eq!(a.status(), StatusCode::OK);
             assert_eq!(b.status(), StatusCode::OK);
@@ -1048,20 +1069,7 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
             };
             let (ha, ba) = signed(&id_a);
             let (hb, bb) = signed(&id_b);
-            let (a, b) = tokio::join!(
-                Box::pin(relay_callback(
-                    State(f.state.clone()),
-                    Path(f.row.id.clone()),
-                    ha,
-                    ba
-                )),
-                Box::pin(relay_callback(
-                    State(f.state.clone()),
-                    Path(f.row.id.clone()),
-                    hb,
-                    bb
-                ))
-            );
+            let (a, b) = tokio::join!(direct_response(&f, ha, ba), direct_response(&f, hb, bb));
             assert_eq!(a.status(), StatusCode::ACCEPTED);
             assert_eq!(b.status(), StatusCode::ACCEPTED);
             wait_for_calls(&f.calls, 1).await;

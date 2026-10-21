@@ -433,13 +433,14 @@ pub(crate) async fn chat_status(
     profile: &PlatformBotConfig,
     sender: &str,
     chat: &str,
-) -> AppResult<&'static str> {
+) -> AppResult<String> {
+    let command = link_command(db, &profile.id).await?;
     if sender != chat {
         return Err(unavailable());
     }
     if live_for_sender(db, profile, sender, chat).await?.is_some() {
         return Ok(
-            "Onboarding link status: linked. Use /setups to view progress, or /unlink to disconnect this chat.",
+            "Onboarding link status: linked. Use /setups to view progress, or /unlink to disconnect this chat.".into(),
         );
     }
     let request = db
@@ -453,20 +454,20 @@ pub(crate) async fn chat_status(
         .await?;
     Ok(match request {
         Some(request) if request.expires_at <= Utc::now() => {
-            "Onboarding link status: expired. Send /link to start a fresh review."
+            format!("Onboarding link status: expired. Send {command} to start a fresh review.")
         }
         Some(request) => match request.state {
             BindingRequestState::Pending => {
-                "Onboarding link status: awaiting browser approval. Open the review link from this chat and approve your account. /check only checks status."
+                "Onboarding link status: awaiting browser approval. Open the review link from this chat and approve your account. /check only checks status.".into()
             }
             BindingRequestState::AwaitingChatConfirmation
                 if request.confirmation_hmac.is_some() =>
             {
-                "Onboarding link status: approved; waiting for confirmation here. Return to the approval page and tap Open Telegram to finish, or copy its /confirm command into this private chat. /check does not complete linking."
+                "Onboarding link status: approved; waiting for confirmation here. Return to the approval page and tap Open Telegram to finish, or copy its /confirm command into this private chat. /check does not complete linking.".into()
             }
-            _ => "Onboarding link status: not linked. Send /link to start a fresh review.",
+            _ => format!("Onboarding link status: not linked. Send {command} to start a fresh review."),
         },
-        None => "Onboarding link status: not linked. Send /link to start a fresh review.",
+        None => format!("Onboarding link status: not linked. Send {command} to start a fresh review."),
     })
 }
 

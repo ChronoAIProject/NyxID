@@ -200,7 +200,11 @@ function BindingReview({ code }: { code: string }) {
                   <>
                     {telegramReturn && (
                       <Button variant="primary" asChild>
-                        <a href={telegramReturn} rel="noreferrer">
+                        <a
+                          href={telegramReturn}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
                           Open Telegram to finish
                         </a>
                       </Button>

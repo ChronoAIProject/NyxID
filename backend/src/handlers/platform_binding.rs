@@ -275,14 +275,16 @@ pub async fn revoke(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-fn command_error_reply(error: &AppError) -> Option<&'static str> {
+fn command_error_reply(error: &AppError, link_command: &str) -> Option<String> {
     match error {
         AppError::RateLimited | AppError::ConnectLinkRateLimited => {
-            Some("Too many linking attempts. Wait before trying again.")
+            Some("Too many linking attempts. Wait before trying again.".into())
         }
-        AppError::NotFound(_) | AppError::ValidationError(_) | AppError::Conflict(_) => Some(
-            "This linking request is unavailable or expired. Send /link to start again, approve in your browser, then use its fresh confirmation command here.",
-        ),
+        AppError::NotFound(_) | AppError::ValidationError(_) | AppError::Conflict(_) => {
+            Some(format!(
+                "This linking request is unavailable or expired. Send {link_command} to start again, approve in your browser, then use its fresh confirmation command here."
+            ))
+        }
         _ => None,
     }
 }
@@ -307,6 +309,7 @@ pub(crate) async fn handle_command(
     let Some(profile) = profile else {
         return Ok(false);
     };
+    let link_command = bindings::link_command(&state.db, &profile.id).await?;
     let message = &update["message"];
     let text = message["text"].as_str().unwrap_or("");
     let Some(command) = text.split_whitespace().next() else {
@@ -379,7 +382,7 @@ pub(crate) async fn handle_command(
                 if text.split_whitespace().count() != 1 {
                     "Send /check without any arguments to check onboarding link status.".into()
                 } else {
-                    bindings::chat_status(&state.db, &profile, &sender, &chat).await?.into()
+                    bindings::chat_status(&state.db, &profile, &sender, &chat).await?
                 }
             }
             "/setups" => {
@@ -408,7 +411,7 @@ pub(crate) async fn handle_command(
                     }
                     reply
                 } else {
-                    "Link your own account first with /link. No account credentials are delivered to this bot.".into()
+                    format!("Link your own account first with {link_command}. No account credentials are delivered to this bot.")
                 }
             }
             _ => unreachable!(),
@@ -416,11 +419,11 @@ pub(crate) async fn handle_command(
         match prepared {
             Ok(reply) => reply,
             Err(error) => {
-                let Some(reply) = command_error_reply(&error) else {
+                let Some(reply) = command_error_reply(&error, link_command) else {
                     return Err(error);
                 };
                 reply_binding = None;
-                reply.into()
+                reply
             }
         }
     };
@@ -437,8 +440,6 @@ pub(crate) async fn handle_command(
     {
         return Ok(true);
     }
-    let link_command = bindings::link_command(&state.db, &profile.id).await?;
-    let reply = reply.replace("/link", link_command);
     let token = values
         .get(crate::services::channel_adapters::telegram_new::MANAGER_TOKEN)
         .ok_or_else(|| AppError::Internal("Manager credentials unavailable".into()))?;
@@ -478,17 +479,21 @@ mod tests {
             AppError::ValidationError("private code details".into()),
             AppError::Conflict("private account binding".into()),
         ] {
-            let reply = command_error_reply(&error).unwrap();
+            let reply = command_error_reply(&error, "/link").unwrap();
             assert!(reply.contains("/link"));
             assert!(!reply.contains("private"));
         }
         assert!(
-            command_error_reply(&AppError::RateLimited)
+            command_error_reply(&AppError::RateLimited, "/onboarding")
                 .unwrap()
                 .contains("Wait")
         );
         assert!(
-            command_error_reply(&AppError::Internal("secret provider response".into())).is_none()
+            command_error_reply(
+                &AppError::Internal("secret provider response".into()),
+                "/link"
+            )
+            .is_none()
         );
     }
 }

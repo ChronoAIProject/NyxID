@@ -105,66 +105,84 @@ fn refused() -> AppError {
     AppError::Conflict("Chat reply authority is unavailable".into())
 }
 
-pub(crate) fn fixed_text(reason: UnavailableReason) -> &'static str {
+pub(crate) fn fixed_text(reason: UnavailableReason, chat: ChatPresentation) -> String {
+    let link = if chat == ChatPresentation::Telegram {
+        "/link"
+    } else {
+        chat.login()
+    };
+    let help = chat.help();
     match reason {
         UnavailableReason::ConfirmationRejected => {
-            "This confirmation could not be accepted. The code or account review may be expired, invalid, or for another chat, or linking may be unavailable. Send /link for a fresh account review when personal linking is enabled, then use its one-time confirmation in this same private chat."
+            format!(
+                "This confirmation could not be accepted. The code or account review may be expired, invalid, or for another chat, or linking may be unavailable. Send {link} for a fresh account review when personal linking is enabled, then use its one-time confirmation in this same private chat."
+            )
         }
         UnavailableReason::ControlInvalid => {
-            "That command could not be completed. Use /help for supported controls, or send /link for a fresh account review in this private chat."
+            format!(
+                "That command could not be completed. Use {help} for supported controls, or send {link} for a fresh account review in this private chat."
+            )
         }
         UnavailableReason::ControlRateLimited => {
-            "Too many chat controls were requested. Wait a moment, then retry here. Use /help for supported controls."
+            format!(
+                "Too many chat controls were requested. Wait a moment, then retry here. Use {help} for supported controls."
+            )
         }
         UnavailableReason::UnsupportedInput => {
-            "This chat supports text questions. Use /help for the available controls, or open NyxID for attachments and actions."
+            format!(
+                "This chat supports text questions. Use {help} for the available controls, or open NyxID for attachments and actions."
+            )
         }
         UnavailableReason::PersonalDisabled => {
-            "Personal NyxBot is paused for this manager. Your saved thread remains in NyxID."
+            "Personal NyxBot is paused for this manager. Your saved thread remains in NyxID.".into()
         }
         UnavailableReason::OwnerUnavailable | UnavailableReason::OriginRevoked => {
-            "This personal link is unavailable. Open NyxID to review your account and links."
+            "This personal link is unavailable. Open NyxID to review your account and links.".into()
         }
         UnavailableReason::InsufficientFunds => {
             "Your NyxBot could not start with the available credits. Review Billing in NyxID."
+                .into()
         }
         UnavailableReason::CapacityLimited => {
-            "Your NyxBot is busy. Wait for the current work or open NyxID."
+            "Your NyxBot is busy. Wait for the current work or open NyxID.".into()
         }
         UnavailableReason::PublicQuotaLimited => {
-            "Public chat has reached a daily limit. Try again after midnight UTC, or send /link to use your own NyxBot."
+            format!(
+                "Public chat has reached a daily limit. Try again after midnight UTC, or send {link} to use your own NyxBot."
+            )
         }
         UnavailableReason::PublicTurnFailed => {
-            "The public guide could not finish this turn. Please try again to start fresh, or send /link to use your own NyxBot."
+            format!(
+                "The public guide could not finish this turn. Please try again to start fresh, or send {link} to use your own NyxBot."
+            )
         }
         UnavailableReason::SponsorUnavailable => {
-            "Public chat funding is unavailable. Send /link to use your own NyxBot when personal linking is enabled."
+            format!(
+                "Public chat funding is unavailable. Send {link} to use your own NyxBot when personal linking is enabled."
+            )
         }
         UnavailableReason::EmergencyStopped
         | UnavailableReason::ManagerUnavailable
         | UnavailableReason::TransportUnavailable => {
-            "This manager is currently unavailable. Open NyxID to continue."
+            "This manager is currently unavailable. Open NyxID to continue.".into()
         }
         UnavailableReason::PublicDisabled
         | UnavailableReason::PublicNotReady
         | UnavailableReason::RuntimeUninitialized => {
-            "Public chat is unavailable. Send /link in this private chat to use your own NyxBot when personal linking is enabled."
+            format!(
+                "Public chat is unavailable. Send {link} in this private chat to use your own NyxBot when personal linking is enabled."
+            )
         }
         _ => {
-            "This request is unavailable. Open NyxID to continue, or send an original /link command in the manager's private chat."
+            format!(
+                "This request is unavailable. Open NyxID to continue, or send an original {link} command in the manager's private chat."
+            )
         }
     }
 }
 
 fn fixed_text_for(reason: UnavailableReason, entry: &EntryIdentity) -> AppResult<String> {
-    let chat = ChatPresentation::for_entry(entry)?;
-    Ok(if chat == ChatPresentation::Telegram {
-        fixed_text(reason).to_owned()
-    } else {
-        fixed_text(reason)
-            .replace("/link", chat.login())
-            .replace("/help", chat.help())
-    })
+    Ok(fixed_text(reason, ChatPresentation::for_entry(entry)?))
 }
 
 fn manager_lane(row: &Delivery) -> String {

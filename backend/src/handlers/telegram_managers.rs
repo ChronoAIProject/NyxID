@@ -84,22 +84,14 @@ pub async fn configure(
     service
         .configure_manager(&auth.user_id.to_string(), &fields, false)
         .await?;
-    let (_, name, _) = service.manager().await?;
+    let configured = stored_manager(&state.db, &service.manager_provider()).await?;
     crate::services::audit_service::log_for_user(
         state.db.clone(),
         &auth,
         "telegram_manager_configured",
         Some(serde_json::json!({"manager_bot_id":id.to_string()})),
     );
-    Ok((
-        headers(),
-        Json(Manager {
-            manager_bot_id: id.to_string(),
-            username: name,
-            ready: true,
-            legacy_default: false,
-        }),
-    ))
+    Ok((headers(), Json(configured)))
 }
 
 #[derive(Deserialize)]
@@ -134,4 +126,72 @@ pub async fn clear(
         Some(serde_json::json!({"manager_bot_id":body.manager_bot_id.to_string()})),
     );
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Read the same persisted metadata as the manager list after configuration.
+async fn stored_manager(db: &mongodb::Database, provider: &str) -> AppResult<Manager> {
+    let row = db
+        .collection::<PlatformCredential>(COLLECTION_NAME)
+        .find_one(doc! {"provider":provider})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Telegram manager unavailable".into()))?;
+    Ok(Manager {
+        manager_bot_id: row
+            .fields
+            .get("manager_bot_id")
+            .cloned()
+            .ok_or_else(|| AppError::Conflict("Manager identity unavailable".into()))?,
+        username: row
+            .fields
+            .get("manager_username")
+            .cloned()
+            .unwrap_or_default(),
+        ready: row.fields.get("webhook_ready").is_some_and(|v| v == "true"),
+        legacy_default: row.provider == "telegram-new",
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn configured_manager_response_uses_stored_readiness_and_provider_identity() {
+        let (state, _, _) = crate::services::telegram_new_tests::fixture().await;
+        let rows = state.db.collection::<PlatformCredential>(COLLECTION_NAME);
+        for provider in ["telegram-new", "telegram-new/200"] {
+            if provider != "telegram-new" {
+                let mut row = rows
+                    .find_one(doc! {"provider":"telegram-new"})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                row.id = uuid::Uuid::new_v4().to_string();
+                row.provider = provider.into();
+                row.fields.insert("manager_bot_id".into(), "200".into());
+                rows.insert_one(row).await.unwrap();
+            }
+            for ready in [None, Some("false"), Some("true")] {
+                let update = ready.map_or_else(
+                    || doc! {"$unset":{"fields.webhook_ready":""}},
+                    |value| doc! {"$set":{"fields.webhook_ready":value}},
+                );
+                rows.update_one(doc! {"provider":provider}, update)
+                    .await
+                    .unwrap();
+                let response = stored_manager(&state.db, provider).await.unwrap();
+                let json = serde_json::to_value(response).unwrap();
+                assert_eq!(json["ready"], ready == Some("true"));
+                assert_eq!(json["legacy_default"], provider == "telegram-new");
+                assert_eq!(
+                    json["manager_bot_id"],
+                    if provider == "telegram-new" {
+                        "100"
+                    } else {
+                        "200"
+                    }
+                );
+            }
+        }
+        state.db.drop().await.unwrap();
+    }
 }

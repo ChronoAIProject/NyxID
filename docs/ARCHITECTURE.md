@@ -2124,7 +2124,10 @@ cannot change a response halfway through delivery.
 fingerprint and each part's pending/sending/sent/failed state without storing the
 message body. Confirmed parts are not replayed; ambiguous provider outcomes stop
 resubmission. The personal-erasure worker deletes these journals by exact owner.
-Telegram input extraction preserves forwarded/quoted content as reference data;
+Direct Telegram input extraction preserves forwarded/quoted content as reference data.
+Current relay-sourced gateway delivery supplies plain text, original-message
+eligibility and own/quoted file handles, losing forward-origin names, quoted text
+and hidden link URLs (accepted demo limitation; see the CMA follow-up plan);
 only verified original messages can exercise pairing or action-card controls.
 Forwarded files use the existing owner-bound attachment roots and encrypted
 chunks, committed with the assistant turn.
