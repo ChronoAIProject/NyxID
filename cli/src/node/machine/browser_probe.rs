@@ -875,12 +875,22 @@ mod tests {
         assert_eq!(child.group, parent.pid);
         assert_eq!(child.parent, std::process::id());
         assert!(ancestry(&child, &parent, Link::read).unwrap().is_none());
-        assert_eq!(
+        // spawn() can return before the child's exec completes; until then
+        // /proc reports the forking test thread's name, not the executable's.
+        let comm = || {
             fs::read_to_string(format!("/proc/{}/comm", fake.0.id()))
                 .unwrap()
-                .trim(),
-            "chromium"
-        );
+                .trim()
+                .to_owned()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while comm() != "chromium" && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(comm(), "chromium");
+        // The exec'ed process is still not a browser descendant.
+        let child = Link::read(fake.0.id()).unwrap();
+        assert!(ancestry(&child, &parent, Link::read).unwrap().is_none());
         drop(browser);
         assert!(
             !pin.live().unwrap(),
