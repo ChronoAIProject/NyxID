@@ -1,5 +1,4 @@
-import { solutionStartTarget } from "./features/website-a/solution-availability";
-import { siteHref, authHref } from "./features/website-a/auth-links";
+import { solutionStartHref } from "./features/website-a/auth-links";
 import { onboardingSearch } from "@/schemas/platform-onboarding";
 import { ToolsPage } from "@/pages/tools";
 import { AdminToolsPage } from "@/pages/admin-tools";
@@ -340,9 +339,12 @@ const website8Route = createRoute({
 });
 
 const legacyStartRoute = createRoute({
- path: "/start", getParentRoute: () => rootRoute,
- beforeLoad: () => { const target = solutionStartTarget(window.location.search); window.location.replace(target ? siteHref(target) : authHref("register")); },
- component: () => null,
+  path: "/start",
+  getParentRoute: () => rootRoute,
+  beforeLoad: () => {
+    window.location.replace(solutionStartHref(window.location.search));
+  },
+  component: () => null,
 });
 
 const blogIndexRoute = createRoute({

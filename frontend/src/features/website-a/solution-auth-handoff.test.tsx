@@ -13,7 +13,8 @@ import { RegisterPage } from "@/pages/register";
 import { useAuthStore } from "@/stores/auth-store";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { SolutionActivation } from "./solution-activation";
-import { siteHref } from "./auth-links";
+import { siteHref, solutionAuthPath, legacyDestination } from "./auth-links";
+import { websiteRelease } from "./release-config";
 import { WebsiteContext, type WebsiteState } from "./website-context";
 
 const { login, register } = vi.hoisted(() => ({
@@ -44,12 +45,71 @@ vi.mock("@/hooks/use-auth-device", () => ({
 }));
 
 const originalAuth = useAuthStore.getState();
+const originalSolutions = { ...websiteRelease.solutions };
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.clearAllMocks();
   useAuthStore.setState(originalAuth);
+  websiteRelease.solutions = { ...originalSolutions };
   window.history.replaceState({}, "", "/");
+});
+
+function runRealStartHandler() {
+  const route = Object.values(appRouter.routesById).find(
+    (r) => r.fullPath === "/start",
+  )!;
+  const beforeLoad = route.options.beforeLoad as () => void;
+  beforeLoad();
+}
+
+it.each([
+  "/assistant?setup=help-desk&draft=hello%20world",
+  "/dashboard?panel=settings",
+])(
+  "uses the actual /start route and shared auth handoff for %s",
+  async (target) => {
+    websiteRelease.solutions = { "help-desk": target };
+    const search =
+      "?t=help-desk&code=NYX-ABCDEF12&return_to=https%3A%2F%2Fevil.test";
+    window.history.replaceState({}, "", `/start${search}`);
+    const replace = vi
+      .spyOn(window.location, "replace")
+      .mockImplementation(() => {});
+    runRealStartHandler();
+    const href = String(replace.mock.calls[0]?.[0]);
+    expect(href).toBe(siteHref(solutionAuthPath(target)));
+    expect(href).toBe(legacyDestination("#/start?t=help-desk", search));
+    const destination = new URL(href, window.location.origin);
+    expect(destination.pathname).toBe("/login");
+    expect(destination.searchParams.get("code")).toBe("NYX-ABCDEF12");
+    expect(destination.searchParams.get("return_to")).toBe(target);
+    window.history.replaceState({}, "", href);
+    await showAuthPage(LoginPage);
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Sign up" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/register"));
+    expect(screen.getByPlaceholderText("NYX-XXXXXXXX")).toHaveValue(
+      "NYX-ABCDEF12",
+    );
+    expect(new URLSearchParams(window.location.search).get("return_to")).toBe(
+      target,
+    );
+  },
+);
+
+it.each([
+  ["?t=help-desk&code=NYX-ABCDEF12", "/solutions/help-desk"],
+  ["?code=NYX-ABCDEF12&return_to=%2Fkeys", "/register"],
+])("preserves the actual /start fallback for %s", (search, path) => {
+  websiteRelease.solutions = {};
+  window.history.replaceState({}, "", `/start${search}`);
+  const replace = vi
+    .spyOn(window.location, "replace")
+    .mockImplementation(() => {});
+  runRealStartHandler();
+  expect(replace).toHaveBeenCalledWith(`${path}${search}`);
 });
 
 async function showAuthPage(component: typeof LoginPage) {

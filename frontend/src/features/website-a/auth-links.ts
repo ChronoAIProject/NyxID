@@ -45,6 +45,21 @@ export function solutionAuthPath(target: string) {
   return `/login?${new URLSearchParams({ return_to: target })}`;
 }
 
+/** Shared by the real /start route and retained prototype fragments. */
+export function solutionStartHref(
+  query: string,
+  search = typeof window === "undefined" ? "" : window.location.search,
+) {
+  const solution = solutionStartTarget(query);
+  if (!solution) return authHref("register", search);
+  return siteHref(
+    /^\/(?:assistant|dashboard)(?:\?|$)/.test(solution)
+      ? solutionAuthPath(solution)
+      : solution,
+    search,
+  );
+}
+
 /** Only recognized public prototype paths may leave the fragment namespace. */
 export function legacyDestination(
   hash: string,
@@ -61,17 +76,9 @@ export function legacyDestination(
     return siteHref(target + (query ? `?${query}` : ""), search);
   }
   if (pathname === "/start" || pathname === "/done") {
-    const solution = solutionStartTarget(query);
-    if (solution)
-      return siteHref(
-        /^\/(?:assistant|dashboard)(?:\?|$)/.test(solution)
-          ? solutionAuthPath(solution)
-          : solution,
-        search,
-      );
     // Mock provisioning fragments (including `t`) are not real auth state.
     // Preserve only the original outer query when entering real registration.
-    return authHref("register", search);
+    return solutionStartHref(query, search);
   }
   if (!publicRoutes.includes(pathname)) return null;
   return siteHref(pathname + (query ? `?${query}` : ""), search);
