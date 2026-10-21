@@ -16,6 +16,15 @@ import tempfile
 import threading
 import time
 
+NATIVE_RECEIPT = b"native_linux_custody: completed cross-UID file and Secret Service checks"
+
+
+def assert_rust_execution(result, name):
+    assert result.returncode == 0, f"native test failed: {name}"
+    assert b"test result: ok. 1 passed; 0 failed; 0 ignored;" in result.stdout, "exact native test must execute once"
+    if name == "node::custody::tests::native_linux_custody":
+        assert result.stdout.count(NATIVE_RECEIPT) == 1, "native custody fixture did not complete (possible early return)"
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -113,8 +122,7 @@ def main():
                                         timeout=bound, check=False)
                 log.write(result.stdout)
                 log.flush()
-                assert result.returncode == 0, f"native test failed: {name}"
-                assert b"test result: ok. 1 passed; 0 failed; 0 ignored;" in result.stdout, "exact native test must execute once"
+                assert_rust_execution(result, name)
 
             rust_test("node::custody::tests::native_linux_custody", 120)
             passed += 1

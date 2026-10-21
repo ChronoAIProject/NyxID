@@ -34,7 +34,7 @@ jobs:
           bash .github/scripts/install-linux-build-deps.sh
           sudo -n sh scripts/apt-snapshot-install.sh --install-only security/apt-snapshots.tsv ubuntu:noble -- \
             xvfb xauth x11-utils openbox dbus-x11 bubblewrap at-spi2-core fonts-liberation libnss3-tools \
-            python3-venv python3-pip build-essential git openssl util-linux cargo rustc nodejs npm
+            python3-venv python3-pip build-essential git openssl util-linux cargo rustc nodejs npm gnome-keyring
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
           components: clippy, rustfmt
@@ -57,8 +57,24 @@ jobs:
             python3 scripts/check-machine-native-prereqs.py --prepare-disposable-host
       - name: Build committed CLI and production-module fixture with their locks
         run: |
+          set -euo pipefail
           cargo build --locked -p nyxid-cli --bin nyxid
           cargo build --locked --manifest-path cli/tests/machine_context_spike/Cargo.toml
+          cargo test --locked -p nyxid-cli --bin nyxid --no-run --message-format=json \
+            | python3 -c 'import json, sys; messages = [json.loads(line) for line in sys.stdin]; binaries = [m["executable"] for m in messages if m.get("reason") == "compiler-artifact" and m.get("profile", {}).get("test") and m.get("target", {}).get("name") == "nyxid" and m.get("executable")]; assert len(binaries) == 1, binaries; print(binaries[0])' \
+            > "$RUNNER_TEMP/node-custody-test-binary"
+      - name: Require native cross-UID file and Secret Service custody acceptance
+        run: |
+          set -euo pipefail
+          command -v dbus-run-session
+          for identity in nyxid-custody-command nyxid-custody-browser nyxid-custody-developer; do
+            sudo -n useradd --no-create-home --shell /usr/sbin/nologin "$identity"
+          done
+          sudo -n env PATH="$PATH" python3 cli/tests/node_custody_acceptance.py --disposable \
+            --binary "$CARGO_TARGET_DIR/debug/nyxid" \
+            --test-binary "$(cat "$RUNNER_TEMP/node-custody-test-binary")" \
+            --identities nyxid-custody-command,nyxid-custody-browser,nyxid-custody-developer \
+            --evidence "$RUNNER_TEMP/machine-native-evidence"
       - name: Run native managed-browser, two-context and full adversarial acceptance
         run: |
           set -euo pipefail
@@ -83,5 +99,12 @@ jobs:
         with:
           name: machine-native-amd64-probe-timings
           path: ${{ runner.temp }}/machine-native-evidence/probe-timings.txt
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: machine-native-amd64-custody
+          path: ${{ runner.temp }}/machine-native-evidence/native-custody.log
           if-no-files-found: error
           retention-days: 14

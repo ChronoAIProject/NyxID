@@ -326,6 +326,21 @@ evidence, and new backends refuse v3 node evidence. Missing/null/false custody n
 becomes a successful observation. Existing `shared_legacy` assignments retain their
 stored mode; a failed separated request never falls back to shared legacy.
 
+The required hosted **Native Machine Separation (amd64)** job also runs
+`cli/tests/node_custody_acceptance.py` as root on its disposable Ubuntu 24.04
+runner. It installs GNOME Keyring, creates three distinct disposable worker users,
+and builds the exact Rust test executable with the committed lockfile. The harness
+owns its private D-Bus and Secret Service, checks cross-UID file/key-service
+denials and positive controls, and exercises shared-legacy and separated admission.
+It requires both one passing Rust test and the completion receipt
+`native_linux_custody: completed cross-UID file and Secret Service checks`;
+the fixture-env early return cannot satisfy it. `machine-native-amd64-custody`
+retains `native-custody.log` even on failure. Workflow policy regressions reject
+removal, conditional execution, ignored failures, missing prerequisites, or loss
+of the real test binary/fixture/evidence contract. Run this harness only on a
+disposable native Linux host; ordinary macOS unit tests do not establish this
+native evidence.
+
 After the backend upgrade, existing separated assignments pause until their nodes
 report supported v4 evidence. Their stored mode and capabilities stay unchanged;
 discovery and settings retain them with an unavailable reason. Upgrade and drain

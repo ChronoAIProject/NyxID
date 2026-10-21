@@ -951,6 +951,16 @@ insecure ancestry. The job prints UID/EUID/GID/groups and each ancestor's numeri
 owner/group, mode and type before/after preparation. Native acceptance also
 prints that inventory at startup and on failure.
 
+After this preparation, the same required native job runs the cross-UID file and
+Secret Service custody harness (`cli/tests/node_custody_acceptance.py`) as root,
+with three distinct disposable users and its own D-Bus/GNOME Keyring session.
+It requires the Rust fixture's explicit completion receipt, so an unset fixture
+environment and early return cannot pass as native evidence. The always-uploaded
+`machine-native-amd64-custody` artifact retains the checks in `native-custody.log`.
+The workflow policy tests require this step and its actual Rust test binary,
+prerequisites and evidence. This adds custody coverage to the existing native
+browser/context/adversarial suite and preserves the disposable `/opt` preparation.
+
 The native lifecycle harness exercises the actual privileged installer with
 group-writable and other-writable policy ancestry, requires its existing refusal
 message, and restores the original directory mode in `finally`. It then retains

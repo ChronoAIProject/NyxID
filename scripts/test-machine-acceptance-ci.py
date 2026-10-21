@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Negative coverage for real native/image acceptance and pinned driver inputs."""
 import copy
+import ast
 import hashlib
 import importlib.util
 import io
@@ -12,6 +13,7 @@ import stat
 import tarfile
 import tempfile
 import unittest
+import subprocess
 
 from workflow_yaml import load_unique
 
@@ -26,6 +28,8 @@ def module(name):
 
 cua = module('install-pinned-cua')
 prereqs = module('check-machine-native-prereqs')
+spec = importlib.util.spec_from_file_location('node_custody_acceptance', ROOT / 'cli/tests/node_custody_acceptance.py')
+custody = importlib.util.module_from_spec(spec); spec.loader.exec_module(custody)
 
 
 def workflows():
@@ -38,12 +42,18 @@ def step(job, text):
     if len(found) != 1:
         raise ValueError('missing/duplicated required acceptance step: ' + text)
     result = found[0]
-    if result.get('continue-on-error') or 'if' in result or any(t in result['run'] for t in ('|| true', 'set +e', '::warning::')):
+    if result.get('continue-on-error') or 'if' in result or any(t in result['run'] for t in ('||', 'set +e', '::warning::')):
         raise ValueError('acceptance gates must be mandatory: ' + text)
     return result['run']
 
 
-def require(data):
+def require(data, custody_source=None):
+    if custody_source is None:
+        custody_source = (ROOT / 'cli/tests/node_custody_acceptance.py').read_text()
+    tree = ast.parse(custody_source)
+    rust_tests = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'rust_test']
+    if len(rust_tests) != 1 or ast.unparse(rust_tests[0].body[-1]) != 'assert_rust_execution(result, name)':
+        raise ValueError('native harness must require execution receipt on every Rust invocation')
     ci = data['ci']; workflow = data['machine-native-acceptance']
     caller = ci['jobs']['machine-native']
     if (caller.get('if') or caller.get('continue-on-error') or
@@ -67,7 +77,7 @@ def require(data):
     step(native, 'scripts/test-machine-acceptance-ci.py')
     install = step(native, 'scripts/apt-snapshot-install.sh --install-only security/apt-snapshots.tsv ubuntu:noble')
     for package in ('libnss3-tools', 'xvfb', 'openbox', 'dbus-x11', 'bubblewrap', 'at-spi2-core', 'python3-venv',
-                    'python3-pip', 'cargo', 'rustc', 'nodejs', 'npm'):
+                    'python3-pip', 'cargo', 'rustc', 'nodejs', 'npm', 'gnome-keyring'):
         if package not in shlex.split(install.replace('\\\n', ' ')):
             raise ValueError('missing snapshot native/adversarial dependency: ' + package)
     step(native, 'scripts/install-pinned-cua.py --destination "$RUNNER_TEMP/machine-native-cua"')
@@ -76,6 +86,24 @@ def require(data):
         raise ValueError('disposable managed ancestry preparation requires root')
     step(native, 'cargo build --locked -p nyxid-cli --bin nyxid')
     step(native, 'cargo build --locked --manifest-path cli/tests/machine_context_spike/Cargo.toml')
+    build = step(native, 'cargo test --locked -p nyxid-cli --bin nyxid --no-run --message-format=json')
+    for text in ('set -euo pipefail', 'm.get("reason") == "compiler-artifact"',
+                 'm.get("profile", {}).get("test")', 'm.get("target", {}).get("name") == "nyxid"',
+                 'assert len(binaries) == 1', '> "$RUNNER_TEMP/node-custody-test-binary"'):
+        if text not in build:
+            raise ValueError('native custody must build and identify exactly one real test binary: ' + text)
+    run_custody = step(native, 'python3 cli/tests/node_custody_acceptance.py --disposable')
+    for text in ('set -euo pipefail', 'command -v dbus-run-session',
+                 'sudo -n useradd --no-create-home --shell /usr/sbin/nologin "$identity"',
+                 'sudo -n env PATH="$PATH" python3 cli/tests/node_custody_acceptance.py',
+                 '--binary "$CARGO_TARGET_DIR/debug/nyxid"',
+                 '--test-binary "$(cat "$RUNNER_TEMP/node-custody-test-binary")"',
+                 '--identities nyxid-custody-command,nyxid-custody-browser,nyxid-custody-developer',
+                 '--evidence "$RUNNER_TEMP/machine-native-evidence"'):
+        if text not in run_custody:
+            raise ValueError('native custody lost required root/fixture/execution contract: ' + text)
+    if native['steps'].index(next(s for s in native['steps'] if run_custody == s.get('run'))) < native['steps'].index(next(s for s in native['steps'] if prepare == s.get('run'))):
+        raise ValueError('native custody must follow disposable ancestry preparation')
     run = step(native, 'bash cli/tests/machine_native_acceptance.sh --disposable')
     for text in ('set -euo pipefail', 'sudo -n env ',
                  'NYXID_TEST_CLI="$CARGO_TARGET_DIR/debug/nyxid"',
@@ -85,10 +113,17 @@ def require(data):
                  'tee "$RUNNER_TEMP/machine-native-evidence/acceptance.log"'):
         if text not in run:
             raise ValueError('native acceptance lost root/harness/timing contract: ' + text)
-    uploads = [s for s in native['steps'] if s.get('uses', '').startswith('actions/upload-artifact@')]
+    uploads = [s for s in native['steps'] if s.get('uses', '').startswith('actions/upload-artifact@') and
+               s.get('with', {}).get('name') == 'machine-native-amd64-probe-timings']
     if len(uploads) != 1 or uploads[0].get('if') != 'always()' or uploads[0]['with'].get('if-no-files-found') != 'error' or \
             uploads[0]['with'].get('path') != '${{ runner.temp }}/machine-native-evidence/probe-timings.txt':
         raise ValueError('fixed-label native timing artifact required even after failure')
+    custody_uploads = [s for s in native['steps'] if s.get('uses', '').startswith('actions/upload-artifact@') and
+                       s.get('with', {}).get('name') == 'machine-native-amd64-custody']
+    if len(custody_uploads) != 1 or custody_uploads[0].get('if') != 'always()' or \
+            custody_uploads[0]['with'].get('if-no-files-found') != 'error' or \
+            custody_uploads[0]['with'].get('path') != '${{ runner.temp }}/machine-native-evidence/native-custody.log':
+        raise ValueError('native custody execution evidence required even after failure')
     container = ci['jobs']['machine-container']
     if 'machine-container' not in ci['jobs']['ci-pass']['needs']:
         raise ValueError('full-image acceptance must gate CI Pipeline')
@@ -132,7 +167,8 @@ class AcceptanceWorkflows(unittest.TestCase):
 
     def test_native_prerequisite_build_and_full_suite_cannot_be_skipped_or_shortened(self):
         for needle in ('check-machine-native-prereqs.py', 'install-pinned-cua.py', 'cargo build --locked -p',
-                       'machine_native_acceptance.sh', 'test-machine-acceptance-ci.py'):
+                       'machine_native_acceptance.sh', 'test-machine-acceptance-ci.py',
+                       'node_custody_acceptance.py'):
             for mutation in ('missing', 'conditional', 'ignored'):
                 data = workflows(); steps = data['machine-native-acceptance']['jobs']['native']['steps']
                 selected = next(s for s in steps if needle in s.get('run', ''))
@@ -153,6 +189,53 @@ class AcceptanceWorkflows(unittest.TestCase):
             selected = next(s for s in steps if 'scripts/check-machine-native-prereqs.py' in s.get('run', ''))
             selected['run'] = selected['run'].replace(old, new)
             with self.subTest(preparation=new), self.assertRaises(ValueError): require(data)
+
+    def test_native_custody_build_fixture_and_evidence_cannot_be_softened(self):
+        mutations = (
+            ('cargo test --locked -p nyxid-cli --bin nyxid --no-run --message-format=json', '--no-run', ''),
+            ('cargo test --locked -p nyxid-cli --bin nyxid --no-run --message-format=json', 'assert len(binaries) == 1', 'assert True'),
+            ('node_custody_acceptance.py', '--test-binary ', '--unused '),
+            ('node_custody_acceptance.py', 'sudo -n env ', 'env '),
+            ('node_custody_acceptance.py', 'set -euo pipefail', 'set -eu'),
+            ('node_custody_acceptance.py', 'command -v dbus-run-session', 'true'),
+            ('node_custody_acceptance.py', 'sudo -n useradd', 'echo useradd'),
+            ('node_custody_acceptance.py', '--identities ', '--no-identities '),
+            ('node_custody_acceptance.py', '--evidence ', '--unused '),
+            ('node_custody_acceptance.py', '--disposable', '--disposable || true'),
+            ('apt-snapshot-install.sh', ' gnome-keyring', ''),
+        )
+        for needle, old, new in mutations:
+            data = workflows(); steps = data['machine-native-acceptance']['jobs']['native']['steps']
+            selected = next(s for s in steps if needle in s.get('run', ''))
+            selected['run'] = selected['run'].replace(old, new)
+            with self.subTest(old=old, new=new), self.assertRaises(ValueError): require(data)
+        for mutation in ('missing', 'optional', 'path'):
+            data = workflows(); steps = data['machine-native-acceptance']['jobs']['native']['steps']
+            selected = next(s for s in steps if s.get('with', {}).get('name') == 'machine-native-amd64-custody')
+            if mutation == 'missing': steps.remove(selected)
+            elif mutation == 'optional': selected['with']['if-no-files-found'] = 'warn'
+            else: selected['with']['path'] = 'wrong'
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): require(data)
+
+    def test_native_custody_receipt_rejects_early_return_zero_tests_and_failure(self):
+        name = 'node::custody::tests::native_linux_custody'
+        passed = b'test result: ok. 1 passed; 0 failed; 0 ignored;'
+        for code, output in [(0, passed), (0, custody.NATIVE_RECEIPT),
+                             (1, passed + custody.NATIVE_RECEIPT),
+                             (0, passed + custody.NATIVE_RECEIPT * 2)]:
+            with self.subTest(code=code, output=output), self.assertRaises(AssertionError):
+                custody.assert_rust_execution(subprocess.CompletedProcess([], code, output), name)
+        custody.assert_rust_execution(subprocess.CompletedProcess([], 0, passed + custody.NATIVE_RECEIPT), name)
+
+    def test_harness_cannot_omit_or_condition_the_execution_receipt(self):
+        source = (ROOT / 'cli/tests/node_custody_acceptance.py').read_text()
+        for replacement in ('pass', 'assert result.returncode == 0',
+                            'if False: assert_rust_execution(result, name)'):
+            softened = source.replace('                assert_rust_execution(result, name)',
+                                      '                ' + replacement)
+            self.assertNotEqual(source, softened)
+            with self.subTest(replacement=replacement), self.assertRaises(ValueError):
+                require(workflows(), softened)
 
     def test_full_image_cannot_add_token_mounts_or_weaken_settings(self):
         for old, new in (('--init ', ''), ('--shm-size=512m', '--shm-size=64m'),
