@@ -165,6 +165,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        media_event_ids: Vec::new(),
         invocation_id: None,
         acknowledgement_id: None,
         retry_of: None,
@@ -209,7 +210,10 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
             }
             Err(error) => return Err(error),
         };
-        if crate::services::channel_thread_follow_service::prune_queue(&state.db, owner, id).await?
+        if Box::pin(crate::services::channel_thread_follow_service::prune_queue(
+            &state.db, owner, id,
+        ))
+        .await?
             == 0
         {
             return Ok(());
@@ -682,12 +686,14 @@ pub(crate) async fn permission_decided(
             request.routing.as_ref(),
             team::event("permission_decided", note, None),
         );
-        notify(state, owner, &request.conversation_id, vec![event]).await;
+        Box::pin(notify(state, owner, &request.conversation_id, vec![event])).await;
     }
     if allowed
         && request.kind == "skills"
         && request.decided_by.as_deref() != Some("orchestrator")
-        && deliver_skill_notification(state, request).await.is_err()
+        && Box::pin(deliver_skill_notification(state, request))
+            .await
+            .is_err()
     {
         tracing::debug!("Skill attachment notification deferred");
     }
@@ -903,6 +909,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            media_event_ids: Vec::new(),
             invocation_id: invocation_id.map(str::to_owned),
             acknowledgement_id: None,
             retry_of: None,
@@ -3273,6 +3280,24 @@ pub fn spawn_sweeps(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if crate::services::lark_base_writes::sweep(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Lark Base write maintenance deferred");
+            }
+            if crate::services::assistant_channel_media::queue::sweep(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Channel media finalization deferred");
+            }
+            if crate::services::channel_media_events::sweep(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Channel media sweep deferred");
+            }
             if crate::services::channel_thread_follow_service::sweep(&state.db)
                 .await
                 .is_err()

@@ -474,6 +474,8 @@ fn normalize_with_key(
             "sender_hash": sender_hash, "participant_hashes": participant_hashes});
     }
     Ok(Some(InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: id.into(),
         conversation_id: conversation_id(&bot.platform_bot_id, thread),
         conversation_type: "private".into(),

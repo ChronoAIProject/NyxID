@@ -148,8 +148,16 @@ crate::exact_credit_model! {
         pub settlement_claimed_at: Option<DateTime<Utc>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[serde(with = "crate::models::credits::whole::optional")]
+        /// Gross wallet debit, including tax on new tax-accounted rows.
         pub wallet_charge_credits: Option<Credits>,
-        /// Gross cost of the full finalized quantity at the settlement rate,
+        /// Missing on pre-tax legacy rows. New rows may need a profile for wallet overage.
+        #[serde(default)]
+        pub tax_accounting: bool,
+        #[serde(default)]
+        pub applied_tax: Option<crate::models::billing_tax_profile::AppliedUsageTax>,
+        #[serde(default, with = "crate::models::credits::whole::optional")]
+        pub wallet_tax_credits: Option<Credits>,
+        /// Pre-tax cost of the full finalized quantity at the settlement rate,
         /// including units covered by allowances. Display only; never a wallet debit.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[serde(with = "crate::models::credits::whole::optional")]
@@ -162,7 +170,7 @@ crate::exact_credit_model! {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[serde(with = "crate::models::credits::whole::optional")]
         pub grant_funded: Option<Credits>,
-        /// Exact wallet-funded cost, identical to the wallet debit.
+        /// Exact pre-tax wallet-funded cost; wallet_charge_credits also includes tax.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[serde(with = "crate::models::credits::whole::optional")]
         pub wallet_funded: Option<Credits>,

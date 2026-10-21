@@ -45,6 +45,8 @@ pub(crate) async fn fixture(platform: &str) -> (mongodb::Database, ChannelBot, C
         "route_id":"route","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
     }).await.unwrap();
     let inbound = InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: "42".into(),
         conversation_id: "-100".into(),
         conversation_type: "group".into(),

@@ -1184,6 +1184,32 @@ async fn execute_turn_inner(
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
     tool_images: &mut images::ToolImages,
 ) -> Result<TurnResult, TurnError> {
+    let media_context = if row.active_turn.as_ref().is_some_and(|turn| {
+        turn.channel_event_id.is_some() || turn.events.iter().any(|e| !e.media_event_ids.is_empty())
+    }) {
+        Box::pin(crate::services::assistant_channel_media::ingest_and_bind(
+            state, row,
+        ))
+        .await
+        .map_err(|error| {
+            TurnError::internal(
+                if matches!(error, AppError::AssistantTurnRequired) {
+                    "cancelled"
+                } else {
+                    "assistant_unavailable"
+                },
+                "media",
+            )
+        })?
+    } else {
+        String::new()
+    };
+    let current_input = if media_context.is_empty() {
+        text.to_owned()
+    } else {
+        format!("{text}\n\n{media_context}")
+    };
+    let text = current_input.as_str();
     let turn = row.active_turn.as_ref().expect("claimed turn");
     let run_deadline = if let Some(run_id) = turn
         .trigger_run_id

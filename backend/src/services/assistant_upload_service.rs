@@ -1,4 +1,5 @@
 //! Message-bound, envelope-encrypted uploads. Every read rechecks live scope.
+pub mod byte_budget;
 use super::{
     assistant_acknowledgement_service::ChatAuthority,
     assistant_nyxagent as engine,
@@ -133,6 +134,38 @@ pub(crate) async fn upload_authorized(
     bytes: Vec<u8>,
     access: Option<super::org_group_service::Access>,
 ) -> AppResult<TurnAttachment> {
+    store_authorized(db, keys, user, scope, name, bytes, access, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upload_channel_authorized(
+    db: &Database,
+    keys: &EncryptionKeys,
+    user: &str,
+    scope: &str,
+    name: &str,
+    bytes: Vec<u8>,
+    source: crate::models::assistant_channel_media::UploadSource,
+) -> AppResult<TurnAttachment> {
+    owner_scope(db, user, scope).await?;
+    store_authorized(db, keys, user, scope, name, bytes, None, Some(source)).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn store_authorized(
+    db: &Database,
+    keys: &EncryptionKeys,
+    user: &str,
+    scope: &str,
+    name: &str,
+    bytes: Vec<u8>,
+    access: Option<super::org_group_service::Access>,
+    source: Option<crate::models::assistant_channel_media::UploadSource>,
+) -> AppResult<TurnAttachment> {
+    use sha2::{Digest, Sha256};
+    // Legacy rows may lack a digest; attachment-write egress can hash their
+    // decrypted bytes under its byte reservation. Every new upload has one.
+    let content_sha256 = Some(format!("{:x}", Sha256::digest(&bytes)));
     let label = safe_name(name);
     let extension = label
         .rsplit_once('.')
@@ -142,6 +175,8 @@ pub(crate) async fn upload_authorized(
     // A bounded copy is retained for encrypted storage; the parser receives its own process.
     let extracted = attachment_extraction::extract(bytes.clone(), extension).await?;
     let mut row = AssistantUpload {
+        source,
+        content_sha256,
         secret_context_versions: Default::default(),
         id: Uuid::new_v4().to_string(),
         origin: "user_upload".into(),
@@ -236,7 +271,31 @@ pub(crate) async fn upload_authorized(
         Ok(())
     }
     .await;
+    #[cfg(test)]
+    if result.is_ok()
+        && let Some(source) = &row.source
+    {
+        super::assistant_channel_media::test_hooks::reach(
+            db,
+            &source.turn_id,
+            "upload_before_commit",
+        )
+        .await;
+    }
+    // The shared helper aborts definite errors and retries only COMMIT on the
+    // same transaction when its outcome is unknown.
     super::org_membership_authority::finish(session, result).await?;
+    #[cfg(test)]
+    if let Some(source) = &row.source
+        && super::assistant_channel_media::test_hooks::reach(
+            db,
+            &source.turn_id,
+            "upload_after_commit",
+        )
+        .await
+    {
+        return Err(AppError::Internal("Channel upload commit uncertain".into()));
+    }
     Ok(metadata(&row))
 }
 
@@ -462,12 +521,11 @@ pub async fn for_chat(db: &Database, chat: &ChatAuthority, id: &str) -> AppResul
 }
 
 /// Tool pixels belong only to the producing live turn, including a guest turn.
-async fn tool_image_bytes(
+async fn tool_image_for_chat(
     db: &Database,
-    keys: &EncryptionKeys,
     chat: &ChatAuthority,
     id: &str,
-) -> AppResult<Option<(String, Vec<u8>)>> {
+) -> AppResult<Option<crate::models::assistant_attachment::AssistantAttachment>> {
     if chat.turn_stopped || chat.turn_id.is_none() || Uuid::parse_str(id).is_err() {
         return Err(missing());
     }
@@ -507,12 +565,23 @@ async fn tool_image_bytes(
     if !row.content_type.starts_with("image/") {
         return Err(missing());
     }
+    Ok(Some(row))
+}
+
+async fn tool_image_bytes(
+    db: &Database,
+    keys: &EncryptionKeys,
+    chat: &ChatAuthority,
+    id: &str,
+) -> AppResult<Option<(String, Vec<u8>)>> {
+    let Some(row) = tool_image_for_chat(db, chat, id).await? else {
+        return Ok(None);
+    };
     let mut protected = super::assistant_record_service::decrypt_image(keys, &row).await?;
     let bytes = std::mem::take(&mut *protected);
-    Box::pin(super::assistant_upload_retention::require_available(
-        db, filter,
-    ))
-    .await?;
+    tool_image_for_chat(db, chat, id)
+        .await?
+        .ok_or_else(missing)?;
     Ok(Some((row.content_type, bytes)))
 }
 
@@ -1085,6 +1154,113 @@ pub async fn group_attachments(
         .try_collect()
         .await?;
     Ok(rows.into_iter().flat_map(|r| r.attachments).collect())
+}
+
+/// An authorized origin selected before any egress decryption. Never retry a
+/// failed origin lookup against the other attachment model.
+pub enum EgressAttachment {
+    User(Box<AssistantUpload>),
+    Tool(Box<crate::models::assistant_attachment::AssistantAttachment>),
+}
+impl EgressAttachment {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::User(row) => &row.id,
+            Self::Tool(row) => &row.id,
+        }
+    }
+    pub fn size(&self) -> i64 {
+        match self {
+            Self::User(row) => row.size,
+            Self::Tool(row) => row.size,
+        }
+    }
+    pub fn label(&self) -> &str {
+        match self {
+            Self::User(row) => &row.label,
+            Self::Tool(row) => match row.content_type.as_str() {
+                "image/jpeg" => "tool-image.jpg",
+                "image/gif" => "tool-image.gif",
+                "image/webp" => "tool-image.webp",
+                "image/png" => "tool-image.png",
+                _ => "tool-image",
+            },
+        }
+    }
+    pub fn content_type(&self) -> &str {
+        match self {
+            Self::User(row) => &row.content_type,
+            Self::Tool(row) => &row.content_type,
+        }
+    }
+}
+
+pub async fn for_egress(
+    db: &Database,
+    chat: &ChatAuthority,
+    id: &str,
+) -> AppResult<EgressAttachment> {
+    if chat.guest || Uuid::parse_str(id).is_err() {
+        return Err(missing());
+    }
+    super::assistant_resource_service::require_live(db, chat).await?;
+    let key = db
+        .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+        .find_one(doc! {"_id":&chat.api_key_id,"user_id":&chat.user_id,"is_active":true})
+        .await?
+        .ok_or_else(missing)?;
+    if key.expires_at.is_some_and(|at| at <= Utc::now()) {
+        return Err(missing());
+    }
+    if db.collection::<bson::Document>("assistant_agent_credentials")
+        .find_one(doc! {"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id})
+        .projection(doc! {"_id":1}).await?.is_none() { return Err(missing()); }
+    let row = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {"_id":id})
+        .projection(doc! {"origin":1})
+        .await?
+        .ok_or_else(missing)?;
+    match row.get_str("origin").ok() {
+        Some("user_upload") => Ok(EgressAttachment::User(Box::new(
+            for_chat(db, chat, id).await?,
+        ))),
+        Some("tool") | None => Ok(EgressAttachment::Tool(Box::new(
+            tool_image_for_chat(db, chat, id)
+                .await?
+                .ok_or_else(missing)?,
+        ))),
+        _ => Err(missing()),
+    }
+}
+
+/// The caller already holds a reservation for exactly this authorized size.
+pub async fn egress_bytes(
+    db: &Database,
+    keys: &EncryptionKeys,
+    chat: &ChatAuthority,
+    attachment: &EgressAttachment,
+) -> AppResult<Vec<u8>> {
+    let current = for_egress(db, chat, attachment.id()).await?;
+    if current.size() != attachment.size()
+        || current.label() != attachment.label()
+        || current.content_type() != attachment.content_type()
+        || std::mem::discriminant(&current) != std::mem::discriminant(attachment)
+    {
+        return Err(missing());
+    }
+    let bytes = match current {
+        EgressAttachment::User(row) => payload(db, keys, &row).await?.1,
+        EgressAttachment::Tool(row) => {
+            let mut protected = super::assistant_record_service::decrypt_image(keys, &row).await?;
+            std::mem::take(&mut *protected)
+        }
+    };
+    if bytes.len() as i64 != attachment.size() {
+        return Err(missing());
+    }
+    for_egress(db, chat, attachment.id()).await?;
+    Ok(bytes)
 }
 
 #[cfg(test)]

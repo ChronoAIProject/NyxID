@@ -3,10 +3,24 @@ use super::*;
 /// Private, borrowed authority carried all the way to the actual send/connect.
 /// Credential preparation can await external services; it does not admit egress.
 pub(crate) struct HttpEgressGuard<'a> {
+    attachment: Option<AttachmentEgress<'a>>,
     authority: EgressAuthority<'a>,
 }
 
+struct AttachmentEgress<'a> {
+    db: &'a Database,
+    service: &'a crate::services::mcp_service::McpToolService,
+    endpoint: &'a crate::services::mcp_service::McpToolEndpoint,
+    binding: &'a crate::services::lark_attachment_tool::Binding,
+}
+
 enum EgressAuthority<'a> {
+    Lark {
+        guard: &'a super::LarkManagedGuard<'a>,
+        row: &'a crate::models::lark_base_write::LarkBaseWrite,
+        phase: crate::models::lark_base_write::WriteState,
+    },
+    AttachmentOnly,
     Managed(
         &'a OwnedHttpEgressGuard,
         &'a crate::services::proxy_service::ProxyTarget,
@@ -105,6 +119,7 @@ impl OwnedHttpEgressGuard {
         target: &'a crate::services::proxy_service::ProxyTarget,
     ) -> HttpEgressGuard<'a> {
         HttpEgressGuard {
+            attachment: None,
             authority: EgressAuthority::Managed(self, target),
         }
     }
@@ -196,6 +211,7 @@ impl OwnedHttpEgressGuard {
                 }
                 Some(OwnedEgressAuthority::ExternalJob { job, declared }) => {
                     Some(HttpEgressGuard {
+                        attachment: None,
                         authority: EgressAuthority::ExternalJob {
                             db: &self.db,
                             job,
@@ -205,6 +221,7 @@ impl OwnedHttpEgressGuard {
                 }
                 Some(OwnedEgressAuthority::AssistantCatalogJob { job, catalog }) => {
                     Some(HttpEgressGuard {
+                        attachment: None,
                         authority: EgressAuthority::AssistantCatalogJob {
                             db: &self.db,
                             job,
@@ -231,6 +248,7 @@ impl Admission {
         path: &str,
     ) -> HttpEgressGuard<'a> {
         HttpEgressGuard {
+            attachment: None,
             authority: EgressAuthority::Assistant(AssistantEgressGuard {
                 admission: self,
                 db,
@@ -245,6 +263,37 @@ impl Admission {
     }
 }
 impl<'a> HttpEgressGuard<'a> {
+    pub(super) fn for_lark(
+        guard: &'a super::LarkManagedGuard<'a>,
+        row: &'a crate::models::lark_base_write::LarkBaseWrite,
+        phase: crate::models::lark_base_write::WriteState,
+    ) -> Self {
+        Self {
+            attachment: None,
+            authority: EgressAuthority::Lark { guard, row, phase },
+        }
+    }
+    pub(crate) fn with_attachment(
+        base: Option<Self>,
+        db: &'a Database,
+        service: &'a crate::services::mcp_service::McpToolService,
+        endpoint: &'a crate::services::mcp_service::McpToolEndpoint,
+        binding: Option<&'a crate::services::lark_attachment_tool::Binding>,
+    ) -> Option<Self> {
+        let Some(binding) = binding else { return base };
+        let mut guard = base.unwrap_or(Self {
+            authority: EgressAuthority::AttachmentOnly,
+            attachment: None,
+        });
+        guard.attachment = Some(AttachmentEgress {
+            db,
+            service,
+            endpoint,
+            binding,
+        });
+        Some(guard)
+    }
+
     pub(crate) fn for_proxy(
         admission: Option<&'a Admission>,
         ingress: Option<&'a crate::services::machine_gateway_service::Ingress>,
@@ -260,6 +309,7 @@ impl<'a> HttpEgressGuard<'a> {
         let ingress = ingress?;
         if let Some(job) = ingress.assistant_job_id() {
             return Some(Self {
+                attachment: None,
                 authority: EgressAuthority::AssistantCatalogJob {
                     db,
                     job,
@@ -268,6 +318,7 @@ impl<'a> HttpEgressGuard<'a> {
             });
         }
         Some(Self {
+            attachment: None,
             authority: EgressAuthority::ExternalJob {
                 db,
                 job: ingress.external_job_id()?,
@@ -292,16 +343,36 @@ impl<'a> HttpEgressGuard<'a> {
         self
     }
     pub(crate) fn revalidate(&self) -> futures::future::BoxFuture<'_, AppResult<()>> {
-        match &self.authority {
-            EgressAuthority::Managed(guard, target) => guard.revalidate(target),
-            EgressAuthority::Assistant(guard) => Box::pin(guard.revalidate_inner()),
-            EgressAuthority::ExternalJob { db, job, declared } => {
-                crate::services::machine_gateway_service::validate_external_job(db, job, declared)
+        Box::pin(async move {
+            match &self.authority {
+                EgressAuthority::Lark { guard, row, phase } => {
+                    guard.revalidate_effect(row, *phase).await
+                }
+                EgressAuthority::AttachmentOnly => Ok(()),
+                EgressAuthority::Managed(guard, target) => guard.revalidate(target).await,
+                EgressAuthority::Assistant(guard) => guard.revalidate_inner().await,
+                EgressAuthority::ExternalJob { db, job, declared } => {
+                    crate::services::machine_gateway_service::validate_external_job(
+                        db, job, declared,
+                    )
+                    .await
+                }
+                EgressAuthority::AssistantCatalogJob { db, job, catalog } => {
+                    crate::services::assistant_job_service_use::validate_catalog(db, job, catalog)
+                        .await
+                }
+            }?;
+            if let Some(attachment) = &self.attachment {
+                crate::services::lark_attachment_tool::validate_binding(
+                    attachment.db,
+                    attachment.service,
+                    attachment.endpoint,
+                    attachment.binding,
+                )
+                .await?;
             }
-            EgressAuthority::AssistantCatalogJob { db, job, catalog } => {
-                crate::services::assistant_job_service_use::validate_catalog(db, job, catalog)
-            }
-        }
+            Ok(())
+        })
     }
 }
 

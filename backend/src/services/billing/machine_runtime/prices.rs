@@ -143,7 +143,9 @@ impl BillingService {
             .as_deref()
             .ok_or_else(|| unavailable("billing provider is not configured"))?;
         let result = async {
-            lago.sync_standard_charge(
+            super::super::taxes::sync_charge(
+                &self.db,
+                lago,
                 &rate.plan_code,
                 &ServicePriceSync {
                     metric_code: rate.lago_metric_code.clone(),

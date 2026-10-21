@@ -686,6 +686,8 @@ pub(super) fn reserved_row(
     let funding = layer_reservation.map(|item| {
         let layer = Some(item);
         UsageFunding {
+            tax_accounting: true,
+            applied_tax: item.applied_tax.clone(),
             credits_per_unit_pico: item.credits_per_unit_pico,
             credits_per_unit_micros: layer
                 .map(|item| item.credits_per_unit_micros)
@@ -1120,6 +1122,8 @@ mod tests {
                             reserved_credits: crate::models::credits::Credits::from_whole(5),
                             allowance_reservations: Vec::new(),
                             grant_reservations: Vec::new(),
+                            tax_cache_ttl_secs: 900,
+                            applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
                         }],
                     })
                 } else {
@@ -1363,6 +1367,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(
@@ -1447,6 +1453,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
@@ -1625,6 +1633,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(
@@ -1743,6 +1753,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(4),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(
@@ -1825,6 +1837,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(
@@ -1983,6 +1997,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
@@ -2111,6 +2127,8 @@ mod tests {
                 reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                tax_cache_ttl_secs: 900,
+                applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
@@ -2229,6 +2247,8 @@ mod tests {
                         reserved_credits: crate::models::credits::Credits::from_whole(1),
                         allowance_reservations: Vec::new(),
                         grant_reservations: Vec::new(),
+                        tax_cache_ttl_secs: 900,
+                        applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
                     },
                 )
                 .collect(),
@@ -2387,6 +2407,7 @@ mod tests {
             })
             .await
             .expect("insert wallet");
+        crate::services::billing::taxes::seed_test_profiles(db).await;
     }
 
     /// The provider-reported token breakdown persists onto the finalized

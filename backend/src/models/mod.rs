@@ -15,6 +15,7 @@ pub mod authorization_code;
 pub mod billing_ledger;
 pub mod billing_rate_cache;
 pub mod billing_target;
+pub mod billing_tax_profile;
 pub mod billing_topup_session;
 pub mod billing_wallet;
 pub mod bson_bytes;
@@ -136,6 +137,7 @@ pub mod assistant_agent;
 pub mod assistant_agent_credential;
 pub mod assistant_agent_learning;
 pub mod assistant_attachment;
+pub mod assistant_channel_media;
 pub mod assistant_checkpoint;
 pub mod assistant_conversation;
 pub mod assistant_group;
@@ -174,6 +176,8 @@ pub mod trigger_schedule;
 
 pub mod assistant_upload;
 pub mod assistant_upload_retention;
+pub mod lark_base_write;
+pub mod lark_base_write_photo;
 pub mod permission_policy;
 
 pub mod assistant_voice;

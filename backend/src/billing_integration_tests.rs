@@ -1,4 +1,6 @@
+mod bills;
 mod operations;
+mod taxes;
 mod usage;
 
 use std::collections::BTreeSet;
@@ -202,6 +204,13 @@ const COVERAGE_CASES: &[CoverageCase] = &[
 
 #[derive(Default)]
 pub(crate) struct FakeLago {
+    tax_rate: Option<String>,
+    tax_unavailable: bool,
+    tax_delay: Option<std::time::Duration>,
+    tax_fetches: AtomicUsize,
+    bill_data: Option<serde_json::Value>,
+    invoice_data: Option<serde_json::Value>,
+    invoice: Option<crate::services::billing::lago_client::InvoiceSummary>,
     wallet_creates: AtomicUsize,
     wallet_balance: Option<crate::models::credits::Credits>,
     wallet_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
@@ -227,6 +236,41 @@ impl FakeLago {
 
 #[async_trait]
 impl LagoApi for FakeLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        self.tax_fetches.fetch_add(1, Ordering::SeqCst);
+        if let Some(delay) = self.tax_delay {
+            tokio::time::sleep(delay).await;
+        }
+        if self.tax_unavailable {
+            return Err(AppError::BillingProviderUnavailable(
+                "test tax outage".into(),
+            ));
+        }
+        let mut config = crate::services::billing::taxes::zero_config();
+        if let Some(rate) = &self.tax_rate {
+            config.customer["taxes"] = serde_json::json!([{"code":"gst","name":"GST","rate":rate}]);
+        }
+        Ok(config)
+    }
+    async fn subscription_invoices(&self, _: &str, _: u32, _: u32) -> AppResult<serde_json::Value> {
+        Ok(self
+            .invoice_data
+            .clone()
+            .unwrap_or(serde_json::json!({"invoices":[], "meta":{"total_count":0}})))
+    }
+    async fn invoice_summary(
+        &self,
+        id: &str,
+    ) -> AppResult<Option<crate::services::billing::lago_client::InvoiceSummary>> {
+        Ok(self.invoice.clone().filter(|i| i.lago_id == id))
+    }
+    async fn invoice_download_url(&self, _: &str) -> AppResult<Option<String>> {
+        Ok(Some("https://example.test/invoice.pdf".into()))
+    }
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
         Ok(owner.external_customer_id.clone())
     }
@@ -272,7 +316,7 @@ impl LagoApi for FakeLago {
         Ok(LagoUsage {
             customer_id: customer_id.to_string(),
             subscription_id: subscription_id.to_string(),
-            raw: serde_json::json!({}),
+            raw: self.bill_data.clone().unwrap_or(serde_json::json!({})),
         })
     }
 

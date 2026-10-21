@@ -404,6 +404,21 @@ pub(crate) async fn process_inbound_messages(
         )
         .await;
 
+        if let Some(disposition) = &delivery.disposition
+            && let Err(error) = channel_relay_service::record_callback_disposition(
+                state.db,
+                &stored_message.id,
+                disposition,
+            )
+            .await
+        {
+            tracing::debug!(
+                message_id = %stored_message.id,
+                %error,
+                "callback disposition update deferred"
+            );
+        }
+
         // Sync 200+body replies are no longer supported (per ADR-013 / NyxID#221
         // comment 2). Agents must return 202 and post replies asynchronously
         // via POST /api/v1/channel-relay/reply. The callback status only

@@ -777,6 +777,54 @@ and drop. Markdown accepts both `.md` and `.markdown`; JSON and CSV are validate
 before their verbatim text is retained. Empty MIME, `application/octet-stream`
 and Windows' `application/vnd.ms-excel` CSV MIME do not change classification.
 
+## Managed attachment writes
+
+`bitable_media_upload` is available for trusted Lark/Feishu catalog operations
+in a live, non-guest owner chat with the default-off, per-person
+`assistant:attachment-writes` flag enabled. It resolves an authorized
+`attachment_id` from the chat, derives its size, and uploads canonical
+multipart bytes to the selected Base. A successful response returns a
+`file_token`; it does not create a record. User uploads retain conversation,
+key, and retention checks, and tool images retain their producing-turn fence.
+Ordinary Agent Keys, external OAuth plugin connections, exact/durable/async execution,
+and mounted copies of the OpenAPI document cannot use this capability.
+
+The managed `bitable_record_create_with_attachments` accepts closed
+`{fields, attachments}` JSON, validates the schema and
+complete source photo set, reserves the content digests, uploads, then creates
+one record. One composite action card, when confirmation is required, binds
+the canonical JSON and all dependency contracts. Child requests run under the
+managed guard, without separate child grants or cards. Before each field page,
+upload attempt, and create, the guard revalidates the live turn, Stop, key and
+operation scopes, published contracts, destination, credential epoch, and
+agent override. The standalone upload does not provide these record-replay
+guarantees.
+
+The dispatch barrier durably records `dispatching` before the create send.
+There is no automatic create resend after that barrier. Success returns
+`{record_id, already_created:false}`; an authorized identical replay returns
+`{record_id, already_created:true}`, even after credential rotation. Active
+writes report `in progress; try again shortly`. An `uncertain` result reports
+`outcome unknown; check the Base; NyxID will not create it again`. Do not retry
+through plain create or another connection. Proven `failed_pre_dispatch` and
+`failed_definite` outcomes release reservations; `failed_definite` with
+`last_code: not_sent` means the create request never left NyxID, so a corrected
+new call may create once. Earlier uploads may have completed. A conflicting
+succeeded photo reports `Photo already belongs to record <record_id>; use
+bitable_record_update to change its fields`.
+
+An incomplete inbound photo set refuses with `N of M photos from that message
+could not be read; ask the owner to resend`. Attachment destinations must be
+attachment fields, number values must be finite JSON numbers, and selects must
+use existing options; receipt-specific bounds come from operation scopes.
+Managed permission errors identify the outbound service slug and connection
+label. Terminal metadata protects identical photos for 400 days within the same
+owner, Base, and table. See the [Lark Base guide](../site/cli/guides/connect-a-service.md#lark-base)
+for permissions, flag combinations, and the Receipt-Bot recipe, and
+[API discovery](../API_DISCOVERY.md) for trusted projection and discovery
+exclusions. Inbound media and rollback completion gates remain defined in
+[Assistant uploads](10-uploads.md#channel-rollout-and-rollback).
+
 ## Task completion and knowledge retrieval
 
 Both NyxBot and specialist base instructions favor the shortest sufficient

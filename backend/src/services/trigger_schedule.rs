@@ -1381,6 +1381,10 @@ async fn record_terminal_in_session(
             .await?
         {
             let message = AssistantMessage {
+                media_event_ids: Vec::new(),
+                media_queue_notice_id: None,
+                media_pending: None,
+                media_bound: None,
                 platform_delivery_recovery_queued: false,
                 platform_reply: None,
                 platform_origin: None,

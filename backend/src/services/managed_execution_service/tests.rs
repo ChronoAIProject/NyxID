@@ -12,6 +12,13 @@ use std::sync::Arc;
 struct FakeLago;
 #[async_trait]
 impl LagoApi for FakeLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        Ok(crate::services::billing::taxes::zero_config())
+    }
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
         Ok(owner.external_customer_id.clone())
     }

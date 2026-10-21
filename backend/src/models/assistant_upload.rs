@@ -6,6 +6,10 @@ pub use super::assistant_attachment::COLLECTION_NAME;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantUpload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<super::assistant_channel_media::UploadSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
     #[serde(default)]
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
@@ -44,4 +48,10 @@ pub struct ReadInterval {
     pub end: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for AssistantUpload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AssistantUpload([REDACTED])")
+    }
 }

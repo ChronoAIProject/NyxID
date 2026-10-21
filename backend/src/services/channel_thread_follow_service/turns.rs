@@ -1,5 +1,7 @@
 use super::*;
-use crate::models::{channel_bot::ChannelBot, channel_message::ChannelMessage};
+use crate::models::{
+    channel_bot::ChannelBot, channel_message::ChannelMessage, nyxbot_channel::NyxbotEvent,
+};
 
 /// Returns live policy after taking the same fence as stop/settings/allocation.
 /// Queued work ignores subscription expiry only, never sender or agent changes.
@@ -248,18 +250,49 @@ pub async fn filter_events(
             let mut sources = Vec::new();
             let mut origins = Vec::new();
             for source in &event.source_event_ids {
-                if let Some(origin) = super::super::channel_turn_delivery::queued_origin_in_session(
-                    db,
-                    owner,
-                    conversation,
-                    source,
-                    session,
+                if let Some(origin) = Box::pin(
+                    super::super::channel_turn_delivery::queued_origin_in_session(
+                        db,
+                        owner,
+                        conversation,
+                        source,
+                        session,
+                    ),
                 )
                 .await?
                 {
                     sources.push(source.clone());
                     origins.push(origin);
                 } else {
+                    if event.media_event_ids.contains(source) {
+                        use super::super::assistant_channel_media::queue::NoticeReason;
+                        let existing = db
+                            .collection::<NyxbotEvent>(
+                                crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
+                            )
+                            .find_one(
+                                doc! {"_id":source,"user_id":owner,"conversation_id":conversation},
+                            )
+                            .session(&mut *session)
+                            .await?;
+                        let reason =
+                            if existing.is_none_or(|source| source.expires_at <= Utc::now()) {
+                                NoticeReason::Expired
+                            } else {
+                                NoticeReason::Revoked
+                            };
+                        Box::pin(
+                            super::super::assistant_channel_media::queue::notice_in_session(
+                                db,
+                                session,
+                                owner,
+                                conversation,
+                                &event,
+                                reason,
+                            ),
+                        )
+                        .await?;
+                    }
                     db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
                         .update_one(doc! {"_id": source, "user_id": owner,
                             "delivery.state": {"$in": ["waiting", "pending"]}},
@@ -268,6 +301,7 @@ pub async fn filter_events(
                         .session(&mut *session).await?;
                 }
             }
+            event.media_event_ids.retain(|id| sources.contains(id));
             event.source_event_ids = sources;
             event.reply_to = origins;
             if !event.source_event_ids.is_empty() {
@@ -283,7 +317,16 @@ pub async fn filter_events(
         let mut valid = true;
         for origin in &event.reply_to {
             if origin.thread.is_some() {
-                match validate_in_session(db, owner, origin, conversation, true, session).await {
+                match Box::pin(validate_in_session(
+                    db,
+                    owner,
+                    origin,
+                    conversation,
+                    true,
+                    session,
+                ))
+                .await
+                {
                     Ok(_) => {}
                     Err(AppError::NotFound(_)) => {
                         valid = false;
@@ -313,7 +356,7 @@ pub async fn prune_queue(db: &Database, owner: &str, conversation: &str) -> AppR
         let work:AppResult<usize>=Box::pin(async{
             let rows=db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME);
             let Some(row)=rows.find_one(doc! {"_id":conversation,"user_id":owner}).session(&mut *session).await? else{return Ok(0);};
-            let events=filter_events(db,owner,conversation,row.pending_events,session).await?;
+            let events=Box::pin(filter_events(db,owner,conversation,row.pending_events,session)).await?;
             {
                 rows.update_one(doc! {"_id":conversation,"user_id":owner},doc! {"$set":{"pending_events":bson::to_bson(&events).map_err(|_|not_found())?}})
                     .session(&mut *session).await?;

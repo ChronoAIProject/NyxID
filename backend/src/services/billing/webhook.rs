@@ -46,6 +46,38 @@ pub async fn handle_lago_webhook_event(
     event_type: &str,
     payload: &Value,
 ) -> AppResult<LagoWebhookOutcome> {
+    if event_type.starts_with("customer.")
+        || event_type.starts_with("subscription.")
+        || event_type.starts_with("plan.")
+    {
+        let profiles =
+            db.collection::<bson::Document>(crate::models::billing_tax_profile::COLLECTION_NAME);
+        if let Some(customer) = extract_external_customer_id(payload) {
+            if let Some(wallet) = db
+                .collection::<BillingWallet>(BILLING_WALLET)
+                .find_one(doc! {"lago_customer_id": &customer})
+                .await?
+            {
+                profiles
+                    .update_many(
+                        doc! {"owner_id": &wallet.owner_id},
+                        doc! {"$set": {"fetched_at": bson::DateTime::from_millis(0)}},
+                    )
+                    .await?;
+                if let Some(lago) = lago
+                    && let Err(error) = super::taxes::refresh(db, lago, &wallet).await
+                {
+                    // Keep the invalidated profile stale and complete unrelated
+                    // entitlement handling (notably terminated subscriptions).
+                    tracing::warn!(owner_id = %wallet.owner_id, %error, "Webhook tax refresh will retry");
+                }
+            }
+        } else if let Some(plan) = payload.pointer("/plan/code").and_then(Value::as_str) {
+            super::taxes::invalidate_plan(db, plan).await?;
+            // Admissions refresh their own profile inline; the bounded sweep
+            // refreshes the remaining subscribers in order of staleness.
+        }
+    }
     if is_lago_wallet_event(event_type) {
         let Some(customer_id) = extract_external_customer_id(payload) else {
             return Ok(ignored());

@@ -777,11 +777,193 @@ pub async fn list_topups(
     }))
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct BillQuery {
+    pub owner_id: Option<String>,
+    pub page: Option<u32>,
+    pub per_page: Option<u32>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BillTaxResponse {
+    pub code: String,
+    pub name: String,
+    pub rate_percent: Credits,
+    pub amount: Credits,
+}
+impl From<crate::services::billing::bill::BillTax> for BillTaxResponse {
+    fn from(tax: crate::services::billing::bill::BillTax) -> Self {
+        Self {
+            code: tax.code,
+            name: tax.name,
+            rate_percent: tax.rate_percent,
+            amount: tax.amount,
+        }
+    }
+}
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BillChargeResponse {
+    pub metric_code: String,
+    pub name: String,
+    pub units: String,
+    pub amount: Credits,
+}
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CurrentBillResponse {
+    pub owner_id: String,
+    pub currency: String,
+    pub from: String,
+    pub to: String,
+    pub charges: Vec<BillChargeResponse>,
+    pub subtotal: Credits,
+    pub taxes: Vec<BillTaxResponse>,
+    pub tax_breakdown_available: bool,
+    pub tax_total: Credits,
+    pub rounding: Credits,
+    pub total: Credits,
+}
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UsageInvoiceResponse {
+    pub id: String,
+    pub number: String,
+    pub issuing_date: String,
+    pub currency: String,
+    pub payment_status: String,
+    pub subtotal: Credits,
+    pub taxes: Vec<BillTaxResponse>,
+    pub tax_total: Credits,
+    pub total: Credits,
+    pub prepaid_credits_applied: Credits,
+    pub amount_due: Credits,
+}
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UsageInvoicesResponse {
+    pub owner_id: String,
+    pub page: u32,
+    pub per_page: u32,
+    pub total: u64,
+    pub invoices: Vec<UsageInvoiceResponse>,
+}
+
+#[utoipa::path(get, path = "/api/v1/billing/bill", tag = "Billing",
+    params(("owner_id" = Option<String>, Query, description = "Personal or authorized organization owner")),
+    responses((status = 200, body = CurrentBillResponse)), security(("bearer_auth" = [])))]
+pub async fn get_bill(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<BillQuery>,
+) -> AppResult<Json<CurrentBillResponse>> {
+    let actor = auth.user_id.to_string();
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve_for_wallet_management(&actor, query.owner_id.as_deref())
+        .await?;
+    ensure_billing_rollout(&state, &owner.owner_id, &actor).await?;
+    let wallet = state
+        .billing
+        .get_wallet(&owner.owner_id)
+        .await?
+        .ok_or_else(|| AppError::BillingNotConfigured("Billing wallet is not configured".into()))?;
+    let lago = state
+        .billing
+        .lago_client()
+        .ok_or_else(|| AppError::BillingNotConfigured("Lago client is not configured".into()))?;
+    let bill = crate::services::billing::bill::current(
+        &state.db,
+        lago.as_ref(),
+        &wallet,
+        state.config.billing_rate_cache_ttl_secs,
+    )
+    .await?;
+    Ok(Json(CurrentBillResponse {
+        owner_id: owner.owner_id,
+        currency: bill.currency,
+        from: bill.from,
+        to: bill.to,
+        charges: bill
+            .charges
+            .into_iter()
+            .map(|c| BillChargeResponse {
+                metric_code: c.metric_code,
+                name: c.name,
+                units: c.units,
+                amount: c.amount,
+            })
+            .collect(),
+        subtotal: bill.subtotal,
+        taxes: bill.taxes.into_iter().map(Into::into).collect(),
+        tax_breakdown_available: bill.tax_breakdown_available,
+        tax_total: bill.tax_total,
+        rounding: bill.rounding,
+        total: bill.total,
+    }))
+}
+
+#[utoipa::path(get, path = "/api/v1/billing/invoices", tag = "Billing",
+    params(("owner_id" = Option<String>, Query), ("page" = Option<u32>, Query), ("per_page" = Option<u32>, Query)),
+    responses((status = 200, body = UsageInvoicesResponse)), security(("bearer_auth" = [])))]
+pub async fn list_invoices(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<BillQuery>,
+) -> AppResult<Json<UsageInvoicesResponse>> {
+    let actor = auth.user_id.to_string();
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve_for_wallet_management(&actor, query.owner_id.as_deref())
+        .await?;
+    ensure_billing_rollout(&state, &owner.owner_id, &actor).await?;
+    let page = query.page.unwrap_or(1);
+    let per_page = query.per_page.unwrap_or(10);
+    if page == 0 || !(1..=100).contains(&per_page) {
+        return Err(AppError::BadRequest("Invalid invoice pagination".into()));
+    }
+    let wallet = state
+        .billing
+        .get_wallet(&owner.owner_id)
+        .await?
+        .ok_or_else(|| AppError::BillingNotConfigured("Billing wallet is not configured".into()))?;
+    let lago = state
+        .billing
+        .lago_client()
+        .ok_or_else(|| AppError::BillingNotConfigured("Lago client is not configured".into()))?;
+    let result =
+        crate::services::billing::bill::past(lago.as_ref(), &wallet, page, per_page).await?;
+    Ok(Json(UsageInvoicesResponse {
+        owner_id: owner.owner_id,
+        page,
+        per_page,
+        total: result.total,
+        invoices: result
+            .invoices
+            .into_iter()
+            .map(|i| UsageInvoiceResponse {
+                id: i.id,
+                number: i.number,
+                issuing_date: i.issuing_date,
+                currency: i.currency,
+                payment_status: i.payment_status,
+                subtotal: i.subtotal,
+                taxes: i.taxes.into_iter().map(Into::into).collect(),
+                tax_total: i.tax_total,
+                total: i.total,
+                prepaid_credits_applied: i.prepaid_credits_applied,
+                amount_due: i.amount_due,
+            })
+            .collect(),
+    }))
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/billing/invoices/{invoice_id}/download",
     tag = "Billing",
-    params(("invoice_id" = String, Path, description = "Lago invoice id")),
+    params(
+        ("invoice_id" = String, Path, description = "Lago invoice id"),
+        ("owner_id" = Option<String>, Query, description = "Personal or authorized organization owner")
+    ),
     responses(
         (status = 200, description = "Signed receipt download URL", body = InvoiceDownloadResponse)
     ),
@@ -791,12 +973,13 @@ pub async fn download_invoice(
     State(state): State<AppState>,
     auth_user: AuthUser,
     axum::extract::Path(invoice_id): axum::extract::Path<String>,
+    Query(query): Query<BillQuery>,
 ) -> AppResult<Json<InvoiceDownloadResponse>> {
     let actor_id = auth_user.user_id.to_string();
     let owner = state
         .billing
         .owner_resolver()
-        .resolve_for_wallet_management(&actor_id, None)
+        .resolve_for_wallet_management(&actor_id, query.owner_id.as_deref())
         .await?;
     ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
 

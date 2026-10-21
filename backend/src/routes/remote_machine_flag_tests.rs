@@ -70,6 +70,14 @@ impl LocalLago {
 }
 #[async_trait]
 impl LagoApi for LocalLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        self.called();
+        Ok(crate::services::billing::taxes::zero_config())
+    }
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
         self.called();
         Ok(owner.external_customer_id.clone())

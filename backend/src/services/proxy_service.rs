@@ -1122,6 +1122,7 @@ pub(crate) fn prepare_node_request(
     caller_token: Option<&str>,
     extra_outbound_headers: &[(String, String)],
 ) -> AppResult<PreparedNodeRequest> {
+    super::lark_attachment_tool::refuse_reserved_path(path)?;
     let mut node_delegated = delegated.to_vec();
     extend_with_path_credential(&mut node_delegated, target);
     let prepared = prepare_delegated_request(path, query, &node_delegated)?;
@@ -4334,6 +4335,7 @@ async fn forward_request_with_egress_guard_inner(
     egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
+    super::lark_attachment_tool::refuse_reserved_path(path)?;
     if super::telnyx_platform_service::contract(&target.service).is_some() {
         let proof = billing_egress_permit.managed_proof().ok_or_else(|| {
             AppError::BillingProviderUnavailable(
@@ -7445,6 +7447,42 @@ mod tests {
                 ("X-Provider-Key".to_string(), "secret".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn lark_base_write_reserved_routes_refuse_raw_and_node_forwarding_before_provider_effects()
+     {
+        let vendor = wiremock::MockServer::start().await;
+        let target = make_proxy_target(vendor.uri());
+        for path in [
+            "/nyxid/managed/bitable/apps/base/tables/table/records",
+            "nyxid/managed/bitable/apps/base/tables/table/records",
+            "/open-apis/nyxid/managed/bitable/apps/base/tables/table/records",
+        ] {
+            assert!(
+                super::forward_request(
+                    &Client::new(),
+                    &target,
+                    reqwest::Method::POST,
+                    path,
+                    None,
+                    reqwest::header::HeaderMap::new(),
+                    ProxyBody::Buffered(None),
+                    vec![],
+                    vec![],
+                    None,
+                    &empty_token_cache(),
+                    &empty_response_cache(),
+                    crate::services::billing::route_inventory::internal_node_dispatch_permit()
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                prepare_node_request(&target, path, None, vec![], &[], &[], None, &[]).is_err()
+            );
+        }
+        assert!(vendor.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

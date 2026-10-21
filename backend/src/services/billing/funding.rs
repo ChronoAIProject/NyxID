@@ -300,7 +300,9 @@ fn reserve_and_open_durable_once<'a>(
                     layer.grant_reservations.push(GrantReservationAllocation { grant_id: grant.id, amount: wanted, service_limit_key: key });
                     remaining_cost = remaining_cost.checked_sub(wanted)?;
                 }
-                layer.reserved_credits = remaining_cost;
+                layer.reserved_credits = super::taxes::reserve_gross_in_session(
+                    &db, session, &wallet, layer, remaining_cost,
+                ).await?;
             }
             let total = layers.iter().map(|layer| layer.reserved_credits)
                 .try_fold(Credits::ZERO, Credits::checked_add)?;
@@ -982,12 +984,18 @@ pub fn settle_usage_funding<'a>(
         }
 
         let wallet = charge_after_allowance.checked_sub(grant_covered)?;
-        if reserved_only && wallet > claimed.reserved_credits {
+        let applied_tax = super::taxes::settlement_tax(db, &claimed, wallet).await?;
+        let tax = applied_tax
+            .as_ref()
+            .map(|snapshot| super::taxes::tax_half_up(wallet, snapshot.rate_percent))
+            .transpose()?
+            .unwrap_or(Credits::ZERO);
+        let wallet_charge_credits = wallet.checked_add(tax)?;
+        if reserved_only && wallet_charge_credits > claimed.reserved_credits {
             return Err(AppError::BillingProviderUnavailable(
                 "Machine settlement exceeds its funded wallet window".into(),
             ));
         }
-        let wallet_charge_credits = wallet;
         // Grant- and allowance-funded usage is deliberately absent from Lago's
         // charging stream. Only the wallet-funded fraction is emitted, so Lago's
         // invoice, NyxID's pending debit, wallet refresh, and drift comparison all
@@ -1001,6 +1009,8 @@ pub fn settle_usage_funding<'a>(
             "funding.grant_funded": grant_covered,
             "funding.wallet_funded": wallet,
             "funding.wallet_charge_credits": wallet_charge_credits,
+            "funding.wallet_tax_credits": tax,
+            "funding.applied_tax": bson::to_bson(&applied_tax).map_err(|e| AppError::Internal(e.to_string()))?,
             "funding.settled_at": settled_at,
             "updated_at": settled_at,
         };
@@ -1704,7 +1714,7 @@ mod tests {
     ) -> AppResult<super::super::reservation::BillingReservation> {
         use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as WALLETS};
         let now = bson::DateTime::now();
-        let wallet = match db
+        let mut wallet = match db
             .collection::<BillingWallet>(WALLETS)
             .find_one(doc! { "owner_id": owner })
             .await?
@@ -1718,6 +1728,10 @@ mod tests {
                 w
             }
         };
+        super::super::taxes::seed_test_profiles(db).await;
+        if wallet.lago_subscription_id.is_none() {
+            wallet.lago_subscription_id = Some("test-subscription".into());
+        }
         let ctx = BillingRouteContext::new(
             super::super::BillingIngress::Proxy,
             Uuid::new_v4().to_string(),
@@ -1745,6 +1759,8 @@ mod tests {
             reserved_credits: rate.checked_mul(quantity)?,
             allowance_reservations: vec![],
             grant_reservations: vec![],
+            tax_cache_ttl_secs: 900,
+            applied_tax: None,
         };
         reserve_and_open_ordinary(db, &ctx, &wallet, vec![layer]).await
     }

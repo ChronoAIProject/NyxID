@@ -324,6 +324,7 @@ fn mcp_credential_class(
 /// A single endpoint within a service.
 #[derive(Clone, Default)]
 pub struct McpToolEndpoint {
+    pub attachment_input: Option<super::lark_attachment_tool::Projection>,
     pub async_operation: Option<crate::models::async_service_operation::AsyncOperationContract>,
     pub target_id: Option<String>,
     pub endpoint_id: String,
@@ -388,6 +389,10 @@ pub fn endpoint_contract_digest(endpoint: &McpToolEndpoint) -> String {
     if let Some(async_operation) = &endpoint.async_operation {
         contract["async_operation"] =
             serde_json::to_value(async_operation).expect("async contract");
+    }
+    if let Some(projection) = &endpoint.attachment_input {
+        contract["attachment_input"] =
+            serde_json::to_value(projection).expect("attachment projection");
     }
     canonical_sha256(contract)
 }
@@ -509,6 +514,7 @@ pub fn exact_operation_view(services: &[McpToolService]) -> ExactOperationView {
             let mut operations = service
                 .endpoints
                 .iter()
+                .filter(|endpoint| !super::lark_attachment_tool::is_attachment_operation(endpoint))
                 .filter_map(|endpoint| {
                     let metadata = service
                         .durable_endpoint_metadata
@@ -1560,7 +1566,7 @@ async fn load_user_tools_with_grants(
             let template_rows = eps_by_svc
                 .get(catalog_id)
                 .map(|eps| ParsedMcpEndpoints {
-                    endpoints: service_endpoints_to_mcp(eps),
+                    endpoints: stored_service_endpoints_to_mcp(eps, catalog_policy),
                     durable_metadata: service_endpoint_durable_metadata(
                         eps,
                         catalog_policy.map(|service| service.slug.as_str()),
@@ -1600,6 +1606,13 @@ async fn load_user_tools_with_grants(
             (generic_proxy_endpoints(endpoint_label), true, false)
         };
         let mut published = published;
+        // Even an unusable override that falls back to template rows must not
+        // advertise attachment authority through an instance-mounted spec.
+        if user_spec_url.is_some() {
+            for endpoint in &mut published.endpoints {
+                endpoint.attachment_input = super::lark_attachment_tool::untrusted(endpoint);
+            }
+        }
         if let Some(catalog) = catalog_policy {
             mark_catalog_operations(&mut published, &catalog.slug);
         }
@@ -1663,7 +1676,7 @@ async fn load_user_tools_with_grants(
         }
 
         let endpoint_rows = eps_by_svc.get(svc.id.as_str()).cloned().unwrap_or_default();
-        let endpoints = service_endpoints_to_mcp(&endpoint_rows);
+        let endpoints = stored_service_endpoints_to_mcp(&endpoint_rows, Some(svc));
         let durable_endpoint_metadata =
             service_endpoint_durable_metadata(&endpoint_rows, Some(svc.slug.as_str()));
 
@@ -1695,9 +1708,11 @@ async fn load_user_tools_with_grants(
 }
 
 /// Convert ServiceEndpoints to McpToolEndpoints.
-fn service_endpoints_to_mcp(eps: &[&ServiceEndpoint]) -> Vec<McpToolEndpoint> {
-    eps.iter()
+pub(super) fn service_endpoints_to_mcp(eps: &[&ServiceEndpoint]) -> Vec<McpToolEndpoint> {
+    let mut endpoints: Vec<_> = eps
+        .iter()
         .map(|ep| McpToolEndpoint {
+            attachment_input: None,
             async_operation: ep.async_operation.clone(),
             target_id: ep.target_id.clone(),
             endpoint_id: ep.id.clone(),
@@ -1712,7 +1727,20 @@ fn service_endpoints_to_mcp(eps: &[&ServiceEndpoint]) -> Vec<McpToolEndpoint> {
             response_description: ep.response_description.clone(),
             response: ep.response.clone(),
         })
-        .collect()
+        .collect();
+    for endpoint in &mut endpoints {
+        endpoint.attachment_input = super::lark_attachment_tool::untrusted(endpoint);
+    }
+    endpoints
+}
+
+fn stored_service_endpoints_to_mcp(
+    eps: &[&ServiceEndpoint],
+    catalog: Option<&DownstreamService>,
+) -> Vec<McpToolEndpoint> {
+    let mut endpoints = service_endpoints_to_mcp(eps);
+    super::lark_attachment_tool::stored_projections(catalog, &mut endpoints);
+    endpoints
 }
 
 fn service_endpoint_durable_metadata(
@@ -1884,6 +1912,7 @@ fn parsed_endpoints_to_mcp(parsed: Vec<openapi_parser::ParsedEndpoint>) -> Parse
             },
         );
         endpoints.push(McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             // Dynamic operations have no persisted row. Hash the producer's
@@ -1901,6 +1930,9 @@ fn parsed_endpoints_to_mcp(parsed: Vec<openapi_parser::ParsedEndpoint>) -> Parse
             response_description: None,
             response: parsed_endpoint.response,
         });
+    }
+    for endpoint in &mut endpoints {
+        endpoint.attachment_input = super::lark_attachment_tool::untrusted(endpoint);
     }
     ParsedMcpEndpoints {
         endpoints,
@@ -2412,6 +2444,7 @@ fn select_slug_winner_indices(
 /// predefined API endpoints. Lets the AI make arbitrary HTTP requests.
 fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
     McpToolEndpoint {
+        attachment_input: None,
         async_operation: None,
         target_id: None,
         endpoint_id: GENERIC_PROXY_ENDPOINT_ID.to_string(),
@@ -2983,6 +3016,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
             .iter()
             .filter(|rule| rule.enabled)
             .map(|rule| McpToolEndpoint {
+                attachment_input: None,
                 async_operation: None,
                 target_id: None,
                 endpoint_id: rule.id.clone(),
@@ -3000,6 +3034,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
                 response_description: None,
                 response: OperationResponseContract::default(),
             })
+            .filter(|endpoint| !super::lark_attachment_tool::is_attachment_operation(endpoint))
             .collect();
 
         if endpoints.is_empty() {
@@ -3112,6 +3147,12 @@ fn sanitize_tool_segment(value: &str) -> String {
 /// Build a JSON Schema `inputSchema` from endpoint parameters and body schema.
 /// Ported from the TypeScript `buildInputSchema()` in `mcp-proxy/src/tools.ts`.
 pub(crate) fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
+    if matches!(
+        endpoint.attachment_input,
+        Some(super::lark_attachment_tool::Projection::Stored(_))
+    ) {
+        return super::lark_attachment_tool::input_schema(endpoint);
+    }
     let mut properties = serde_json::Map::new();
     let mut required: Vec<serde_json::Value> = Vec::new();
 
@@ -3747,6 +3788,8 @@ impl AutomaticReceipt {
 }
 
 pub struct PreparedProxyCall {
+    managed_base: Option<super::lark_base_writes::Prepared>,
+    attachment_binding: Option<super::lark_attachment_tool::Binding>,
     resource_source: Option<crate::models::assistant_resource::ResourceSource>,
     automatic_receipt: Option<AutomaticReceipt>,
     async_submission: Option<String>,
@@ -3853,6 +3896,27 @@ impl PreparedProxyCall {
             ));
         }
         Ok(())
+    }
+
+    /// Platform chat consent must bind the materialized bytes too: an attachment
+    /// id alone does not describe the request that leaves this process.
+    pub(crate) fn attachment_confirmation_arguments(
+        &self,
+        endpoint: &McpToolEndpoint,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        self.attachment_binding.as_ref()?;
+        use sha2::Digest;
+        let body_sha256 = hex::encode(sha2::Sha256::digest(
+            self.body.as_deref().unwrap_or_default(),
+        ));
+        Some(serde_json::json!({
+            "endpoint_contract": endpoint_contract_digest(endpoint),
+            "method": self.method.as_str(), "path": self.path, "query": self.query,
+            "body_sha256": body_sha256,
+            "content_type": self.body_content_type,
+            "acknowledgement_id": args.get("acknowledgement_id"),
+        }))
     }
 
     pub fn operation_descriptor(&self) -> operation_descriptor::OperationDescriptor {
@@ -4037,6 +4101,8 @@ pub(crate) fn http_carries_method_override(
         return true;
     };
     PreparedProxyCall {
+        managed_base: None,
+        attachment_binding: None,
         resource_source: None,
         automatic_receipt: None,
         async_submission: None,
@@ -4071,6 +4137,17 @@ pub(crate) fn http_carries_method_override(
 /// or downstream side effect. Execution consumes this value and never rebuilds
 /// method/path/body from caller arguments.
 pub fn prepare_proxy_tool_call(
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+    args: &serde_json::Value,
+) -> AppResult<PreparedProxyCall> {
+    if super::lark_attachment_tool::is_attachment_operation(endpoint) {
+        return Err(super::lark_attachment_tool::refused());
+    }
+    prepare_proxy_tool_call_inner(service, endpoint, args)
+}
+
+fn prepare_proxy_tool_call_inner(
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
     args: &serde_json::Value,
@@ -4130,6 +4207,8 @@ pub fn prepare_proxy_tool_call(
     };
 
     Ok(PreparedProxyCall {
+        managed_base: None,
+        attachment_binding: None,
         resource_source: None,
         automatic_receipt: None,
         async_submission: None,
@@ -4158,6 +4237,76 @@ pub fn prepare_proxy_tool_call(
                 .copied()
                 .unwrap_or_default()
         },
+    })
+}
+
+/// Only live chat dispatch can materialize attachment references. Ordinary,
+/// exact, descriptor and background preparation continues to refuse candidates.
+pub fn prepare_chat_proxy_tool_call<'a>(
+    db: &'a mongodb::Database,
+    keys: &'a EncryptionKeys,
+    chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
+    service: &'a McpToolService,
+    endpoint: &'a McpToolEndpoint,
+    args: &'a serde_json::Value,
+) -> futures::future::BoxFuture<'a, AppResult<PreparedProxyCall>> {
+    Box::pin(async move {
+        if !super::lark_attachment_tool::is_attachment_operation(endpoint) {
+            return prepare_proxy_tool_call(service, endpoint, args);
+        }
+        if matches!(
+            endpoint.attachment_input,
+            Some(super::lark_attachment_tool::Projection::Managed(_))
+        ) {
+            let mut prepared = prepare_proxy_tool_call_inner(service, endpoint, args)?;
+            let chat = chat.ok_or_else(super::lark_attachment_tool::refused)?;
+            let key = db
+                .collection::<crate::models::api_key::ApiKey>("api_keys")
+                .find_one(doc! {"_id":&chat.api_key_id,"is_active":true})
+                .await?
+                .ok_or_else(super::lark_attachment_tool::refused)?;
+            let body: serde_json::Value =
+                serde_json::from_slice(prepared.body.as_deref().unwrap_or_default())
+                    .map_err(|_| super::lark_attachment_tool::refused())?;
+            prepared.body = Some(
+                serde_json::to_vec(&canonical_json(body.clone()))
+                    .map_err(|_| super::lark_attachment_tool::refused())?
+                    .into(),
+            );
+            prepared.authorize_agent_operations(
+                &key.assistant_operation_scopes,
+                service,
+                endpoint,
+            )?;
+            prepared.managed_base = Some(
+                Box::pin(super::lark_base_writes::prepare(
+                    db,
+                    keys,
+                    Some(chat),
+                    service,
+                    endpoint,
+                    args,
+                    &body,
+                ))
+                .await?,
+            );
+            return Ok(prepared);
+        }
+        let materialized = Box::pin(super::lark_attachment_tool::materialize(
+            db, keys, chat, service, endpoint, args,
+        ))
+        .await?;
+        // Reuse route/policy preparation with no caller body. This private copy
+        // changes only body construction; consent and identity keep the real endpoint.
+        let mut route = endpoint.clone();
+        route.request_content_type = None;
+        route.request_body_schema = None;
+        route.request_body_required = false;
+        let mut prepared = prepare_proxy_tool_call_inner(service, &route, &serde_json::json!({}))?;
+        prepared.body = Some(materialized.body);
+        prepared.body_content_type = Some(materialized.content_type);
+        prepared.attachment_binding = Some(materialized.binding);
+        Ok(prepared)
     })
 }
 
@@ -4968,7 +5117,19 @@ pub fn execute_tool_response<'a>(
         ))
         .await?
         {
-            McpToolExecutionOutcome::Response(response) => Ok(response),
+            McpToolExecutionOutcome::Response(response) => {
+                if matches!(
+                    endpoint.attachment_input,
+                    Some(super::lark_attachment_tool::Projection::Stored(_))
+                ) && matches!(response.origin, ToolResponseOrigin::Downstream)
+                {
+                    super::lark_attachment_tool::validate_response(
+                        response.status,
+                        &response.text,
+                    )?;
+                }
+                Ok(response)
+            }
             McpToolExecutionOutcome::ProviderOutcomeUnknown(error) => Err(error),
             McpToolExecutionOutcome::ProviderUnreachable(error) => Err(error),
         }
@@ -5361,6 +5522,30 @@ async fn execute_tool_resolved_inner(
     attested_delegated_credentials: Option<Vec<super::delegation_service::DelegatedCredential>>,
     service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> AppResult<McpToolExecutionOutcome> {
+    if super::lark_attachment_tool::is_attachment_operation(endpoint)
+        && prepared.managed_base.is_none()
+    {
+        let binding = prepared
+            .attachment_binding
+            .as_ref()
+            .ok_or_else(super::lark_attachment_tool::refused)?;
+        if !super::lark_attachment_tool::binding_matches(binding, user_id, exec_ctx.api_key_id)
+            || prepared.async_submission.is_some()
+            || prepared.async_continuation.is_some()
+        {
+            return Err(super::lark_attachment_tool::refused());
+        }
+        super::lark_attachment_tool::validate_binding(db, service, endpoint, binding).await?;
+    }
+    if let Some(base) = &prepared.managed_base
+        && (base.chat.user_id != user_id
+            || exec_ctx.api_key_id != Some(base.chat.api_key_id.as_str())
+            || prepared.async_submission.is_some()
+            || prepared.async_continuation.is_some()
+            || node_route.is_some())
+    {
+        return Err(super::lark_attachment_tool::refused());
+    }
     super::org_agent_service::authorize_service_with_access(
         db,
         user_id,
@@ -5492,7 +5677,11 @@ async fn execute_tool_resolved_inner(
                 &target,
                 Some((
                     prepared.body.as_deref().unwrap_or_default(),
-                    Some("application/json"),
+                    if prepared.attachment_binding.is_some() {
+                        prepared.body_content_type.as_deref()
+                    } else {
+                        Some("application/json")
+                    },
                 )),
             )
             .await?
@@ -5522,7 +5711,11 @@ async fn execute_tool_resolved_inner(
                 false,
                 Some((
                     prepared.body.as_deref().unwrap_or_default(),
-                    Some("application/json"),
+                    if prepared.attachment_binding.is_some() {
+                        prepared.body_content_type.as_deref()
+                    } else {
+                        Some("application/json")
+                    },
                 )),
             )
             .await?
@@ -5546,6 +5739,8 @@ async fn execute_tool_resolved_inner(
 
     box_mcp_forwarding(move || async move {
         let PreparedProxyCall {
+            managed_base,
+            attachment_binding,
             resource_source: _,
             automatic_receipt,
             async_submission: _,
@@ -5558,7 +5753,7 @@ async fn execute_tool_resolved_inner(
             parameter_headers,
             server_owned_headers,
             body,
-            body_content_type: _,
+            body_content_type,
             is_generic_proxy_endpoint,
             approval_metadata: _,
         } = prepared;
@@ -5748,7 +5943,7 @@ async fn execute_tool_resolved_inner(
         proxy_service::validate_ifttt_delegation(&target, &delegated)?;
 
         // Content-Type header
-        let req_headers = if is_generic_proxy_endpoint {
+        let mut req_headers = if is_generic_proxy_endpoint {
             let mut h = reqwest::header::HeaderMap::new();
             if body.is_some() {
                 h.insert(
@@ -5760,6 +5955,11 @@ async fn execute_tool_resolved_inner(
         } else {
             build_downstream_request_headers(endpoint, body.is_some())?
         };
+        if attachment_binding.is_some() {
+            req_headers.insert(reqwest::header::CONTENT_TYPE,
+                body_content_type.as_deref().ok_or_else(super::lark_attachment_tool::refused)?.parse()
+                .map_err(|_|super::lark_attachment_tool::refused())?);
+        }
         let resource_owner_id = billing_context_builder.effective_owner_id.clone();
         let billing_ctx = billing_context_builder
             .build(
@@ -5873,6 +6073,37 @@ async fn execute_tool_resolved_inner(
             .inspect_err(|error| request_audit.admission_error(error))?;
         let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
 
+        if let Some(base)=managed_base.as_ref() {
+            return box_mcp_forwarding(|| async move {
+            let admission=assistant_admission.as_ref().ok_or_else(super::lark_attachment_tool::refused)?;
+            let guard=super::assistant_service_execution::LarkManagedGuard::new(db,encryption_keys,admission,
+                &target,service,endpoint,base,&path,body.as_deref().unwrap_or_default())?;
+            guard.revalidate().await?;
+            billing.mark_forwarded(&metered).await?;
+            destination_audit.dispatch();
+            let result=super::lark_base_writes::execute(db,encryption_keys,base,&guard,
+                super::lark_base_writes::transport::Transport {
+                    target:&target,tokens:token_exchange_cache,cache:cloud_response_cache,
+                    permit:billing_egress_permit,identity:identity_headers,delegated,caller:exec_ctx.caller_token,
+                }).await;
+            let (status,text)=match result {
+                Ok(value)=>(200,serde_json::to_string(&value).map_err(|_|AppError::Internal("Invalid Base result".into()))?),
+                Err(error)=>{
+                    billing.settle(&metered,mcp_platform_usage_for_path(&[],request_len,&target.service,&path,409),None,None).await?;
+                    return Err(error);
+                }
+            };
+            billing.settle(&metered,mcp_platform_usage_for_path(text.as_bytes(),request_len,&target.service,&path,status),None,None).await?;
+            destination_audit.complete(status);
+            request_audit.response(status);
+            if let Some(chat)=assistant_chat.as_ref() {
+                if let Some(receipt)=&automatic_receipt {receipt.record(db,chat).await;}
+                else {admission.receipt(db,chat,assistant_auto).await;}
+            }
+            Ok(McpToolExecutionOutcome::Response(tool_response(status,Some("application/json"),text.as_bytes())))
+            }).await;
+        }
+
         // -------------------------------------------------------------------
         // Route through node when a node route exists (primary + fallbacks).
         // Always attempt all nodes regardless of primary connection state --
@@ -5978,6 +6209,9 @@ async fn execute_tool_resolved_inner(
                         .reject_before_send(&metered, "assistant_authority_changed", false)
                         .await?;
                     return Err(error);
+                }
+                if let Some(binding)=attachment_binding.as_ref() {
+                    super::lark_attachment_tool::validate_binding(db,service,endpoint,binding).await?;
                 }
                 match node_ws_manager
                     .send_proxy_request_classified(
@@ -6145,6 +6379,8 @@ async fn execute_tool_resolved_inner(
                 .http_egress(db, encryption_keys, &target, method.as_str(), &path)
                 .routed(node_route.as_ref())
         });
+        let egress_guard = super::assistant_service_execution::HttpEgressGuard::with_attachment(
+            egress_guard,db,service,endpoint,attachment_binding.as_ref());
         let response = match proxy_service::forward_request_with_resource_proof(
             http_client,
             &target,
@@ -7540,6 +7776,7 @@ mod tests {
             .find(|endpoint| endpoint.name == name)
             .unwrap();
         McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: name.to_string(),
@@ -7691,6 +7928,7 @@ mod tests {
     fn selected_typed_operation_cannot_shift_to_another_allowlisted_custom_method() {
         use crate::models::downstream_service::ProxyOperationRule;
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             method: "POST".into(),
@@ -7735,6 +7973,7 @@ mod tests {
             .is_err()
         );
         let other = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             path: "/v1/items/{id}:other".into(),
@@ -7817,6 +8056,7 @@ mod tests {
     #[test]
     fn google_ai_no_policy_keeps_generate_content_path_bytes() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             method: "POST".into(),
@@ -8094,6 +8334,7 @@ mod tests {
 
     fn make_endpoint(name: &str, description: &str) -> McpToolEndpoint {
         McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: format!("endpoint-{name}"),
@@ -8806,6 +9047,7 @@ mod tests {
     #[test]
     fn mcp_preparation_denies_before_approval_descriptor_for_blocked_order_read() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             method: "GET".to_string(),
@@ -8830,6 +9072,7 @@ mod tests {
     #[test]
     fn mcp_cancellation_prepares_a_write_for_the_existing_approval_path() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             method: "POST".to_string(),
@@ -8861,6 +9104,7 @@ mod tests {
     #[test]
     fn mcp_no_policy_keeps_existing_passthrough_preparation() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             method: "GET".to_string(),
@@ -9388,6 +9632,7 @@ mod tests {
             assert!(!overrides(args.clone()), "{args}");
         }
         let header = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             method: "POST".to_string(),
             path: "/posts/{id}".to_string(),
@@ -9410,6 +9655,7 @@ mod tests {
         // A form endpoint's body is read as a form even when it looks like
         // JSON.
         let form = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             method: "POST".to_string(),
             path: "/Messages.json".to_string(),
@@ -9479,6 +9725,7 @@ mod tests {
     #[test]
     fn mounted_specs_of_catalog_services_keep_overlay_markers() {
         let endpoint = |name: &str, path: &str| McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             method: "POST".to_string(),
             path: path.to_string(),
@@ -11922,6 +12169,7 @@ mod tests {
     #[test]
     fn build_input_schema_uses_base64_string_for_binary_bodies() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11959,6 +12207,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_non_json_object_bodies() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11993,6 +12242,7 @@ mod tests {
     #[test]
     fn build_input_schema_exposes_body_when_content_type_has_no_schema() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12021,6 +12271,7 @@ mod tests {
     #[test]
     fn build_input_schema_treats_unknown_application_uploads_as_binary() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12049,6 +12300,7 @@ mod tests {
     #[test]
     fn build_input_schema_includes_supported_header_and_cookie_params() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12096,6 +12348,7 @@ mod tests {
     #[test]
     fn build_input_schema_uses_alternate_body_field_when_body_param_exists() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12134,6 +12387,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_json_body_when_properties_collide_with_params() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12191,6 +12445,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_json_body_when_properties_collide_with_blocked_header_params() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12230,6 +12485,7 @@ mod tests {
     fn build_input_schema_wraps_json_body_when_properties_collide_with_header_params_case_insensitively()
      {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12275,6 +12531,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_optional_json_body_without_requiring_it() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12309,6 +12566,7 @@ mod tests {
     #[test]
     fn build_input_schema_defaults_binary_media_type_when_missing() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12338,6 +12596,7 @@ mod tests {
     #[test]
     fn build_input_schema_defaults_wildcard_binary_media_type_to_octet_stream() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12368,6 +12627,7 @@ mod tests {
     fn build_input_schema_uses_alternate_body_field_when_body_header_param_exists_case_insensitively()
      {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12422,6 +12682,7 @@ mod tests {
             Some(serde_json::json!([parameter.clone()])),
         ] {
             let mut endpoint = McpToolEndpoint {
+                attachment_input: None,
                 async_operation: None,
                 method: "GET".into(),
                 path: "/search".into(),
@@ -12452,6 +12713,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12486,6 +12748,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12520,6 +12783,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12549,6 +12813,7 @@ mod tests {
     #[test]
     fn build_proxy_args_preserves_flattened_json_body_named_body_property() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12587,6 +12852,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_flattened_json_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12618,6 +12884,7 @@ mod tests {
     #[test]
     fn build_proxy_args_routes_header_and_cookie_params_out_of_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12689,6 +12956,7 @@ mod tests {
     #[test]
     fn build_proxy_args_accepts_header_parameters_case_insensitively() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12741,6 +13009,7 @@ mod tests {
     #[test]
     fn build_proxy_args_allows_missing_optional_wrapped_json_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12773,6 +13042,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12811,6 +13081,7 @@ mod tests {
     #[test]
     fn build_proxy_args_wraps_json_body_when_properties_collide_with_params() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12887,6 +13158,7 @@ mod tests {
     #[test]
     fn build_proxy_args_wraps_json_body_when_properties_collide_with_blocked_header_params() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12941,6 +13213,7 @@ mod tests {
     fn build_proxy_args_wraps_json_body_when_properties_collide_with_header_params_case_insensitively()
      {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12999,6 +13272,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_binary_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13025,6 +13299,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_reserved_header_parameters() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13064,6 +13339,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_reserved_header_parameters_case_insensitively() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13104,6 +13380,7 @@ mod tests {
     fn build_proxy_args_uses_alternate_body_field_when_body_header_param_exists_case_insensitively()
     {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13149,6 +13426,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_extra_fields_for_wrapped_json_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13183,6 +13461,7 @@ mod tests {
     #[test]
     fn build_proxy_args_preserves_urlencoded_body_as_raw_text() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13215,6 +13494,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_unknown_args_when_endpoint_has_no_request_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13257,6 +13537,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_body_for_bodyless_post_endpoint() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13291,6 +13572,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_path_parameter() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13327,6 +13609,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_unresolved_path_templates_without_required_metadata() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13363,6 +13646,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_non_body_parameters() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13439,6 +13723,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_multipart_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13473,6 +13758,7 @@ mod tests {
     #[test]
     fn build_proxy_args_error_mentions_alternate_body_field_name() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13512,6 +13798,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_defaults_binary_schema_to_octet_stream() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13539,6 +13826,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_defaults_wildcard_binary_schema_to_octet_stream() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13566,6 +13854,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_uses_endpoint_content_type() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13593,6 +13882,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_omits_optional_body_without_payload() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13614,6 +13904,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_omits_default_json_without_payload() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13642,6 +13933,7 @@ mod tests {
     #[test]
     fn build_downstream_request_headers_sets_content_type_without_forcing_accept() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13778,6 +14070,7 @@ mod tests {
     #[test]
     fn request_body_field_name_avoids_collision() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),

@@ -67,6 +67,9 @@ pub mod channel_delivery_service;
 pub mod channel_event_service;
 pub mod channel_inbound_service;
 pub mod channel_managed;
+pub mod channel_media_authority;
+pub mod channel_media_events;
+pub mod channel_media_fetch;
 pub mod channel_media_service;
 pub mod channel_native_mentions;
 pub mod channel_platform;
@@ -121,6 +124,7 @@ pub mod incremental_consent_service;
 pub mod internal_auth;
 pub mod invite_code_service;
 pub mod key_service;
+pub mod lark_attachment_tool;
 pub mod lark_permission;
 pub mod llm_gateway_service;
 pub mod llm_usage_service;
@@ -359,6 +363,7 @@ mod agent_operation_scope_tests;
 pub mod permission_policy_service;
 
 pub mod agent_skill_service;
+pub mod assistant_channel_media;
 pub mod assistant_upload_retention;
 pub mod assistant_upload_service;
 pub mod attachment_extraction;
@@ -480,6 +485,7 @@ pub(crate) mod platform_faq_service;
 pub mod assistant_invocation_service;
 pub(crate) mod platform_native_reply_service;
 
+pub mod lark_base_writes;
 pub mod session_authority;
 
 pub mod oauth_token_authority_service;
