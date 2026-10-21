@@ -583,6 +583,21 @@ pub fn safe_operation_view(operation: &MachineOperation) -> SafeMachineOperation
         | "runtime_funding_expired"
         | "expansion_deadline_exceeded"
         | "cleanup_overdue" => code,
+        "delete_kubernetes_authentication_failed"
+        | "delete_kubernetes_access_denied"
+        | "delete_kubernetes_observation_timed_out"
+        | "delete_kubernetes_credentials_unavailable"
+        | "delete_kubernetes_transport_failed"
+        | "delete_kubernetes_http_failed"
+        | "delete_kubernetes_response_invalid"
+        | "delete_kubernetes_inventory_incomplete"
+        | "delete_kubernetes_inventory_limit_exceeded"
+        | "delete_resource_observation_unknown"
+        | "delete_attempt_timed_out"
+            if operation.action == LifecycleAction::Delete =>
+        {
+            code
+        }
         _ => "operation_reconciling",
     });
     SafeMachineOperationView {
@@ -599,6 +614,11 @@ pub fn safe_operation_view(operation: &MachineOperation) -> SafeMachineOperation
         delete_retry_stopped: retry_stopped,
         error_code: safe_code.map(str::to_string),
         error_message: safe_code.map(|code| match code {
+            "delete_kubernetes_authentication_failed" | "delete_kubernetes_credentials_unavailable" => "Deletion is waiting for platform Kubernetes credentials. Ask a platform operator to restore access; cleanup and slot release remain pending.",
+            "delete_kubernetes_access_denied" => "Kubernetes denied access required to verify deletion. Ask a platform operator to check the required cleanup permissions; cleanup and slot release remain pending.",
+            "delete_kubernetes_observation_timed_out" | "delete_attempt_timed_out" => "Deletion observation timed out. Cleanup and slot release remain pending until verification succeeds.",
+            "delete_kubernetes_transport_failed" | "delete_kubernetes_http_failed" => "Kubernetes is unavailable for deletion verification. Cleanup and slot release remain pending until access recovers.",
+            "delete_kubernetes_response_invalid" | "delete_kubernetes_inventory_incomplete" | "delete_kubernetes_inventory_limit_exceeded" | "delete_resource_observation_unknown" => "Deletion could not verify a complete Kubernetes resource inventory. Ask a platform operator to investigate; cleanup and slot release remain pending.",
             "runtime_funding_unavailable" | "runtime_funding_expired" => "Runtime funding could not be renewed. Your workspace is retained; restore available funds or billing availability, then review a new quote and resume manually.",
             "expansion_deadline_exceeded" => "Provisioning exceeded its deadline and was stopped. Your existing workspace is retained; review the platform status before resuming.",
             "cleanup_overdue" => "Deletion remains pending beyond the 24-hour target. Platform operators have been notified; physical cleanup and accounting must finish before completion.",

@@ -6,6 +6,10 @@
 //! exec, or treats an API response as proof of physical process termination.
 
 use crate::kubernetes_credentials::KubernetesCredentials;
+use crate::sandbox_observation::{
+    ObservationErrorKind, ObservationResourceKind, ObservationStage, ObservationVerb,
+    SandboxObservationError,
+};
 use anyhow::{Context, Result, anyhow, ensure};
 use reqwest::{Client, Method, StatusCode, Url, header};
 use serde::{Deserialize, Serialize};
@@ -1036,6 +1040,107 @@ fn validate_recovery_object(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct ObservationContext {
+    resource_kind: ObservationResourceKind,
+    verb: ObservationVerb,
+    http_status: Option<u16>,
+}
+
+impl ObservationContext {
+    fn new(resource_kind: ObservationResourceKind, verb: ObservationVerb) -> Self {
+        Self {
+            resource_kind,
+            verb,
+            http_status: None,
+        }
+    }
+
+    fn received(self, response: &reqwest::Response) -> Self {
+        Self {
+            http_status: Some(response.status().as_u16()),
+            ..self
+        }
+    }
+
+    fn error(self, stage: ObservationStage, error_kind: ObservationErrorKind) -> anyhow::Error {
+        SandboxObservationError {
+            stage,
+            resource_kind: self.resource_kind,
+            verb: self.verb,
+            error_kind,
+            http_status: self.http_status,
+        }
+        .into()
+    }
+
+    fn transport(self, stage: ObservationStage, error: reqwest::Error) -> anyhow::Error {
+        self.error(
+            stage,
+            if error.is_timeout() {
+                ObservationErrorKind::Timeout
+            } else {
+                ObservationErrorKind::Transport
+            },
+        )
+    }
+
+    fn check_status(self, response: &reqwest::Response) -> Result<Self> {
+        let context = self.received(response);
+        if response.status().is_success() {
+            Ok(context)
+        } else {
+            Err(context.error(
+                ObservationStage::Request,
+                match response.status() {
+                    StatusCode::UNAUTHORIZED => ObservationErrorKind::Authentication,
+                    StatusCode::FORBIDDEN => ObservationErrorKind::Forbidden,
+                    _ => ObservationErrorKind::HttpStatus,
+                },
+            ))
+        }
+    }
+}
+
+/// Called only after the enclosing typed List has passed validation. Explicit
+/// null or malformed TypeMeta never receives the omitted-field normalization.
+fn normalize_recovery_list_item(
+    object: &Value,
+    kind: &str,
+    version: &str,
+    namespaced: bool,
+    context: ObservationContext,
+) -> Result<Value> {
+    let mut normalized = object.clone();
+    let fields = normalized.as_object_mut().ok_or_else(|| {
+        context.error(
+            ObservationStage::ValidateItem,
+            ObservationErrorKind::InvalidResponse,
+        )
+    })?;
+    for (field, expected) in [("kind", kind), ("apiVersion", version)] {
+        match fields.get(field) {
+            None => {
+                fields.insert(field.into(), Value::String(expected.into()));
+            }
+            Some(Value::String(actual)) if actual == expected => (),
+            Some(_) => {
+                return Err(context.error(
+                    ObservationStage::ValidateItem,
+                    ObservationErrorKind::InvalidResponse,
+                ));
+            }
+        }
+    }
+    validate_recovery_object(&normalized, kind, version, namespaced).map_err(|_| {
+        context.error(
+            ObservationStage::ValidateIdentity,
+            ObservationErrorKind::InvalidIdentity,
+        )
+    })?;
+    Ok(normalized)
+}
+
 #[derive(Clone)]
 pub struct SandboxApi {
     client: Client,
@@ -1160,6 +1265,83 @@ impl SandboxApi {
     async fn request(&self, method: Method, url: Url) -> Result<reqwest::Response> {
         let request = self.authorize(self.client.request(method, url)).await?;
         Ok(request.send().await?)
+    }
+
+    async fn observation_send(
+        &self,
+        request: reqwest::RequestBuilder,
+        context: ObservationContext,
+    ) -> Result<reqwest::Response> {
+        let request = self.authorize(request).await.map_err(|_| {
+            context.error(
+                ObservationStage::Request,
+                ObservationErrorKind::CredentialUnavailable,
+            )
+        })?;
+        request
+            .send()
+            .await
+            .map_err(|error| context.transport(ObservationStage::Request, error))
+    }
+
+    async fn observation_json(
+        mut response: reqwest::Response,
+        context: ObservationContext,
+    ) -> Result<Value> {
+        const MAX_BYTES: usize = 1024 * 1024;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_BYTES as u64)
+        {
+            return Err(context.error(
+                ObservationStage::DecodeResponse,
+                ObservationErrorKind::InventoryLimit,
+            ));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| context.transport(ObservationStage::DecodeResponse, error))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > MAX_BYTES {
+                return Err(context.error(
+                    ObservationStage::DecodeResponse,
+                    ObservationErrorKind::InventoryLimit,
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).map_err(|_| {
+            context.error(
+                ObservationStage::DecodeResponse,
+                ObservationErrorKind::InvalidResponse,
+            )
+        })
+    }
+
+    async fn observation_optional_object(
+        &self,
+        url: Url,
+        context: ObservationContext,
+    ) -> Result<Option<(Value, ObservationContext)>> {
+        let mut current_context = context;
+        let mut stage = ObservationStage::Request;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let response = self.observation_send(self.client.get(url), context).await?;
+            current_context = context.received(&response);
+            if response.status() == StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            let context = context.check_status(&response)?;
+            stage = ObservationStage::DecodeResponse;
+            Ok(Some((
+                Self::observation_json(response, context).await?,
+                context,
+            )))
+        })
+        .await
+        .map_err(|_| current_context.error(stage, ObservationErrorKind::Timeout))?
     }
 
     /// Resolve only an API-valid class. This never certifies CSI availability,
@@ -1298,19 +1480,24 @@ impl SandboxApi {
     }
 
     pub async fn get(&self, namespace: &str, name: &str) -> Result<Option<SandboxObservation>> {
-        let response = self
-            .request(Method::GET, self.resource_url(namespace, Some(name))?)
-            .await?;
-        if response.status() == StatusCode::NOT_FOUND {
+        let context =
+            ObservationContext::new(ObservationResourceKind::Sandbox, ObservationVerb::Get);
+        let url = self.resource_url(namespace, Some(name)).map_err(|_| {
+            context.error(
+                ObservationStage::ValidateIdentity,
+                ObservationErrorKind::InvalidIdentity,
+            )
+        })?;
+        let Some((object, context)) = self.observation_optional_object(url, context).await? else {
             return Ok(None);
-        }
-        ensure!(
-            response.status().is_success(),
-            "Sandbox GET failed ({})",
-            response.status()
-        );
-        Ok(Some(SandboxObservation::from_object(
-            &response.json().await?,
+        };
+        Ok(Some(SandboxObservation::from_object(&object).map_err(
+            |_| {
+                context.error(
+                    ObservationStage::ValidateItem,
+                    ObservationErrorKind::InvalidResponse,
+                )
+            },
         )?))
     }
 
@@ -1357,19 +1544,18 @@ impl SandboxApi {
             // application/apply-patch+json.
             .header(header::CONTENT_TYPE, "application/apply-patch+yaml")
             .json(&intent.apply_object());
-        let request = self.authorize(request).await?;
-        let response = request.send().await?;
-        if response.status() == StatusCode::CONFLICT {
-            return Err(anyhow!(
-                "Sandbox apply conflict; reconcile the existing operation"
-            ));
-        }
-        ensure!(
-            response.status().is_success(),
-            "Sandbox apply failed ({})",
-            response.status()
-        );
-        SandboxObservation::from_object(&response.json().await?)
+        let context =
+            ObservationContext::new(ObservationResourceKind::Sandbox, ObservationVerb::Patch);
+        let response = self.observation_send(request, context).await?;
+        let context = context.check_status(&response)?;
+        SandboxObservation::from_object(&Self::observation_json(response, context).await?).map_err(
+            |_| {
+                context.error(
+                    ObservationStage::ValidateItem,
+                    ObservationErrorKind::InvalidResponse,
+                )
+            },
+        )
     }
 
     /// Apply only when the live object still has the expected UID. This is the
@@ -1381,11 +1567,21 @@ impl SandboxApi {
         expected_uid: &str,
     ) -> Result<SandboxObservation> {
         intent.validate()?;
-        let current_object = self
-            .read_optional_object(self.resource_url(&intent.namespace, Some(&intent.name))?)
+        let get_context =
+            ObservationContext::new(ObservationResourceKind::Sandbox, ObservationVerb::Get);
+        let (current_object, get_context) = self
+            .observation_optional_object(
+                self.resource_url(&intent.namespace, Some(&intent.name))?,
+                get_context,
+            )
             .await?
             .context("Sandbox disappeared before UID-preconditioned apply")?;
-        let current = SandboxObservation::from_object(&current_object)?;
+        let current = SandboxObservation::from_object(&current_object).map_err(|_| {
+            get_context.error(
+                ObservationStage::ValidateItem,
+                ObservationErrorKind::InvalidResponse,
+            )
+        })?;
         ensure!(
             current.sandbox_uid.as_deref() == Some(expected_uid),
             "Sandbox UID precondition failed"
@@ -1428,28 +1624,36 @@ impl SandboxApi {
             ])
             .header(header::CONTENT_TYPE, "application/apply-patch+yaml")
             .json(&body);
-        let request = self.authorize(request).await?;
-        let response = request.send().await?;
-        ensure!(
-            response.status().is_success(),
-            "UID-preconditioned Sandbox apply failed ({})",
-            response.status()
-        );
-        SandboxObservation::from_object(&response.json().await?)
+        let context =
+            ObservationContext::new(ObservationResourceKind::Sandbox, ObservationVerb::Patch);
+        let response = self.observation_send(request, context).await?;
+        let context = context.check_status(&response)?;
+        SandboxObservation::from_object(&Self::observation_json(response, context).await?).map_err(
+            |_| {
+                context.error(
+                    ObservationStage::ValidateItem,
+                    ObservationErrorKind::InvalidResponse,
+                )
+            },
+        )
     }
 
     pub async fn delete(&self, namespace: &str, name: &str) -> Result<bool> {
+        let context =
+            ObservationContext::new(ObservationResourceKind::Sandbox, ObservationVerb::Delete);
+        let url = self.resource_url(namespace, Some(name)).map_err(|_| {
+            context.error(
+                ObservationStage::ValidateIdentity,
+                ObservationErrorKind::InvalidIdentity,
+            )
+        })?;
         let response = self
-            .request(Method::DELETE, self.resource_url(namespace, Some(name))?)
+            .observation_send(self.client.delete(url), context)
             .await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(false);
         }
-        ensure!(
-            response.status().is_success() || response.status() == StatusCode::ACCEPTED,
-            "Sandbox delete failed ({})",
-            response.status()
-        );
+        context.check_status(&response)?;
         Ok(true)
     }
 
@@ -1468,12 +1672,21 @@ impl SandboxApi {
         validate_identity_token(expected_uid)?;
         validate_identity_token(expected_resource_version)?;
         validate_identity_token(&intent.operation_id)?;
+        let get_context =
+            ObservationContext::new(ObservationResourceKind::Sandbox, ObservationVerb::Get);
         let url = self.resource_url(&intent.namespace, Some(&intent.name))?;
-        let current = self
-            .read_recovery_optional_object(url.clone())
+        let (current, get_context) = self
+            .observation_optional_object(url.clone(), get_context)
             .await?
             .context("Original Sandbox absent before suspension")?;
-        validate_recovery_object(&current, KIND, "agents.x-k8s.io/v1beta1", true)?;
+        validate_recovery_object(&current, KIND, "agents.x-k8s.io/v1beta1", true).map_err(
+            |_| {
+                get_context.error(
+                    ObservationStage::ValidateItem,
+                    ObservationErrorKind::InvalidResponse,
+                )
+            },
+        )?;
         ensure!(
             current.pointer("/metadata/name").and_then(Value::as_str) == Some(intent.name.as_str())
                 && current
@@ -1528,28 +1741,35 @@ impl SandboxApi {
             .patch(url)
             .header(header::CONTENT_TYPE, "application/json-patch+json")
             .json(&patch);
-        let request = self.authorize(request).await?;
-        let response = request.send().await?;
-        ensure!(
-            response.status().is_success(),
-            "UID/RV-preconditioned Sandbox suspension failed ({})",
-            response.status()
-        );
+        let context =
+            ObservationContext::new(ObservationResourceKind::Sandbox, ObservationVerb::Patch);
+        let response = self.observation_send(request, context).await?;
+        let context = context.check_status(&response)?;
         let observation =
-            SandboxObservation::from_object(&Self::read_recovery_json(response).await?)?;
-        ensure!(
-            observation.sandbox_uid.as_deref() == Some(expected_uid)
-                && observation.name == intent.name
-                && observation.namespace == intent.namespace
-                && observation.operation_id.as_deref() == Some(intent.operation_id.as_str())
-                && observation.desired_suspended,
-            "Original Sandbox suspension response identity invalid"
-        );
+            SandboxObservation::from_object(&Self::observation_json(response, context).await?)
+                .map_err(|_| {
+                    context.error(
+                        ObservationStage::ValidateItem,
+                        ObservationErrorKind::InvalidResponse,
+                    )
+                })?;
+        if !(observation.sandbox_uid.as_deref() == Some(expected_uid)
+            && observation.name == intent.name
+            && observation.namespace == intent.namespace
+            && observation.operation_id.as_deref() == Some(intent.operation_id.as_str())
+            && observation.desired_suspended)
+        {
+            return Err(context.error(
+                ObservationStage::ValidateIdentity,
+                ObservationErrorKind::InvalidIdentity,
+            ));
+        }
         Ok(observation)
     }
 
     /// Delete acceptance is not completion evidence. The server evaluates both
     /// preconditions atomically; 404 only skips this precise resource's DELETE.
+    /// Foreground propagation leaves dependent-object cleanup to Kubernetes GC.
     pub async fn delete_if_identity(
         &self,
         namespace: &str,
@@ -1561,6 +1781,7 @@ impl SandboxApi {
         validate_resource_segment(name)?;
         self.delete_url_if_identity(
             self.resource_url(namespace, Some(name))?,
+            ObservationResourceKind::Sandbox,
             expected_uid,
             expected_resource_version,
         )
@@ -1586,29 +1807,41 @@ impl SandboxApi {
         validate_resource_segment(name)?;
         let mut url = self.base_url.clone();
         url.set_path(&format!("/api/v1/namespaces/{namespace}/{resource}/{name}"));
-        self.delete_url_if_identity(url, expected_uid, expected_resource_version)
+        let kind = if resource == "pods" {
+            ObservationResourceKind::Pod
+        } else {
+            ObservationResourceKind::PersistentVolumeClaim
+        };
+        self.delete_url_if_identity(url, kind, expected_uid, expected_resource_version)
             .await
     }
 
     async fn delete_url_if_identity(
         &self,
         url: Url,
+        kind: ObservationResourceKind,
         expected_uid: &str,
         expected_resource_version: &str,
     ) -> Result<bool> {
         validate_identity_token(expected_uid)?;
         validate_identity_token(expected_resource_version)?;
-        let request = self.client.delete(url).header(header::CONTENT_TYPE, "application/json")
-            .json(&json!({"preconditions":{"uid":expected_uid,"resourceVersion":expected_resource_version}}));
-        let response = self.authorize(request).await?.send().await?;
+        let mut options = json!({"preconditions": {
+            "uid": expected_uid, "resourceVersion": expected_resource_version
+        }});
+        if kind == ObservationResourceKind::Sandbox {
+            options["propagationPolicy"] = json!("Foreground");
+        }
+        let request = self
+            .client
+            .delete(url)
+            .header(header::CONTENT_TYPE, "application/json")
+            .json(&options);
+        let context = ObservationContext::new(kind, ObservationVerb::Delete);
+        let response = self.observation_send(request, context).await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(false);
         }
-        ensure!(
-            response.status().is_success(),
-            "UID/RV-preconditioned Kubernetes delete failed ({})",
-            response.status()
-        );
+        context.check_status(&response)?;
         Ok(true)
     }
 
@@ -1631,13 +1864,13 @@ impl SandboxApi {
             .delete(self.resource_url(namespace, Some(name))?)
             .header(header::CONTENT_TYPE, "application/json")
             .json(&json!({"preconditions": {"uid": expected_uid}}));
-        let request = self.authorize(request).await?;
-        let response = request.send().await?;
-        ensure!(
-            response.status().is_success() || response.status() == StatusCode::ACCEPTED,
-            "UID-preconditioned Sandbox delete failed ({})",
-            response.status()
-        );
+        let context =
+            ObservationContext::new(ObservationResourceKind::Sandbox, ObservationVerb::Delete);
+        let response = self.observation_send(request, context).await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        context.check_status(&response)?;
         Ok(true)
     }
 
@@ -1755,12 +1988,22 @@ impl SandboxApi {
         validate_resource_segment(name)?;
         let mut url = self.base_url.clone();
         url.set_path(&format!("/api/v1/namespaces/{namespace}/{resource}/{name}"));
-        let Some(object) = self.read_optional_object(url).await? else {
+        let kind = if resource == "pods" {
+            ObservationResourceKind::Pod
+        } else {
+            ObservationResourceKind::PersistentVolumeClaim
+        };
+        let context = ObservationContext::new(kind, ObservationVerb::Get);
+        let Some((object, context)) = self.observation_optional_object(url, context).await? else {
             return Ok(None);
         };
         Ok(Some(
-            OwnedResourceObservation::from_object(&object)
-                .context("Kubernetes resource metadata missing")?,
+            OwnedResourceObservation::from_object(&object).ok_or_else(|| {
+                context.error(
+                    ObservationStage::ValidateItem,
+                    ObservationErrorKind::InvalidResponse,
+                )
+            })?,
         ))
     }
 
@@ -1782,10 +2025,21 @@ impl SandboxApi {
         validate_resource_segment(name)?;
         let mut url = self.base_url.clone();
         url.set_path(&format!("/api/v1/persistentvolumes/{name}"));
-        self.read_optional_object(url)
+        let context = ObservationContext::new(
+            ObservationResourceKind::PersistentVolume,
+            ObservationVerb::Get,
+        );
+        self.observation_optional_object(url, context)
             .await?
             .as_ref()
-            .map(PersistentVolumeObservation::from_object)
+            .map(|(object, context)| {
+                PersistentVolumeObservation::from_object(object).map_err(|_| {
+                    context.error(
+                        ObservationStage::ValidateItem,
+                        ObservationErrorKind::InvalidResponse,
+                    )
+                })
+            })
             .transpose()
     }
 
@@ -1844,10 +2098,14 @@ impl SandboxApi {
     async fn recovery_objects(
         &self,
         base: Url,
-        kind: &str,
+        resource_kind: ObservationResourceKind,
         version: &str,
         namespaced: bool,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<Vec<(Value, ObservationContext)>> {
+        let context = ObservationContext::new(resource_kind, ObservationVerb::List);
+        let kind = resource_kind.as_str();
+        let mut current_context = context;
+        let mut current_stage = ObservationStage::Request;
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let mut collected = Vec::new();
             let mut continuation: Option<String> = None;
@@ -1861,87 +2119,129 @@ impl SandboxApi {
                 if let Some(token) = &continuation {
                     url.query_pairs_mut().append_pair("continue", token);
                 }
-                let response = self.request(Method::GET, url).await?;
-                ensure!(
-                    response.status().is_success(),
-                    "Kubernetes recovery inventory failed ({})",
-                    response.status()
-                );
-                let body = Self::read_recovery_json(response).await?;
-                ensure!(
-                    body.get("kind").and_then(Value::as_str) == Some(list_kind.as_str())
-                        && body.get("apiVersion").and_then(Value::as_str) == Some(version),
-                    "Kubernetes recovery inventory type invalid"
-                );
+                current_context = context;
+                current_stage = ObservationStage::Request;
+                let response = self.observation_send(self.client.get(url), context).await?;
+                current_context = context.check_status(&response)?;
+                let context = current_context;
+                current_stage = ObservationStage::DecodeResponse;
+                let body = Self::observation_json(response, context).await?;
+                if body.get("kind").and_then(Value::as_str) != Some(list_kind.as_str())
+                    || body.get("apiVersion").and_then(Value::as_str) != Some(version)
+                {
+                    return Err(context.error(
+                        ObservationStage::ValidateList,
+                        ObservationErrorKind::InvalidResponse,
+                    ));
+                }
                 let page_version = body
                     .pointer("/metadata/resourceVersion")
                     .and_then(Value::as_str)
-                    .context("Kubernetes recovery inventory version missing")?;
-                validate_identity_token(page_version)?;
-                ensure!(
-                    resource_version
-                        .as_deref()
-                        .is_none_or(|value| value == page_version),
-                    "Kubernetes recovery inventory changed during pagination"
-                );
-                resource_version = Some(page_version.to_owned());
-                let items = body
-                    .get("items")
-                    .and_then(Value::as_array)
-                    .context("Kubernetes recovery inventory items missing")?;
-                ensure!(
-                    items.len() <= 100,
-                    "Kubernetes recovery inventory page too large"
-                );
-                for object in items {
-                    validate_recovery_object(object, kind, version, namespaced)?;
-                    let uid = text_at(object, "/metadata/uid")
-                        .context("Kubernetes recovery resource UID missing")?;
-                    ensure!(
-                        identities.insert(uid),
-                        "Kubernetes recovery inventory duplicate identity"
-                    );
-                    collected.push(object.clone());
+                    .ok_or_else(|| {
+                        context.error(
+                            ObservationStage::ValidateList,
+                            ObservationErrorKind::InvalidResponse,
+                        )
+                    })?;
+                validate_identity_token(page_version).map_err(|_| {
+                    context.error(
+                        ObservationStage::ValidateList,
+                        ObservationErrorKind::InvalidResponse,
+                    )
+                })?;
+                if resource_version
+                    .as_deref()
+                    .is_some_and(|value| value != page_version)
+                {
+                    return Err(context.error(
+                        ObservationStage::Pagination,
+                        ObservationErrorKind::PaginationIncomplete,
+                    ));
                 }
+                resource_version = Some(page_version.to_owned());
+                let items = body.get("items").and_then(Value::as_array).ok_or_else(|| {
+                    context.error(
+                        ObservationStage::ValidateList,
+                        ObservationErrorKind::InvalidResponse,
+                    )
+                })?;
+                if items.len() > 100 {
+                    return Err(context.error(
+                        ObservationStage::ValidateList,
+                        ObservationErrorKind::InventoryLimit,
+                    ));
+                }
+                // Validate all page metadata before interpreting any list item.
                 continuation = match body.pointer("/metadata/continue") {
                     None => None,
                     Some(Value::String(value)) if value.is_empty() => None,
                     Some(Value::String(value)) => Some(value.clone()),
                     Some(_) => {
-                        return Err(anyhow!(
-                            "Kubernetes recovery inventory continuation malformed"
+                        return Err(context.error(
+                            ObservationStage::Pagination,
+                            ObservationErrorKind::PaginationIncomplete,
                         ));
                     }
                 };
                 let remaining = match body.pointer("/metadata/remainingItemCount") {
                     None => None,
-                    Some(count) => Some(
-                        count
-                            .as_u64()
-                            .context("Kubernetes recovery remaining item count invalid")?,
-                    ),
+                    Some(count) => Some(count.as_u64().ok_or_else(|| {
+                        context.error(
+                            ObservationStage::Pagination,
+                            ObservationErrorKind::PaginationIncomplete,
+                        )
+                    })?),
                 };
-                let Some(next) = &continuation else {
-                    ensure!(
-                        remaining.is_none_or(|count| count == 0),
-                        "Kubernetes recovery inventory continuation missing"
-                    );
+                if let Some(next) = &continuation {
+                    if next.len() > 16 * 1024 {
+                        return Err(context.error(
+                            ObservationStage::Pagination,
+                            ObservationErrorKind::InventoryLimit,
+                        ));
+                    }
+                    if !tokens.insert(next.clone()) {
+                        return Err(context.error(
+                            ObservationStage::Pagination,
+                            ObservationErrorKind::PaginationIncomplete,
+                        ));
+                    }
+                } else if remaining.is_some_and(|count| count != 0) {
+                    return Err(context.error(
+                        ObservationStage::Pagination,
+                        ObservationErrorKind::PaginationIncomplete,
+                    ));
+                }
+                for object in items {
+                    let normalized =
+                        normalize_recovery_list_item(object, kind, version, namespaced, context)?;
+                    let uid = text_at(&normalized, "/metadata/uid").ok_or_else(|| {
+                        context.error(
+                            ObservationStage::ValidateIdentity,
+                            ObservationErrorKind::InvalidIdentity,
+                        )
+                    })?;
+                    if !identities.insert(uid) {
+                        return Err(context.error(
+                            ObservationStage::Pagination,
+                            ObservationErrorKind::PaginationIncomplete,
+                        ));
+                    }
+                    collected.push((normalized, context));
+                }
+                if continuation.is_none() {
                     return Ok(collected);
-                };
-                ensure!(
-                    next.len() <= 16 * 1024 && tokens.insert(next.clone()),
-                    "Kubernetes recovery inventory continuation invalid"
-                );
+                }
             }
-            Err(anyhow!(
-                "Kubernetes recovery inventory exceeds bounded capacity"
+            Err(current_context.error(
+                ObservationStage::Pagination,
+                ObservationErrorKind::InventoryLimit,
             ))
         })
         .await
-        .context("Kubernetes recovery inventory timed out")?
+        .map_err(|_| current_context.error(current_stage, ObservationErrorKind::Timeout))?
     }
 
-    /// Discover original UID/owner candidates throughout the cluster, and any
+    /// Discover original UID/owner candidates in the original namespace, and any
     /// Pod using the original namespaced claim, independently of labels. This
     /// returns candidates; ownership conflicts remain visible to the caller.
     pub async fn recovery_pods(
@@ -1963,35 +2263,63 @@ impl SandboxApi {
             "Kubernetes Pod recovery anchor missing"
         );
         let mut url = self.base_url.clone();
-        url.set_path("/api/v1/pods");
+        url.set_path(&format!("/api/v1/namespaces/{namespace}/pods"));
         let mut matches = Vec::new();
-        for object in self.recovery_objects(url, "Pod", "v1", true).await? {
-            ensure!(
-                object.get("spec").is_some_and(Value::is_object),
-                "Kubernetes recovery Pod specification missing"
-            );
-            let observed = OwnedResourceObservation::from_object(&object)
-                .context("Kubernetes recovery Pod metadata invalid")?;
+        for (object, context) in self
+            .recovery_objects(url, ObservationResourceKind::Pod, "v1", true)
+            .await?
+        {
+            if !object.get("spec").is_some_and(Value::is_object) {
+                return Err(context.error(
+                    ObservationStage::ValidateItem,
+                    ObservationErrorKind::InvalidResponse,
+                ));
+            }
+            let observed = OwnedResourceObservation::from_object(&object).ok_or_else(|| {
+                context.error(
+                    ObservationStage::ValidateIdentity,
+                    ObservationErrorKind::InvalidIdentity,
+                )
+            })?;
+            if observed.namespace.as_deref() != Some(namespace) {
+                return Err(context.error(
+                    ObservationStage::ValidateIdentity,
+                    ObservationErrorKind::InvalidIdentity,
+                ));
+            }
             let volumes = match object.pointer("/spec/volumes") {
                 None => None,
-                Some(volumes) => Some(
-                    volumes
-                        .as_array()
-                        .context("Kubernetes recovery Pod volumes malformed")?,
-                ),
+                Some(volumes) => Some(volumes.as_array().ok_or_else(|| {
+                    context.error(
+                        ObservationStage::ValidateItem,
+                        ObservationErrorKind::InvalidResponse,
+                    )
+                })?),
             };
             let mut uses_claim = false;
             for volume in volumes.into_iter().flatten() {
-                ensure!(
-                    volume.is_object(),
-                    "Kubernetes recovery Pod volume malformed"
-                );
+                if !volume.is_object() {
+                    return Err(context.error(
+                        ObservationStage::ValidateItem,
+                        ObservationErrorKind::InvalidResponse,
+                    ));
+                }
                 if let Some(claim) = volume.get("persistentVolumeClaim") {
                     let name = claim
                         .get("claimName")
                         .and_then(Value::as_str)
-                        .context("Kubernetes recovery Pod claim name missing")?;
-                    validate_resource_segment(name)?;
+                        .ok_or_else(|| {
+                            context.error(
+                                ObservationStage::ValidateIdentity,
+                                ObservationErrorKind::InvalidIdentity,
+                            )
+                        })?;
+                    validate_resource_segment(name).map_err(|_| {
+                        context.error(
+                            ObservationStage::ValidateIdentity,
+                            ObservationErrorKind::InvalidIdentity,
+                        )
+                    })?;
                     uses_claim |= observed.namespace.as_deref() == Some(namespace)
                         && claim_name == Some(name);
                 }
@@ -2050,10 +2378,17 @@ impl SandboxApi {
         }
         let mut url = self.base_url.clone();
         url.set_path("/api/v1/persistentvolumes");
-        self.recovery_objects(url, "PersistentVolume", "v1", false)
+        self.recovery_objects(url, ObservationResourceKind::PersistentVolume, "v1", false)
             .await?
             .iter()
-            .map(PersistentVolumeObservation::from_object)
+            .map(|(object, context)| {
+                PersistentVolumeObservation::from_object(object).map_err(|_| {
+                    context.error(
+                        ObservationStage::ValidateItem,
+                        ObservationErrorKind::InvalidResponse,
+                    )
+                })
+            })
             .collect::<Result<Vec<_>>>()
             .map(|rows| {
                 rows.into_iter()
@@ -2073,16 +2408,28 @@ impl SandboxApi {
         validate_resource_segment(pv_name)?;
         let mut url = self.base_url.clone();
         url.set_path("/apis/storage.k8s.io/v1/volumeattachments");
-        self.recovery_objects(url, "VolumeAttachment", "storage.k8s.io/v1", false)
-            .await?
-            .iter()
-            .map(VolumeAttachmentObservation::from_object)
-            .collect::<Result<Vec<_>>>()
-            .map(|rows| {
-                rows.into_iter()
-                    .filter(|row| row.persistent_volume_name.as_deref() == Some(pv_name))
-                    .collect()
+        self.recovery_objects(
+            url,
+            ObservationResourceKind::VolumeAttachment,
+            "storage.k8s.io/v1",
+            false,
+        )
+        .await?
+        .iter()
+        .map(|(object, context)| {
+            VolumeAttachmentObservation::from_object(object).map_err(|_| {
+                context.error(
+                    ObservationStage::ValidateItem,
+                    ObservationErrorKind::InvalidResponse,
+                )
             })
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|rows| {
+            rows.into_iter()
+                .filter(|row| row.persistent_volume_name.as_deref() == Some(pv_name))
+                .collect()
+        })
     }
 
     /// Observe controller-created Pods/PVCs by ownerReference. Cleanup callers
@@ -2096,8 +2443,8 @@ impl SandboxApi {
         sandbox_uid: &str,
     ) -> Result<Vec<OwnedResourceObservation>> {
         let kind = match resource {
-            "pods" => "Pod",
-            "persistentvolumeclaims" => "PersistentVolumeClaim",
+            "pods" => ObservationResourceKind::Pod,
+            "persistentvolumeclaims" => ObservationResourceKind::PersistentVolumeClaim,
             _ => return Err(anyhow!("unsupported observed resource")),
         };
         validate_resource_segment(namespace)?;
@@ -2108,16 +2455,23 @@ impl SandboxApi {
             .recovery_objects(url, kind, "v1", true)
             .await?
             .iter()
-            .map(|object| {
-                ensure!(
-                    object
-                        .pointer("/metadata/namespace")
-                        .and_then(Value::as_str)
-                        == Some(namespace),
-                    "Kubernetes owned inventory namespace invalid"
-                );
-                OwnedResourceObservation::from_object(object)
-                    .context("Kubernetes owned inventory resource metadata invalid")
+            .map(|(object, context)| {
+                if object
+                    .pointer("/metadata/namespace")
+                    .and_then(Value::as_str)
+                    != Some(namespace)
+                {
+                    return Err(context.error(
+                        ObservationStage::ValidateIdentity,
+                        ObservationErrorKind::InvalidIdentity,
+                    ));
+                }
+                OwnedResourceObservation::from_object(object).ok_or_else(|| {
+                    context.error(
+                        ObservationStage::ValidateItem,
+                        ObservationErrorKind::InvalidResponse,
+                    )
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(rows
@@ -2134,6 +2488,601 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{body_json, header, method, path, query_param},
     };
+
+    fn observation_error(error: &anyhow::Error) -> &SandboxObservationError {
+        let safe = error
+            .downcast_ref::<SandboxObservationError>()
+            .expect("observation failures retain a fixed diagnostic");
+        let rendered = format!("{error:#} {error:?} {safe} {safe:?}");
+        for secret in [
+            "fixture-secret-token",
+            "fixture-writer-fence",
+            "?token=",
+            "http://",
+            "https://",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "diagnostic leaked a protected fixture value"
+            );
+        }
+        safe
+    }
+
+    #[tokio::test]
+    async fn typed_lists_reject_outer_type_and_malformed_identity_after_normalization() {
+        for kind in [
+            ObservationResourceKind::Pod,
+            ObservationResourceKind::PersistentVolumeClaim,
+            ObservationResourceKind::PersistentVolume,
+            ObservationResourceKind::VolumeAttachment,
+        ] {
+            let version = if kind == ObservationResourceKind::VolumeAttachment {
+                "storage.k8s.io/v1"
+            } else {
+                "v1"
+            };
+            let namespaced = matches!(
+                kind,
+                ObservationResourceKind::Pod | ObservationResourceKind::PersistentVolumeClaim
+            );
+            for defect in [
+                "outer-kind",
+                "outer-version",
+                "outer-version-missing",
+                "missing-uid",
+                "invalid-owner",
+                "invalid-claim-ref",
+            ] {
+                if defect == "invalid-claim-ref"
+                    && kind != ObservationResourceKind::PersistentVolume
+                {
+                    continue;
+                }
+                let server = MockServer::start().await;
+                let mut item = recovery_owned_resource(kind.as_str(), "original", "uid", "owner");
+                item.as_object_mut().unwrap().remove("kind");
+                item.as_object_mut().unwrap().remove("apiVersion");
+                let mut list = json!({"kind":format!("{}List", kind.as_str()),"apiVersion":version,
+                    "metadata":{"resourceVersion":"40"},"items":[item]});
+                match defect {
+                    "outer-kind" => list["kind"] = json!("WrongList"),
+                    "outer-version" => list["apiVersion"] = json!("wrong/v1"),
+                    "outer-version-missing" => {
+                        list.as_object_mut().unwrap().remove("apiVersion");
+                    }
+                    "missing-uid" => {
+                        list["items"][0]["metadata"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("uid");
+                    }
+                    "invalid-owner" => {
+                        list["items"][0]["metadata"]["ownerReferences"][0]["uid"] = json!(null)
+                    }
+                    "invalid-claim-ref" => {
+                        list["items"][0]["spec"] =
+                            json!({"claimRef":{"name":"claim", "namespace":42}})
+                    }
+                    _ => unreachable!(),
+                }
+                Mock::given(method("GET"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(list))
+                    .mount(&server)
+                    .await;
+                let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+                let error = api
+                    .recovery_objects(server.uri().parse().unwrap(), kind, version, namespaced)
+                    .await
+                    .err()
+                    .unwrap();
+                let safe = observation_error(&error);
+                assert_eq!(safe.resource_kind, kind);
+                if defect.starts_with("outer-") {
+                    assert_eq!(safe.stage, ObservationStage::ValidateList);
+                    assert_eq!(safe.error_kind, ObservationErrorKind::InvalidResponse);
+                } else {
+                    assert_eq!(safe.stage, ObservationStage::ValidateIdentity);
+                    assert_eq!(safe.error_kind, ObservationErrorKind::InvalidIdentity);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_limits_and_pagination_have_distinct_fixed_diagnostics() {
+        let pod = recovery_pod("original", "uid", "nyxid-machine");
+        for (response, expected) in [
+            (ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40","continue":"loop"},"items":[]})), ObservationErrorKind::PaginationIncomplete),
+            (ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40"},"items":[pod.clone(),pod.clone()]})), ObservationErrorKind::PaginationIncomplete),
+            (ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40","remainingItemCount":1},"items":[]})), ObservationErrorKind::PaginationIncomplete),
+            (ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40","continue":"x".repeat(16 * 1024 + 1)},"items":[]})), ObservationErrorKind::InventoryLimit),
+            (ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40"},"items":vec![pod;101]})), ObservationErrorKind::InventoryLimit),
+            (ResponseTemplate::new(200).set_body_raw("x".repeat(1024*1024+1),"application/json"), ObservationErrorKind::InventoryLimit),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET")).respond_with(response).mount(&server).await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            let error = api.claim_users("nyxid-machine", "claim").await.unwrap_err();
+            assert_eq!(observation_error(&error).error_kind, expected);
+            assert_eq!(observation_error(&error).http_status, Some(200));
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(|request: &wiremock::Request| {
+                let page = request
+                    .url
+                    .query_pairs()
+                    .find(|(key, _)| key == "continue")
+                    .map(|(_, value)| value.parse::<u32>().unwrap())
+                    .unwrap_or(0);
+                ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1",
+                "metadata":{"resourceVersion":"40","continue":(page + 1).to_string()},"items":[]}))
+            })
+            .expect(64)
+            .mount(&server)
+            .await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        let error = api.claim_users("nyxid-machine", "claim").await.unwrap_err();
+        assert_eq!(
+            observation_error(&error).error_kind,
+            ObservationErrorKind::InventoryLimit
+        );
+        assert_eq!(
+            observation_error(&error).stage,
+            ObservationStage::Pagination
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_list_type_metadata_matrix_preserves_kind_and_identity() {
+        for (kind, version, namespaced) in [
+            (ObservationResourceKind::Pod, "v1", true),
+            (ObservationResourceKind::PersistentVolumeClaim, "v1", true),
+            (ObservationResourceKind::PersistentVolume, "v1", false),
+            (
+                ObservationResourceKind::VolumeAttachment,
+                "storage.k8s.io/v1",
+                false,
+            ),
+        ] {
+            for omitted in [
+                vec![],
+                vec!["kind"],
+                vec!["apiVersion"],
+                vec!["kind", "apiVersion"],
+            ] {
+                let server = MockServer::start().await;
+                let mut item = recovery_owned_resource(
+                    kind.as_str(),
+                    "original",
+                    "original-uid",
+                    "sandbox-uid",
+                );
+                item["apiVersion"] = json!(version);
+                if !namespaced {
+                    item["metadata"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("namespace");
+                }
+                for field in &omitted {
+                    item.as_object_mut().unwrap().remove(*field);
+                }
+                Mock::given(method("GET"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                        "kind":format!("{}List", kind.as_str()),"apiVersion":version,
+                        "metadata":{"resourceVersion":"40"},"items":[item]
+                    })))
+                    .mount(&server)
+                    .await;
+                let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+                let rows = api
+                    .recovery_objects(server.uri().parse().unwrap(), kind, version, namespaced)
+                    .await
+                    .unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].0["kind"], kind.as_str());
+                assert_eq!(rows[0].0["apiVersion"], version);
+                assert_eq!(rows[0].0["metadata"]["uid"], "original-uid");
+            }
+            for field in ["kind", "apiVersion"] {
+                for malformed in [
+                    Value::Null,
+                    json!(42),
+                    json!(true),
+                    json!(""),
+                    json!("WrongType"),
+                ] {
+                    let server = MockServer::start().await;
+                    let mut item = recovery_owned_resource(
+                        kind.as_str(),
+                        "original",
+                        "original-uid",
+                        "sandbox-uid",
+                    );
+                    item["apiVersion"] = json!(version);
+                    item[field] = malformed;
+                    Mock::given(method("GET"))
+                        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                            "kind":format!("{}List", kind.as_str()),"apiVersion":version,
+                            "metadata":{"resourceVersion":"40"},"items":[item]
+                        })))
+                        .mount(&server)
+                        .await;
+                    let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+                    let error = api
+                        .recovery_objects(server.uri().parse().unwrap(), kind, version, namespaced)
+                        .await
+                        .err()
+                        .unwrap();
+                    let safe = observation_error(&error);
+                    assert_eq!(safe.error_kind, ObservationErrorKind::InvalidResponse);
+                    assert_eq!(safe.stage, ObservationStage::ValidateItem);
+                    assert_eq!(safe.resource_kind, kind);
+                    assert_eq!(safe.http_status, Some(200));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_pods_rejects_unrelated_namespace_before_filtering() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/namespaces/nyxid-machine/pods"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40"},
+                "items":[recovery_pod("unrelated", "foreign-uid", "other-namespace")]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        let error = api.claim_users("nyxid-machine", "claim").await.unwrap_err();
+        let safe = observation_error(&error);
+        assert_eq!(safe.stage, ObservationStage::ValidateIdentity);
+        assert_eq!(safe.error_kind, ObservationErrorKind::InvalidIdentity);
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.url.path() != "/api/v1/pods")
+        );
+    }
+
+    #[tokio::test]
+    async fn observation_status_matrix_covers_delete_reads_lists_and_effects() {
+        for (status, expected) in [
+            (401, ObservationErrorKind::Authentication),
+            (403, ObservationErrorKind::Forbidden),
+            (500, ObservationErrorKind::HttpStatus),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET")).respond_with(ResponseTemplate::new(status)
+                .set_body_string("fixture-secret-token fixture-writer-fence https://sensitive.invalid/?token=fixture-secret-token"))
+                .mount(&server).await;
+            Mock::given(method("DELETE"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            let errors = [
+                (
+                    api.get("nyxid-machine", "original").await.unwrap_err(),
+                    ObservationResourceKind::Sandbox,
+                    ObservationVerb::Get,
+                ),
+                (
+                    api.resource("nyxid-machine", "pods", "original")
+                        .await
+                        .unwrap_err(),
+                    ObservationResourceKind::Pod,
+                    ObservationVerb::Get,
+                ),
+                (
+                    api.resource("nyxid-machine", "persistentvolumeclaims", "claim")
+                        .await
+                        .unwrap_err(),
+                    ObservationResourceKind::PersistentVolumeClaim,
+                    ObservationVerb::Get,
+                ),
+                (
+                    api.persistent_volume("pv").await.unwrap_err(),
+                    ObservationResourceKind::PersistentVolume,
+                    ObservationVerb::Get,
+                ),
+                (
+                    api.claim_users("nyxid-machine", "claim").await.unwrap_err(),
+                    ObservationResourceKind::Pod,
+                    ObservationVerb::List,
+                ),
+                (
+                    api.list_owned_resources(
+                        "nyxid-machine",
+                        "persistentvolumeclaims",
+                        "sandbox-uid",
+                    )
+                    .await
+                    .unwrap_err(),
+                    ObservationResourceKind::PersistentVolumeClaim,
+                    ObservationVerb::List,
+                ),
+                (
+                    api.persistent_volumes_for_claim("nyxid-machine", "claim", None)
+                        .await
+                        .unwrap_err(),
+                    ObservationResourceKind::PersistentVolume,
+                    ObservationVerb::List,
+                ),
+                (
+                    api.volume_attachments("pv").await.unwrap_err(),
+                    ObservationResourceKind::VolumeAttachment,
+                    ObservationVerb::List,
+                ),
+                (
+                    api.delete_if_identity("nyxid-machine", "original", "sandbox-uid", "1")
+                        .await
+                        .unwrap_err(),
+                    ObservationResourceKind::Sandbox,
+                    ObservationVerb::Delete,
+                ),
+                (
+                    api.delete_resource_if_identity(
+                        "nyxid-machine",
+                        "pods",
+                        "original",
+                        "pod-uid",
+                        "1",
+                    )
+                    .await
+                    .unwrap_err(),
+                    ObservationResourceKind::Pod,
+                    ObservationVerb::Delete,
+                ),
+                (
+                    api.delete_resource_if_identity(
+                        "nyxid-machine",
+                        "persistentvolumeclaims",
+                        "claim",
+                        "pvc-uid",
+                        "1",
+                    )
+                    .await
+                    .unwrap_err(),
+                    ObservationResourceKind::PersistentVolumeClaim,
+                    ObservationVerb::Delete,
+                ),
+            ];
+            for (error, resource_kind, verb) in errors {
+                let safe = observation_error(&error);
+                assert_eq!(safe.error_kind, expected);
+                assert_eq!(safe.stage, ObservationStage::Request);
+                assert_eq!(safe.resource_kind, resource_kind);
+                assert_eq!(safe.verb, verb);
+                assert_eq!(safe.http_status, Some(status));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_patch_status_is_safe_and_keeps_request_context() {
+        for (status, expected) in [
+            (401, ObservationErrorKind::Authentication),
+            (403, ObservationErrorKind::Forbidden),
+            (503, ObservationErrorKind::HttpStatus),
+        ] {
+            let server = MockServer::start().await;
+            let desired = intent(&server);
+            let live = object(&desired, "original-uid");
+            let resource_version = live["metadata"]["resourceVersion"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(live))
+                .mount(&server)
+                .await;
+            Mock::given(method("PATCH"))
+                .respond_with(ResponseTemplate::new(status).set_body_string(
+                    "fixture-secret-token fixture-writer-fence https://private/?token=secret",
+                ))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            let error = api
+                .suspend_if_identity(&desired, "original-uid", &resource_version)
+                .await
+                .unwrap_err();
+            let safe = observation_error(&error);
+            assert_eq!(safe.error_kind, expected);
+            assert_eq!(safe.resource_kind, ObservationResourceKind::Sandbox);
+            assert_eq!(safe.verb, ObservationVerb::Patch);
+            assert_eq!(safe.http_status, Some(status));
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_404_is_absence_only_for_exact_reads_and_deletes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        assert!(
+            api.get("nyxid-machine", "original")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(api.persistent_volume("original").await.unwrap().is_none());
+        assert!(
+            !api.delete_if_identity("nyxid-machine", "original", "uid", "1")
+                .await
+                .unwrap()
+        );
+        for resource in ["pods", "persistentvolumeclaims"] {
+            assert!(
+                api.resource("nyxid-machine", resource, "original")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                !api.delete_resource_if_identity("nyxid-machine", resource, "original", "uid", "1")
+                    .await
+                    .unwrap()
+            );
+            let error = api
+                .list_owned_resources("nyxid-machine", resource, "uid")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                observation_error(&error).error_kind,
+                ObservationErrorKind::HttpStatus
+            );
+            assert_eq!(observation_error(&error).http_status, Some(404));
+        }
+        for error in [
+            api.persistent_volumes_for_claim("nyxid-machine", "claim", None)
+                .await
+                .unwrap_err(),
+            api.volume_attachments("pv").await.unwrap_err(),
+        ] {
+            assert_eq!(
+                observation_error(&error).error_kind,
+                ObservationErrorKind::HttpStatus
+            );
+            assert_eq!(observation_error(&error).http_status, Some(404));
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_decode_credentials_transport_and_request_timeout_are_safe() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "{fixture-secret-token fixture-writer-fence https://private/?token=secret",
+            ))
+            .mount(&server)
+            .await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        for error in [
+            api.get("nyxid-machine", "original").await.unwrap_err(),
+            api.claim_users("nyxid-machine", "claim").await.unwrap_err(),
+        ] {
+            assert_eq!(
+                observation_error(&error).stage,
+                ObservationStage::DecodeResponse
+            );
+            assert_eq!(
+                observation_error(&error).error_kind,
+                ObservationErrorKind::InvalidResponse
+            );
+            assert_eq!(observation_error(&error).http_status, Some(200));
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let api = SandboxApi::with_token_file_client(
+            server.uri().parse().unwrap(),
+            temporary.path().join("missing-token"),
+            Client::new(),
+        )
+        .unwrap();
+        let error = api.claim_users("nyxid-machine", "claim").await.unwrap_err();
+        assert_eq!(
+            observation_error(&error).error_kind,
+            ObservationErrorKind::CredentialUnavailable
+        );
+        assert_eq!(observation_error(&error).http_status, None);
+        let delayed = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(200)),
+            )
+            .mount(&delayed)
+            .await;
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_millis(20))
+            .build()
+            .unwrap();
+        let api = SandboxApi::with_client(delayed.uri().parse().unwrap(), None, client).unwrap();
+        let error = api.claim_users("nyxid-machine", "claim").await.unwrap_err();
+        assert_eq!(
+            observation_error(&error).error_kind,
+            ObservationErrorKind::Timeout
+        );
+        assert_eq!(observation_error(&error).http_status, None);
+        let unreachable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = unreachable.local_addr().unwrap();
+        drop(unreachable);
+        let api = SandboxApi::new(format!("http://{address}").parse().unwrap(), None).unwrap();
+        let error = api.get("nyxid-machine", "original").await.unwrap_err();
+        assert_eq!(
+            observation_error(&error).error_kind,
+            ObservationErrorKind::Transport
+        );
+        assert_eq!(observation_error(&error).http_status, None);
+    }
+
+    #[tokio::test]
+    async fn observation_later_page_failure_returns_no_partial_inventory() {
+        for later in [
+            ResponseTemplate::new(403),
+            ResponseTemplate::new(200).set_body_string("invalid-json"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40","continue":"next"},
+                "items":[recovery_pod("original", "uid", "nyxid-machine")]
+            }))).mount(&server).await;
+            Mock::given(method("GET"))
+                .and(query_param("continue", "next"))
+                .respond_with(later)
+                .with_priority(1)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            let error = api
+                .recovery_pods("nyxid-machine", Some("uid"), None, None)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                observation_error(&error).error_kind,
+                ObservationErrorKind::Forbidden | ObservationErrorKind::InvalidResponse
+            ));
+        }
+    }
+
+    #[test]
+    fn single_object_recovery_type_metadata_remains_strict() {
+        for (kind, version) in [
+            ("Sandbox", "agents.x-k8s.io/v1beta1"),
+            ("Lease", "coordination.k8s.io/v1"),
+        ] {
+            let mut item = recovery_owned_resource(kind, "original", "uid", "owner");
+            item["apiVersion"] = json!(version);
+            validate_recovery_object(&item, kind, version, true).unwrap();
+            for field in ["kind", "apiVersion"] {
+                let mut omitted = item.clone();
+                omitted.as_object_mut().unwrap().remove(field);
+                assert!(validate_recovery_object(&omitted, kind, version, true).is_err());
+                for malformed in [Value::Null, json!(42), json!(""), json!("WrongType")] {
+                    let mut wrong = item.clone();
+                    wrong[field] = malformed;
+                    assert!(validate_recovery_object(&wrong, kind, version, true).is_err());
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn delete_recovery_suspend_preserves_templates_and_uses_uid_rv_tests() {
@@ -2226,9 +3175,15 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("DELETE"))
             .and(header("authorization", "Bearer test-token"))
-            .and(body_json(
-                json!({"preconditions":{"uid":"original-uid","resourceVersion":"7"}}),
-            ))
+            .and(|request: &wiremock::Request| {
+                let mut expected = json!({"preconditions": {
+                    "uid": "original-uid", "resourceVersion": "7"
+                }});
+                if request.url.path().contains("/sandboxes/") {
+                    expected["propagationPolicy"] = json!("Foreground");
+                }
+                request.body_json::<Value>().ok().as_ref() == Some(&expected)
+            })
             .respond_with(|request: &wiremock::Request| {
                 if request.url.path().ends_with("/absent") {
                     ResponseTemplate::new(404)
@@ -2287,6 +3242,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sandbox_foreground_delete_preserves_status_and_never_cleans_children() {
+        for status in [202, 404, 409] {
+            let server = MockServer::start().await;
+            Mock::given(method("DELETE"))
+                .and(path(
+                    "/apis/agents.x-k8s.io/v1beta1/namespaces/nyxid-machine/sandboxes/original",
+                ))
+                .and(body_json(json!({
+                    "preconditions": {"uid": "original-uid", "resourceVersion": "7"},
+                    "propagationPolicy": "Foreground"
+                })))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            let result = api
+                .delete_if_identity("nyxid-machine", "original", "original-uid", "7")
+                .await;
+            match status {
+                202 => assert!(result.unwrap()),
+                404 => assert!(!result.unwrap()),
+                409 => {
+                    let error = result.unwrap_err();
+                    let diagnostic = observation_error(&error);
+                    assert_eq!(diagnostic.error_kind, ObservationErrorKind::HttpStatus);
+                }
+                _ => unreachable!(),
+            }
+            // DELETE acceptance/absence/conflict never triggers child deletes,
+            // storage inventories, or an unconditional retry against a new UID.
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .respond_with(
+                ResponseTemplate::new(202).set_delay(std::time::Duration::from_millis(100)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_millis(20))
+            .build()
+            .unwrap();
+        let api = SandboxApi::with_client(server.uri().parse().unwrap(), None, client).unwrap();
+        let error = api
+            .delete_if_identity("nyxid-machine", "original", "original-uid", "7")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            observation_error(&error).error_kind,
+            ObservationErrorKind::Timeout
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn delete_recovery_rejects_dot_path_segments_before_request() {
         let server = MockServer::start().await;
         let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
@@ -2310,26 +3324,25 @@ mod tests {
     #[tokio::test]
     async fn delete_recovery_pod_search_is_complete_without_labels_and_claims_are_namespaced() {
         let server = MockServer::start().await;
-        let original = recovery_pod("original", "old-pod", "other-namespace");
+        let original = recovery_pod("original", "old-pod", "nyxid-machine");
         let mut owned = recovery_pod("owned", "owned-pod", "nyxid-machine");
         owned["metadata"]["ownerReferences"] = json!([{"apiVersion":"agents.x-k8s.io/v1beta1","kind":"Sandbox","name":"original","uid":"sandbox-uid","controller":true}]);
         let mut user = recovery_pod("claim-user", "user-pod", "nyxid-machine");
         // A non-workspace volume still counts as a writer using the claim.
         user["spec"]["volumes"] =
             json!([{"name":"other","persistentVolumeClaim":{"claimName":"original-claim"}}]);
-        let mut different_namespace = user.clone();
-        different_namespace["metadata"]["namespace"] = json!("unrelated");
-        different_namespace["metadata"]["uid"] = json!("unrelated-pod");
-        different_namespace["metadata"]["ownerReferences"] = json!([{
-            "apiVersion":"apps/v1","kind":"ReplicaSet","name":"foreign",
-            "uid":"foreign-owner","controller":true,"blockOwnerDeletion":false
-        }]);
-        Mock::given(method("GET")).and(path("/api/v1/pods"))
+        Mock::given(method("GET"))
+            .and(path("/api/v1/pods"))
+            .respond_with(ResponseTemplate::new(403))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/api/v1/namespaces/nyxid-machine/pods"))
             .and(query_param("limit","100"))
             .respond_with(move |request:&wiremock::Request| {
                 assert!(!request.url.query_pairs().any(|(key,_)| key=="labelSelector"));
                 if request.url.query_pairs().any(|(key,value)|key=="continue"&&value=="next") {
-                    ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40"},"items":[user.clone(),different_namespace.clone()]}))
+                    ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40"},"items":[user.clone()]}))
                 } else {
                     ResponseTemplate::new(200).set_body_json(json!({"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"40","continue":"next"},"items":[original.clone(),owned.clone()]}))
                 }
@@ -2379,10 +3392,10 @@ mod tests {
         }
         for (defect, owner) in malformed_owners {
             let server = MockServer::start().await;
-            let mut unrelated = recovery_pod("foreign-pod", "foreign-pod-uid", "other-namespace");
+            let mut unrelated = recovery_pod("foreign-pod", "foreign-pod-uid", "nyxid-machine");
             unrelated["metadata"]["ownerReferences"] = json!([owner]);
             Mock::given(method("GET"))
-                .and(path("/api/v1/pods"))
+                .and(path("/api/v1/namespaces/nyxid-machine/pods"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                     "apiVersion":"v1","kind":"PodList",
                     "metadata":{"resourceVersion":"complete"},"items":[unrelated]
@@ -2474,7 +3487,13 @@ mod tests {
         let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
         let start = std::time::Instant::now();
         let error = api.claim_users("nyxid-machine", "claim").await.unwrap_err();
-        assert!(error.to_string().contains("timed out"));
+        assert_eq!(
+            error
+                .downcast_ref::<SandboxObservationError>()
+                .unwrap()
+                .error_kind,
+            ObservationErrorKind::Timeout
+        );
         assert!(start.elapsed() < std::time::Duration::from_secs(7));
     }
 
@@ -3758,6 +4777,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owned_cleanup_inventory_accepts_omitted_item_type_metadata() {
+        let server = MockServer::start().await;
+        let mut claim = recovery_owned_resource(
+            "PersistentVolumeClaim",
+            "workspace-original",
+            "pvc-uid",
+            "sandbox-uid",
+        );
+        claim.as_object_mut().unwrap().remove("kind");
+        claim.as_object_mut().unwrap().remove("apiVersion");
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/v1/namespaces/nyxid-machine/persistentvolumeclaims",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "kind": "PersistentVolumeClaimList", "apiVersion": "v1",
+                "metadata": {"resourceVersion": "40"}, "items": [claim]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        let rows = api
+            .list_owned_resources("nyxid-machine", "persistentvolumeclaims", "sandbox-uid")
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "PersistentVolumeClaim");
+        assert_eq!(rows[0].uid.as_deref(), Some("pvc-uid"));
+    }
+
+    #[tokio::test]
     async fn owned_cleanup_inventory_rejects_nonstring_continuation() {
         for (resource, kind) in [
             ("pods", "Pod"),
@@ -3778,7 +4829,13 @@ mod tests {
                 .list_owned_resources("nyxid-machine", resource, "sandbox-uid")
                 .await
                 .unwrap_err();
-            assert!(error.to_string().contains("continuation malformed"));
+            assert_eq!(
+                error
+                    .downcast_ref::<SandboxObservationError>()
+                    .unwrap()
+                    .error_kind,
+                ObservationErrorKind::PaginationIncomplete
+            );
         }
     }
 
@@ -3802,7 +4859,13 @@ mod tests {
                 .list_owned_resources("nyxid-machine", resource, "sandbox-uid")
                 .await
                 .unwrap_err();
-            assert!(error.to_string().contains("continuation missing"));
+            assert_eq!(
+                error
+                    .downcast_ref::<SandboxObservationError>()
+                    .unwrap()
+                    .error_kind,
+                ObservationErrorKind::PaginationIncomplete
+            );
         }
     }
 
@@ -3953,7 +5016,13 @@ mod tests {
             .list_owned_resources("nyxid-machine", "persistentvolumeclaims", "sandbox-uid")
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("changed during pagination"));
+        assert_eq!(
+            error
+                .downcast_ref::<SandboxObservationError>()
+                .unwrap()
+                .error_kind,
+            ObservationErrorKind::PaginationIncomplete
+        );
     }
 
     #[tokio::test]

@@ -615,11 +615,14 @@ export function RemoteMachineDetail({
                 machine. Pausing has no storage fee.
               </p>
               <p>
-                Deletion removes the workspace and volume after Kubernetes
-                resource cleanup is confirmed. Cleanup and accounting progress
-                remain separate. The 24-hour cleanup target is not guaranteed
-                erasure. The durable tombstone and required evidence remain; a
-                free slot is released only after finalization.
+                Deletion queues removal of the workspace and temporary runtime
+                data. Cleanup remains pending until the applicable control-plane
+                stop/absence, Sandbox object-cascade checks, creation
+                obligations and accounting are verified. Underlying storage
+                follows its reclaim policy; physical storage release is not
+                verified. The 24-hour cleanup target is not guaranteed erasure.
+                The durable tombstone and required evidence remain; a free slot
+                is released only after finalization.
               </p>
             </div>
           </DetailSection>
@@ -982,9 +985,10 @@ function LifecycleActionDialog({
                     data, including HOME, /tmp and other temporary runtime
                     files. There are no snapshots or recovery. Running work will
                     be stopped, and resource cleanup remains pending until
-                    current Kubernetes observations confirm the Sandbox, Pod,
-                    workspace PVC and required PV cleanup. Accounting progress
-                    is tracked separately.
+                    current Kubernetes observations confirm the original
+                    Sandbox, Pod and workspace PVC are absent after cascade
+                    cleanup. Underlying storage is handled by its reclaim
+                    policy. Accounting progress is tracked separately.
                   </p>
                   <p>
                     The cleanup target is 24 hours, not a guaranteed erasure

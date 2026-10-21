@@ -316,24 +316,21 @@ async fn native_delete_records_resource_cleanup_while_accounting_waits_then_sett
     Mock::given(method("GET"))
         .respond_with(|request: &wiremock::Request| {
             let path = request.url.path();
-            if path.ends_with("/pods") || path.ends_with("/persistentvolumeclaims")
-                || path.ends_with("/persistentvolumes") || path.ends_with("/volumeattachments") {
+            assert!(!path.contains("/persistentvolumes"));
+            assert!(!path.contains("/volumeattachments"));
+            assert_ne!(path, "/api/v1/pods");
+            if path.ends_with("/pods") || path.ends_with("/persistentvolumeclaims") {
                 let kind = if path.ends_with("/pods") {
                     "PodList"
-                } else if path.ends_with("/persistentvolumeclaims") {
-                    "PersistentVolumeClaimList"
-                } else if path.ends_with("/persistentvolumes") {
-                    "PersistentVolumeList"
                 } else {
-                    "VolumeAttachmentList"
+                    "PersistentVolumeClaimList"
                 };
                 ResponseTemplate::new(200).set_body_json(json!({
-                    "kind":kind,"apiVersion":if path.ends_with("/volumeattachments") {"storage.k8s.io/v1"} else {"v1"},
+                    "kind":kind,"apiVersion":"v1",
                     "metadata":{"resourceVersion":"complete-native-cleanup-fixture"},"items":[]
                 }))
             } else {
-                // The bound Sandbox, tracked Pod, PVC and Delete-policy PV are
-                // all absent in this explicit Kubernetes API fixture.
+                // Original Sandbox and known namespace children are absent.
                 ResponseTemplate::new(404)
             }
         })
@@ -355,12 +352,22 @@ async fn native_delete_records_resource_cleanup_while_accounting_waits_then_sett
     assert!(resource_evidence.resources_complete);
     assert!(!resource_evidence.evidence_id.is_empty());
     assert_eq!(
+        resource_evidence.evidence_version,
+        crate::services::remote_machine_delete_recovery::EVIDENCE_VERSION
+    );
+    assert_eq!(
+        resource_evidence.storage,
+        crate::models::remote_machine::DeleteStorageDisposition::SandboxCascadeObserved
+    );
+    assert_eq!(
         pending.cleanup_evidence_digest.as_deref(),
         Some(resource_evidence.evidence_id.as_str()),
         "resource cleanup remains durably visible before accounting finality"
     );
     assert_eq!(pending.resource_state, ResourceState::Deleting);
-    assert_eq!(pending.billing_state, BillingState::Pending);
+    // An unavailable accounting consumer preserves the accepted billing state;
+    // require_accounting_final below proves that the run still cannot finalize.
+    assert_eq!(pending.billing_state, deleting.billing_state);
     assert!(!pending.writer_admitted);
     assert_eq!(wallet(&f).await.reserved_credits, held);
     assert!(require_accounting_final(&f.db, &pending).await.is_err());
@@ -394,7 +401,6 @@ async fn native_delete_records_resource_cleanup_while_accounting_waits_then_sett
         "/pods/node".into(),
         "/persistentvolumeclaims".into(),
         "/persistentvolumeclaims/workspace".into(),
-        "/persistentvolumes/native-cleanup-pv".into(),
     ] {
         assert!(
             requests

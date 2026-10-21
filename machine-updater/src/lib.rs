@@ -17,6 +17,8 @@ pub mod runtime_provider;
 /// through Kubernetes. The Agent Sandbox controller remains the sole
 /// reconciler for those resources.
 pub mod sandbox;
+/// Payload-free diagnostics for Kubernetes deletion observations.
+pub mod sandbox_observation;
 
 /// Backend-only Kubernetes request credentials, distinct from Pod identity.
 pub mod kubernetes_credentials;

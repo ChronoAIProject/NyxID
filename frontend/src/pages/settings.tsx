@@ -634,7 +634,8 @@ function SecurityTab() {
           <div className="space-y-1.5">
             <CardTitle className="text-destructive">Delete Account</CardTitle>
             <CardDescription className="text-destructive/70">
-              Permanently delete your account and managed Machine workspaces.
+              Permanently delete your account and queue managed Machine workspace
+              cleanup.
               Necessary security and financial records are retained.
             </CardDescription>
           </div>

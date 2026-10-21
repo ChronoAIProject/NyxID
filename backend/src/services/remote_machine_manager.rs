@@ -295,7 +295,7 @@ impl Manager {
     async fn finalized_cleanup_candidates(&self) -> AppResult<Vec<ManagedMachine>> {
         Ok(self.db.collection::<ManagedMachine>(MACHINES)
             .find(doc! {"resource_state":"deleted","sandbox_uid":{"$type":"string"},
-                "active_operation_id":{"$type":"string"},"delete_recovery.evidence_version":super::remote_machine_delete_recovery::EVIDENCE_VERSION})
+                "active_operation_id":{"$type":"string"},"delete_recovery.evidence_version":{"$in":[1_i32,super::remote_machine_delete_recovery::EVIDENCE_VERSION]}})
             .sort(doc! {"manager_observed_at":1,"_id":1}).limit(8)
             .max_time(Duration::from_secs(3)).await?.try_collect().await?)
     }
@@ -311,7 +311,9 @@ impl Manager {
                 doc! {"_id":&machine.node_id,"resource_state":"deleted"},
                 doc! {"$set":{"manager_observed_at":bson::DateTime::now()}},
             ).await?;
-            if !matches!(result, Ok(Ok(()))) {
+            if !matches!(result, Ok(Ok(())))
+                && !matches!(&result, Ok(Err(error)) if super::remote_machine_delete_recovery::observation_error_code(error).is_some())
+            {
                 tracing::warn!(machine_id=%machine.node_id, "Remote Machine retained-resource cleanup pending");
             }
             Ok::<(), AppError>(())
@@ -713,19 +715,24 @@ impl Manager {
         machine: &'a ManagedMachine,
         observed: &'a SandboxObservation,
     ) -> futures::future::BoxFuture<'a, AppResult<()>> {
-        Box::pin(self.record_observation_inner(machine, observed))
+        Box::pin(self.record_observation_inner(machine, observed, None))
     }
 
     async fn record_observation_inner(
         &self,
         machine: &ManagedMachine,
         observed: &SandboxObservation,
+        delete_snapshot: Option<&mut ManagedMachine>,
     ) -> AppResult<()> {
         use super::remote_machine_native as native;
         use crate::models::remote_machine::NativeRuntimeObservation;
-        let mut machine = lifecycle::get_machine(&self.db, &machine.owner_id, &machine.node_id)
-            .await?
-            .ok_or_else(unavailable)?;
+        let mut machine = if delete_snapshot.is_some() {
+            machine.clone()
+        } else {
+            lifecycle::get_machine(&self.db, &machine.owner_id, &machine.node_id)
+                .await?
+                .ok_or_else(unavailable)?
+        };
         if machine.native_uncertainty.is_some() {
             return Err(unavailable());
         }
@@ -783,12 +790,24 @@ impl Manager {
             .api
             .list_owned_resources(&machine.sandbox_namespace, "pods", uid)
             .await
-            .map_err(api_error)?;
+            .map_err(|error| {
+                if delete_snapshot.is_some() {
+                    super::remote_machine_delete_recovery::api_pending(&machine, error)
+                } else {
+                    api_error(error)
+                }
+            })?;
         let pvcs = self
             .api
             .list_owned_resources(&machine.sandbox_namespace, "persistentvolumeclaims", uid)
             .await
-            .map_err(api_error)?;
+            .map_err(|error| {
+                if delete_snapshot.is_some() {
+                    super::remote_machine_delete_recovery::api_pending(&machine, error)
+                } else {
+                    api_error(error)
+                }
+            })?;
         if pods.len() > 1 || pvcs.len() > 1 {
             return self.uncertain(&machine, "multiple_owned_resources").await;
         }
@@ -856,7 +875,13 @@ impl Manager {
                 .api
                 .resource(&machine.sandbox_namespace, "pods", name)
                 .await
-                .map_err(api_error)?
+                .map_err(|error| {
+                    if delete_snapshot.is_some() {
+                        super::remote_machine_delete_recovery::api_pending(&machine, error)
+                    } else {
+                        api_error(error)
+                    }
+                })?
                 .is_some()
         {
             return self
@@ -903,7 +928,13 @@ impl Manager {
                 .api
                 .persistent_volume(name)
                 .await
-                .map_err(api_error)?
+                .map_err(|error| {
+                    if delete_snapshot.is_some() {
+                        super::remote_machine_delete_recovery::api_pending(&machine, error)
+                    } else {
+                        api_error(error)
+                    }
+                })?
                 .ok_or_else(unavailable)?;
             if pv.claim_uid != pvc.uid
                 || pv.claim_namespace.as_deref() != Some(machine.sandbox_namespace.as_str())
@@ -1003,7 +1034,10 @@ impl Manager {
                 uid, generation, resource_version
             ),
         };
-        native::record(&self.db, &machine, &observation, bindings).await?;
+        let saved = native::record(&self.db, &machine, &observation, bindings).await?;
+        if let Some(snapshot) = delete_snapshot {
+            *snapshot = saved;
+        }
         Ok(())
     }
 
@@ -1011,15 +1045,35 @@ impl Manager {
         &'a self,
         machine: &'a ManagedMachine,
     ) -> futures::future::BoxFuture<'a, AppResult<()>> {
-        Box::pin(self.observe_resource_inner(machine))
+        Box::pin(self.observe_resource_inner(machine, None))
     }
 
-    async fn observe_resource_inner(&self, machine: &ManagedMachine) -> AppResult<()> {
+    pub(crate) fn observe_delete_resource<'a>(
+        &'a self,
+        machine: &'a mut ManagedMachine,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(async move {
+            let snapshot = machine.clone();
+            self.observe_resource_inner(&snapshot, Some(machine)).await
+        })
+    }
+
+    async fn observe_resource_inner(
+        &self,
+        machine: &ManagedMachine,
+        mut delete_snapshot: Option<&mut ManagedMachine>,
+    ) -> AppResult<()> {
         if let Some(mut observed) = self
             .api
             .get(&machine.sandbox_namespace, &machine.sandbox_name)
             .await
-            .map_err(api_error)?
+            .map_err(|error| {
+                if delete_snapshot.is_some() {
+                    super::remote_machine_delete_recovery::api_pending(machine, error)
+                } else {
+                    api_error(error)
+                }
+            })?
         {
             // A previously admitted HTTP request can finish after a newer
             // owner transaction. Repair only the current Sandbox desired state;
@@ -1027,6 +1081,9 @@ impl Manager {
             let mut current = lifecycle::get_machine(&self.db, &machine.owner_id, &machine.node_id)
                 .await?
                 .ok_or_else(unavailable)?;
+            if delete_snapshot.is_some() && current.revision != machine.revision {
+                return Err(AppError::Conflict("delete_evidence_raced".into()));
+            }
             if current
                 .sandbox_uid
                 .as_deref()
@@ -1156,6 +1213,9 @@ impl Manager {
                 }
                 observed = if current.resource_state == ResourceState::Deleting {
                     current = self.prepare_delete_suspension(&current, &observed).await?;
+                    if let Some(snapshot) = delete_snapshot.as_deref_mut() {
+                        *snapshot = current.clone();
+                    }
                     self.api
                         .suspend_if_identity(
                             &intent,
@@ -1166,7 +1226,13 @@ impl Manager {
                                 .ok_or_else(unavailable)?,
                         )
                         .await
-                        .map_err(api_error)?
+                        .map_err(|error| {
+                            if delete_snapshot.is_some() {
+                                super::remote_machine_delete_recovery::api_pending(&current, error)
+                            } else {
+                                api_error(error)
+                            }
+                        })?
                 } else {
                     self.api
                         .apply_if_uid(&intent, &uid)
@@ -1178,7 +1244,13 @@ impl Manager {
                         .await?;
                 }
             }
-            self.record_observation(&current, &observed).await?;
+            if let Some(snapshot) = delete_snapshot {
+                *snapshot = current.clone();
+                Box::pin(self.record_observation_inner(&current, &observed, Some(snapshot)))
+                    .await?;
+            } else {
+                self.record_observation(&current, &observed).await?;
+            }
         } else if machine.sandbox_uid.is_some() {
             return self
                 .uncertain(machine, "sandbox_disappeared_without_native_stop")
@@ -1372,169 +1444,6 @@ impl Manager {
 
     async fn finish_native_delete(&self, machine: &ManagedMachine) -> AppResult<()> {
         super::remote_machine_delete_recovery::advance(self, machine).await
-    }
-
-    pub(crate) fn finish_ordinary_native_delete<'a>(
-        &'a self,
-        machine: &'a ManagedMachine,
-    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
-        Box::pin(self.finish_ordinary_native_delete_inner(machine))
-    }
-
-    async fn finish_ordinary_native_delete_inner(&self, machine: &ManagedMachine) -> AppResult<()> {
-        if machine.native_uncertainty.is_some()
-            || !super::remote_machine_native::predecessor_stopped(machine)
-            || !lifecycle::deletion_authorized(&self.db, &machine.node_id).await?
-        {
-            return Err(unavailable());
-        }
-        if machine.delete_recovery.as_ref().is_none_or(|progress| {
-            !super::remote_machine_delete_recovery::stop_is_valid(machine, progress)
-                || progress.stop.as_ref().is_none_or(|stop| {
-                    stop.kind != crate::models::remote_machine::DeleteStopKind::OrdinaryNative
-                })
-        }) {
-            return Err(unavailable());
-        }
-        if !machine.free_slot {
-            let settlement = match &self.billing {
-                Some(billing) => {
-                    super::remote_machine_runtime::settle_persisted_delete(
-                        &self.db,
-                        billing.clone(),
-                        machine,
-                    )
-                    .await
-                }
-                None => Err(unavailable()),
-            };
-            if settlement.is_err() {
-                self.db
-                    .collection::<Document>(MACHINES)
-                    .update_one(
-                        doc! {"_id":&machine.node_id,"revision":machine.revision},
-                        doc! {"$set":{"billing_state":"pending"}},
-                    )
-                    .await?;
-            }
-        }
-        let uid = machine.sandbox_uid.as_deref().ok_or_else(unavailable)?;
-        if let Some(claim) = &machine.pvc_name
-            && !self
-                .api
-                .claim_users(&machine.sandbox_namespace, claim)
-                .await
-                .map_err(api_error)?
-                .is_empty()
-        {
-            return Err(unavailable());
-        }
-        // Immediate local credential removal is independent of slow GC/accounting.
-        self.db.collection::<Document>(crate::models::node::COLLECTION_NAME).update_one(
-            doc!{"_id":&machine.node_id,"user_id":&machine.owner_id},
-            doc!{"$set":{"is_active":false,"status":"offline","signing_secret_encrypted":bson::Bson::Null,
-                "auth_token_hash":crate::crypto::token::hash_token(&uuid::Uuid::new_v4().to_string()),
-                "signing_secret_hash":crate::crypto::token::hash_token(&uuid::Uuid::new_v4().to_string()),"connection_owner":bson::Bson::Null}}
-        ).await?;
-        if let Some(sandbox) = self
-            .api
-            .get(&machine.sandbox_namespace, &machine.sandbox_name)
-            .await
-            .map_err(api_error)?
-        {
-            if sandbox.sandbox_uid.as_deref() != Some(uid)
-                || sandbox.machine_id.as_deref() != Some(&machine.node_id)
-                || sandbox.owner_id.as_deref() != Some(&machine.owner_id)
-            {
-                return self
-                    .uncertain(machine, "delete_sandbox_ownership_conflict")
-                    .await;
-            }
-            super::remote_machine_delete_recovery::live_before_effect(&self.db, machine).await?;
-            self.api
-                .delete_if_identity(
-                    &machine.sandbox_namespace,
-                    &machine.sandbox_name,
-                    uid,
-                    sandbox
-                        .resource_version
-                        .as_deref()
-                        .ok_or_else(unavailable)?,
-                )
-                .await
-                .map_err(api_error)?;
-            return Err(unavailable()); // submission is never cleanup completion
-        }
-        for resource in ["pods", "persistentvolumeclaims"] {
-            if !self
-                .api
-                .list_owned_resources(&machine.sandbox_namespace, resource, uid)
-                .await
-                .map_err(api_error)?
-                .is_empty()
-            {
-                return Err(unavailable());
-            }
-        }
-        if let Some(name) = &machine.native_pod_name
-            && self
-                .api
-                .resource(&machine.sandbox_namespace, "pods", name)
-                .await
-                .map_err(api_error)?
-                .is_some()
-        {
-            return Err(unavailable());
-        }
-        if let Some(name) = &machine.pvc_name {
-            if self
-                .api
-                .resource(&machine.sandbox_namespace, "persistentvolumeclaims", name)
-                .await
-                .map_err(api_error)?
-                .is_some()
-            {
-                return Err(unavailable());
-            }
-            // Never release unknown/Retain backing storage based on claim absence.
-            if machine.native_pv_reclaim_policy.as_deref() != Some("Delete") {
-                return Err(unavailable());
-            }
-            let pv_name = machine.native_pv_name.as_deref().ok_or_else(unavailable)?;
-            if !self
-                .api
-                .volume_attachments(pv_name)
-                .await
-                .map_err(api_error)?
-                .is_empty()
-                || !self
-                    .api
-                    .persistent_volumes_for_claim(
-                        &machine.sandbox_namespace,
-                        name,
-                        Some(machine.pvc_uid.as_deref().ok_or_else(unavailable)?),
-                    )
-                    .await
-                    .map_err(api_error)?
-                    .is_empty()
-            {
-                return Err(unavailable());
-            }
-            if machine.native_pv_uid.is_none()
-                || self
-                    .api
-                    .persistent_volume(pv_name)
-                    .await
-                    .map_err(api_error)?
-                    .is_some()
-            {
-                return Err(unavailable());
-            }
-        } else if machine.pvc_uid.is_some() {
-            return Err(unavailable());
-        }
-        super::remote_machine_delete_recovery::finalize_ordinary_evidence(self, machine).await?;
-        self.complete_if_final(machine).await
     }
 
     pub(crate) async fn complete_if_final(&self, previous: &ManagedMachine) -> AppResult<()> {

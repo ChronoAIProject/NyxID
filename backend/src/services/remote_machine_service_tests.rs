@@ -2097,3 +2097,79 @@ async fn profile_binding_normalizes_omitted_selection_and_rejects_changed_replay
     );
     db.drop().await.unwrap();
 }
+
+#[test]
+fn deletion_diagnostic_projection_is_allowlisted_and_redacted() {
+    use crate::models::remote_machine_operation::{CleanupState, MachineOperation, OperationState};
+    let now = Utc::now();
+    let mut operation = MachineOperation {
+        id: "operation".into(),
+        owner_id: "private-owner".into(),
+        machine_id: Some("machine".into()),
+        action: LifecycleAction::Delete,
+        idempotency_key_hash: "private-idempotency".into(),
+        request_digest: "private-request".into(),
+        expected_revision: Some(1),
+        desired_runtime_generation: Some(1),
+        state: OperationState::Reconciling,
+        cleanup_state: CleanupState::Pending,
+        effect_id: Some("private-effect".into()),
+        error_code: None,
+        error_message: Some("private-upstream-response credential writer-fence".into()),
+        evidence_digest: Some("private-evidence".into()),
+        retry_count: 1,
+        delete_retry: None,
+        next_attempt_at: None,
+        deadline_at: None,
+        created_at: now,
+        updated_at: now,
+        terminal_at: None,
+    };
+    for code in [
+        "delete_kubernetes_authentication_failed",
+        "delete_kubernetes_access_denied",
+        "delete_kubernetes_observation_timed_out",
+        "delete_kubernetes_credentials_unavailable",
+        "delete_kubernetes_transport_failed",
+        "delete_kubernetes_http_failed",
+        "delete_kubernetes_response_invalid",
+        "delete_kubernetes_inventory_incomplete",
+        "delete_kubernetes_inventory_limit_exceeded",
+        "delete_resource_observation_unknown",
+        "delete_attempt_timed_out",
+    ] {
+        operation.error_code = Some(code.into());
+        operation.action = LifecycleAction::Delete;
+        let view = lifecycle::safe_operation_view(&operation);
+        assert_eq!(view.error_code.as_deref(), Some(code));
+        assert!(view.error_message.as_deref().unwrap().contains("pending"));
+        let encoded = serde_json::to_string(&view).unwrap();
+        for secret in ["private-", "credential writer-fence"] {
+            assert!(
+                !encoded.contains(secret),
+                "diagnostic leaked a protected fixture value"
+            );
+        }
+        operation.action = LifecycleAction::Create;
+        assert_eq!(
+            lifecycle::safe_operation_view(&operation)
+                .error_code
+                .as_deref(),
+            Some("operation_reconciling")
+        );
+    }
+    operation.action = LifecycleAction::Delete;
+    for code in [
+        "delete_kubernetes_unrecognized",
+        "delete_kubernetes_access_denied?token=private-token",
+    ] {
+        operation.error_code = Some(code.into());
+        let view = lifecycle::safe_operation_view(&operation);
+        assert_eq!(view.error_code.as_deref(), Some("operation_reconciling"));
+        assert!(!serde_json::to_string(&view).unwrap().contains("private-"));
+    }
+    operation.error_code = None;
+    let view = lifecycle::safe_operation_view(&operation);
+    assert_eq!(view.error_code, None);
+    assert_eq!(view.error_message, None);
+}
