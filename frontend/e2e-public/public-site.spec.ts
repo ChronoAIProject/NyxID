@@ -76,7 +76,7 @@ test("hydrates, keeps shell during a delayed route chunk and supports history an
     [],
   );
 });
-test("contact preselection and disabled solution gate survive hydration", async ({
+test("contact preselection and configured solution gate survive hydration", async ({
   page,
 }) => {
   await page.goto("/zh/contact?topic=bundle&return_to=%2Fkeys");
@@ -89,9 +89,13 @@ test("contact preselection and disabled solution gate survive hydration", async 
   );
   await page.goto("/solutions/help-desk");
   if (publication.configuration.solutions["help-desk"]) {
-    await expect(
-      page.locator('[data-solution-activation="help-desk"]'),
-    ).toHaveAttribute("href", publication.configuration.solutions["help-desk"]);
+    const link = page.locator('[data-solution-activation="help-desk"]');
+    await expect(link).toHaveAttribute("href", /^\/login\?/);
+    const destination = new URL((await link.getAttribute("href"))!, page.url());
+    expect(destination.pathname).toBe("/login");
+    expect(destination.searchParams.get("return_to")).toBe(
+      publication.configuration.solutions["help-desk"],
+    );
   } else {
     await expect(
       page.getByRole("button", { name: "Use this solution", exact: true }),
@@ -101,6 +105,45 @@ test("contact preselection and disabled solution gate survive hydration", async 
     ).toBeVisible();
   }
 });
+
+// Registered only in the explicit single-solution CI fixture, never skipped to
+// manufacture default-off evidence. This proves wiring, not a live solution task.
+if (publication.configuration.solutions["help-desk"]) {
+  test("single accepted help-desk fixture preserves invitations through all entry routes", async ({
+    page,
+  }) => {
+    const target = publication.configuration.solutions["help-desk"];
+    const query = "code=NYX-ABCDEF12&return_to=https%3A%2F%2Fevil.test";
+    for (const entry of ["cta", "fragment", "start"]) {
+      if (entry === "cta") {
+        await page.goto(`/solutions/help-desk?${query}`);
+        await expect(page.locator("html")).toHaveAttribute(
+          "data-public-ready",
+          "v1",
+        );
+        await page.locator('[data-solution-activation="help-desk"]').click();
+      } else {
+        await page.goto(
+          entry === "start"
+            ? `/start?t=help-desk&${query}`
+            : `/?${query}#/start?t=help-desk`,
+        );
+      }
+      await expect(page).toHaveURL((url) => url.pathname === "/login");
+      let params = new URL(page.url()).searchParams;
+      expect(params.get("code")).toBe("NYX-ABCDEF12");
+      expect(params.get("return_to")).toBe(target);
+      await page.getByRole("button", { name: "Sign up", exact: true }).click();
+      await expect(page).toHaveURL((url) => url.pathname === "/register");
+      await expect(page.getByPlaceholder("NYX-XXXXXXXX")).toHaveValue(
+        "NYX-ABCDEF12",
+      );
+      params = new URL(page.url()).searchParams;
+      expect(params.get("code")).toBe("NYX-ABCDEF12");
+      expect(params.get("return_to")).toBe(target);
+    }
+  });
+}
 
 test("records a bounded lab resource sample", async ({ page }) => {
   await page.addInitScript(() => {

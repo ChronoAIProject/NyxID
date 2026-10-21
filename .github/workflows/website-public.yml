@@ -62,3 +62,61 @@ jobs:
             frontend/dist/public-*validation.json
             frontend/dist/public-browser-results.json
             frontend/test-results/
+  solution-on-fixture:
+    name: Single solution on fixture (not delivery)
+    needs: public-artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Build one accepted solution fixture
+        run: npm run build && node scripts/verify-solution-fixture.mjs
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          VITE_WEBSITE_BLOG_MENU_ENABLED: 'false'
+          VITE_WEBSITE_NEWSLETTER_ENABLED: 'false'
+          VITE_WEBSITE_CONTACT_CHAT_ENABLED: 'false'
+          VITE_WEBSITE_STATUS_ENABLED: 'false'
+          VITE_WEBSITE_SOLUTION_ACTIVATIONS: '{"help-desk":{"target":"/assistant?setup=help-desk&draft=hello%20world","acceptance":"ci/wiring-fixture-only"}}'
+      - name: Isolated fixture server
+        run: |
+          node scripts/public-fixture-server.mjs > /tmp/public-fixture.log 2>&1 &
+          docker build -f Dockerfile.public-test -t nyxid-solution-fixture .
+          docker run -d --name nyxid-solution-fixture --add-host host.docker.internal:host-gateway -p 127.0.0.1:4188:8080 nyxid-solution-fixture
+          for i in $(seq 1 30); do curl --fail --silent http://127.0.0.1:4188/solutions/help-desk >/dev/null && break; sleep 1; done
+          docker exec nyxid-solution-fixture nginx -t
+      - run: npx playwright install --with-deps chromium
+      - name: Targeted on branch and real entry browser checks
+        run: npx playwright test --config public-playwright.config.ts --grep 'contact preselection|single accepted help-desk fixture' && node scripts/verify-solution-fixture.mjs --browser
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+      - name: Package non-delivery fixture evidence
+        run: tar -czf website-solution-fixture.tar.gz dist nginx.conf.template Dockerfile.public-test
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: website-solution-fixture-${{ github.sha }}
+          path: frontend/website-solution-fixture.tar.gz
+      - name: Fixture diagnostics
+        if: failure()
+        run: |
+          docker logs nyxid-solution-fixture || true
+          test ! -f /tmp/public-fixture.log || cat /tmp/public-fixture.log
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: website-solution-fixture-failure-${{ github.sha }}
+          path: |
+            frontend/dist/public-*validation.json
+            frontend/dist/public-browser-results.json
+            frontend/dist/solution-fixture.json
+            frontend/test-results/
