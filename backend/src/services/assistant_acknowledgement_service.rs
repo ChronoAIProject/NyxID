@@ -1160,6 +1160,10 @@ async fn notify_nyxbot_denied(
                     &db, &chat.user_id, &home, &[event], session,
                 ).await?;
                 let message = AssistantMessage {
+                    media_event_ids: Vec::new(),
+                    media_queue_notice_id: None,
+        media_pending: None,
+                    media_bound: None,
                     turn_metadata: None,
                     platform_delivery_recovery_queued: false,
                     platform_reply: None,
@@ -1474,6 +1478,7 @@ pub(crate) async fn fence(
     ApiKey,
     Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
 )> {
+    super::erasure_admission::fence_in_session(db, &chat.user_id, session).await?;
     if !super::assistant_invocation_service::fence_in_session(
         db,
         session,

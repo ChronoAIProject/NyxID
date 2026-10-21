@@ -4,6 +4,9 @@
 # templates in fkst-hosted.
 blank_issues_enabled: false
 contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/ChronoAIProject/NyxID/security/advisories/new
+    about: Do not disclose vulnerabilities or secrets in public issues. See SECURITY.md.
   - name: fkst docs & help
     url: https://github.com/ChronoAIProject/fkst-hosted
     about: How fkst agent sessions work, and where to get help.

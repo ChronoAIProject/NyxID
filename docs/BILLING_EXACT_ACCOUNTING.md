@@ -400,3 +400,61 @@ measurements of the integrated release.
 All window/filter cases passed the exact-oracle, index-coverage and median-budget
 assertions. The remaining overhead relative to the integer base is reflected in
 these measurements.
+
+### Assistant provenance in usage summaries
+
+Assistant provenance is additive display-partition metadata, not a root rollup
+identity. Existing root hashes/grouping and the exact-v2 normalization contract
+remain stable. Modern free meters retain the low-cardinality assistant source;
+they do not introduce per-key/ack partitions for unrelated free traffic. Existing
+connection attribution remains available. Source snapshots and zero-cost
+partitions survive API-key revoke/soft delete and credential removal.
+
+Upgrade all rollup writers to preserve this provenance through folding. An old
+writer ignores the source field and may fold newly captured free usage into a
+source-less summary during a mixed-version rollout. The scoped report excludes
+that uncovered summary even when its underlying meters were captured recently.
+
+A legacy free root can have measures but no cost partitions. When modern source
+partitions join that root, readers recover the root-minus-partitions residual
+for every additive measure. It remains unattributed and is never assigned to the
+new source. This calculation is on the atomic document read, including late old
+writers and daily bootstrap/promotion. A single-display accelerator is valid
+only when its sole partition accounts for all root rows. NyxBot free-summary
+reads always expand partitions plus residual, so an old writer rebuilding its
+older shortcut cannot assign the combined root to one new source. Normalization
+still writes exact money and scalar query mirrors atomically with concurrent
+folds; this reporting change adds no hot-path migration or money admission gate.
+
+Mixed exact and legacy groups preserve the exact gross/wallet/allowance subtotal
+when the legacy cached rate is absent. Cost presence remains null for an
+unknown-only group, while known zero exact settlements remain known. Model
+account Other rows subtract in Mongo before presentation count clamping and
+subtract cost-presence counts separately, retaining unknown-only remainders as
+unavailable. No quantities or distinct cardinalities are fabricated in the
+model-report DTO.
+
+### Wallet usage tax
+
+`UsageFunding.wallet_funded` and `total_charge` remain exact **pre-tax** funding
+amounts. Newly admitted rows set `tax_accounting` and retain an optional applied
+Lago rate snapshot. Only a nonzero wallet share requires a fresh tax profile;
+benefits remain untaxed. A benefit-only estimate that spills into wallet funding
+at settlement uses the latest verified stored profile regardless of age, since
+upstream work is complete; no verified profile leaves settlement retryable.
+This snapshot read occurs before the Lago carry transaction, which persists it
+atomically with the claim-fenced funding split. Wallet holds use base plus tax ceiled at one pico;
+settlement uses base plus proportional tax rounded half-up at one pico.
+`wallet_tax_credits` records that tax and `wallet_charge_credits` records the gross
+debit. All wallet reserved/pending counters and overdraft checks are gross.
+Machine runtime windows use the same rule; preflight keeps grant seconds separate
+from wallet seconds priced at the gross per-second rate.
+
+The claim-fenced Lago carry still uses only `wallet_funded`, so tax never changes
+emitted quantities or cumulative residue. The existing usage-settled ledger
+append journals pre-tax usage and tax as separate balanced transfers from the
+wallet, using `usage:<row>` and `tax:usage:<owner>`. Locks remain until that entry
+is durable. Lago fee/tax cent rounding remains an ordinary provider-refresh
+`external:lago` adjustment. No ledger/hash encoding, dedupe key or checkpoint
+protocol changes. Legacy rows without tax fields settle pre-tax. Deploy all
+replicas before enabling Lago customer taxes; see [operations](BILLING_OPERATIONS.md).

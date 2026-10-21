@@ -160,6 +160,11 @@ pub struct InboundMessage {
     pub content_type: String,
     pub text: Option<String>,
     pub attachments: Vec<InboundAttachment>,
+    /// Internal provider selectors, persisted separately and excluded from callbacks.
+    #[serde(skip)]
+    pub(crate) embedded_attachments: Vec<crate::models::channel_message::StoredAttachment>,
+    #[serde(skip)]
+    pub(crate) embedded_attachments_omitted: usize,
     /// Platform message ID that this message is a reply to (if threaded)
     pub reply_to_platform_message_id: Option<String>,
     /// Thread or topic identifier (platform-specific)
@@ -1165,6 +1170,8 @@ mod tests {
     #[test]
     fn inbound_message_serde_roundtrip() {
         let msg = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: "pm-1".to_string(),
             conversation_id: "conv-1".to_string(),
             conversation_type: "private".to_string(),
@@ -1207,6 +1214,8 @@ mod tests {
     #[test]
     fn inbound_message_with_attachments_roundtrip() {
         let msg = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: "pm-2".to_string(),
             conversation_id: "conv-2".to_string(),
             conversation_type: "group".to_string(),

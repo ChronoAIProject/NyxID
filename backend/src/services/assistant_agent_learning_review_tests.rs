@@ -94,6 +94,46 @@ fn release_predicate_requires_no_dispatch_checkpoint_or_live_lease() {
     assert!(!non_effective(&p, Utc::now()));
 }
 
+#[tokio::test]
+async fn erasure_accepted_during_publication_preflight_prevents_actual_dispatch_marker() {
+    let fixture = orchestrator_fixture("learning_erasure_dispatch_boundary").await;
+    let db = &fixture.state.db;
+    let mut row = proposal(false);
+    row.owner_id = fixture.owner.clone();
+    row.status = "publishing".into();
+    let p = row.publication.as_mut().unwrap();
+    p.lease_expires_at = Some(Utc::now() + Duration::minutes(3));
+    let p = p.clone();
+    db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    // Hold the already-loaded publication snapshot across closing admission.
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await
+        .unwrap();
+    crate::services::erasure_admission::close_in_session(db, &fixture.owner, &mut tx)
+        .await
+        .unwrap();
+    crate::services::transaction_service::commit(&mut tx)
+        .await
+        .unwrap();
+    assert!(matches!(
+        mark_started(&fixture.state, &row, &p).await,
+        Err(AppError::Conflict(_))
+    ));
+    let live = db
+        .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!live.publication.unwrap().started);
+    db.drop().await.unwrap();
+}
+
 #[test]
 fn format_details_flag_only_marks_empty_format_verdicts() {
     assert!(failure_details_unavailable(
@@ -1536,6 +1576,10 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .db
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
+                media_event_ids: Vec::new(),
+                media_queue_notice_id: None,
+                media_pending: None,
+                media_bound: None,
                 platform_delivery_recovery_queued: false,
                 platform_reply: None,
                 platform_origin: None,

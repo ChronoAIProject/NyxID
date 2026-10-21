@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SETTINGS_TABS } from "@/lib/url-tabs";
 import { useAuthStore } from "@/stores/auth-store";
+import { useConsentStore } from "@/stores/consent-store";
 import type { User } from "@/types/api";
 import { SettingsPage } from "./settings";
 
@@ -42,6 +43,9 @@ beforeEach(() => {
   unexpectedRequests.length = 0;
   transport.mockReset().mockImplementation(async (url, options) => {
     const headers = { "Content-Type": "application/json" };
+    if (url === "/api/v1/users/me/preferences/analytics" && options?.method === "GET") {
+      return new Response(JSON.stringify({ account_id: "owner", enabled: false, changed_at: null, revision: "" }), { headers });
+    }
     if (url === "/api/v1/onboarding/bindings" && options?.method === "GET") {
       return new Response("[]", { headers });
     }
@@ -99,6 +103,35 @@ async function open(
 describe.each(["/settings", "/assistant"] as const)(
   "SettingsPage at %s",
   (route) => {
+    it("allows local withdrawal while account permission is unavailable", async () => {
+      useConsentStore.setState({ accountId: "owner", enabled: true, asked: true });
+      transport.mockResolvedValueOnce(new Response("{}", { status: 503, headers: { "Content-Type": "application/json" } }));
+      await open(route, "privacy");
+      await screen.findByText("Account permission unavailable");
+      const local = screen.getByRole("switch", { name: "Allow usage analytics on this browser" });
+      expect(local).toBeEnabled();
+      await userEvent.click(local);
+      expect(useConsentStore.getState().enabled).toBe(false);
+      expect(local).toHaveAttribute("aria-checked", "false");
+      expect(transport).toHaveBeenCalledTimes(1);
+    });
+
+    it("distinguishes loading and failure and retries account permission", async () => {
+      let resolve!: (response: Response) => void;
+      transport.mockImplementationOnce(() => new Promise<Response>((done) => { resolve = done; }));
+      await open(route, "privacy");
+      expect(screen.getByRole("status")).toHaveTextContent("Loading account permission");
+      expect(screen.getByRole("switch", { name: "Allow account usage analytics" })).toBeDisabled();
+      await waitFor(() => expect(resolve).toBeTypeOf("function"));
+      await act(async () => resolve(new Response("{}", { status: 503, headers: { "Content-Type": "application/json" } })));
+      await screen.findByText("Account permission unavailable");
+      expect(screen.getByRole("switch", { name: "Allow account usage analytics" })).toBeDisabled();
+      await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await screen.findByText("Account permission disabled");
+      expect(screen.getByRole("switch", { name: "Allow account usage analytics" })).toBeEnabled();
+      expect(transport).toHaveBeenCalledTimes(2);
+    });
+
     it("discloses deletion of every managed Machine and paused workspace in the actual confirmation", async () => {
       await open(route, "security");
       await userEvent.click(screen.getByRole("button", { name: "Delete My Account" }));
@@ -139,7 +172,7 @@ describe.each(["/settings", "/assistant"] as const)(
         ["/api/v1/users/me", expect.objectContaining({
           method: "DELETE",
           credentials: "include",
-          headers: expect.objectContaining({ "X-NyxID-Account-Deletion-Policy": "machine-data" }),
+          headers: expect.objectContaining({ "X-NyxID-Account-Deletion-Policy": "machine-data-provider-revocation-v2" }),
         })],
       ]));
       await waitFor(() => expect(confirm).toBeEnabled());

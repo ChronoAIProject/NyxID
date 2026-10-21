@@ -1328,7 +1328,8 @@ pub async fn expire_pending_requests(
                 service_slug: req.service_slug.clone(),
                 mode: req.approval_mode.as_str().to_string(),
             },
-        );
+        )
+        .await;
     }
 
     Ok(count)
@@ -2789,6 +2790,7 @@ mod tests {
             arguments: serde_json::json!({}),
             execution_authority_digest: None,
             execution_authority_binding: None,
+            optional_provider_authority_digest: None,
             redemption: None,
         };
 

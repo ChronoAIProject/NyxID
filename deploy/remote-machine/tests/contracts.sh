@@ -41,10 +41,17 @@ assert len(storage) == 1, "one explicit StorageClass read rule required"
 for field, expected in (("resources", ["storageclasses"]), ("verbs", ["get", "list"])):
     value = re.search(r"(?m)^    " + field + r": (.+)$", storage[0])
     assert value and json.loads(value.group(1)) == expected, "StorageClass rule must grant only get/list"
-attachments = [rule for rule in rules if json.loads(rule.splitlines()[0]) == ["storage.k8s.io"]
-               and json.loads(re.search(r"(?m)^    resources: (.+)$", rule).group(1)) == ["volumeattachments"]]
-assert len(attachments) == 1, "one explicit VolumeAttachment read rule required"
-assert json.loads(re.search(r"(?m)^    verbs: (.+)$", attachments[0]).group(1)) == ["get", "list"]
+for rule in rules:
+    resources = json.loads(re.search(r"(?m)^    resources: (.+)$", rule).group(1))
+    assert not set(resources) & {"pods", "volumeattachments"}, "no cluster child/storage reads"
+pv = [rule for rule in rules if json.loads(re.search(r"(?m)^    resources: (.+)$", rule).group(1)) == ["persistentvolumes"]]
+assert len(pv) == 1 and json.loads(re.search(r"(?m)^    verbs: (.+)$", pv[0]).group(1)) == ["get"]
+manager = Path(sys.argv[1]).with_name("manager-role.yaml").read_text()
+for rule in re.split(r"(?m)^  - apiGroups: ", manager)[1:]:
+    resources = json.loads(re.search(r"(?m)^    resources: (.+)$", rule).group(1))
+    if set(resources) & {"pods", "persistentvolumeclaims"}:
+        assert json.loads(re.search(r"(?m)^    verbs: (.+)$", rule).group(1)) == ["get", "list", "watch"]
+
 PYROLE
 grep -F 'failurePolicy: Fail' "$root/admission.yaml" >/dev/null
 grep -F 'podTemplate.spec.automountServiceAccountToken == false' "$root/admission.yaml" >/dev/null

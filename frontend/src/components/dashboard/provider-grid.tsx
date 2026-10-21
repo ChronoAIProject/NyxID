@@ -152,7 +152,7 @@ export function ProviderGrid() {
       toast.success(
         response?.upstream_revocation_scheduled === true
           ? "Removed from NyxID. Upstream revocation scheduled."
-          : "Removed from NyxID. Upstream access remains active.",
+          : "Removed from NyxID. Upstream revocation is not confirmed.",
       );
       setDisconnectDialog(null);
       setCascadeDetails(null);

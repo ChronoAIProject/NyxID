@@ -136,6 +136,7 @@ pub async fn group_message(
         .await
 }
 
+#[derive(Clone)]
 pub struct FeedbackWrite {
     pub user_id: String,
     pub message_id: String,
@@ -185,13 +186,18 @@ pub fn classify(
     }
 }
 
-/// One atomic upsert. `ReturnDocument::Before` gives the replaced row, so two
-/// concurrent first votes cannot both be classified `submitted`: MongoDB
-/// retries the losing duplicate-key upsert as an update of the winner's row.
+/// The lifecycle fence and feedback upsert commit together. A duplicate-key
+/// error definitely aborts this transaction; bounded retries then update the
+/// unique winner. Unknown commit results never replay the mutation.
 pub async fn upsert_feedback(
     db: &Database,
     write: FeedbackWrite,
-) -> mongodb::error::Result<(AssistantMessageFeedback, Option<AssistantMessageFeedback>)> {
+) -> crate::errors::AppResult<(AssistantMessageFeedback, Option<AssistantMessageFeedback>)> {
+    #[cfg(test)]
+    if let Ok(pause) = FEEDBACK_WRITE_PAUSE.try_with(Clone::clone) {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
     let filter = doc! {"user_id": &write.user_id, "message_id": &write.message_id};
     let now = chrono::Utc::now();
     let new_id = uuid::Uuid::new_v4().to_string();
@@ -216,12 +222,36 @@ pub async fn upsert_feedback(
         "$set": set,
         "$setOnInsert": {"_id": &new_id, "created_at": bson::DateTime::from_chrono(now)},
     };
-    let previous = db
-        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
-        .find_one_and_update(filter, update)
-        .upsert(true)
-        .return_document(ReturnDocument::Before)
-        .await?;
+    let context = (db.clone(), write.user_id.clone(), filter, update);
+    let mut retries = 0;
+    let previous = loop {
+        let result = super::transaction_service::run_db_only(
+            db,
+            &context,
+            |tx, (db, owner, filter, update)| {
+                Box::pin(async move {
+                    fence_feedback_owner(db, owner, tx).await?;
+                    Ok(db
+                        .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
+                        .find_one_and_update(filter.clone(), update.clone())
+                        .upsert(true)
+                        .return_document(ReturnDocument::Before)
+                        .session(tx)
+                        .await?)
+                })
+            },
+        )
+        .await;
+        match result {
+            Err(crate::errors::AppError::DatabaseError(error))
+                if retries < 7 && super::assistant_team_service::is_duplicate(&error) =>
+            {
+                retries += 1;
+                tokio::task::yield_now().await;
+            }
+            result => break result?,
+        }
+    };
     let row = AssistantMessageFeedback {
         id: previous.as_ref().map_or(new_id, |p| p.id.clone()),
         user_id: write.user_id,
@@ -244,14 +274,55 @@ pub async fn upsert_feedback(
     Ok((row, previous))
 }
 
+async fn fence_feedback_owner(
+    db: &Database,
+    owner: &str,
+    tx: &mut mongodb::ClientSession,
+) -> crate::errors::AppResult<()> {
+    super::erasure_admission::fence_in_session(db, owner, tx).await?;
+    let person = db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .find_one(
+            doc! {"_id": owner, "is_active": true, "platform_personal_deleting": {"$ne": true}},
+        )
+        .session(tx)
+        .await?;
+    if person.is_none_or(|person| !person.user_type.is_person()) {
+        return Err(crate::errors::AppError::Conflict(
+            "Feedback owner is unavailable".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn delete_feedback(
     db: &Database,
     user_id: &str,
     message_id: &str,
-) -> mongodb::error::Result<Option<AssistantMessageFeedback>> {
-    db.collection::<AssistantMessageFeedback>(COLLECTION_NAME)
-        .find_one_and_delete(doc! {"user_id": user_id, "message_id": message_id})
-        .await
+) -> crate::errors::AppResult<Option<AssistantMessageFeedback>> {
+    let context = (db.clone(), user_id.to_owned(), message_id.to_owned());
+    super::transaction_service::run_db_only(db, &context, |tx, (db, owner, message)| {
+        Box::pin(async move {
+            fence_feedback_owner(db, owner, tx).await?;
+            Ok(db
+                .collection::<AssistantMessageFeedback>(COLLECTION_NAME)
+                .find_one_and_delete(doc! {"user_id":owner,"message_id":message})
+                .session(tx)
+                .await?)
+        })
+    })
+    .await
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct FeedbackWritePause {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static FEEDBACK_WRITE_PAUSE: std::sync::Arc<FeedbackWritePause>;
 }
 
 fn tool_labels<'a>(labels: impl Iterator<Item = &'a str>) -> Vec<String> {
@@ -458,4 +529,145 @@ pub fn audit_details(
         "error_code": context.and_then(|c| c.error_code.clone()),
         "tool_errors": context.map(|c| c.tool_errors),
     })
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::{errors::AppError, services::personal_erasure_service as erasure, test_utils};
+    fn write(owner: &str) -> FeedbackWrite {
+        FeedbackWrite {
+            user_id: owner.into(),
+            message_id: "held-reply".into(),
+            conversation_id: None,
+            group_id: None,
+            turn_id: None,
+            vote: "up".into(),
+            comment: None,
+            comment_present: false,
+            context: None,
+        }
+    }
+    #[tokio::test]
+    async fn legacy_person_feedback_is_admitted_but_invalid_owner_types_are_rejected() {
+        let db = test_utils::connect_transaction_test_database("feedback_legacy_owner").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut person = bson::to_document(&test_utils::test_user(
+            &owner,
+            crate::models::user::UserType::Person,
+        ))
+        .unwrap();
+        person.remove("user_type");
+        db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .insert_one(person)
+            .await
+            .unwrap();
+        upsert_feedback(&db, write(&owner)).await.unwrap();
+        for value in [
+            bson::Bson::Null,
+            bson::Bson::String("unknown".into()),
+            bson::Bson::String("org".into()),
+        ] {
+            db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+                .update_one(doc! {"_id":&owner}, doc! {"$set":{"user_type":value}})
+                .await
+                .unwrap();
+            assert!(upsert_feedback(&db, write(&owner)).await.is_err());
+        }
+    }
+    #[tokio::test]
+    async fn held_feedback_write_cannot_recreate_completed_erasure_inventory() {
+        let db = test_utils::connect_transaction_test_database("feedback_erasure_held_write").await;
+        test_utils::init_test_audit_chain_hmac_key();
+        erasure::ensure_indexes(&db).await.unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        upsert_feedback(&db, write(&owner)).await.unwrap();
+        let state = test_utils::test_app_state(db.clone());
+        let pause = std::sync::Arc::new(FeedbackWritePause::default());
+        let held = FEEDBACK_WRITE_PAUSE.scope(pause.clone(), upsert_feedback(&db, write(&owner)));
+        let erase = async {
+            tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.notified())
+                .await
+                .unwrap();
+            loop {
+                match erasure::accept(&db, &owner, &owner, None).await {
+                    Ok(_) => break,
+                    Err(AppError::ErasurePreparing) => {
+                        erasure::prepare_one_for_test(&db, &state.encryption_keys)
+                            .await
+                            .unwrap();
+                    }
+                    Err(error) => panic!("erasure acceptance failed: {error:?}"),
+                }
+            }
+            loop {
+                if erasure::status(&db, &owner).await.unwrap().unwrap().status
+                    == crate::models::personal_erasure::ErasureStatus::Complete
+                {
+                    break;
+                }
+                db.collection::<bson::Document>(crate::models::personal_erasure::COLLECTION_NAME)
+                    .update_many(doc! {}, doc! {"$set":{"retry_at":bson::DateTime::now()}})
+                    .await
+                    .unwrap();
+                erasure::process_one(&state).await.unwrap();
+                if db
+                    .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&owner})
+                    .await
+                    .unwrap()
+                    .is_none()
+                    && crate::services::telemetry_erasure_service::completion_evidence(&db, &owner)
+                        .await
+                        .unwrap()
+                        .is_none()
+                {
+                    crate::services::telemetry_erasure_service::drain_once(
+                        &db,
+                        &crate::telemetry::erasure::ErasureClients::default(),
+                    )
+                    .await
+                    .unwrap();
+                    crate::services::telemetry_erasure_service::operator_reconcile_empty_inventory(
+                        &db,
+                        &owner,
+                        "fixture-operator",
+                        "fixture://never-configured",
+                        "Synthetic deployment has never configured telemetry",
+                    )
+                    .await
+                    .unwrap();
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                db.collection::<bson::Document>(COLLECTION_NAME)
+                    .count_documents(doc! {"user_id":&owner})
+                    .await
+                    .unwrap(),
+                0
+            );
+            pause.release.notify_one();
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(held, erase)
+        })
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        assert_eq!(
+            db.collection::<bson::Document>(COLLECTION_NAME)
+                .count_documents(doc! {"user_id":&owner})
+                .await
+                .unwrap(),
+            0
+        );
+    }
 }

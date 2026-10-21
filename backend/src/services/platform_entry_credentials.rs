@@ -7,9 +7,7 @@ use super::{
 };
 use crate::{
     errors::{AppError, AppResult},
-    models::{
-        channel_bot::ChannelBot, platform_credential::PlatformCredential, user_api_key::UserApiKey,
-    },
+    models::{channel_bot::ChannelBot, user_api_key::UserApiKey},
 };
 use bson::{Bson, Document, doc};
 use mongodb::{ClientSession, Database};
@@ -27,11 +25,18 @@ enum TokenRequirement {
     UsableOrRefreshable,
 }
 
+struct CapturedConnectionToken {
+    id: String,
+    owner: String,
+    versions: std::collections::BTreeMap<String, u8>,
+    ciphertext: Zeroizing<Vec<u8>>,
+}
+
 pub(crate) struct EntryCredentialSnapshot {
     bot: CredentialSnapshot,
-    shared: Option<PlatformCredential>,
+    shared: Option<super::platform_credential_service::PlatformCredentialSnapshot>,
     connection_identity: Option<Document>,
-    connection_token: Option<Zeroizing<Vec<u8>>>,
+    connection_token: Option<CapturedConnectionToken>,
     token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     connection_refreshable: bool,
     guards: Vec<Guard>,
@@ -130,12 +135,17 @@ impl EntryCredentialSnapshot {
             connection_guard.insert("credential_epoch", doc! {"$in":[1_i64,Bson::Null]});
         }
 
-        result.connection_token = Some(Zeroizing::new(
-            connection
-                .access_token_encrypted
-                .clone()
-                .ok_or_else(changed)?,
-        ));
+        result.connection_token = Some(CapturedConnectionToken {
+            id: connection.id.clone(),
+            owner: connection.user_id.clone(),
+            versions: connection.secret_context_versions.clone(),
+            ciphertext: Zeroizing::new(
+                connection
+                    .access_token_encrypted
+                    .clone()
+                    .ok_or_else(changed)?,
+            ),
+        });
         result.token_expires_at = connection.expires_at;
         result.connection_refreshable = connection.refresh_token_encrypted.is_some();
         result.connection_identity = Some(identity);
@@ -259,8 +269,14 @@ impl EntryCredentialSnapshot {
         {
             return Err(changed());
         }
-        if let Some(ciphertext) = &self.connection_token {
-            let bytes = Zeroizing::new(keys.decrypt(ciphertext).await?);
+        if let Some(captured) = &self.connection_token {
+            let bytes = super::credential_record_service::CredentialRecord::captured_key(
+                &captured.id,
+                &captured.owner,
+                &captured.versions,
+            )
+            .decrypt(keys, "access_token_encrypted", &captured.ciphertext)
+            .await?;
             let token = std::str::from_utf8(&bytes).map_err(|_| changed())?;
             if token.is_empty() {
                 return Err(changed());

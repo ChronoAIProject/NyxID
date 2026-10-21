@@ -16,6 +16,7 @@ use crate::models::usage_meter::COLLECTION_NAME;
 
 pub mod analytics;
 pub mod identities;
+pub mod nyxbot;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(20);
 const TOKEN_FIELDS: &[&str] = &[
@@ -51,6 +52,9 @@ pub struct AdminUsageQuery {
     pub services: Option<String>,
     pub actors: Option<String>,
     pub owners: Option<String>,
+    /// Exact stored billing model; unknown_model selects absent identities separately.
+    pub model: Option<String>,
+    pub unknown_model: Option<bool>,
     /// Ranking quantity unit; defaults to tokens. Never adds unlike units.
     pub metric: Option<String>,
     /// quantity, requests, cost, total_tokens, prompt_tokens, completion_tokens,
@@ -207,6 +211,9 @@ impl AdminUsageResponse {
 }
 
 pub struct UsageParams {
+    pub nyxbot: bool,
+    pub unknown_model: bool,
+    pub model: Option<String>,
     pub analytics: Option<analytics::AnalyticsOptions>,
     pub selection: analytics::UsageSelection,
     pub window: UsageWindow,
@@ -299,7 +306,20 @@ impl AdminUsageQuery {
             .and_then(|page| page.checked_mul(per_page))
             .and_then(|offset| i64::try_from(offset).ok())
             .ok_or_else(|| invalid("page is too large"))?;
+        let model = self.model.map(|value| value.trim().to_owned());
+        if self.unknown_model == Some(true) && model.is_some() {
+            return Err(invalid("Choose model or unknown_model"));
+        }
+        if model
+            .as_ref()
+            .is_some_and(|m| m.is_empty() || m.len() > 256)
+        {
+            return Err(invalid("model must contain 1 to 256 characters"));
+        }
         Ok(UsageParams {
+            nyxbot: false,
+            unknown_model: self.unknown_model.unwrap_or(false),
+            model,
             analytics: None,
             selection: analytics::UsageSelection {
                 services: analytics::filter_values(self.services, false)?,
@@ -352,6 +372,18 @@ fn legacy_cost(quantity: &str) -> Bson {
     doc! { "$multiply": [ { "$toDecimal": quantity }, "$rate_pico", crate::models::credits::Credits::from_pico(1).expect("one pico")] }.into()
 }
 
+/// Report model: the pricing model, else the provider-reported model. Legacy
+/// billable rows keep their pricing model alone because their historical cost
+/// is estimated from a model-keyed cached rate. Requires `meter_flags`.
+fn reported_model_fallback() -> Bson {
+    doc! { "$ifNull": ["$model", { "$cond": [
+        { "$or": ["$exact", { "$eq": [{ "$ifNull": ["$wallet_id", null] }, null] }] },
+        { "$ifNull": ["$reported_model", null] },
+        null,
+    ] }] }
+    .into()
+}
+
 pub(crate) fn meter_group(legacy_dimensions: bool) -> Document {
     let mut group = doc! {
         "_id": {
@@ -359,7 +391,8 @@ pub(crate) fn meter_group(legacy_dimensions: bool) -> Document {
             "service_id": { "$ifNull": ["$service_id", null] },
             "service_slug": { "$ifNull": ["$service_slug", null] },
             "class": "$credential_class", "metric": "$metric", "code": "$lago_metric_code",
-            "model": { "$ifNull": ["$model", null] }, "layer": "$layer",
+            "model": reported_model_fallback(), "layer": "$layer",
+            "assistant_source": { "$ifNull": ["$assistant_source", null] },
             "api_key": { "$ifNull": ["$api_key_id", null] }, "acked": "$lago_acked",
             "billable": { "$ne": [{ "$ifNull": ["$wallet_id", null] }, null] },
         },
@@ -371,6 +404,18 @@ pub(crate) fn meter_group(legacy_dimensions: bool) -> Document {
         "legacy_allowance_quantity": { "$sum": { "$cond": ["$exact", 0, { "$sum": "$funding.allowance_consumptions.quantity" }] } },
         "legacy_grant_cost": { "$sum": { "$cond": ["$exact", 0, { "$sum": { "$map": { "input": { "$ifNull": ["$funding.grant_consumptions", []] }, "as": "allocation", "in": credit_expr("$$allocation.amount") } } }] } },
     };
+    // Modern free provenance needs no key/ack dimensions. Keep historical key
+    // identity until folded, and retain the existing billable display contract.
+    let key = group.get_document_mut("_id").expect("group key");
+    let retain_key = doc! { "$or": [{ "$ne": [{ "$ifNull": ["$wallet_id", null] }, null] }, { "$eq": [{ "$ifNull": ["$assistant_source", null] }, null] }] };
+    key.insert(
+        "api_key",
+        doc! { "$cond": [retain_key.clone(), { "$ifNull": ["$api_key_id", null] }, null] },
+    );
+    key.insert(
+        "acked",
+        doc! { "$cond": [retain_key, "$lago_acked", false] },
+    );
     for field in TOKEN_FIELDS {
         group.insert(
             *field,
@@ -426,7 +471,7 @@ fn base_pipeline(params: &UsageParams) -> Vec<Document> {
     ]) {
         let sum: Bson = doc! { "$add": [format!("${field}"), legacy] }.into();
         let billable: Bson = if *field == "grant_cost" { sum } else {
-            doc! { "$cond": ["$unknown", null, sum] }.into()
+            doc! { "$cond": ["$unknown", { "$cond": [{ "$gt": ["$exact_cost_events", 0] }, format!("${field}"), null] }, sum] }.into()
         };
         costs.insert(*field, doc! { "$cond": ["$_id.billable", billable, 0] });
     }
@@ -973,12 +1018,35 @@ fn fast_pipeline(
         };
         unfold.insert(*field, value);
     }
+    let parts: Bson = doc! { "$map": { "input": { "$objectToArray": { "$ifNull": ["$cost_partitions", {}] } }, "as": "entry", "in": "$$entry.v" } }.into();
+    let mut residual = doc! { "key": {} };
+    for field in MEASURES {
+        let money = COST_FIELDS.contains(field) || *field == "legacy_grant_cost";
+        let root = if money {
+            rollup_credit_expr(field, rollup_normalized)
+        } else {
+            format!("${field}").into()
+        };
+        let part = if money {
+            exact_or_legacy_credit_expr(
+                format!("$$entry.{field}").into(),
+                format!(
+                    "$$entry.{}",
+                    crate::services::billing::usage_rollup::legacy_measure(field)
+                )
+                .into(),
+            )
+        } else {
+            format!("$$entry.{field}").into()
+        };
+        residual.insert(*field, doc! { "$subtract": [{ "$ifNull": [root, 0_i64] }, { "$sum": { "$map": { "input": parts.clone(), "as": "entry", "in": { "$ifNull": [part, 0_i64] } } } }] });
+    }
+    // Residual values are already exact; their money expressions read exact keys.
     let partition_pipeline = vec![
-        doc! { "$set": { "part": { "$cond": [
-            { "$gt": [{ "$size": { "$objectToArray": { "$ifNull": ["$cost_partitions", {}] } } }, 0] },
-            { "$map": { "input": { "$objectToArray": "$cost_partitions" }, "as": "part", "in": "$$part.v" } },
-            ["$$ROOT"],
-        ] } } },
+        doc! { "$set": { "residual": residual, "parts": parts } },
+        doc! { "$set": { "part": { "$concatArrays": ["$parts", { "$cond": [
+            { "$gt": ["$residual.rows_folded", 0_i64] }, ["$residual"], [],
+        ] }] } } },
         doc! { "$unwind": "$part" },
         doc! { "$set": unfold },
         doc! { "$group": partition_group },
@@ -1033,6 +1101,17 @@ fn fast_pipeline(
         single_filter.insert("single_display_key", doc! { "$ne": null });
         let mut partition_filter = source_filter(params, bucket, from, to);
         partition_filter.insert("single_display_key", Bson::Null);
+        if params.nyxbot {
+            // Legacy writers may rebuild the single-key shortcut from a lone
+            // new free partition while older root-only measures still exist.
+            // Free assistant reports always read partitions plus the residual.
+            single_filter.insert("billable", true);
+            partition_filter.remove("single_display_key");
+            partition_filter.insert(
+                "$and",
+                vec![doc! { "$or": [{ "billable": false }, { "single_display_key": Bson::Null }] }],
+            );
+        }
         let mut partitions = vec![doc! { "$match": partition_filter }];
         partitions.extend(partition_pipeline.clone());
         pipeline.extend([
@@ -1052,8 +1131,11 @@ fn fast_pipeline(
             ] } });
         }
     }
+    pipeline.push(doc! { "$group": regroup });
+    if params.nyxbot {
+        pipeline.extend(nyxbot::attribution_stages());
+    }
     pipeline.extend([
-        doc! { "$group": regroup },
         doc! { "$set": { "rate": { "$ifNull": [
             { "$getField": { "field": { "$concat": ["$_id.code", ":", { "$ifNull": ["$_id.model", "*"] }] }, "input": { "$literal": rates.clone() } } },
             { "$getField": { "field": { "$concat": ["$_id.code", ":*"] }, "input": { "$literal": rates } } }, null,
@@ -1062,6 +1144,14 @@ fn fast_pipeline(
     let mut price = base_pipeline(params).split_off(6);
     price[0].get_document_mut("$set").expect("price set").insert("unknown", doc! { "$and": ["$_id.billable", { "$gt": ["$legacy_quantity", 0] }, { "$eq": [{ "$ifNull": ["$rate", null] }, null] }] });
     pipeline.extend(price);
+    pipeline.push(doc! { "$set": { "_id.model": { "$let": { "vars": { "model": { "$trim": { "input": { "$ifNull": ["$_id.model", ""] } } } }, "in": { "$cond": [{ "$eq": ["$$model", ""] }, null, "$$model"] } } } } });
+    if let Some(model) = &params.model {
+        pipeline.push(doc! { "$match": { "_id.model": model } });
+    }
+    if params.unknown_model {
+        pipeline.push(doc! { "$match": { "_id.model": Bson::Null } });
+    }
+
     let selected = || -> Vec<Document> {
         let mut stages = Vec::new();
         if let Some(service) = &params.service {
@@ -1080,6 +1170,10 @@ fn fast_pipeline(
         stages.extend(rollup(dimensions));
         stages
     };
+    if params.nyxbot {
+        pipeline.push(doc! { "$facet": nyxbot::facets(params, &reduced) });
+        return pipeline;
+    }
     if let Some(options) = &params.analytics {
         pipeline.push(doc! { "$facet": options.facets(&reduced) });
         return pipeline;

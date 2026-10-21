@@ -36,6 +36,9 @@ const mocks = vi.hoisted(() => ({
   openExternal: vi.fn(),
 }));
 vi.mock("@/hooks/use-billing", () => ({
+  BILLING_INVOICES_PAGE_SIZE: 10,
+  useCurrentBill: () => ({ isLoading: false, isError: false, data: undefined }),
+  useBillingInvoices: () => ({ isLoading: false, isError: false, data: { invoices: [], total: 0 } }),
   useBillingWallet: mocks.wallet,
   useBillingUsage: mocks.usage,
   useTopUpHistory: mocks.history,

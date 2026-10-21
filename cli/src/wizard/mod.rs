@@ -41,7 +41,7 @@ use serde::Deserialize;
 /// `~/.nyxid/` by `ApiClient::from_auth` and handed in here. `profile`
 /// is needed so the proxy can refresh the access token on 401 using
 /// the saved refresh token for the correct profile.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProxyContext {
     pub base_url_root: String,
     pub access_token: String,
@@ -1352,5 +1352,26 @@ fn print_wizard_summary(body: &serde_json::Value, base_url: &str) {
         None => {
             eprintln!("✓ Wizard completed (no service created).");
         }
+    }
+}
+
+impl std::fmt::Debug for ProxyContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProxyContext([REDACTED])")
+    }
+}
+
+#[cfg(test)]
+mod context_debug_tests {
+    use super::ProxyContext;
+    #[test]
+    fn bearer_is_redacted_in_debug() {
+        let secret = "distinctive-wizard-session-b29c";
+        let context = ProxyContext {
+            base_url_root: "https://example.invalid".into(),
+            access_token: secret.into(),
+            profile: None,
+        };
+        assert!(!format!("{context:?}").contains(secret));
     }
 }

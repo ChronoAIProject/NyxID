@@ -52,11 +52,11 @@ pub(super) async fn inbound(
     if row.transport != "direct" {
         return Ok(false);
     }
-    Ok(
-        inbound_impl(state, row, payload, message, text, event_key, false)
-            .await?
-            .is_some(),
-    )
+    Ok(Box::pin(inbound_impl(
+        state, row, payload, message, text, event_key, false,
+    ))
+    .await?
+    .is_some())
 }
 
 pub(super) async fn gateway_inbound(
@@ -73,7 +73,7 @@ pub(super) async fn gateway_inbound(
     }
     let payload = json!({"conversation":{"type":activity["conversation"]["kind"]},
         "sender":{"display_name":activity["actor"]["display_name"]}});
-    inbound_impl(
+    Box::pin(inbound_impl(
         state,
         row,
         &payload,
@@ -81,7 +81,7 @@ pub(super) async fn gateway_inbound(
         text,
         event_key,
         true,
-    )
+    ))
     .await
 }
 
@@ -150,7 +150,14 @@ async fn inbound_impl(
     {
         return Ok(Some(Inbound::Silent));
     }
-    if text.trim().is_empty() {
+
+    if text.trim().is_empty()
+        && Box::pin(crate::services::channel_media_events::for_turn(
+            &state.db, row, event_key,
+        ))
+        .await?
+        .0 == 0
+    {
         return Ok(Some(Inbound::Silent));
     }
     let sender = Sender {
@@ -186,6 +193,8 @@ async fn inbound_impl(
     {
         let own = own_user_id(state, &bot).await;
         let inbound = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: facts.message_id.clone(),
             conversation_id: facts.chat_id.clone(),
             conversation_type: payload["conversation"]["type"]
@@ -769,59 +778,64 @@ pub(super) async fn send_bound_reply(
     conversation: &str,
     outbound: &OutboundReply,
 ) -> AppResult<threads::delivery::ThreadDelivery> {
-    let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
-    let adapter = adapter(state, &bot)?;
-    let token = crate::services::channel_credentials::resolve_bot_token(
-        &state.db,
-        &state.encryption_keys,
-        adapter.as_ref(),
-        &bot,
-    )
-    .await?;
-    let secrets = if bot.credential_source == "platform" {
-        Some(
-            crate::services::channel_managed::build_verify_secrets(
-                &state.db,
-                &state.encryption_keys,
-                adapter.as_ref(),
-                &bot,
-            )
-            .await?,
+    // Keep this multi-stage delivery future on the heap. Its callers include
+    // Tokio workers and nested image/automation delivery on normal stacks.
+    Box::pin(async move {
+        let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
+        let adapter = adapter(state, &bot)?;
+        let token = crate::services::channel_credentials::resolve_bot_token(
+            &state.db,
+            &state.encryption_keys,
+            adapter.as_ref(),
+            &bot,
         )
-    } else {
-        None
-    };
-    let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
-        &state.db,
-        &state.billing,
-        &bot,
-        Some(&channel.route_api_key_id),
-    );
-    let credentials = BotCredentials {
-        token: &token,
-        platform_bot_id: Some(&bot.platform_bot_id),
-        platform_secrets: secrets.as_ref(),
-        billing: billing.as_ref(),
-    };
-    let target = threads::resolution::resolve_admitted(
-        &state.db,
-        adapter.as_ref(),
-        &bot,
-        &credentials,
-        owner,
-        origin,
-        conversation,
-    )
-    .await?
-    .ok_or_else(follow::not_found)?;
-    threads::delivery::send_reply(
-        &state.db,
-        adapter.as_ref(),
-        &bot,
-        &credentials,
-        &target,
-        outbound,
-    )
+        .await?;
+        let secrets = if bot.credential_source == "platform" {
+            Some(
+                crate::services::channel_managed::build_verify_secrets(
+                    &state.db,
+                    &state.encryption_keys,
+                    adapter.as_ref(),
+                    &bot,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+            &state.db,
+            &state.billing,
+            &bot,
+            Some(&channel.route_api_key_id),
+        );
+        let credentials = BotCredentials {
+            token: &token,
+            platform_bot_id: Some(&bot.platform_bot_id),
+            platform_secrets: secrets.as_ref(),
+            billing: billing.as_ref(),
+        };
+        let target = threads::resolution::resolve_admitted(
+            &state.db,
+            adapter.as_ref(),
+            &bot,
+            &credentials,
+            owner,
+            origin,
+            conversation,
+        )
+        .await?
+        .ok_or_else(follow::not_found)?;
+        threads::delivery::send_reply(
+            &state.db,
+            adapter.as_ref(),
+            &bot,
+            &credentials,
+            &target,
+            outbound,
+        )
+        .await
+    })
     .await
 }
 

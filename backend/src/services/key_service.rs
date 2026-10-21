@@ -1793,6 +1793,7 @@ mod tests {
             status: NodeStatus::Online,
             auth_token_hash: "auth-hash".to_string(),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "signing-hash".to_string(),
             last_heartbeat_at: Some(now),
             connected_at: Some(now),
@@ -2828,6 +2829,82 @@ mod tests {
             .expect("key remains active");
         assert_eq!(touched.state_version, 2);
         assert!(touched.last_used_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn validate_api_key_unknown_scope_shape_fails_closed_before_authentication() {
+        let db = connect_test_database("key_svc_unknown_scope_shape")
+            .await
+            .expect("MongoDB required for typed scope loading regression");
+        let user_id = Uuid::new_v4().to_string();
+        let created = create_api_key(
+            &db,
+            &user_id,
+            "number-scoped",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create key");
+        let scopes = doc! {"service": {
+            "revision": 1_i64,
+            "catalog_service_id": null,
+            "operations": [{
+                "endpoint_id": null,
+                "rule": {"method": "POST", "path_template": "/records"},
+                "inputs": {"body": {
+                    "type": "number", "minimum": 0_i64, "maximum": 100_i64,
+                    "max_fraction_digits": 2_i32
+                }}
+            }]
+        }};
+        let rows = db.collection::<bson::Document>(API_KEYS);
+        rows.update_one(
+            doc! {"_id": &created.id},
+            doc! {"$set": {
+                "assistant_operation_scopes": scopes
+            }},
+        )
+        .await
+        .unwrap();
+        let (_, key, _) = validate_api_key(&db, &created.full_key).await.unwrap();
+        assert!(
+            key.assistant_operation_scopes["service"].operations[0]
+                .inputs
+                .is_some()
+        );
+
+        // The permissions test proves the pre-Number enum rejects `number`.
+        // An unknown tag exercises the same typed MongoDB failure on this binary.
+        rows.update_one(doc! {"_id": &created.id}, doc! {
+            "$set": {"assistant_operation_scopes.service.operations.0.inputs.body.type": "future_number"},
+            "$unset": {"last_used_at": ""}
+        }).await.unwrap();
+        let result = validate_api_key(&db, &created.full_key).await;
+        assert!(
+            matches!(result, Err(AppError::DatabaseError(_))),
+            "unknown scopes cannot authenticate"
+        );
+        let stored = rows
+            .find_one(doc! {"_id": &created.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !stored.contains_key("last_used_at"),
+            "auth did not advance past typed load"
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

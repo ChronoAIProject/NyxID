@@ -48,7 +48,8 @@ pub async fn get_usage(
         TelemetryEvent::AdminUsageViewed {
             filter: (!applied.is_empty()).then(|| applied.join(",")),
         },
-    );
+    )
+    .await;
     Ok(Json(response))
 }
 

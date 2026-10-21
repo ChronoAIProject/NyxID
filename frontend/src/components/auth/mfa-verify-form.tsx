@@ -1,7 +1,7 @@
 import { useRef, useEffect } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate } from "@tanstack/react-router";
-import { mfaVerifySchema, type MfaVerifyFormData } from "@/schemas/auth";
+import { mfaLoginSchema, type MfaVerifyFormData } from "@/schemas/auth";
 import { useMfaVerify } from "@/hooks/use-auth";
 import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
@@ -31,7 +31,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
   const codeInputRef = useRef<HTMLInputElement>(null);
 
   const form = useAppForm<MfaVerifyFormData>({
-    resolver: zodResolver(mfaVerifySchema),
+    resolver: zodResolver(mfaLoginSchema),
     defaultValues: {
       code: "",
     },
@@ -81,7 +81,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
         <p className="text-12 text-muted-foreground">
           {verifyMutation.sessionConfirmationPending
             ? "Verification was submitted. Confirm your session to continue."
-            : "Enter the 6-digit code from your authenticator app"}
+            : "Enter your authenticator code or a single-use recovery code"}
         </p>
       </div>
 
@@ -105,12 +105,12 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
                 <FormControl>
                   <Input
                     placeholder="000000"
-                    maxLength={6}
+                    maxLength={32}
                     autoComplete="one-time-code"
-                    inputMode="numeric"
+                    inputMode="text"
                     disabled={verifyMutation.sessionConfirmationPending}
-                    aria-label="Enter 6-digit verification code"
-                    className="text-center font-mono text-lg tracking-widest"
+                    aria-label="Authenticator or recovery code"
+                    className="min-w-0 font-mono text-xs tracking-normal sm:text-sm"
                     {...field}
                     ref={codeInputRef}
                   />

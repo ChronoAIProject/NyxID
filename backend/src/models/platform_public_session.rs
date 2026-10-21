@@ -29,6 +29,8 @@ pub struct PlatformPublicSession, RawPlatformPublicSession {
     pub policy_digest: String,
     pub nyxagent_profile: String,
     pub credential_api_key_id: String,
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(with = "crate::models::bson_bytes::required")]
     pub credential_ciphertext: Vec<u8>,
     #[serde(with = "crate::models::bson_bytes::required")]
@@ -134,6 +136,7 @@ mod tests {
     fn unknown_upstream_evidence_requires_cleanup_and_times_remain_bson_dates() {
         let now = Utc::now();
         let row = PlatformPublicSession {
+            secret_context_versions: Default::default(),
             id: "session-sensitive".into(),
             profile_id: "profile".into(),
             manager_bot_id: "99".into(),

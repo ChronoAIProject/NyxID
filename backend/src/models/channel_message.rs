@@ -22,6 +22,38 @@ impl std::fmt::Debug for StoredAttachment {
     }
 }
 
+/// Bounded gateway admission metadata; no upstream IDs, prose or raw body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CallbackDisposition {
+    Accepted,
+    Refused { reason: CallbackRefusal },
+    Unknown,
+}
+
+/// CMA's closed refusal vocabulary (`ingress/admission.rs`). Unknown codes are
+/// normalized to an unknown disposition when the callback response is parsed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallbackRefusal {
+    BotSender,
+    SystemSender,
+    UnknownSender,
+    MessageEdit,
+    InteractiveActionUnsupported,
+    InteractionExpiredOrInvalid,
+    SystemEvent,
+    ContentUnsupported,
+    AttachmentUnsupported,
+    SenderDenied,
+    ChatDenied,
+    GroupDenied,
+    GroupNotAddressed,
+    AddressingEvidenceUnavailable,
+    ThreadEvidenceUnavailable,
+    PlatformVerifierUnavailable,
+}
+
 /// A metadata-only record of a message flowing through the channel bot
 /// relay pipeline.
 ///
@@ -35,6 +67,9 @@ impl std::fmt::Debug for StoredAttachment {
 /// grain state, or wherever the agent persists its conversation history).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    /// SHA-256 media identity of a suppressed native redelivery (64 hex chars).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_of_media_key: Option<String>,
     /// Optional normalized thread facts, never an interaction credential.
     #[serde(default)]
     pub thread_context: Option<super::channel_thread::ChannelThreadFacts>,
@@ -77,6 +112,11 @@ pub struct ChannelMessage {
     pub content_type: String,
     #[serde(default)]
     pub attachments: Vec<StoredAttachment>,
+    /// Post resources in document order; never part of the callback/indexed HTTP list.
+    #[serde(default)]
+    pub embedded_attachments: Vec<StoredAttachment>,
+    #[serde(default)]
+    pub embedded_attachments_omitted: usize,
     /// Platform-specific routing metadata: Telegram `message_thread_id`,
     /// Discord deferred-interaction token (`interaction:{app}:{token}`),
     /// Lark `thread_id`, etc. **This is routing metadata, not message
@@ -96,6 +136,9 @@ pub struct ChannelMessage {
     /// it answered at all. A status code only, never the response body.
     #[serde(default)]
     pub callback_http_status: Option<u16>,
+    /// Parsed HTTP 202 admission from the gateway; legacy callbacks omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_disposition: Option<CallbackDisposition>,
     /// Internal message ID this message is a reply to
     #[serde(default)]
     pub reply_to_message_id: Option<String>,
@@ -132,6 +175,9 @@ mod tests {
 
     fn make_message() -> ChannelMessage {
         ChannelMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
+            duplicate_of_media_key: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -152,6 +198,7 @@ mod tests {
             agent_api_key_id: None,
             callback_status: None,
             callback_http_status: None,
+            callback_disposition: None,
             reply_to_message_id: None,
             platform_reply_message_id: None,
             reply_to_platform_message_id: None,

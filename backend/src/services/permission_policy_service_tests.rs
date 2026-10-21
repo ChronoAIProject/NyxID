@@ -45,6 +45,7 @@ async fn fixture() -> (crate::AppState, String, String) {
     let credential_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now();
     let credential = UserApiKey {
+        secret_context_versions: Default::default(),
         id: credential_id.clone(),
         user_id: owner.clone(),
         label: "Drive test".into(),

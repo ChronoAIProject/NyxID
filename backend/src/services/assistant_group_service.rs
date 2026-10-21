@@ -210,9 +210,22 @@ pub async fn create(
         created_at: now,
         updated_at: now,
     };
-    db.collection::<AssistantGroup>(GROUPS)
-        .insert_one(&group)
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
+    let result: AppResult<()> = async {
+        super::erasure_admission::fence_in_session(db, owner, &mut session).await?;
+        db.collection::<AssistantGroup>(GROUPS)
+            .insert_one(&group)
+            .session(&mut session)
+            .await?;
+        Ok(())
+    }
+    .await;
+    super::org_membership_authority::finish(session, result).await?;
     append(
         db,
         owner,
@@ -467,6 +480,7 @@ pub async fn append_following(
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<GroupMessage> = Box::pin(async {
+                super::erasure_admission::fence_in_session(&db, &owner, session).await?;
                 let now = Utc::now();
                 let group = db
                     .collection::<AssistantGroup>(GROUPS)

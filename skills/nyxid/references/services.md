@@ -4,6 +4,7 @@
 
 - [Discover Services](#discover-services)
 - [Inventory authority and Lark Base access](#inventory-authority-and-lark-base-access)
+- [Lark Base receipt photos](#lark-base-receipt-photos)
 - [Slug rules for `service add`](#slug-rules-for-service-add)
 - [OAuth consent service grants and resource URIs](#oauth-consent-service-grants-and-resource-uris)
 - [Requesting additional OAuth scopes](#requesting-additional-oauth-scopes)
@@ -83,6 +84,84 @@ spreadsheet file. Rebinding an Aevatar workflow cannot grant this document acces
 exact Bot application to the original Base or deliberately remap the workflow to an accessible Base
 with the same schema. Re-list services after changing credentials or routes, and retry only a safe,
 idempotent read until access is proven.
+
+## Lark Base receipt photos
+
+NyxID provides `bitable_fields_list`, `bitable_media_upload`, and
+`bitable_record_create_with_attachments` on trusted Lark/Feishu catalog
+connections. Operation IDs are not complete MCP tool names: use the discovered
+name and schema for the exact connection. Attachment tools require the live
+owner chat and flag below. Do not emulate a missing composite with raw upload
+and record-create requests.
+
+Use `api-lark`/`api-feishu` for user OAuth or
+`api-lark-bot`/`api-feishu-bot` for app tenant tokens. Enable
+`base:field:read`, `base:record:create`, and `docs:document.media:upload` in
+the developer console and, for user OAuth, request the matching consent.
+`bitable:app` is the coarse Base alternative listed by these APIs. Seed
+defaults remain read-only, and the selected principal also needs access to
+the exact Base document. The inbound channel bot's download permission is
+separate: any one of `im:message`, `im:message:readonly`, or
+`im:message.history:readonly`, configured on that bot app in the developer
+console per `/reference/im-v1/message-resource/get`.
+
+In a live, non-guest NyxAgent owner chat:
+
+1. Use `bitable_fields_list` to read the table's current field names, types,
+   and dropdown options. Use existing options; do not invent values.
+2. For a receipt with photos, prefer
+   `bitable_record_create_with_attachments` with `{fields, attachments}`.
+   Each attachment field maps to chat attachment IDs, not file URLs or raw
+   provider handles. The composite requires a complete, nonempty photo set,
+   at most ten unique IDs, 20 MiB per file and 50 MiB total. All field names
+   must exist; attachment destinations must be attachment fields, number values
+   must be finite JSON numbers, and select values must match current options.
+   Unknown options are refused, never created. An incomplete source set reports
+   `N of M photos from that message could not be read; ask the owner to resend`.
+   Ask for a complete resend; do not omit unreadable photos to force a create.
+3. Use standalone `bitable_media_upload` only when the task needs a
+   `file_token` without creating a record. Supply `attachment_id`,
+   `parent_type` (`bitable_image` or `bitable_file`), and `parent_node` (the
+   Base app token). NyxID derives size, defaults the sanitized filename, and
+   supplies `extra.drive_route_token`. This tool has no managed record ledger.
+4. Success returns `{record_id, already_created:false}`; an authorized
+   identical replay returns `{record_id, already_created:true}`, even after
+   credential rotation. Use the returned record as proof of the result.
+5. An active write reports `in progress; try again shortly`. For `uncertain`,
+   follow `outcome unknown; check the Base; NyxID will not create it again`.
+   Never re-call, switch connections, split the photos, or use plain
+   `bitable_record_create` to bypass uncertainty or a duplicate barrier. A
+   conflicting succeeded photo reports `Photo already belongs to record
+   <record_id>; use bitable_record_update to change its fields`.
+6. `failed_pre_dispatch` and `failed_definite` release reservations. The latter
+   includes `last_code: not_sent`: the create request did not leave NyxID,
+   although earlier uploads may have completed. A corrected new call may create
+   once. Managed permission errors name the outbound service slug and connection
+   label; fix that principal's scopes and Base access.
+
+Managed identical-photo protection lasts 400 days within the same owner,
+Base app, and table. It uses content bytes, so a new attachment ID or another
+conversation does not evade it. There is no duplicate override; a deliberate
+duplicate must be added manually in Lark. Terminal metadata remains after the
+upload expires, active writes are not retention-deleted, and owner purge
+removes the metadata and reservations.
+
+`assistant:attachment-writes` defaults off per person and enables these
+attachment-write tools only for live owner-chat keys. Ordinary CLI/Agent Keys,
+external OAuth plugin connections, and guests cannot use them. The separate
+default-off `assistant:channel-media` admits owner Lark/Feishu photos/files;
+browser uploads can feed writes even when new channel media admission is off.
+Upgrade all replicas and drain pre-release workers before enabling either.
+
+For a Receipt-Bot specialist, grant the chosen service and scope it to only
+`bitable_fields_list` and `bitable_record_create_with_attachments`, with exact
+Base/table rules and closed receipt field/attachment limits. Do not grant plain
+create or standalone upload as a workaround. The complete JSON and supported
+API/CLI authoring routes are in
+[the operation-scope recipe](https://github.com/ChronoAIProject/NyxID/blob/main/docs/AGENT_OPERATION_SCOPES.md#receipt-bot-recipe).
+The [Lark Base guide](https://github.com/ChronoAIProject/NyxID/blob/main/docs/site/cli/guides/connect-a-service.md#lark-base)
+defines the flag matrix and rollout/rollback procedure. Human owners author nested
+limits through the API; the grants UI preserves them when selecting operations.
 
 ## OAuth consent service grants and resource URIs
 

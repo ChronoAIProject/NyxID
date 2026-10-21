@@ -281,28 +281,34 @@ async fn machine_oauth_code_access_refresh_keep_exact_version_and_never_upgrade(
             .is_err()
         );
     }
-    // A legacy refresh row claiming machine cannot silently acquire current consent.
-    let legacy = oauth_service::issue_oauth_refresh_token(
-        &f.state.db,
-        &f.state.config,
+    // A historical unbound row must be inserted as historical storage, not
+    // minted through the current guarded issuance API (which rejects it).
+    let (legacy_token, legacy_jti) = jwt::generate_refresh_token(
         &f.state.jwt_keys,
-        &f.client,
-        &f.user,
-        "proxy",
-        &[],
-        &[],
-        false,
-        None,
+        &f.state.config,
+        &Uuid::parse_str(&f.user).unwrap(),
     )
-    .await
     .unwrap();
     f.state
         .db
         .collection::<RefreshToken>(REFRESH_TOKENS)
-        .update_one(
-            doc! {"jti":&legacy.refresh_token_jti},
-            doc! {"$set":{"scope":"machine proxy"}},
-        )
+        .insert_one(RefreshToken {
+            id: Uuid::new_v4().to_string(),
+            jti: legacy_jti,
+            client_id: f.client.clone(),
+            user_id: f.user.clone(),
+            session_id: None,
+            scope: Some("machine proxy".into()),
+            protected_consent: None,
+            expires_at: Utc::now() + Duration::days(7),
+            revoked: false,
+            replaced_by: None,
+            revoked_at: None,
+            resource_uris: Vec::new(),
+            allowed_service_ids: Vec::new(),
+            allow_all_services: false,
+            created_at: Utc::now(),
+        })
         .await
         .unwrap();
     assert!(
@@ -310,7 +316,7 @@ async fn machine_oauth_code_access_refresh_keep_exact_version_and_never_upgrade(
             &f.state.db,
             &f.state.config,
             &f.state.jwt_keys,
-            &legacy.refresh_token,
+            &legacy_token,
             None,
             None
         )
@@ -774,6 +780,13 @@ async fn machine_oauth_ordinary_broker_token_retains_client_and_cannot_approve()
     let f = MachineConsentFixture::new().await;
     let original = f.prepare().await;
     f.code(&original).await;
+    let consent = consent_service::check_consent(&f.state.db, &f.user, &f.client, "openid proxy")
+        .await
+        .unwrap()
+        .unwrap();
+    let reference = consent_service::ensure_issuance_reference(&f.state.db, &consent)
+        .await
+        .unwrap();
     let issued = oauth_service::issue_oauth_refresh_token(
         &f.state.db,
         &f.state.config,
@@ -784,7 +797,7 @@ async fn machine_oauth_ordinary_broker_token_retains_client_and_cannot_approve()
         &[],
         &[],
         false,
-        None,
+        Some(&reference),
     )
     .await
     .unwrap();
@@ -820,7 +833,13 @@ async fn machine_oauth_ordinary_broker_token_retains_client_and_cannot_approve()
     let claims =
         jwt::verify_token(&f.state.jwt_keys, &f.state.config, &exchanged.access_token).unwrap();
     assert_eq!(claims.client_id.as_deref(), Some(f.client.as_str()));
-    assert!(claims.protected_consent.is_none());
+    assert_eq!(claims.protected_consent, Some(reference));
+    assert!(
+        !claims
+            .scope
+            .split_whitespace()
+            .any(|scope| scope == "machine")
+    );
     let request = axum::http::Request::builder()
         .uri("/oauth/authorize")
         .header(

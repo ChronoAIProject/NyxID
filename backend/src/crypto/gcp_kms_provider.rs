@@ -26,9 +26,7 @@ impl GcpKmsKeyMetadata {
             && current_key_id == prev_id
         {
             panic!(
-                "GCP_KMS_KEY_NAME and GCP_KMS_KEY_NAME_PREVIOUS produce the same key id \
-                 (0x{:02x}). This is a 1-in-256 hash collision. Use a different key.",
-                current_key_id
+                "GCP_KMS_KEY_NAME and GCP_KMS_KEY_NAME_PREVIOUS produce the same key id; configure distinct noncolliding keys"
             );
         }
 
@@ -71,7 +69,7 @@ impl std::fmt::Debug for GcpKmsKeyMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GcpKmsProvider")
             .field("current_key_name", &"[REDACTED]")
-            .field("current_key_id", &format!("0x{:02x}", self.current_key_id))
+            .field("current_key_id", &"[REDACTED]")
             .field(
                 "previous_key_name",
                 if self.previous_key_name.is_some() {
@@ -105,10 +103,10 @@ impl GcpKmsProvider {
         let client_config = google_cloud_kms::client::ClientConfig::default()
             .with_auth()
             .await
-            .expect("Failed to configure GCP KMS authentication");
+            .unwrap_or_else(|_| panic!("GCP KMS authentication initialization failed"));
         let client = google_cloud_kms::client::Client::new(client_config)
             .await
-            .expect("Failed to create GCP KMS client");
+            .unwrap_or_else(|_| panic!("GCP KMS client initialization failed"));
 
         let keys = GcpKmsKeyMetadata::new(
             key_name.to_string(),
@@ -116,7 +114,6 @@ impl GcpKmsProvider {
         );
 
         tracing::info!(
-            key_id = format!("0x{:02x}", keys.current_key_id()),
             has_previous = keys.has_previous_key(),
             "GCP Cloud KMS provider initialized"
         );
@@ -136,7 +133,6 @@ impl KeyProvider for GcpKmsProvider {
     async fn wrap_dek(&self, plaintext_dek: &[u8]) -> Result<WrappedKey, AppError> {
         use google_cloud_kms::grpc::kms::v1::EncryptRequest;
 
-        let mut last_err = None;
         for attempt in 0..GCP_KMS_MAX_RETRIES {
             if attempt > 0 {
                 let backoff = std::time::Duration::from_millis(
@@ -160,15 +156,17 @@ impl KeyProvider for GcpKmsProvider {
                         ciphertext: Zeroizing::new(response.ciphertext),
                     });
                 }
-                Err(e) => {
+                Err(_) => {
                     tracing::warn!(attempt = attempt + 1, "GCP KMS encrypt transient failure");
-                    last_err = Some(e);
                 }
             }
         }
 
-        let e = last_err.unwrap();
-        tracing::error!("GCP KMS encrypt failed after {GCP_KMS_MAX_RETRIES} attempts: {e}");
+        tracing::error!(
+            attempts = GCP_KMS_MAX_RETRIES,
+            category = "provider_encrypt_failed",
+            "GCP KMS encrypt failed"
+        );
         Err(AppError::Internal("GCP KMS encrypt failed".to_string()))
     }
 
@@ -177,7 +175,6 @@ impl KeyProvider for GcpKmsProvider {
 
         let key_name = self.keys.key_name_for(wrapped.key_id)?;
 
-        let mut last_err = None;
         for attempt in 0..GCP_KMS_MAX_RETRIES {
             if attempt > 0 {
                 let backoff = std::time::Duration::from_millis(
@@ -194,15 +191,17 @@ impl KeyProvider for GcpKmsProvider {
 
             match self.client.decrypt(request, None).await {
                 Ok(response) => return Ok(Zeroizing::new(response.plaintext)),
-                Err(e) => {
+                Err(_) => {
                     tracing::warn!(attempt = attempt + 1, "GCP KMS decrypt transient failure");
-                    last_err = Some(e);
                 }
             }
         }
 
-        let e = last_err.unwrap();
-        tracing::error!("GCP KMS decrypt failed after {GCP_KMS_MAX_RETRIES} attempts: {e}");
+        tracing::error!(
+            attempts = GCP_KMS_MAX_RETRIES,
+            category = "provider_decrypt_failed",
+            "GCP KMS decrypt failed"
+        );
         Err(AppError::Internal("GCP KMS decrypt failed".to_string()))
     }
 

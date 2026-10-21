@@ -6067,6 +6067,149 @@ async fn complete_draft_card_observes_a_fully_read_omitted_upload() {
 }
 
 #[tokio::test]
+async fn format_rejection_counter_concurrent_first_inserts_increment_once() {
+    let f = fixture("authoring_counter_concurrent").await;
+    let attempts = f.state.db.collection::<bson::Document>(
+        crate::models::assistant_skill_draft_attempt::COLLECTION_NAME,
+    );
+    for trial in 0..30 {
+        let mut chat = f.chat.clone();
+        chat.turn_id = Some(Uuid::new_v4().to_string());
+        let start = tokio::sync::Barrier::new(3);
+        let reject = || async {
+            start.wait().await;
+            record_format_rejection(&f.state.db, &chat).await
+        };
+        let (a, b, c) = tokio::join!(reject(), reject(), reject());
+        let mut counts = vec![a.unwrap(), b.unwrap(), c.unwrap()];
+        counts.sort();
+        assert_eq!(counts, vec![1, 2, 3], "trial {trial}");
+        let (id, turn_id) = attempt_id(&chat).unwrap();
+        let stored = attempts.find_one(doc! {"_id": &id}).await.unwrap().unwrap();
+        assert_eq!(stored.get_i32("rejections").unwrap(), 3);
+        assert_eq!(stored.get_str("user_id").unwrap(), chat.user_id);
+        assert_eq!(
+            stored.get_str("conversation_id").unwrap(),
+            chat.conversation_id
+        );
+        assert_eq!(stored.get_str("turn_id").unwrap(), turn_id);
+    }
+    assert_eq!(attempts.count_documents(doc! {}).await.unwrap(), 30);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn format_rejection_counter_does_not_increment_another_owner() {
+    let f = fixture("authoring_counter_owner").await;
+    assert_eq!(
+        record_format_rejection(&f.state.db, &f.chat).await.unwrap(),
+        1
+    );
+    let attempts = f.state.db.collection::<bson::Document>(
+        crate::models::assistant_skill_draft_attempt::COLLECTION_NAME,
+    );
+    let (id, _) = attempt_id(&f.chat).unwrap();
+    let before = attempts.find_one(doc! {"_id": &id}).await.unwrap().unwrap();
+    // Attempt IDs bind conversation and turn; a different owner must not reuse one.
+    let mut other = f.chat.clone();
+    other.user_id = Uuid::new_v4().to_string();
+    assert_eq!(attempt_id(&other).unwrap().0, id);
+    let AppError::DatabaseError(error) = record_format_rejection(&f.state.db, &other)
+        .await
+        .unwrap_err()
+    else {
+        panic!("Expected the original duplicate-key error for the owner mismatch");
+    };
+    assert!(matches!(
+        error.kind.as_ref(),
+        mongodb::error::ErrorKind::Command(command) if command.code == 11000
+    ));
+    let response = error.server_response().unwrap().to_document().unwrap();
+    assert_eq!(
+        response.get_document("keyPattern").unwrap(),
+        &doc! {"_id": 1}
+    );
+    assert_eq!(
+        response.get_document("keyValue").unwrap(),
+        &doc! {"_id": &id}
+    );
+    assert_eq!(
+        attempts.find_one(doc! {"_id": &id}).await.unwrap(),
+        Some(before)
+    );
+    assert_eq!(attempts.count_documents(doc! {}).await.unwrap(), 1);
+    assert_eq!(
+        record_format_rejection(&f.state.db, &f.chat).await.unwrap(),
+        2
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn format_rejection_counter_propagates_other_unique_index_duplicates() {
+    let f = fixture("authoring_counter_other_unique").await;
+    assert_eq!(
+        record_format_rejection(&f.state.db, &f.chat).await.unwrap(),
+        1
+    );
+    let attempts = f.state.db.collection::<bson::Document>(
+        crate::models::assistant_skill_draft_attempt::COLLECTION_NAME,
+    );
+    // Only this disposable fixture gets an additional unique index.
+    attempts
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"user_id": 1})
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await
+        .unwrap();
+    let (id, _) = attempt_id(&f.chat).unwrap();
+    let before = attempts.find_one(doc! {"_id": &id}).await.unwrap().unwrap();
+    let mut next_turn = f.chat.clone();
+    next_turn.turn_id = Some(Uuid::new_v4().to_string());
+    let (next_id, _) = attempt_id(&next_turn).unwrap();
+    assert_ne!(next_id, id);
+    let AppError::DatabaseError(error) = record_format_rejection(&f.state.db, &next_turn)
+        .await
+        .unwrap_err()
+    else {
+        panic!("Expected the unrelated unique-index duplicate to propagate");
+    };
+    assert!(matches!(
+        error.kind.as_ref(),
+        mongodb::error::ErrorKind::Command(command) if command.code == 11000
+    ));
+    let response = error.server_response().unwrap().to_document().unwrap();
+    assert_eq!(
+        response.get_document("keyPattern").unwrap(),
+        &doc! {"user_id": 1}
+    );
+    assert_eq!(
+        response.get_document("keyValue").unwrap(),
+        &doc! {"user_id": &f.owner}
+    );
+    assert_eq!(
+        attempts.find_one(doc! {"_id": &id}).await.unwrap(),
+        Some(before)
+    );
+    assert!(
+        attempts
+            .find_one(doc! {"_id": &next_id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(attempts.count_documents(doc! {}).await.unwrap(), 1);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn repair_budget_counts_only_package_format_rejections() {
     let f = fixture("authoring_format_only_cap").await;
     let valid = input(&f.chat.agent_id);

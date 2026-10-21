@@ -134,6 +134,8 @@ async fn callback_as(
         json!({"message":{"from":{"is_bot":false}}})
     };
     let inbound = InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: n.to_string(),
         conversation_id: "-100".into(),
         conversation_type: "group".into(),

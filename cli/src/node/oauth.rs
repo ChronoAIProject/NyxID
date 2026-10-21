@@ -79,7 +79,7 @@ impl OAuthRequestOptions {
 }
 
 /// Token response from OAuth token endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[allow(dead_code)]
 pub struct TokenResponse {
     pub access_token: String,
@@ -90,7 +90,7 @@ pub struct TokenResponse {
 }
 
 /// Device code response (RFC 8628).
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct DeviceCodeResponse {
     device_code: String,
     user_code: String,
@@ -1410,5 +1410,43 @@ mod tests {
 
         assert_eq!(token.access_token, "access-3");
         assert_eq!(token.refresh_token.as_deref(), Some("ref-3"));
+    }
+}
+
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TokenResponse([REDACTED])")
+    }
+}
+
+impl std::fmt::Debug for DeviceCodeResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DeviceCodeResponse([REDACTED])")
+    }
+}
+
+#[cfg(test)]
+mod secret_debug_tests {
+    use super::*;
+    #[test]
+    fn token_and_device_code_debug_redacts_capabilities() {
+        let secret = "distinctive-cli-oauth-secret-b29c";
+        let tokens = TokenResponse {
+            access_token: secret.into(),
+            refresh_token: Some(secret.into()),
+            token_type: None,
+            expires_in: None,
+            scope: None,
+        };
+        let device = DeviceCodeResponse {
+            device_code: secret.into(),
+            user_code: secret.into(),
+            verification_uri: Some(format!("https://example.invalid/{secret}")),
+            verification_url: None,
+            expires_in: 600,
+            interval: 5,
+        };
+        assert!(!format!("{tokens:?}").contains(secret));
+        assert!(!format!("{device:?}").contains(secret));
     }
 }

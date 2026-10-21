@@ -289,7 +289,8 @@ pub async fn admin_disconnect_node(
                 // keeps per-node granularity without leaking the UUID.
                 node_id: hash_short_id(&node_id),
             },
-        );
+        )
+        .await;
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -331,7 +332,8 @@ pub async fn admin_delete_node(
             // per-node granularity without leaking the UUID.
             node_id: hash_short_id(&node_id),
         },
-    );
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -375,6 +377,7 @@ mod tests {
             status: NodeStatus::Offline,
             auth_token_hash: "deadbeef".repeat(8),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "abcdef01".repeat(8),
             last_heartbeat_at: None,
             connected_at: None,

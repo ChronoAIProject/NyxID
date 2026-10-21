@@ -421,6 +421,8 @@ fn normalize(event: &Value, includes: &Value, own_id: &str) -> AppResult<Option<
         .split_once('-')
         .is_some_and(|(a, b)| numeric_id(a) && numeric_id(b));
     Ok(Some(InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: id.to_string(),
         conversation_id: conversation.to_string(),
         conversation_type: if private { "private" } else { "group" }.to_string(),

@@ -14,7 +14,7 @@ use super::{
 use crate::{
     AppState,
     errors::AppResult,
-    models::channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage},
+    models::channel_message::{COLLECTION_NAME as MESSAGES, CallbackDisposition, ChannelMessage},
 };
 
 /// How long the gateway may hold an accepted private message before it
@@ -317,6 +317,8 @@ pub(crate) async fn twin_bot(
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Verdict {
     Delivered,
+    Interrupted,
+    MediaFailed(&'static str),
     /// Stable code: `refused_{status}`, `undelivered`, or `not_received`.
     Lost(String),
     /// Says nothing about delivery (e.g. a group message or photo the
@@ -333,6 +335,52 @@ fn failure_code(http_status: Option<u16>) -> String {
     }
 }
 
+/// First failed selector in source order determines the channel's summary.
+/// Never copy an arbitrary persisted status into API errors or UI prose.
+fn media_failure_code(status: &str) -> &'static str {
+    match status {
+        "too_large" => "media_too_large",
+        "source_unavailable" => "media_source_unavailable",
+        "unsupported_or_invalid" => "media_unsupported_or_invalid",
+        "rate_limited" => "media_rate_limited",
+        "fetch_or_store_failed" => "media_fetch_or_store_failed",
+        "timeout" | "not_processed: timeout" => "media_timeout",
+        "not_processed: stopped" => "media_stopped",
+        "not_processed: expired" => "media_expired",
+        _ => "media_failed",
+    }
+}
+
+fn media_verdict(event: &NyxbotEvent) -> Verdict {
+    if let Some(media) = &event.media {
+        if media.interrupted {
+            return Verdict::Interrupted;
+        }
+        if let Some(outcome) = media
+            .items
+            .iter()
+            .filter_map(|item| item.outcome.as_ref())
+            .find(|outcome| outcome.status != "bound")
+        {
+            return Verdict::MediaFailed(media_failure_code(&outcome.status));
+        }
+        // A turn binding precedes ingestion. Advancing delivery_seen_at now
+        // would permanently hide an ingestion failure recorded by the run.
+        if media.items.iter().any(|item| item.outcome.is_none())
+            && !matches!(event.status.as_str(), "completed" | "failed" | "refused")
+        {
+            return Verdict::Unknown;
+        }
+    }
+    if event.conversation_id.is_some()
+        || matches!(event.status.as_str(), "completed" | "failed" | "refused")
+    {
+        Verdict::Delivered
+    } else {
+        Verdict::Unknown
+    }
+}
+
 /// Plain words for a delivery failure code, for the agent and the owner.
 pub(crate) fn failure_reason(code: &str, transport: &str) -> String {
     let receiver = if transport == "gateway" {
@@ -340,6 +388,30 @@ pub(crate) fn failure_reason(code: &str, transport: &str) -> String {
     } else {
         "NyxID's relay"
     };
+    if code == "media_interrupted" {
+        return "a photo or file was accepted but interrupted before processing".into();
+    }
+    let media_reason = match code {
+        "media_too_large" => Some("a photo or file exceeded the size limit"),
+        "media_source_unavailable" => {
+            Some("a photo or file source was unavailable or no longer authorized")
+        }
+        "media_unsupported_or_invalid" => {
+            Some("a photo or file had an unsupported or invalid format")
+        }
+        "media_rate_limited" => {
+            Some("a photo or file could not be processed because the upload rate limit was reached")
+        }
+        "media_fetch_or_store_failed" => Some("a photo or file could not be downloaded or stored"),
+        "media_timeout" => Some("photo or file processing timed out"),
+        "media_stopped" => Some("the turn stopped before a photo or file was processed"),
+        "media_expired" => Some("a photo or file expired in the queue before processing"),
+        "media_failed" => Some("a photo or file could not be processed"),
+        _ => None,
+    };
+    if let Some(reason) = media_reason {
+        return reason.into();
+    }
     if code == "not_received" {
         return format!("{receiver} accepted it but never passed it on");
     }
@@ -377,20 +449,76 @@ async fn private_message(state: &AppState, row: &NyxbotChannel, message: &Channe
 }
 
 async fn judge(state: &AppState, row: &NyxbotChannel, message: &ChannelMessage) -> Verdict {
+    // Resolve media aliases before transport/content shortcuts. A suppressed
+    // redelivery inherits the winner and can never trigger Lost/resend advice.
+    let alias = message.duplicate_of_media_key.as_deref();
+    let filter = match alias {
+        Some(key) => doc! {"user_id":&row.user_id,"media.key":key},
+        None => {
+            doc! {"channel_id":&row.id,"user_id":&row.user_id,"event_id":&message.id,"media.key":{"$type":"string"}}
+        }
+    };
+    match state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(filter)
+        .await
+    {
+        Ok(Some(event)) => {
+            return media_verdict(&event);
+        }
+        Ok(None) if alias.is_some() => return Verdict::Skip,
+        Err(_) => return Verdict::Unknown,
+        _ => {}
+    }
     match message.callback_status.as_deref() {
         Some("failed") => Verdict::Lost(failure_code(message.callback_http_status)),
         // NyxID's own relay receiver accepted it: the agent has it.
         Some("delivered") if row.transport != "gateway" => Verdict::Delivered,
         Some("delivered") => {
-            // The gateway may accept a message and drop it on purpose: group
-            // messages outside its admission policy, and anything but plain
-            // text (it refuses photos and system events with a 202). Only a
-            // private plain-text message must reach the provider.
+            if matches!(
+                message.callback_disposition,
+                Some(CallbackDisposition::Refused { .. })
+            ) {
+                return Verdict::Skip;
+            }
             let plain_text = message.content_type == "text"
                 && message.attachments.is_empty()
+                && message.embedded_attachments.is_empty()
                 && message.activity.is_none();
+            let eligible_media = message.platform == row.platform
+                && matches!(row.platform.as_str(), "lark" | "feishu")
+                && matches!(
+                    message.callback_disposition,
+                    Some(CallbackDisposition::Accepted)
+                )
+                && message.activity.is_none()
+                && (!message.attachments.is_empty() || !message.embedded_attachments.is_empty())
+                && message
+                    .attachments
+                    .iter()
+                    .chain(&message.embedded_attachments)
+                    .all(|item| matches!(item.content_type.as_str(), "image" | "file"))
+                && message
+                    .sender_platform_id
+                    .as_ref()
+                    .is_some_and(|sender| row.owner_sender_ids.contains(sender));
+            let supported_media = if eligible_media {
+                match crate::services::feature_flag_service::personal_flag_enabled(
+                    &state.db,
+                    &row.user_id,
+                    crate::services::feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+                )
+                .await
+                {
+                    Ok(enabled) => enabled,
+                    Err(_) => return Verdict::Unknown,
+                }
+            } else {
+                false
+            };
             let age = Utc::now() - message.created_at;
-            if !plain_text
+            if !(plain_text || supported_media)
                 || age > ChronoDuration::hours(JUDGE_WINDOW_HOURS)
                 || !private_message(state, row, message).await
             {
@@ -551,6 +679,19 @@ async fn check_delivery(state: &AppState, row: &NyxbotChannel) -> AppResult<()> 
     };
     let seen = bson::DateTime::from_chrono(seen_at);
     match verdict {
+        Verdict::Interrupted | Verdict::MediaFailed(_) => {
+            let (status, code) = match verdict {
+                Verdict::MediaFailed(code) => ("media_failed", code),
+                _ => ("interrupted", "media_interrupted"),
+            };
+            channels
+                .update_one(
+                    active,
+                    doc! {"$set":{"delivery_status":status,
+                    "delivery_error":code,"delivery_failed_at":seen,"delivery_seen_at":seen}},
+                )
+                .await?;
+        }
         Verdict::Lost(code) => {
             let Some(before) = channels
                 .find_one_and_update(
@@ -682,4 +823,345 @@ async fn notify_failing(
     )
     .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        models::channel_message::{CallbackRefusal, StoredAttachment},
+        test_utils::{connect_transaction_test_database, test_app_state, test_user},
+    };
+    use uuid::Uuid;
+
+    async fn fixture(name: &str) -> (AppState, NyxbotChannel, ChannelMessage) {
+        let db = connect_transaction_test_database(name).await;
+        let owner = Uuid::new_v4().to_string();
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&owner, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let now = bson::DateTime::now();
+        let row: NyxbotChannel = bson::from_document(doc! {
+            "_id": Uuid::new_v4().to_string(), "user_id": &owner,
+            "channel_bot_id": Uuid::new_v4().to_string(), "platform":"lark", "bot_label":"Receipts",
+            "transport":"gateway", "status":"active", "route_api_key_id":"key",
+            "route_id": Uuid::new_v4().to_string(), "owner_sender_ids":["human"],
+            "created_at":bson::DateTime::from_chrono(Utc::now() - ChronoDuration::hours(1)), "updated_at":now,
+        }).unwrap();
+        let bot: crate::models::channel_bot::ChannelBot = bson::from_document(doc! {
+            "_id": &row.channel_bot_id, "user_id": &owner, "platform": "lark",
+            "label": "Receipts", "platform_bot_id": "bot", "platform_bot_username": "receipts",
+            "bot_token_encrypted": bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic, bytes: vec![],
+            },
+            "webhook_secret_hash": "hash", "webhook_registered": true, "status": "active",
+            "is_active": true, "created_at": now, "updated_at": now,
+        })
+        .unwrap();
+        db.collection::<crate::models::channel_bot::ChannelBot>(
+            crate::models::channel_bot::COLLECTION_NAME,
+        )
+        .insert_one(bot)
+        .await
+        .unwrap();
+        db.collection::<NyxbotChannel>(CHANNELS)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        let thread = doc! {
+            "_id":Uuid::new_v4().to_string(), "user_id":&owner, "channel_id":&row.id,
+            "partition":"private", "kind":"private", "platform_chat_id":"oc_private",
+            "created_at":now,"updated_at":now,
+        };
+        db.collection::<bson::Document>(THREADS)
+            .insert_one(thread)
+            .await
+            .unwrap();
+        let mut message: ChannelMessage = bson::from_document(doc! {
+            "_id":Uuid::new_v4().to_string(), "user_id":&owner,"conversation_id":&row.route_id,
+            "channel_bot_id":&row.channel_bot_id,"direction":"inbound","platform":"lark",
+            "platform_conversation_id":"oc_private","sender_platform_id":"human",
+            "content_type":"image","callback_status":"delivered","callback_http_status":202,
+            "created_at":bson::DateTime::from_chrono(Utc::now() - ChronoDuration::seconds(180)),
+        })
+        .unwrap();
+        message.callback_disposition = Some(CallbackDisposition::Accepted);
+        message.attachments = vec![StoredAttachment {
+            content_type: "image".into(),
+            provider_ref: "opaque".into(),
+            platform_message_id: None,
+            file_key: None,
+            image_key: None,
+            filename: None,
+            mime_type: None,
+            size_bytes: None,
+        }];
+        (test_app_state(db), row, message)
+    }
+
+    async fn enable_media(state: &AppState, row: &NyxbotChannel) {
+        state
+            .db
+            .collection::<bson::Document>("feature_flag_overrides")
+            .insert_one(doc! {
+                "_id":Uuid::new_v4().to_string(),"org_user_id":bson::Bson::Null,
+                "flag_key":crate::services::feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+                "target_kind":"user","target_key":&row.user_id,"enabled":true,"updated_by":"test",
+                "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+    }
+
+    fn event(row: &NyxbotChannel, message: &ChannelMessage) -> NyxbotEvent {
+        bson::from_document(doc! {
+            "_id":Uuid::new_v4().to_string(),"channel_id":&row.id,"user_id":&row.user_id,
+            "partition":"private","event_id":&message.id,"status":"running",
+            "conversation_id":"conversation","created_at":bson::DateTime::now(),
+            "expires_at":bson::DateTime::from_chrono(Utc::now() + ChronoDuration::days(7)),
+            "media":{"key":"a".repeat(64),"declared":1_i32,"platform_chat_id":"oc_private",
+                "items":[{"index":0_i32,"embedded":false,"kind":"image"}]},
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn channel_media_status_callback_eligibility_and_grace_matrix() {
+        let (state, mut row, mut message) = fixture("media_status_eligibility").await;
+        assert_eq!(
+            judge(&state, &row, &message).await,
+            Verdict::Skip,
+            "media disabled"
+        );
+        enable_media(&state, &row).await;
+        for platform in ["lark", "feishu"] {
+            row.platform = platform.into();
+            message.platform = platform.into();
+            assert_eq!(
+                judge(&state, &row, &message).await,
+                Verdict::Lost("not_received".into()),
+                "accepted private image"
+            );
+            message.embedded_attachments = std::mem::take(&mut message.attachments);
+            message.content_type = "unknown".into();
+            assert_eq!(
+                judge(&state, &row, &message).await,
+                Verdict::Lost("not_received".into()),
+                "accepted private post"
+            );
+            message.attachments = std::mem::take(&mut message.embedded_attachments);
+            message.content_type = "image".into();
+        }
+        for reason in [
+            CallbackRefusal::ContentUnsupported,
+            CallbackRefusal::AttachmentUnsupported,
+            CallbackRefusal::GroupNotAddressed,
+        ] {
+            message.callback_disposition = Some(CallbackDisposition::Refused { reason });
+            assert_eq!(judge(&state, &row, &message).await, Verdict::Skip);
+        }
+        for disposition in [None, Some(CallbackDisposition::Unknown)] {
+            message.callback_disposition = disposition;
+            assert_eq!(
+                judge(&state, &row, &message).await,
+                Verdict::Skip,
+                "legacy or malformed response"
+            );
+        }
+        message.callback_disposition = Some(CallbackDisposition::Accepted);
+        let attachment = message.attachments.pop().unwrap();
+        for kind in ["sticker", "unknown"] {
+            message.content_type = kind.into();
+            assert_eq!(
+                judge(&state, &row, &message).await,
+                Verdict::Skip,
+                "sticker or malformed post"
+            );
+        }
+        message.attachments.push(attachment);
+        message.content_type = "image".into();
+        message.platform_conversation_id = Some("oc_group".into());
+        assert_eq!(
+            judge(&state, &row, &message).await,
+            Verdict::Skip,
+            "unaddressed group"
+        );
+        message.platform_conversation_id = Some("oc_private".into());
+        message.sender_platform_id = Some("guest".into());
+        assert_eq!(
+            judge(&state, &row, &message).await,
+            Verdict::Skip,
+            "guests do not ingest"
+        );
+        message.sender_platform_id = Some("human".into());
+        message.created_at = Utc::now() - ChronoDuration::seconds(10);
+        assert_eq!(judge(&state, &row, &message).await, Verdict::Unknown);
+        message.created_at = Utc::now() - ChronoDuration::hours(13);
+        assert_eq!(judge(&state, &row, &message).await, Verdict::Skip);
+        message.attachments.clear();
+        message.content_type = "text".into();
+        message.callback_disposition = None;
+        message.created_at = Utc::now() - ChronoDuration::seconds(180);
+        assert_eq!(
+            judge(&state, &row, &message).await,
+            Verdict::Lost("not_received".into()),
+            "legacy text unchanged"
+        );
+        row.transport = "direct".into();
+        assert_eq!(judge(&state, &row, &message).await, Verdict::Delivered);
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_media_status_waits_for_outcomes_and_reports_failure_classes() {
+        let (state, row, message) = fixture("media_status_outcomes").await;
+        state
+            .db
+            .collection::<ChannelMessage>(MESSAGES)
+            .insert_one(&message)
+            .await
+            .unwrap();
+        let mut event = event(&row, &message);
+        let events = state.db.collection::<NyxbotEvent>(EVENTS);
+        events.insert_one(&event).await.unwrap();
+        assert_eq!(
+            judge(&state, &row, &message).await,
+            Verdict::Unknown,
+            "binding alone is not ingestion success"
+        );
+        check_delivery(&state, &row).await.unwrap();
+        let pending = state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            pending.delivery_seen_at.is_none(),
+            "later outcome must still be judged"
+        );
+        for (status, code) in [
+            ("too_large", "media_too_large"),
+            ("source_unavailable", "media_source_unavailable"),
+            ("unsupported_or_invalid", "media_unsupported_or_invalid"),
+            ("rate_limited", "media_rate_limited"),
+            ("fetch_or_store_failed", "media_fetch_or_store_failed"),
+            ("timeout", "media_timeout"),
+            ("not_processed: timeout", "media_timeout"),
+            ("not_processed: stopped", "media_stopped"),
+            ("not_processed: expired", "media_expired"),
+            ("not_processed: failed", "media_failed"),
+            ("untrusted status text", "media_failed"),
+        ] {
+            event.media.as_mut().unwrap().items[0].outcome =
+                Some(crate::models::assistant_channel_media::MediaOutcome {
+                    event_id: event.id.clone(),
+                    event_key: "a".repeat(64),
+                    index: Some(0),
+                    embedded: false,
+                    status: status.into(),
+                    upload_id: None,
+                });
+            events
+                .replace_one(doc! {"_id":&event.id}, &event)
+                .await
+                .unwrap();
+            assert_eq!(
+                judge(&state, &row, &message).await,
+                Verdict::MediaFailed(code),
+                "{status}"
+            );
+            assert_ne!(failure_reason(code, "gateway"), "it could not be delivered");
+            assert!(!failure_reason(code, "gateway").contains("untrusted"));
+        }
+        check_delivery(&state, &row).await.unwrap();
+        let failed = state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.delivery_status.as_deref(), Some("media_failed"));
+        assert_eq!(failed.delivery_error.as_deref(), Some("media_failed"));
+        assert!(
+            failed.delivery_notified_at.is_none(),
+            "ingestion failures do not claim delivery loss"
+        );
+        event.media.as_mut().unwrap().items[0]
+            .outcome
+            .as_mut()
+            .unwrap()
+            .status = "bound".into();
+        events
+            .replace_one(doc! {"_id":&event.id}, &event)
+            .await
+            .unwrap();
+        assert_eq!(judge(&state, &row, &message).await, Verdict::Delivered);
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_media_status_duplicates_reuse_failed_interrupted_and_pending_winners() {
+        let (state, row, mut message) = fixture("media_status_duplicates").await;
+        let mut event = event(&row, &message);
+        event.event_id = "winning-relay-uuid".into();
+        message.duplicate_of_media_key = Some("a".repeat(64));
+        let events = state.db.collection::<NyxbotEvent>(EVENTS);
+        events.insert_one(&event).await.unwrap();
+        assert_eq!(judge(&state, &row, &message).await, Verdict::Unknown);
+        event.media.as_mut().unwrap().interrupted = true;
+        events
+            .replace_one(doc! {"_id":&event.id}, &event)
+            .await
+            .unwrap();
+        assert_eq!(judge(&state, &row, &message).await, Verdict::Interrupted);
+        state
+            .db
+            .collection::<ChannelMessage>(MESSAGES)
+            .insert_one(&message)
+            .await
+            .unwrap();
+        check_delivery(&state, &row).await.unwrap();
+        let interrupted = state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(interrupted.delivery_status.as_deref(), Some("interrupted"));
+        assert_eq!(
+            interrupted.delivery_error.as_deref(),
+            Some("media_interrupted")
+        );
+        assert!(interrupted.delivery_notified_at.is_none());
+        event.media.as_mut().unwrap().interrupted = false;
+        event.media.as_mut().unwrap().items[0].outcome =
+            Some(crate::models::assistant_channel_media::MediaOutcome {
+                event_id: event.id.clone(),
+                event_key: "a".repeat(64),
+                index: Some(0),
+                embedded: false,
+                status: "source_unavailable".into(),
+                upload_id: None,
+            });
+        events
+            .replace_one(doc! {"_id":&event.id}, &event)
+            .await
+            .unwrap();
+        assert_eq!(
+            judge(&state, &row, &message).await,
+            Verdict::MediaFailed("media_source_unavailable")
+        );
+        events.delete_one(doc! {"_id":&event.id}).await.unwrap();
+        assert_eq!(
+            judge(&state, &row, &message).await,
+            Verdict::Skip,
+            "expired winner never becomes Lost"
+        );
+        state.db.drop().await.unwrap();
+    }
 }

@@ -17,6 +17,24 @@ pub struct AnalyticsQuery {
     pub to: Option<DateTime<Utc>>,
 }
 
+#[derive(Serialize)]
+pub struct MediaDrainResponse {
+    pub converted: u64,
+}
+
+/// Early queue conversion for a rollback drain; repeat until converted is zero.
+pub async fn drain_channel_media(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> AppResult<Json<MediaDrainResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    super::admin_helpers::require_admin(&state, &auth).await?;
+    let converted =
+        crate::services::assistant_channel_media::queue::convert_queued(&state.db, Utc::now())
+            .await?;
+    Ok(Json(MediaDrainResponse { converted }))
+}
+
 impl AnalyticsQuery {
     fn window(&self, now: DateTime<Utc>) -> AppResult<(DateTime<Utc>, DateTime<Utc>)> {
         let to = self.to.unwrap_or(now);
@@ -64,6 +82,20 @@ pub async fn analytics(
         daily_sessions: summary.daily_sessions,
         daily_turns: summary.daily_turns,
     }))
+}
+
+/// Kept behind the assistant admin/operator guard, independently of Usage Viewer.
+pub async fn model_usage(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<crate::services::admin_usage_service::AdminUsageQuery>,
+) -> AppResult<Json<crate::services::admin_usage_service::nyxbot::Response>> {
+    super::admin_helpers::require_admin_or_operator(&state, &auth, "admin.assistant.model_usage")
+        .await?;
+    Ok(Json(
+        crate::services::admin_usage_service::nyxbot::get(&state.db, query.validate(Utc::now())?)
+            .await?,
+    ))
 }
 
 #[cfg(test)]

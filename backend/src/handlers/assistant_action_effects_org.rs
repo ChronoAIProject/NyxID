@@ -179,6 +179,14 @@ pub struct AssistantAccountResponse {
     pub replayed: bool,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantAccountDeletionResponse {
+    pub resource: AssistantAccountResource,
+    pub replayed: bool,
+    pub erasure: super::users::DeleteAccountResponse,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RevokeAssistantConsentRequest {
@@ -217,15 +225,18 @@ pub struct AssistantMfaSetupRequest {
     pub code: Option<String>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantMfaSetupResponse {
     pub resource: AssistantAccountResource,
     pub stage: AssistantMfaSetupStage,
     pub factor_id: Option<String>,
-    pub setup_value: Option<String>,
-    pub qr_code_url: Option<String>,
-    pub recovery_values: Option<Vec<String>>,
+    #[schema(value_type = Option<String>)]
+    pub setup_value: Option<zeroize::Zeroizing<String>>,
+    #[schema(value_type = Option<String>)]
+    pub qr_code_url: Option<zeroize::Zeroizing<String>>,
+    #[schema(value_type = Option<Vec<String>>)]
+    pub recovery_values: Option<zeroize::Zeroizing<Vec<String>>>,
     pub replayed: bool,
     #[serde(default)]
     pub one_time_material: OneTimeMaterialAvailability,
@@ -325,7 +336,7 @@ pub struct AssistantTelegramLinkResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_in_secs: Option<u32>,
 }
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantServiceAccountResponse {
     pub resource: AssistantServiceAccountResource,
@@ -335,7 +346,7 @@ pub struct AssistantServiceAccountResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
 }
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantDeveloperAppResponse {
     pub resource: AssistantDeveloperAppResource,
@@ -522,7 +533,8 @@ pub struct AssistantConfirmedActionRequestId {
 pub struct AssistantGcpCreateRequest {
     pub action_request_id: String,
     pub label: Option<String>,
-    pub key_json: String,
+    #[schema(value_type = String)]
+    pub key_json: zeroize::Zeroizing<String>,
     pub scopes: Option<String>,
     pub service_slugs: Option<Vec<String>>,
     pub target_org_id: Option<String>,
@@ -936,7 +948,7 @@ async fn delete_account(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Json(body): Json<DeleteAssistantAccountRequest>,
-) -> AppResult<Json<AssistantAccountResponse>> {
+) -> AppResult<Json<AssistantAccountDeletionResponse>> {
     super::login_client_context::require_first_party_human(&auth_user)?;
     crate::services::admin_user_service::validate_account_deletion_policy(
         &body.deletion_policy_version,
@@ -973,12 +985,9 @@ async fn delete_account(
     let replayed = match receipt {
         ReceiptOutcome::Replay(_) => true,
         ReceiptOutcome::InProgress(receipt) => {
-            if state
-                .db
-                .collection::<User>(USERS)
-                .find_one(doc! { "_id": &user_id })
+            if crate::services::personal_erasure_service::status(&state.db, &user_id)
                 .await?
-                .is_some()
+                .is_none()
             {
                 return Err(in_progress_conflict());
             }
@@ -999,7 +1008,11 @@ async fn delete_account(
         }
     };
 
-    Ok(Json(AssistantAccountResponse {
+    let erasure = crate::services::personal_erasure_service::status(&state.db, &user_id)
+        .await?
+        .ok_or_else(|| AppError::Conflict("Account deletion has not been accepted".into()))?;
+    Ok(Json(AssistantAccountDeletionResponse {
+        erasure: users::DeleteAccountResponse::from_job(&state.db, erasure).await?,
         resource: AssistantAccountResource { user_id },
         replayed,
     }))
@@ -1195,7 +1208,7 @@ async fn setup_account_mfa(
                         State(state.clone()),
                         auth_user,
                         tele,
-                        Json(mfa::MfaConfirmRequest { code }),
+                        Json(mfa::MfaConfirmRequest { code: code.into() }),
                     )
                     .await?;
                     mark_completed(&state.db, &receipt).await?;
@@ -3800,7 +3813,8 @@ mod wave4_effect_tests {
             action_request_id: "gcp-create-reserved".to_string(),
             label: Some("Reserved GCP".to_string()),
             key_json: "{\"client_email\":\"svc@example.test\",\"private_key\":\"redacted\"}"
-                .to_string(),
+                .to_string()
+                .into(),
             scopes: None,
             service_slugs: None,
             target_org_id: None,
@@ -3816,7 +3830,7 @@ mod wave4_effect_tests {
         )
         .await;
         let state = crate::test_utils::test_app_state(db.clone());
-        crate::services::user_api_key_service::create_api_key_with_id(
+        crate::test_utils::create_api_key_with_id(
             &db,
             &state.encryption_keys,
             &actor_id,
@@ -4376,7 +4390,7 @@ mod wave4_effect_tests {
         // Wrong confirmation must be refused.
         let (status, _) = post(
             state.clone(),
-            json!({ "actionRequestId": "delete-wrong", "deletionPolicyVersion":"machine-data", "confirmEmail": "someone@else.test" }),
+            json!({ "actionRequestId": "delete-wrong", "deletionPolicyVersion":"machine-data-provider-revocation-v2", "confirmEmail": "someone@else.test" }),
         )
         .await;
         assert!(
@@ -4387,7 +4401,7 @@ mod wave4_effect_tests {
         // Empty confirmation must be refused too.
         let (status, _) = post(
             state.clone(),
-            json!({ "actionRequestId": "delete-empty", "deletionPolicyVersion":"machine-data", "confirmEmail": "   " }),
+            json!({ "actionRequestId": "delete-empty", "deletionPolicyVersion":"machine-data-provider-revocation-v2", "confirmEmail": "   " }),
         )
         .await;
         assert!(
@@ -4578,7 +4592,10 @@ mod wave4_effect_tests {
             })
             .unwrap()
         };
-        assert_ne!(fingerprint("machine-data"), fingerprint("previous-policy"));
+        assert_ne!(
+            fingerprint("machine-data-provider-revocation-v2"),
+            fingerprint("previous-policy")
+        );
     }
 
     #[tokio::test]
@@ -4613,7 +4630,9 @@ mod wave4_effect_tests {
                 user_id: user_id.clone(),
                 factor_type: "totp".to_string(),
                 secret_encrypted: None,
+                secret_context_version: None,
                 recovery_codes: None,
+                last_totp_counter: None,
                 is_verified: false,
                 is_active: true,
                 created_at: now,
@@ -5724,14 +5743,14 @@ mod wave4_effect_tests {
         let gcp = AssistantGcpCreateRequest {
             action_request_id: "request-gcp".to_string(),
             label: Some("gcp".to_string()),
-            key_json: "{\"private_key\":\"one\"}".to_string(),
+            key_json: "{\"private_key\":\"one\"}".to_string().into(),
             scopes: None,
             service_slugs: None,
             target_org_id: None,
         };
         let gcp_one = gcp_create_fingerprint(&gcp).unwrap();
         let gcp_two = gcp_create_fingerprint(&AssistantGcpCreateRequest {
-            key_json: "{\"private_key\":\"two\"}".to_string(),
+            key_json: "{\"private_key\":\"two\"}".to_string().into(),
             ..gcp
         })
         .unwrap();
@@ -5762,5 +5781,21 @@ mod wave4_effect_tests {
                 "clientSecret": "chat-supplied",
             }));
         assert!(openclaw.is_err());
+    }
+}
+
+crate::errors::redacted_debug!(AssistantMfaSetupResponse);
+
+impl std::fmt::Debug for AssistantServiceAccountResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AssistantServiceAccountResponse")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for AssistantDeveloperAppResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AssistantDeveloperAppResponse")
+            .finish_non_exhaustive()
     }
 }

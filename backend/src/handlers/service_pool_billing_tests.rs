@@ -20,6 +20,13 @@ struct EntitledLago;
 
 #[async_trait::async_trait]
 impl LagoApi for EntitledLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        Ok(crate::services::billing::taxes::zero_config())
+    }
     async fn ensure_customer(&self, input: &OwnerProvisionInput) -> AppResult<String> {
         Ok(input.external_customer_id.clone())
     }

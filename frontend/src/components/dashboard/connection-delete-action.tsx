@@ -67,7 +67,7 @@ function DeleteConnectionDialog({
         toast.success(
           response.upstream_revocation_scheduled
             ? "Removed from NyxID. Upstream revocation scheduled."
-            : "Removed from NyxID. Upstream access remains active.",
+            : "Removed from NyxID. Upstream revocation is not confirmed.",
         );
         onClose();
       },

@@ -87,6 +87,7 @@ pub async fn grant_consent_with_machine(
     let machine = machine.cloned();
     session
         .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let db = &db;
             let user_id = user_id.as_str();
@@ -197,7 +198,46 @@ pub fn protected_reference(
     })
 }
 
-/// No Machine reads on ordinary OAuth paths. Legacy/missing references cannot upgrade.
+/// Upgrade only an actively authorized issuance snapshot. Existing tokens and
+/// queued proofs never acquire a replacement revision from a later grant.
+pub async fn ensure_issuance_reference(
+    db: &mongodb::Database,
+    consent: &Consent,
+) -> AppResult<crate::models::consent::ProtectedConsentRef> {
+    if consent
+        .revision
+        .as_deref()
+        .is_some_and(|revision| !revision.trim().is_empty())
+    {
+        return protected_reference(consent);
+    }
+    if consent
+        .expires_at
+        .is_some_and(|expiry| expiry <= Utc::now())
+    {
+        return Err(grant_changed());
+    }
+    let revision = Uuid::new_v4().to_string();
+    let updated = db
+        .collection::<Consent>(CONSENTS)
+        .update_one(
+            version_filter(consent),
+            doc! {"$set":{"revision":&revision,"issuance_fence":Uuid::new_v4().to_string()}},
+        )
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    if updated.matched_count != 1 {
+        return Err(grant_changed());
+    }
+    Ok(crate::models::consent::ProtectedConsentRef {
+        consent_id: consent.id.clone(),
+        consent_revision: revision,
+    })
+}
+
+/// Indexed primary/linearizable authority read. A majority-acknowledged revoke
+/// preceding this read cannot be hidden by another replica's positive snapshot.
+/// First-party session refresh uses the reserved nil client without OAuth consent.
 pub async fn validate_protected_reference(
     db: &mongodb::Database,
     user_id: &str,
@@ -205,17 +245,45 @@ pub async fn validate_protected_reference(
     scope: &str,
     reference: Option<&crate::models::consent::ProtectedConsentRef>,
 ) -> AppResult<Option<Consent>> {
-    if !scope.split_whitespace().any(|s| s == "machine") && reference.is_none() {
+    validate_protected_reference_with_reads(
+        &mut super::oauth_token_authority_service::AuthorityReads::new(db),
+        user_id,
+        client_id,
+        scope,
+        reference,
+    )
+    .await
+}
+
+pub(super) async fn validate_protected_reference_with_reads(
+    reads: &mut super::oauth_token_authority_service::AuthorityReads<'_>,
+    user_id: &str,
+    client_id: &str,
+    scope: &str,
+    reference: Option<&crate::models::consent::ProtectedConsentRef>,
+) -> AppResult<Option<Consent>> {
+    if (client_id.is_empty() || client_id == Uuid::nil().to_string())
+        && !scope.split_whitespace().any(|s| s == "machine")
+        && reference.is_none()
+    {
         return Ok(None);
     }
     let reference = reference.ok_or_else(grant_changed)?;
     if reference.consent_id.trim().is_empty() || reference.consent_revision.trim().is_empty() {
         return Err(grant_changed());
     }
-    let consent = check_consent(db, user_id, client_id, "machine")
-        .await?
-        .ok_or_else(grant_changed)?;
-    if protected_reference(&consent)? != *reference {
+    let consent: Consent = reads.read(CONSENTS,
+        doc! {"_id":&reference.consent_id,"user_id":user_id,"client_id":client_id,"revision":&reference.consent_revision})
+        .await?.ok_or_else(grant_changed)?;
+    let granted: std::collections::HashSet<_> = consent.scopes.split_whitespace().collect();
+    if consent
+        .expires_at
+        .is_some_and(|expiry| expiry <= Utc::now())
+        || !scope
+            .split_whitespace()
+            .all(|requested| granted.contains(requested))
+        || protected_reference(&consent)? != *reference
+    {
         return Err(grant_changed());
     }
     Ok(Some(consent))
@@ -242,6 +310,7 @@ pub async fn fence_protected_reference(
             version_filter(&consent),
             doc! { "$set": { "issuance_fence": Uuid::new_v4().to_string() } },
         )
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
     if result.matched_count != 1 {
         return Err(grant_changed());
@@ -310,6 +379,7 @@ pub async fn replace_incremental_consent_with_machine(
     let machine = machine.cloned();
     session
         .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let db = &db;
             let existing = &existing;
@@ -384,6 +454,7 @@ pub async fn revoke_consent(
     let client_id = client_id.to_owned();
     session
         .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let result: AppResult<ConsentRevocationResult> = async {
                 // Conflict with Machine consent preparation on the same live

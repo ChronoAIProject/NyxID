@@ -428,9 +428,13 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   retried the next day; a manual connect never rebuilds a working bot just to
   change transport. A new bot on a listed platform the gateway refuses is
   connected through NyxID's relay with a fresh route key the gateway never saw;
-  Telegram failures are still reported as errors. Through the gateway, Lark and
-  Feishu accept plain text input only (incoming images, files and rich posts are
-  refused there, while NyxID's relay passes them on). NyxID sends tool-returned
+  Telegram failures are still reported as errors. With the default-off personal
+  `assistant:channel-media` flag enabled, verified owner Lark/Feishu images,
+  files and rich posts reach the assistant on both relay and gateway transports.
+  Gateway support requires CMA ≥ `a570be21` and `CMAEG_MEDIA_ENABLED=true`;
+  downloads begin at run start after admission, preserving the default 30-second
+  provider header budget. Text-only, audio/video and native Telegram input keep
+  their existing behavior. NyxID sends tool-returned
   images directly through its adapters on both transports, before the reply text. A message whose route the relay looked up
   just before the swap committed reaches NyxID's relay endpoint after it and is
   refused and reported like any lost message. A move whose replica stopped
@@ -466,8 +470,9 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   behaviour, removes the org route, releases the gateway channel, and deletes
   active and pending keys under their respective owners. No event reaches the
   linking person's agent after that check fails. Telegram org bots always use
-  the gateway. Lark/Feishu org bots have the same gateway input limitation
-  as personal bots; outbound tool images use NyxID's adapters.
+  the gateway. Lark/Feishu org bots use the linking person's media flag and
+  the same owner-media rules as personal bots; live org-admin authority is
+  rechecked before each fetch. Outbound tool images use NyxID's adapters.
 - **Right user.** The owner is verified through NyxID's Telegram notification
   link, a one-time link code (a `t.me/<bot>?start=<code>` link for Telegram), or,
   for a Telegram bot created inside Telegram through NyxID, as the account that
@@ -483,16 +488,26 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   sender, and whether the sender is the owner.
 - **Delivery health.** A linked chat app must never go quiet silently. The
   15-second sweep judges each active channel's newest inbound message: a failed
-  relay callback (NyxID keeps the HTTP status, never the body) is lost
+  relay callback (NyxID keeps the HTTP status, never the raw body) is lost
   (`refused_{status}`, or `undelivered` when nothing answered or NyxID could not
-  send it). Through the gateway, a private plain-text message that was accepted
-  but has no provider admission for its message ID after two minutes is lost too
-  (`not_received`; the gateway's event ID is NyxID's message ID). Group
-  messages, photos and other events the gateway may drop on purpose are skipped
-  and never change the status. A lost message marks the channel `failing` and
+  send it). For HTTP 202, NyxID parses at most 2 KiB of CMA's closed callback
+  disposition, storing only `accepted`/`refused` and a fixed refusal code;
+  malformed, oversized or unrecognized responses are `unknown`. Intentional
+  refusals stay skipped. Through the gateway, a private plain-text message, or
+  an eligible verified-owner image/file/post with media enabled and an explicit
+  accepted disposition, is lost when no provider event appears for its message
+  ID after two minutes (`not_received`; the gateway event ID is NyxID's message
+  ID). The judge window remains twelve hours; its first check looks back one
+  hour. Unsupported content, unknown/legacy media dispositions and unaddressed
+  groups stay skipped. Media with pending item outcomes remains pending. An
+  interrupted source event reports `interrupted`; ingestion failures report
+  `media_failed` with a fixed class and reason. Suppressed native duplicates
+  resolve through their alias to the winning event, never becoming `Lost`.
+  A lost message marks the channel `failing` and
   tells the thread that set the bot up (else the agent's home), at most once per
   six hours; the channel list shows the reason, and the next message that
-  arrives marks it `ok`. A channel's first check looks back one hour only.
+  arrives marks it `ok`. Media failures/interruption do not send the delivery-loss
+  reconnect notice; they have their own per-turn or next-owner-turn notes.
   Reconnecting a failing channel rebuilds it from scratch and keeps its verified
   owners. Chat-specific routes win over a channel's default route, so the owner's
   private messages that another route on the bot takes (typically a leftover
@@ -1153,7 +1168,17 @@ persisted-profile relaunches and package repair. Follow 12413 recovery guidance;
 
 ## Owner attachments
 
-The owner can attach documents and images to direct or group messages; see [Assistant uploads](10-uploads.md). Each agent receives safe metadata only for the message it is answering. Documents are untrusted, paginated tool data. Group members share the group’s bound uploads while they remain members; unrelated specialist threads and guests cannot read them. Images use capability negotiation, with an explicit fallback to saving the attachment on a granted machine when the deployed agent cannot view them. Channel-media ingestion remains a follow-up.
+The owner can attach documents and images to direct or group messages; see [Assistant uploads](10-uploads.md). Each agent receives safe metadata only for the message it is answering. Documents are untrusted, paginated tool data. Group members share the group’s bound uploads while they remain members; unrelated specialist threads and guests cannot read them. Images use capability negotiation, with an explicit fallback to saving the attachment on a granted machine when the deployed agent cannot view them.
+
+Verified-owner Lark/Feishu images, files and rich posts use the same encrypted
+upload and retention lifecycle under `assistant:channel-media`. Ingestion starts
+in the consuming run, rechecks live source authority, and commits an immutable
+bind receipt. Stop, timeout and orphan settlement finalize pending items outside
+the cancelled run. Guests receive the fixed note `attachments from guests are
+not shared with the assistant` and cause no download or upload. Media-bearing
+messages never answer approval/text decisions or coalesce by question digest.
+See [Inbound channel media](10-uploads.md#inbound-channel-media) for item/byte/time
+limits, dedup horizons, queued expiry and the admin drain/rollback procedure.
 
 ## Drafting agent skills
 
@@ -1192,8 +1217,9 @@ admission; NyxID filters admitted events with the same sender, mention, live org
 and follow policies as relay events. An other-person-only mention is context,
 not a new turn; broadcasts never activate follow. Native replies explicitly bind
 to the original event and root, including delayed replies. Legacy gateways keep
-follow unavailable. Lark/Feishu input on the gateway remains text-only, including org
-bots; media and edit parity are separate work.
+follow unavailable. Owner Lark/Feishu image/file/post ingestion has the separate
+media flag and CMA prerequisites described above, including for org bots and
+admitted followed threads. Edit parity remains separate work.
 
 ## Asynchronous service results
 

@@ -33,8 +33,23 @@ fn default_supports_oauth_scopes() -> bool {
     true
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevocationEffectScope {
+    TokenOnly,
+    GrantWide,
+    /// Reviewed API has distinct single-token and whole-grant endpoints.
+    RequestScoped,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationConfig {
+    /// Explicitly reviewed remote effect scope. Absent legacy/default-false
+    /// metadata does not prove RFC 7009 revocation is limited to one token.
+    /// This is privileged provider configuration, never inferred from token
+    /// inequality or local connection identity.
+    #[serde(default)]
+    pub effect_scope: Option<RevocationEffectScope>,
     /// RFC 7009 form encoding, or a JSON token object without the optional hint.
     #[serde(default = "default_request_encoding")]
     pub request_encoding: String,
@@ -89,6 +104,10 @@ mod public_oauth_headers {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
+    /// Explicit field storage dispatch. Missing entries use the documented
+    /// legacy decoder only while trusted legacy reads remain enabled.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
     pub id: String,
     pub slug: String,
@@ -226,6 +245,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_oauth2() {
         let config = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             slug: "google".to_string(),
             name: "Google".to_string(),
@@ -235,6 +255,7 @@ mod tests {
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://oauth2.googleapis.com/revoke".to_string(),
@@ -284,6 +305,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_api_key() {
         let config = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             slug: "anthropic".to_string(),
             name: "Anthropic".to_string(),
@@ -363,6 +385,7 @@ mod tests {
         assert!(!revocation.revokes_grant);
 
         let unknown = RevocationConfig {
+            effect_scope: None,
             request_encoding: "form".to_string(),
             style: "future_style".to_string(),
             url: "https://example.com/future-revoke".to_string(),

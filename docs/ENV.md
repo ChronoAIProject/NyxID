@@ -11,7 +11,7 @@ For deployment-specific guidance on these variables, see [DEPLOYMENT.md](DEPLOYM
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `DATABASE_URL` | MongoDB connection string | `mongodb://localhost:27017/nyxid?replicaSet=nyxid-rs&directConnection=true` |
-| `ENCRYPTION_KEY` | 32-byte hex-encoded AES-256 key (64 hex chars) | Output of `openssl rand -hex 32` |
+| `ENCRYPTION_KEY` | 32-byte hex AES-256 key (64 hex chars); required for `local`, optional legacy/local fallback with KMS | Output of `openssl rand -hex 32` |
 
 ## Encryption
 
@@ -59,10 +59,35 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 |---|---|---|
 | `BACKEND_URL` | `http://backend:3001` | Internal HTTP(S) upstream origin, without path/credentials/query/fragment. |
 | `NYXID_PUBLIC_ORIGIN` | `http://localhost:8080` | Trusted public frontend origin. HTTPS enables HSTS; production Compose passes `FRONTEND_URL`. |
-| `NYXID_BROWSER_CONNECT_ORIGINS` | *(empty)* | At most 16 space-separated HTTP(S) origins for custom runtime API/analytics destinations; matching WS(S) origins are derived. Origin values are validated, never substituted as CSP/nginx fragments. |
+| `NYXID_BROWSER_CONNECT_ORIGINS` | *(empty)* | At most 16 space-separated HTTP(S) origins for custom runtime API destinations (analytics uses the authenticated same-origin relay); matching WS(S) origins are derived. Origin values are validated, never substituted as CSP/nginx fragments. |
 
 See [Production browser policy](BROWSER_SECURITY_POLICY.md) for response-specific
 CSP, supported resources, split credential routing and the production harness.
+
+## Request-bound resource reads
+
+| Variable | Default | Description |
+|---|---|---|
+| `NYXID_RESOURCE_REQUEST_PROOF_ENABLED` | `false` | Emit and introspect exact GET/HEAD proofs for an owner's live personal NyxBot turn after existing proxy admission. Requires a registered confidential resource client, JWT identity propagation and current AutoAllow policy. No guest, specialist, org-agent, node, mutation or deferred-command authority is enabled. |
+
+This is an additive transport using the server-owned `X-NyxID-Resource-Request`
+header. It does not replace `X-NyxID-Identity-Token` or make an ordinary identity
+JWT a bearer credential. Keep this flag off until every resource-server replica
+implements the exact-request verifier, and every NyxID replica implements the
+authenticated `resource_request` introspection path. Register the confidential
+client in the catalog's `introspection_client_ids`, enable the resource verifier
+(`CHRONO_NYXID_RESOURCE_REQUEST_ENABLED` for CMA), and only then enable this flag
+on NyxID. Verify with isolated read fixtures before admitting live traffic. For
+rollback, disable NyxID issuance first and allow the 60-second proof lifetime to
+expire before removing resource verification support. No runtime restart or
+sandbox change is required by this feature. See [Agent Isolation](AGENT_ISOLATION.md#request-bound-nyxbot-resource-reads).
+
+Deploying the provider still needs a verified drain of existing proxy streams
+and NyxBot turns. The current backend does not track those tasks through a
+graceful shutdown; losing a worker can end its turn as `turn_lost`, without
+automatic replay. Keep existing processes alive until their admitted work is
+complete and new work has been routed elsewhere. The disabled feature flag
+does not protect unrelated in-flight work from a backend process replacement.
 
 ## Remote Machine backend Kubernetes authentication
 
@@ -109,7 +134,7 @@ listener through a public Service, ingress, or load balancer.
 | `SECURITY_ROLLOUT_DRAINED` | `false` | Exact `true` acknowledges that all old/unregistered serving replicas and relevant writers were drained. This is an operator assertion, not discovery. It must be true on every declared replica for gated security feature activation. |
 | `INTERNAL_BIND_ADDR` | `127.0.0.1:3002` | Bind address for the private authenticated listener. Multi-replica deployments must bind it to a peer-reachable interface, such as `0.0.0.0:3002` inside a pod network. |
 | `INTERNAL_ADVERTISE_URL` | `POD_IP`, detected local IP, `HOSTNAME`, then `127.0.0.1` | Peer-reachable base URL stored in ownership records. NyxID detects a local routable IP when `POD_IP` is unset and `INTERNAL_BIND_ADDR` is non-loopback. Every generated URL uses the port from `INTERNAL_BIND_ADDR`. Set this variable to override detection with an internal pod IP or private DNS URL. Never set the public ingress URL. |
-| `INTERNAL_DISPATCH_HMAC_KEY` | derived from `ENCRYPTION_KEY` | Optional 32-byte HMAC key as 64 hex characters. All replicas must use the same value. Set it explicitly when the local encryption key is unavailable, such as with a KMS key provider. |
+| `INTERNAL_DISPATCH_HMAC_KEY` | legacy derivation from `ENCRYPTION_KEY`, then JWT PEM | Optional 32-byte hex override (64 hex characters) used during legacy HMAC preparation. A configured `HMAC_KEYSET_PATH` is authoritative after adoption. All replicas must retain the same final domain key; changing an override against a durable pin fails startup. |
 | `INTERNAL_AUTH_MAX_SKEW_SECS` | `30` | Maximum clock skew accepted by the internal request signature verifier. |
 | `INTERNAL_NONCE_TTL_SECS` | `120` | MongoDB replay-record lifetime for internal request nonces. This must exceed twice `INTERNAL_AUTH_MAX_SKEW_SECS`. |
 | `INTERNAL_DUPLEX_HANDSHAKE_TIMEOUT_SECS` | `5` | Maximum time an authenticated internal WebSocket may wait before sending its signed opening envelope. |
@@ -184,6 +209,7 @@ absolute accept URL from `runtime-config.api_base_url`; see
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATABASE_MAX_CONNECTIONS` | `10` | Connection pool max size |
+| `NYXID_TEST_DATABASE_URL` | unset; probes `127.0.0.1:27018`, then `127.0.0.1:27017` | Backend test-only MongoDB URI; authoritative when set, nonblank and pinned for the test process. An unusable override fails instead of falling back. The harness creates/drops isolated per-test databases; transaction tests require a writable replica set or mongos. |
 
 ## Billing Meter and Lago Sink
 
@@ -199,7 +225,7 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 | `LAGO_PAYMENT_PROVIDER_CODE` | *(empty)* | Code of the Lago Stripe payment provider connection. When set, newly created Lago customers are linked to it (`sync_with_provider: true`) so `POST /api/v1/billing/topup` can generate checkout URLs. Unset leaves customers unlinked and top-ups fail with `no_linked_payment_provider`; existing customers must be linked manually in the Lago dashboard. |
 | `LAGO_WEBHOOK_SECRET` | *(empty)* | Lago webhook verification secret for `POST /api/v1/webhooks/lago`; redacted from config debug output. Required to accept Lago-originated wallet/subscription updates. |
 | `BILLING_RECONCILE_INTERVAL_SECS` | `300` | Reconcile sweep interval. Set `0` to disable event push/reconcile sweeps. |
-| `BILLING_RATE_CACHE_TTL_SECS` | `900` | Maximum age of a read-only rate used for reservation sizing. A missing or older rate rejects a billable request before forwarding. The reconcile sweep mirrors the Lago plan's standard charges into the cache each cycle (and once at startup), so the default works when the sweep is enabled; raise it only when `BILLING_RECONCILE_INTERVAL_SECS=0`. |
+| `BILLING_RATE_CACHE_TTL_SECS` | `900` | Maximum age of read-only price and per-owner tax profiles used for reservation sizing. A missing or older rate rejects a billable request before forwarding. The reconcile sweep mirrors the Lago plan's standard charges into the cache each cycle (and once at startup), so the default works when the sweep is enabled; raise it only when `BILLING_RECONCILE_INTERVAL_SECS=0`. |
 | `BILLING_RESERVATION_ABANDON_SECS` | `600` | Grace before never-forwarded reserved rows are marked `abandoned`. |
 | `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS` | `0` | Default overdraft cap copied to newly provisioned wallets unless an admin sets the global default on `/admin/billing` (Settings), which then wins. Existing wallets keep their cap. The shared-store reservation gate enforces the wallet's cap atomically. |
 | `BILLING_FAIL_CLOSED` | `false` | Incident kill switch. When `BILLING_ENABLED=true`, rejects billable forwarding even when Lago is healthy; when billing is disabled it has no effect. |
@@ -220,6 +246,38 @@ Each lane owns `platform_svc_{slug}_byok` or `platform_svc_{slug}_pk` on
 `LAGO_PLAN_CODE`; clearing persists cleanup until both charge and cache are removed.
 Resale is unchanged and independently gated by `BILLING_RESALE_ENABLED`.
 See [platform keys and inference](PLATFORM_KEYS_AND_INFERENCE.md).
+
+### Merchant tax configuration and bills
+
+Lago owns taxes; NyxID reads a per-owner `billing_tax_profiles` cache containing
+resolved charge/plan/customer/billing-entity rates. `BILLING_RATE_CACHE_TTL_SECS`
+also controls tax freshness; no additional environment variable is required.
+Provisioning, customer/subscription notifications, plan/price invalidation and
+the bounded reconcile sweep keep it current. A missing/stale profile triggers
+one inline refresh with a five-second total provider timeout outside admission
+transactions. Failed attempts are persisted and suppress inline retries for 30 seconds,
+including cold profiles. Provisioning, webhook and reconcile refreshes bypass this
+backoff. After a failed refresh, wallet-funded
+admission fails closed. Fully allowance/grant-funded admission needs no profile.
+Verified empty taxes mean zero tax; failure-only cache records never do.
+For duplicate plan charges sharing a metric, NyxID conservatively uses the
+highest summed tax rate; provider refresh reconciles the difference. Percentage rates use exact decimal parsing
+with up to 12 fractional digits, matching `Credits` precision; negative,
+malformed or more precise rates fail closed rather than being rounded silently.
+
+Wallet holds and settlement include tax on the pre-tax wallet share; Lago events
+retain only pre-tax quantities. Half-up settlement and upward admission rounding
+use exact picocredits. Provider fee/tax cent rounding is trued up by existing
+`external:lago` refresh adjustments. Top-up invoices remain untaxed; grants and
+allowances never reach Lago and are not taxed.
+
+Deploy all replicas **before** ops assign customer taxes. Existing rows without
+tax fields settle pre-tax; there is no backfill or tax migration fence.
+[Billing operations](BILLING_OPERATIONS.md) documents manual merchant organization
+flag overrides, precedence and personal-vs-org resolution, and the customer-level
+Singapore GST / overseas 0% procedure. The personal Billing page reads Lago's
+current bill and finalized subscription invoices through `/billing/bill` and
+`/billing/invoices`; both APIs also accept an authorized `owner_id`.
 
 ### Billing flag matrix
 
@@ -376,11 +434,11 @@ The `nyxid` CLI's wizard-style commands (e.g. `nyxid service add`, `nyxid api-ke
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLI_PAIRING_HMAC_KEY` | *(derived from `ENCRYPTION_KEY`)* | Explicit 32-byte HMAC key (64 hex chars) for `CliPairing.code_hash`. Generate with `openssl rand -hex 32`. Set this in multi-instance deployments where `ENCRYPTION_KEY` is not configured (for example `KEY_PROVIDER=aws-kms` or `gcp-kms`) so every backend worker produces the same HMAC output for a given code. |
+| `CLI_PAIRING_HMAC_KEY` | legacy derivation from `ENCRYPTION_KEY`, then JWT PEM | Optional 32-byte hex override (64 hex chars) for pairing-code HMAC during legacy preparation. Replicas must share the same final domain key. A configured `HMAC_KEYSET_PATH` takes precedence; adopt the existing value before changing AES/JWT sources. |
 
 ### Key selection rules
 
-The backend picks the key at startup using the first match:
+When `HMAC_KEYSET_PATH` is configured, its pinned CLI-pairing value is authoritative. Without that file, legacy preparation picks the key using the first match:
 
 1. `CLI_PAIRING_HMAC_KEY` if set (must be 64 hex chars).
 2. Derived from `ENCRYPTION_KEY` via HMAC-SHA256 with domain-separated label `nyxid:cli-pairing-code-hmac-v1`. Stable across restarts and workers that share `ENCRYPTION_KEY`. This is the expected path for the local AES provider.
@@ -388,12 +446,29 @@ The backend picks the key at startup using the first match:
 
 If all three sources are missing, the backend refuses to start with a clear error message pointing at this section. In practice that branch is unreachable because the JWT private key is already required at startup.
 
-### When you must set it explicitly
+### Explicit overrides and rotation
 
-- You want to rotate the pairing-code HMAC independently of both `ENCRYPTION_KEY` and the JWT signing key (e.g. to rotate it without rotating JWTs).
-- Any deployment policy that forbids reusing key material across purposes.
+Explicit overrides can establish independent keys for a new deployment. On an existing deployment preserve the exact final domain keys. Independent adoption decouples their lifetime from AES/JWT sources; replacing a key with a different override is not a supported rotation protocol and fails the consistency pin.
 
-Otherwise the automatic derivation chain is safe: local deployments derive from `ENCRYPTION_KEY`, KMS deployments derive from the JWT signing key.
+Legacy derivation couples pairing and other domains to encryption/JWT sources. Adopt the unchanged independent keyset before rotating those sources; the durable consistency pin rejects accidental domain changes. See [key lifecycle preparation](security/KEY_LIFECYCLE.md).
+
+## Independent HMAC keyset and JWT overlap
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HMAC_KEYSET_PATH` | unset; unchanged legacy derivation with consistency check | Local JSON file, at most 4096 bytes, `version: 1`, with exactly six 64-hex fields: `cli_pairing`, `auth_device`, `audit_chain`, `assistant_action`, `billing_ledger`, `internal_dispatch`. Unix group/other permissions are rejected. Blank configuration is treated as unset. Authoritative when configured; no fallback on unreadable/malformed files. A majority-durable commitment pin rejects replacement. Export the existing final keys before JWT/AES source rotation using [the ordered preparation runbook](security/KEY_LIFECYCLE.md). This preserves keys; it is not arbitrary HMAC-key rotation. |
+| `JWT_RETAINED_PUBLIC_KEY_PATHS` | empty | Comma-separated list of at most sixteen retained RSA public PEM paths; whitespace around entries and empty entries are removed. Active/retained RSA keys must be at least 3072 bits, the active pair must match, and duplicate key IDs (including the active key) fail startup. Verification requires RS256 and a known `kid`; JWKS publishes active and retained keys. Stage all readers before activating a new signer and retain verifiers through required token lifetimes/JWKS caches. External Machine-provider trust roots stay separate. |
+
+## Product analytics and vendor erasure
+
+| Variable | Default | Semantics |
+|---|---|---|
+| `NYXID_TELEMETRY_DSN` | unset | Backend PostHog ingestion key/project configuration. A configured destination never grants account/device permission; absent/false consent and pre-login events fail closed. |
+| `NYXID_TELEMETRY_HOST` | `https://us.i.posthog.com` | Backend ingestion base URL for an explicit `NYXID_TELEMETRY_DSN`; self-hosters can override it. The built-in share-back destination uses its compiled host. The default does not establish a hosted deployment's location or contracts. |
+| `NYXID_SHARE_ANALYTICS` | off | Enables the compiled analytics destination when no nonblank `NYXID_TELEMETRY_DSN` is supplied; an explicit DSN takes precedence. Still subject to the same account/device dispatch gate. |
+| `NYXID_TELEMETRY_ERASURE_DESTINATIONS` | unset; empty inventory | JSON array of up to sixteen current/historical project APIs. Each object has only `id`, `api_host`, `project_id`, `personal_api_key`. `id` is 1–64 ASCII letters/digits/`-`/`_`, unique and not `unresolved`; `api_host` is an HTTPS origin without userinfo, path, query or fragment; `project_id` is 1–20 digits; the nonempty personal API key is at most 1024 bytes. Invalid configuration fails startup. Keys stay in runtime configuration; durable destination identities cannot be rebound to another project. Missing credentials leave erasure awaiting operator action; an empty list does not prove there is no historical vendor data. |
+
+The erasure credential is a project API credential, not the ingestion DSN. Preserve historical destination coverage and verify vendor processing; queue/HTTP acceptance is not deletion completion. See [TELEMETRY.md](TELEMETRY.md) for account/device controls, withdrawal, dispatch reconciliation and manual erasure evidence. `DO_NOT_TRACK` and `NYXID_TELEMETRY=off` further deny CLI events; `NYXID_TELEMETRY=on` does not grant consent.
 
 ## Audit Log Hash Chain (Optional)
 
@@ -401,11 +476,11 @@ NyxID audit-log rows created after this feature is enabled are tamper-evident. E
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AUDIT_CHAIN_HMAC_KEY` | *(derived from `ENCRYPTION_KEY`, then JWT private key)* | Explicit 32-byte HMAC key (64 hex chars) for audit-log hash chaining. Generate with `openssl rand -hex 32`. Set this when you need to rotate the audit-chain key independently of both `ENCRYPTION_KEY` and the JWT signing key, or when deployment policy forbids deriving secondary HMAC keys from those sources. |
+| `AUDIT_CHAIN_HMAC_KEY` | *(derived from `ENCRYPTION_KEY`, then JWT private key)* | Explicit 32-byte HMAC key (64 hex chars) for audit-log hash chaining. Generate with `openssl rand -hex 32`. Existing explicit override for the audit domain. Preserve the exact existing key; replacing it invalidates retained chains and persisted fingerprints. Use independent keyset adoption before JWT/encryption source rotation. |
 
 ### Key selection rules
 
-The backend picks the audit-chain key at startup using the first match:
+When `HMAC_KEYSET_PATH` is configured, its pinned audit value is authoritative. Without that file, legacy preparation picks the audit key using the first match:
 
 1. `AUDIT_CHAIN_HMAC_KEY` if set (must be 64 hex chars).
 2. Derived from `ENCRYPTION_KEY` via HMAC-SHA256 with the domain-separated `audit-chain` label.
@@ -691,3 +766,52 @@ Git receives gateway URL rewrites and headers through process-only
 these settings to a global or repository config. No NyxID or provider
 credential is inherited or copied to the command environment. See
 [MACHINE_NODES.md](MACHINE_NODES.md).
+
+## Contextual encryption writer cutover
+
+| Variable | Default | Startup semantics |
+|---|---|---|
+| `CONTEXTUAL_RECORD_WRITES` | `false` | Accepts exactly `true`/`false` or `1`/`0`; other values fail startup. Enabling requires `CONTEXTUAL_RECORD_WRITERS_DRAINED=true` or `1`. Converted writers use supported legacy storage while off and contextual storage while on; configured-header writes require activation. |
+| `CONTEXTUAL_RECORD_WRITERS_DRAINED` | no acknowledgement | Startup-only operator assertion, read when contextual writes are enabled. Exactly `true` or `1` permits activation; absent/other values reject activation. It does not discover, stop or fence old binaries. |
+| `ALLOW_LEGACY_RECORD_READS` | `true` | Accepts exactly `true`/`false` or `1`/`0`; other values fail startup. Disabling requires contextual writes on. It controls converted adapters, not every raw crypto call or backup dependency. |
+
+`ALLOW_LEGACY_RECORD_READS`
+controls legacy decoding in converted contextual-encryption field adapters.
+Converted Node, MFA, saved-login and provider credential adapters consume it. Set `false` only after
+an authenticated migration/readiness pass and coordinated old-reader/writer
+drain. A mutable database version marker cannot re-enable legacy decoding when
+this trusted setting is false. This switch does not retire unconverted fields,
+old provider keys or backups. No production cutover has been performed by the
+remediation work.
+
+### Reader-first procedure
+
+`CONTEXTUAL_RECORD_WRITES` defaults to `false`. Converted encrypted-field writers preserve the exact legacy encrypted format
+and omit contextual version markers during reader staging. Node registration,
+rotation, transfer and managed activation use that compatibility path. Sensitive
+header edits require writer cutover and never fall back to new plaintext storage.
+Existing legacy readers remain available through `ALLOW_LEGACY_RECORD_READS=true`.
+
+Startup validates both settings together. The supported modes are:
+
+| `ALLOW_LEGACY_RECORD_READS` | `CONTEXTUAL_RECORD_WRITES` | Mode |
+| --- | --- | --- |
+| `true` | `false` | Compatible reader staging (the default). |
+| `true` | `true` | Contextual writes and migration; drained acknowledgement required. |
+| `false` | `true` | Strict readers; drained acknowledgement and completed authenticated inventory readiness required. |
+| `false` | `false` | Rejected at startup: compatible writers would create ciphertext this process cannot read. |
+
+The startup mode check does not establish migration readiness or cloud key-version
+retirement evidence. Those require the authenticated final inventory checks.
+
+Activating `CONTEXTUAL_RECORD_WRITES=true` requires the explicit startup
+acknowledgement `CONTEXTUAL_RECORD_WRITERS_DRAINED=true`. Deploy compatible readers
+with writes off, stop and drain all old application/background/CLI writers, verify
+that no old binary will restart, then activate on the compatible fleet. This is an
+operator-controlled drained cutover, not automatic mixed-version enforcement or a
+zero-downtime guarantee. Once any v3 value exists, rollback to an old reader is
+unsupported. Roll back only to a v3-compatible binary while retaining its keys.
+After authenticated migration readiness across every field adapter, separately
+turn legacy reads off. Old backups and historical KMS key versions retain their
+own decryption requirements; the currently configured KMS resource can still
+serve historical versions. See [the explicit migration API procedure](SECURITY.md#encrypted-record-migration). Pending field adapters still block complete readiness; the runbook does not certify a deployment.

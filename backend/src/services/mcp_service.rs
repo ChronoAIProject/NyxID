@@ -185,6 +185,9 @@ pub struct McpExecContext<'a> {
     /// API key ID that is acting on behalf of the user. Enables per-agent
     /// credential override via [`proxy_service::resolve_agent_credential_override`].
     pub api_key_id: Option<&'a str>,
+    /// Exact authenticated child credential, so revoking it invalidates proof
+    /// introspection without silently widening to its parent key's authority.
+    pub api_key_credential_id: Option<&'a str>,
     /// When true, node routing and fallbacks are not filtered.
     pub allow_all_nodes: bool,
     /// Permitted node IDs when `allow_all_nodes` is false.
@@ -321,6 +324,7 @@ fn mcp_credential_class(
 /// A single endpoint within a service.
 #[derive(Clone, Default)]
 pub struct McpToolEndpoint {
+    pub attachment_input: Option<super::lark_attachment_tool::Projection>,
     pub async_operation: Option<crate::models::async_service_operation::AsyncOperationContract>,
     pub target_id: Option<String>,
     pub endpoint_id: String,
@@ -355,6 +359,7 @@ pub struct McpCatalogDiagnostics {
     pub service_scope_restricted: bool,
     pub node_scope_restricted: bool,
     pub node_scope_exclusions_present: bool,
+    pub shadowed_connections: usize,
 }
 
 pub struct McpOperationCatalog {
@@ -384,6 +389,10 @@ pub fn endpoint_contract_digest(endpoint: &McpToolEndpoint) -> String {
     if let Some(async_operation) = &endpoint.async_operation {
         contract["async_operation"] =
             serde_json::to_value(async_operation).expect("async contract");
+    }
+    if let Some(projection) = &endpoint.attachment_input {
+        contract["attachment_input"] =
+            serde_json::to_value(projection).expect("attachment projection");
     }
     canonical_sha256(contract)
 }
@@ -505,6 +514,7 @@ pub fn exact_operation_view(services: &[McpToolService]) -> ExactOperationView {
             let mut operations = service
                 .endpoints
                 .iter()
+                .filter(|endpoint| !super::lark_attachment_tool::is_attachment_operation(endpoint))
                 .filter_map(|endpoint| {
                     let metadata = service
                         .durable_endpoint_metadata
@@ -715,7 +725,15 @@ pub async fn load_user_tools(
     node_ws_manager: &NodeWsManager,
     user_id: &str,
 ) -> AppResult<Vec<McpToolService>> {
-    load_user_tools_inner(db, node_ws_manager, user_id, false, NodeScope::Unrestricted).await
+    load_user_tools_inner(
+        db,
+        node_ws_manager,
+        user_id,
+        false,
+        NodeScope::Unrestricted,
+        ServiceScope::Unrestricted,
+    )
+    .await
 }
 
 /// Like [`load_user_tools`] but honors an API-key node scope during
@@ -731,7 +749,15 @@ pub async fn load_user_tools_scoped(
     user_id: &str,
     scope: NodeScope<'_>,
 ) -> AppResult<Vec<McpToolService>> {
-    load_user_tools_inner(db, node_ws_manager, user_id, false, scope).await
+    load_user_tools_inner(
+        db,
+        node_ws_manager,
+        user_id,
+        false,
+        scope,
+        ServiceScope::Unrestricted,
+    )
+    .await
 }
 
 /// Like [`load_user_tools`] but includes non-executable user services for
@@ -746,7 +772,15 @@ pub async fn load_user_tools_all(
     node_ws_manager: &NodeWsManager,
     user_id: &str,
 ) -> AppResult<Vec<McpToolService>> {
-    load_user_tools_inner(db, node_ws_manager, user_id, true, NodeScope::Unrestricted).await
+    load_user_tools_inner(
+        db,
+        node_ws_manager,
+        user_id,
+        true,
+        NodeScope::Unrestricted,
+        ServiceScope::Unrestricted,
+    )
+    .await
 }
 
 /// Scoped variant of [`load_user_tools_all`]. Search discovery honors
@@ -758,9 +792,18 @@ pub async fn load_user_tools_all_scoped(
     db: &mongodb::Database,
     node_ws_manager: &NodeWsManager,
     user_id: &str,
-    scope: NodeScope<'_>,
+    node_scope: NodeScope<'_>,
+    service_scope: ServiceScope<'_>,
 ) -> AppResult<Vec<McpToolService>> {
-    load_user_tools_inner(db, node_ws_manager, user_id, true, scope).await
+    load_user_tools_inner(
+        db,
+        node_ws_manager,
+        user_id,
+        true,
+        node_scope,
+        service_scope,
+    )
+    .await
 }
 
 /// Node-scope filter used by the MCP discovery chain. `Unrestricted`
@@ -778,6 +821,14 @@ pub enum NodeScope<'a> {
 pub enum ServiceScope<'a> {
     Unrestricted,
     Allowed(&'a [String]),
+    /// All reachable connections, with these exact identities preferred when
+    /// a slug collision is resolved.
+    Preferring(&'a [String]),
+    /// Only services owned by the bound organization and allowed by the
+    /// request-local organization ACL.
+    Organization {
+        access: &'a crate::services::org_agent_service::RequestAccess,
+    },
 }
 
 impl ServiceScope<'_> {
@@ -787,11 +838,78 @@ impl ServiceScope<'_> {
             ServiceScope::Allowed(ids) => {
                 service.source.is_user_service() && ids.iter().any(|id| id == &service.service_id)
             }
+            ServiceScope::Preferring(_) => true,
+            ServiceScope::Organization { access } => matches!(
+                &service.source,
+                McpToolSource::UserManaged {
+                    effective_owner_id, ..
+                } if effective_owner_id == access.owner()
+            ),
         }
     }
 
     fn is_restricted(&self) -> bool {
-        matches!(self, ServiceScope::Allowed(_))
+        matches!(
+            self,
+            ServiceScope::Allowed(_) | ServiceScope::Organization { .. }
+        )
+    }
+
+    fn allows_user_service(&self, service: &UserService) -> bool {
+        match self {
+            ServiceScope::Unrestricted | ServiceScope::Preferring(_) => true,
+            ServiceScope::Allowed(ids) => ids.iter().any(|id| id == &service.id),
+            ServiceScope::Organization { access } => {
+                service.user_id == access.owner() && access.allows_service(service)
+            }
+        }
+    }
+
+    fn preference_rank(&self, service_id: &str) -> usize {
+        match self {
+            ServiceScope::Preferring(ids) => usize::from(!ids.iter().any(|id| id == service_id)),
+            _ => 0,
+        }
+    }
+
+    fn owner_rank(&self, actor: &str, owner: &str) -> usize {
+        match self {
+            ServiceScope::Organization { .. } => 0,
+            _ if owner == actor => 0,
+            _ => 1,
+        }
+    }
+}
+
+/// Select the one service authority shared by MCP and REST catalog surfaces.
+/// A bound organization is fail-closed unless its authentication snapshot
+/// matches the actor and owner; no fresh membership lookup is permitted here.
+pub fn caller_service_scope<'a>(
+    actor: &'a str,
+    bound_owner: Option<&'a str>,
+    request_access: Option<&'a crate::services::org_agent_service::RequestAccess>,
+    chat: Option<&'a crate::services::assistant_acknowledgement_service::ChatAuthority>,
+    allow_all_services: bool,
+    allowed_service_ids: &'a [String],
+) -> ServiceScope<'a> {
+    if let Some(owner) = bound_owner.filter(|owner| *owner != actor) {
+        if let Some(access) = request_access.filter(|access| access.matches(actor, owner))
+            && chat.is_some()
+        {
+            return ServiceScope::Organization { access };
+        }
+        return ServiceScope::Allowed(allowed_service_ids);
+    }
+    if let Some(chat) = chat {
+        if chat.is_orchestrator() {
+            ServiceScope::Unrestricted
+        } else {
+            ServiceScope::Preferring(allowed_service_ids)
+        }
+    } else if allow_all_services {
+        ServiceScope::Unrestricted
+    } else {
+        ServiceScope::Allowed(allowed_service_ids)
     }
 }
 
@@ -808,17 +926,20 @@ pub async fn load_operation_catalog(
     let grants =
         crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
     let providers = crate::services::platform_key_service::load_providers(db).await?;
-    let mut visible = load_user_tools_with_grants(
+    let options = UserToolLoadOptions {
+        providers: &providers,
+        service_scope,
+    };
+    let (mut visible, shadowed_connections) = load_user_tools_with_grants(
         db,
         node_ws_manager,
         user_id,
         true,
         node_scope,
         &grants,
-        &providers,
+        &options,
     )
     .await?;
-    visible.retain(|service| service_scope.permits(service));
 
     // A boolean reason is safe for services already visible through service
     // authorization, while counts or IDs would disclose node topology. The
@@ -828,17 +949,16 @@ pub async fn load_operation_catalog(
             .iter()
             .map(|service| (service.service_id.clone(), service.executable))
             .collect();
-        let mut before_node_scope = load_user_tools_with_grants(
+        let (before_node_scope, _) = load_user_tools_with_grants(
             db,
             node_ws_manager,
             user_id,
             true,
             NodeScope::Unrestricted,
             &grants,
-            &providers,
+            &options,
         )
         .await?;
-        before_node_scope.retain(|service| service_scope.permits(service));
         before_node_scope
             .iter()
             .filter(|service| {
@@ -913,6 +1033,7 @@ pub async fn load_operation_catalog(
             service_scope_restricted: service_scope.is_restricted(),
             node_scope_restricted,
             node_scope_exclusions_present,
+            shadowed_connections,
         },
     })
 }
@@ -1024,21 +1145,32 @@ async fn load_user_tools_inner(
     node_ws_manager: &NodeWsManager,
     user_id: &str,
     include_non_executable: bool,
-    scope: NodeScope<'_>,
+    node_scope: NodeScope<'_>,
+    service_scope: ServiceScope<'_>,
 ) -> AppResult<Vec<McpToolService>> {
     let grants =
         crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
     let providers = crate::services::platform_key_service::load_providers(db).await?;
-    load_user_tools_with_grants(
+    let options = UserToolLoadOptions {
+        providers: &providers,
+        service_scope,
+    };
+    let (services, _) = load_user_tools_with_grants(
         db,
         node_ws_manager,
         user_id,
         include_non_executable,
-        scope,
+        node_scope,
         &grants,
-        &providers,
+        &options,
     )
-    .await
+    .await?;
+    Ok(services)
+}
+
+struct UserToolLoadOptions<'scope, 'data> {
+    providers: &'data HashMap<String, crate::models::provider_config::ProviderConfig>,
+    service_scope: ServiceScope<'scope>,
 }
 
 async fn load_user_tools_with_grants(
@@ -1046,10 +1178,11 @@ async fn load_user_tools_with_grants(
     node_ws_manager: &NodeWsManager,
     user_id: &str,
     include_non_executable: bool,
-    scope: NodeScope<'_>,
+    node_scope: NodeScope<'_>,
     grants: &crate::services::platform_key_service::OwnerGrants,
-    providers: &HashMap<String, crate::models::provider_config::ProviderConfig>,
-) -> AppResult<Vec<McpToolService>> {
+    options: &UserToolLoadOptions<'_, '_>,
+) -> AppResult<(Vec<McpToolService>, usize)> {
+    let service_scope = options.service_scope;
     // -----------------------------------------------------------------------
     // Phase 1: Load platform (DownstreamService) services
     // -----------------------------------------------------------------------
@@ -1071,7 +1204,7 @@ async fn load_user_tools_with_grants(
     // to nodes outside its allow-list — `execute_tool` would later
     // reject every call with `ApiKeyScopeForbidden` (eighteenth-round
     // Codex P2).
-    let node_route_service_ids = match scope {
+    let node_route_service_ids = match node_scope {
         NodeScope::Unrestricted => {
             node_routing_service::list_routable_service_ids(db, user_id, node_ws_manager).await?
         }
@@ -1170,14 +1303,14 @@ async fn load_user_tools_with_grants(
     // Phase 2: Load UserService tools (personal + org-shared)
     // -----------------------------------------------------------------------
 
-    let all_user_services = load_callable_user_services(
+    let (all_user_services, shadowed_connections) = load_callable_user_services(
         db,
         node_ws_manager,
         user_id,
         include_non_executable,
-        scope,
+        node_scope,
         grants,
-        providers,
+        options,
     )
     .await?;
 
@@ -1216,16 +1349,23 @@ async fn load_user_tools_with_grants(
     let mut blocked_slugs: HashSet<String> =
         executable_slugs.iter().map(|s| (*s).to_string()).collect();
     let personal_pinned: Vec<UserService> =
-        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-            .find(doc! {
-                "user_id": user_id,
-                "is_active": true,
-                "service_type": "http",
-                "node_id": { "$type": "string", "$ne": "" },
-            })
-            .await?
-            .try_collect()
-            .await?;
+        if matches!(service_scope, ServiceScope::Organization { .. }) {
+            Vec::new()
+        } else {
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find(doc! {
+                    "user_id": user_id,
+                    "is_active": true,
+                    "service_type": "http",
+                    "node_id": { "$type": "string", "$ne": "" },
+                })
+                .await?
+                .try_collect::<Vec<_>>()
+                .await?
+                .into_iter()
+                .filter(|service| service_scope.allows_user_service(service))
+                .collect()
+        };
     for svc in &personal_pinned {
         // Always block, even when the pinned `node_id` is out of the
         // caller's API-key scope. `execute_tool` for the platform copy
@@ -1246,6 +1386,11 @@ async fn load_user_tools_with_grants(
             if !m.role.can_proxy() {
                 continue;
             }
+            if let ServiceScope::Organization { access } = service_scope
+                && m.org_user_id != access.owner()
+            {
+                continue;
+            }
             let effective_scope =
                 crate::services::org_role_scope_service::effective_scope_for_membership(db, m)
                     .await?;
@@ -1261,6 +1406,9 @@ async fn load_user_tools_with_grants(
                     .try_collect()
                     .await?;
             for svc in org_pinned {
+                if !service_scope.allows_user_service(&svc) {
+                    continue;
+                }
                 if !crate::services::user_service_service::role_can_proxy_service(m.role, &svc) {
                     continue;
                 }
@@ -1418,7 +1566,7 @@ async fn load_user_tools_with_grants(
             let template_rows = eps_by_svc
                 .get(catalog_id)
                 .map(|eps| ParsedMcpEndpoints {
-                    endpoints: service_endpoints_to_mcp(eps),
+                    endpoints: stored_service_endpoints_to_mcp(eps, catalog_policy),
                     durable_metadata: service_endpoint_durable_metadata(
                         eps,
                         catalog_policy.map(|service| service.slug.as_str()),
@@ -1458,6 +1606,13 @@ async fn load_user_tools_with_grants(
             (generic_proxy_endpoints(endpoint_label), true, false)
         };
         let mut published = published;
+        // Even an unusable override that falls back to template rows must not
+        // advertise attachment authority through an instance-mounted spec.
+        if user_spec_url.is_some() {
+            for endpoint in &mut published.endpoints {
+                endpoint.attachment_input = super::lark_attachment_tool::untrusted(endpoint);
+            }
+        }
         if let Some(catalog) = catalog_policy {
             mark_catalog_operations(&mut published, &catalog.slug);
         }
@@ -1521,7 +1676,7 @@ async fn load_user_tools_with_grants(
         }
 
         let endpoint_rows = eps_by_svc.get(svc.id.as_str()).cloned().unwrap_or_default();
-        let endpoints = service_endpoints_to_mcp(&endpoint_rows);
+        let endpoints = stored_service_endpoints_to_mcp(&endpoint_rows, Some(svc));
         let durable_endpoint_metadata =
             service_endpoint_durable_metadata(&endpoint_rows, Some(svc.slug.as_str()));
 
@@ -1548,13 +1703,16 @@ async fn load_user_tools_with_grants(
         });
     }
 
-    Ok(result)
+    result.retain(|service| service_scope.permits(service));
+    Ok((result, shadowed_connections))
 }
 
 /// Convert ServiceEndpoints to McpToolEndpoints.
-fn service_endpoints_to_mcp(eps: &[&ServiceEndpoint]) -> Vec<McpToolEndpoint> {
-    eps.iter()
+pub(super) fn service_endpoints_to_mcp(eps: &[&ServiceEndpoint]) -> Vec<McpToolEndpoint> {
+    let mut endpoints: Vec<_> = eps
+        .iter()
         .map(|ep| McpToolEndpoint {
+            attachment_input: None,
             async_operation: ep.async_operation.clone(),
             target_id: ep.target_id.clone(),
             endpoint_id: ep.id.clone(),
@@ -1569,7 +1727,20 @@ fn service_endpoints_to_mcp(eps: &[&ServiceEndpoint]) -> Vec<McpToolEndpoint> {
             response_description: ep.response_description.clone(),
             response: ep.response.clone(),
         })
-        .collect()
+        .collect();
+    for endpoint in &mut endpoints {
+        endpoint.attachment_input = super::lark_attachment_tool::untrusted(endpoint);
+    }
+    endpoints
+}
+
+fn stored_service_endpoints_to_mcp(
+    eps: &[&ServiceEndpoint],
+    catalog: Option<&DownstreamService>,
+) -> Vec<McpToolEndpoint> {
+    let mut endpoints = service_endpoints_to_mcp(eps);
+    super::lark_attachment_tool::stored_projections(catalog, &mut endpoints);
+    endpoints
 }
 
 fn service_endpoint_durable_metadata(
@@ -1741,6 +1912,7 @@ fn parsed_endpoints_to_mcp(parsed: Vec<openapi_parser::ParsedEndpoint>) -> Parse
             },
         );
         endpoints.push(McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             // Dynamic operations have no persisted row. Hash the producer's
@@ -1758,6 +1930,9 @@ fn parsed_endpoints_to_mcp(parsed: Vec<openapi_parser::ParsedEndpoint>) -> Parse
             response_description: None,
             response: parsed_endpoint.response,
         });
+    }
+    for endpoint in &mut endpoints {
+        endpoint.attachment_input = super::lark_attachment_tool::untrusted(endpoint);
     }
     ParsedMcpEndpoints {
         endpoints,
@@ -1843,17 +2018,29 @@ async fn load_callable_user_services(
     node_ws_manager: &NodeWsManager,
     user_id: &str,
     include_non_executable: bool,
-    scope: NodeScope<'_>,
+    node_scope: NodeScope<'_>,
     grants: &crate::services::platform_key_service::OwnerGrants,
-    providers: &HashMap<String, crate::models::provider_config::ProviderConfig>,
-) -> AppResult<Vec<ResolvedUserService>> {
+    options: &UserToolLoadOptions<'_, '_>,
+) -> AppResult<(Vec<ResolvedUserService>, usize)> {
+    let providers = options.providers;
+    let service_scope = options.service_scope;
     // -- Personal services --
+    // Organization specialists are bound to their organization, so avoid
+    // loading personal rows that the service scope will discard. For an
+    // allow-list, filter before credential and node-route batches as well.
     let personal_services: Vec<UserService> =
-        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-            .find(doc! { "user_id": user_id, "is_active": true, "service_type": "http" })
-            .await?
-            .try_collect()
-            .await?;
+        if matches!(service_scope, ServiceScope::Organization { .. }) {
+            Vec::new()
+        } else {
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find(doc! { "user_id": user_id, "is_active": true, "service_type": "http" })
+                .await?
+                .try_collect::<Vec<_>>()
+                .await?
+                .into_iter()
+                .filter(|service| service_scope.allows_user_service(service))
+                .collect()
+        };
 
     // Collect all api_key_ids from personal + org services for batch lookup
     let mut all_api_key_ids: Vec<String> = personal_services
@@ -1863,36 +2050,61 @@ async fn load_callable_user_services(
 
     // -- Org-shared services --
     let mut org_services: Vec<(UserService, String)> = Vec::new(); // (service, org_user_id)
-
-    for m in grants.memberships() {
-        if !m.role.can_proxy() {
-            continue; // Viewers cannot call MCP tools
-        }
-        let effective_scope =
-            crate::services::org_role_scope_service::effective_scope_for_membership(db, m).await?;
-
+    if let ServiceScope::Organization { access } = service_scope {
         let org_svcs: Vec<UserService> =
             crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
                 .find(doc! {
-                    "user_id": &m.org_user_id,
+                    "user_id": access.owner(),
                     "is_active": true,
                     "service_type": "http",
                 })
                 .await?
                 .try_collect()
                 .await?;
-
         for svc in org_svcs {
-            if !crate::services::user_service_service::role_can_proxy_service(m.role, &svc) {
-                continue;
+            if access.allows_service(&svc) {
+                if let Some(ak_id) = &svc.api_key_id {
+                    all_api_key_ids.push(ak_id.clone());
+                }
+                org_services.push((svc, access.owner().to_string()));
             }
-            if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &svc.id) {
-                continue;
+        }
+    } else {
+        for m in grants.memberships() {
+            if !m.role.can_proxy() {
+                continue; // Viewers cannot call MCP tools
             }
-            if let Some(ak_id) = &svc.api_key_id {
-                all_api_key_ids.push(ak_id.clone());
+            let effective_scope =
+                crate::services::org_role_scope_service::effective_scope_for_membership(db, m)
+                    .await?;
+
+            let org_svcs: Vec<UserService> =
+                crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                    .find(doc! {
+                        "user_id": &m.org_user_id,
+                        "is_active": true,
+                        "service_type": "http",
+                    })
+                    .await?
+                    .try_collect()
+                    .await?;
+
+            for svc in org_svcs {
+                if !crate::services::user_service_service::role_can_proxy_service(m.role, &svc) {
+                    continue;
+                }
+                if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &svc.id)
+                {
+                    continue;
+                }
+                if !service_scope.allows_user_service(&svc) {
+                    continue;
+                }
+                if let Some(ak_id) = &svc.api_key_id {
+                    all_api_key_ids.push(ak_id.clone());
+                }
+                org_services.push((svc, m.org_user_id.clone()));
             }
-            org_services.push((svc, m.org_user_id.clone()));
         }
     }
 
@@ -1959,7 +2171,10 @@ async fn load_callable_user_services(
         // when the primary is out of scope would make every invocation
         // 403 (eighteenth-round Codex P2). Fallbacks alone can't rescue
         // that configuration for a scoped key.
-        let primary_in_scope = svc.node_id.as_deref().is_some_and(|nid| scope.permits(nid));
+        let primary_in_scope = svc
+            .node_id
+            .as_deref()
+            .is_some_and(|nid| node_scope.permits(nid));
         if !primary_in_scope {
             service_has_dispatchable_route.insert(svc.id.clone(), false);
             continue;
@@ -1996,19 +2211,25 @@ async fn load_callable_user_services(
             )
             .await
             .unwrap_or_default();
-            fallbacks.iter().any(|nid| scope.permits(nid))
+            fallbacks.iter().any(|nid| node_scope.permits(nid))
         } else {
             false
         };
         service_has_dispatchable_route.insert(svc.id.clone(), any_dispatchable);
     }
 
-    // Filter and assemble
-    let mut result = Vec::new();
-    let mut seen_slugs: HashSet<String> = HashSet::new();
-
-    // Personal first (takes priority over org for same slug)
+    // Resolve authority and credential state before slug collisions. A
+    // temporarily unavailable preferred connection still owns its slug.
+    let mut candidates = Vec::new();
     for us in personal_services {
+        let primary_in_scope = us
+            .node_id
+            .as_deref()
+            .filter(|node| !node.is_empty())
+            .is_none_or(|node| node_scope.permits(node));
+        if !primary_in_scope {
+            continue;
+        }
         let has_route = service_has_dispatchable_route
             .get(&us.id)
             .copied()
@@ -2018,39 +2239,20 @@ async fn load_callable_user_services(
                 Some(info) => info,
                 None => classify_credential(&us, &active_key_map, has_route),
             };
-        if !include_non_executable && !cred_info.is_executable {
-            continue;
-        }
-        // Scope filter applies even in `include_non_executable` search
-        // mode. A tool whose primary node is outside the caller's
-        // allow-list will hard-fail with `ApiKeyScopeForbidden` on
-        // every invocation, so surfacing it in `nyx__search_tools`
-        // misleads scoped agents into trying and retrying tools they
-        // can never call (twenty-eighth-round Codex P2). This is the
-        // pinned-primary scope check; failover nodes are already
-        // gated by `has_route` via the scope-aware
-        // `service_has_dispatchable_route` precompute above.
-        let primary_in_scope = us
-            .node_id
-            .as_deref()
-            .filter(|n| !n.is_empty())
-            .map(|nid| scope.permits(nid))
-            .unwrap_or(true);
-        if !primary_in_scope {
-            continue;
-        }
-        seen_slugs.insert(us.slug.clone());
-        result.push(ResolvedUserService {
+        candidates.push(ResolvedUserService {
             service: us,
             effective_owner_id: user_id.to_string(),
             has_server_credential: cred_info.has_server_credential,
             executable: cred_info.is_executable,
         });
     }
-
-    // Org services (skip slug collisions with personal)
     for (us, org_user_id) in org_services {
-        if seen_slugs.contains(&us.slug) {
+        let primary_in_scope = us
+            .node_id
+            .as_deref()
+            .filter(|node| !node.is_empty())
+            .is_none_or(|node| node_scope.permits(node));
+        if !primary_in_scope {
             continue;
         }
         let has_route = service_has_dispatchable_route
@@ -2062,29 +2264,7 @@ async fn load_callable_user_services(
                 Some(info) => info,
                 None => classify_credential(&us, &active_key_map, has_route),
             };
-        if !include_non_executable && !cred_info.is_executable {
-            continue;
-        }
-        // Scope filter applies even in `include_non_executable` search
-        // mode. A tool whose primary node is outside the caller's
-        // allow-list will hard-fail with `ApiKeyScopeForbidden` on
-        // every invocation, so surfacing it in `nyx__search_tools`
-        // misleads scoped agents into trying and retrying tools they
-        // can never call (twenty-eighth-round Codex P2). This is the
-        // pinned-primary scope check; failover nodes are already
-        // gated by `has_route` via the scope-aware
-        // `service_has_dispatchable_route` precompute above.
-        let primary_in_scope = us
-            .node_id
-            .as_deref()
-            .filter(|n| !n.is_empty())
-            .map(|nid| scope.permits(nid))
-            .unwrap_or(true);
-        if !primary_in_scope {
-            continue;
-        }
-        seen_slugs.insert(us.slug.clone());
-        result.push(ResolvedUserService {
+        candidates.push(ResolvedUserService {
             service: us,
             effective_owner_id: org_user_id,
             has_server_credential: cred_info.has_server_credential,
@@ -2092,7 +2272,20 @@ async fn load_callable_user_services(
         });
     }
 
-    Ok(result)
+    // Choose a winner independently for each slug, then retain the original
+    // catalog order for the selected rows. Preference IDs affect collision
+    // ownership, not the slots used by discovery ordering.
+    let winner_indices = select_slug_winner_indices(&candidates, service_scope, user_id);
+    let shadowed_connections = candidates.len().saturating_sub(winner_indices.len());
+    let mut selected: Vec<ResolvedUserService> = candidates
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| winner_indices.contains(&index).then_some(candidate))
+        .collect();
+    if !include_non_executable {
+        selected.retain(|candidate| candidate.executable);
+    }
+    Ok((selected, shadowed_connections))
 }
 
 struct CredentialClassification {
@@ -2218,6 +2411,31 @@ fn classify_credential(
     }
 }
 
+fn select_slug_winner_indices(
+    candidates: &[ResolvedUserService],
+    service_scope: ServiceScope<'_>,
+    actor: &str,
+) -> HashSet<usize> {
+    let mut winners: HashMap<String, (usize, (usize, usize))> = HashMap::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let priority = (
+            service_scope.preference_rank(&candidate.service.id),
+            service_scope.owner_rank(actor, &candidate.effective_owner_id),
+        );
+        match winners.get_mut(&candidate.service.slug) {
+            Some((winner_index, winner_priority)) if priority < *winner_priority => {
+                *winner_index = index;
+                *winner_priority = priority;
+            }
+            None => {
+                winners.insert(candidate.service.slug.clone(), (index, priority));
+            }
+            _ => {}
+        }
+    }
+    winners.into_values().map(|(index, _)| index).collect()
+}
+
 // ---------------------------------------------------------------------------
 // Generic proxy endpoint for custom user services
 // ---------------------------------------------------------------------------
@@ -2226,6 +2444,7 @@ fn classify_credential(
 /// predefined API endpoints. Lets the AI make arbitrary HTTP requests.
 fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
     McpToolEndpoint {
+        attachment_input: None,
         async_operation: None,
         target_id: None,
         endpoint_id: GENERIC_PROXY_ENDPOINT_ID.to_string(),
@@ -2797,6 +3016,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
             .iter()
             .filter(|rule| rule.enabled)
             .map(|rule| McpToolEndpoint {
+                attachment_input: None,
                 async_operation: None,
                 target_id: None,
                 endpoint_id: rule.id.clone(),
@@ -2814,6 +3034,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
                 response_description: None,
                 response: OperationResponseContract::default(),
             })
+            .filter(|endpoint| !super::lark_attachment_tool::is_attachment_operation(endpoint))
             .collect();
 
         if endpoints.is_empty() {
@@ -2926,6 +3147,12 @@ fn sanitize_tool_segment(value: &str) -> String {
 /// Build a JSON Schema `inputSchema` from endpoint parameters and body schema.
 /// Ported from the TypeScript `buildInputSchema()` in `mcp-proxy/src/tools.ts`.
 pub(crate) fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
+    if matches!(
+        endpoint.attachment_input,
+        Some(super::lark_attachment_tool::Projection::Stored(_))
+    ) {
+        return super::lark_attachment_tool::input_schema(endpoint);
+    }
     let mut properties = serde_json::Map::new();
     let mut required: Vec<serde_json::Value> = Vec::new();
 
@@ -3561,6 +3788,8 @@ impl AutomaticReceipt {
 }
 
 pub struct PreparedProxyCall {
+    managed_base: Option<super::lark_base_writes::Prepared>,
+    attachment_binding: Option<super::lark_attachment_tool::Binding>,
     resource_source: Option<crate::models::assistant_resource::ResourceSource>,
     automatic_receipt: Option<AutomaticReceipt>,
     async_submission: Option<String>,
@@ -3667,6 +3896,27 @@ impl PreparedProxyCall {
             ));
         }
         Ok(())
+    }
+
+    /// Platform chat consent must bind the materialized bytes too: an attachment
+    /// id alone does not describe the request that leaves this process.
+    pub(crate) fn attachment_confirmation_arguments(
+        &self,
+        endpoint: &McpToolEndpoint,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        self.attachment_binding.as_ref()?;
+        use sha2::Digest;
+        let body_sha256 = hex::encode(sha2::Sha256::digest(
+            self.body.as_deref().unwrap_or_default(),
+        ));
+        Some(serde_json::json!({
+            "endpoint_contract": endpoint_contract_digest(endpoint),
+            "method": self.method.as_str(), "path": self.path, "query": self.query,
+            "body_sha256": body_sha256,
+            "content_type": self.body_content_type,
+            "acknowledgement_id": args.get("acknowledgement_id"),
+        }))
     }
 
     pub fn operation_descriptor(&self) -> operation_descriptor::OperationDescriptor {
@@ -3851,6 +4101,8 @@ pub(crate) fn http_carries_method_override(
         return true;
     };
     PreparedProxyCall {
+        managed_base: None,
+        attachment_binding: None,
         resource_source: None,
         automatic_receipt: None,
         async_submission: None,
@@ -3885,6 +4137,17 @@ pub(crate) fn http_carries_method_override(
 /// or downstream side effect. Execution consumes this value and never rebuilds
 /// method/path/body from caller arguments.
 pub fn prepare_proxy_tool_call(
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+    args: &serde_json::Value,
+) -> AppResult<PreparedProxyCall> {
+    if super::lark_attachment_tool::is_attachment_operation(endpoint) {
+        return Err(super::lark_attachment_tool::refused());
+    }
+    prepare_proxy_tool_call_inner(service, endpoint, args)
+}
+
+fn prepare_proxy_tool_call_inner(
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
     args: &serde_json::Value,
@@ -3944,6 +4207,8 @@ pub fn prepare_proxy_tool_call(
     };
 
     Ok(PreparedProxyCall {
+        managed_base: None,
+        attachment_binding: None,
         resource_source: None,
         automatic_receipt: None,
         async_submission: None,
@@ -3972,6 +4237,76 @@ pub fn prepare_proxy_tool_call(
                 .copied()
                 .unwrap_or_default()
         },
+    })
+}
+
+/// Only live chat dispatch can materialize attachment references. Ordinary,
+/// exact, descriptor and background preparation continues to refuse candidates.
+pub fn prepare_chat_proxy_tool_call<'a>(
+    db: &'a mongodb::Database,
+    keys: &'a EncryptionKeys,
+    chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
+    service: &'a McpToolService,
+    endpoint: &'a McpToolEndpoint,
+    args: &'a serde_json::Value,
+) -> futures::future::BoxFuture<'a, AppResult<PreparedProxyCall>> {
+    Box::pin(async move {
+        if !super::lark_attachment_tool::is_attachment_operation(endpoint) {
+            return prepare_proxy_tool_call(service, endpoint, args);
+        }
+        if matches!(
+            endpoint.attachment_input,
+            Some(super::lark_attachment_tool::Projection::Managed(_))
+        ) {
+            let mut prepared = prepare_proxy_tool_call_inner(service, endpoint, args)?;
+            let chat = chat.ok_or_else(super::lark_attachment_tool::refused)?;
+            let key = db
+                .collection::<crate::models::api_key::ApiKey>("api_keys")
+                .find_one(doc! {"_id":&chat.api_key_id,"is_active":true})
+                .await?
+                .ok_or_else(super::lark_attachment_tool::refused)?;
+            let body: serde_json::Value =
+                serde_json::from_slice(prepared.body.as_deref().unwrap_or_default())
+                    .map_err(|_| super::lark_attachment_tool::refused())?;
+            prepared.body = Some(
+                serde_json::to_vec(&canonical_json(body.clone()))
+                    .map_err(|_| super::lark_attachment_tool::refused())?
+                    .into(),
+            );
+            prepared.authorize_agent_operations(
+                &key.assistant_operation_scopes,
+                service,
+                endpoint,
+            )?;
+            prepared.managed_base = Some(
+                Box::pin(super::lark_base_writes::prepare(
+                    db,
+                    keys,
+                    Some(chat),
+                    service,
+                    endpoint,
+                    args,
+                    &body,
+                ))
+                .await?,
+            );
+            return Ok(prepared);
+        }
+        let materialized = Box::pin(super::lark_attachment_tool::materialize(
+            db, keys, chat, service, endpoint, args,
+        ))
+        .await?;
+        // Reuse route/policy preparation with no caller body. This private copy
+        // changes only body construction; consent and identity keep the real endpoint.
+        let mut route = endpoint.clone();
+        route.request_content_type = None;
+        route.request_body_schema = None;
+        route.request_body_required = false;
+        let mut prepared = prepare_proxy_tool_call_inner(service, &route, &serde_json::json!({}))?;
+        prepared.body = Some(materialized.body);
+        prepared.body_content_type = Some(materialized.content_type);
+        prepared.attachment_binding = Some(materialized.binding);
+        Ok(prepared)
     })
 }
 
@@ -4778,10 +5113,23 @@ pub fn execute_tool_response<'a>(
             has_server_credential,
             billing_context_builder,
             catalog_service_slug.as_deref(),
+            None,
         ))
         .await?
         {
-            McpToolExecutionOutcome::Response(response) => Ok(response),
+            McpToolExecutionOutcome::Response(response) => {
+                if matches!(
+                    endpoint.attachment_input,
+                    Some(super::lark_attachment_tool::Projection::Stored(_))
+                ) && matches!(response.origin, ToolResponseOrigin::Downstream)
+                {
+                    super::lark_attachment_tool::validate_response(
+                        response.status,
+                        &response.text,
+                    )?;
+                }
+                Ok(response)
+            }
             McpToolExecutionOutcome::ProviderOutcomeUnknown(error) => Err(error),
             McpToolExecutionOutcome::ProviderUnreachable(error) => Err(error),
         }
@@ -4988,6 +5336,7 @@ pub fn execute_tool_resolved<'a>(
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
     catalog_service_slug: Option<&'a str>,
+    attested_delegated_credentials: Option<Vec<super::delegation_service::DelegatedCredential>>,
 ) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(async move {
         let resource_source = super::resource_adapter::source(
@@ -5049,6 +5398,7 @@ pub fn execute_tool_resolved<'a>(
             has_server_credential,
             billing_context_builder,
             catalog_service_slug,
+            attested_delegated_credentials,
             lease.clone(),
         );
         // Preserve uncertain outcomes so approval redemption cannot replay
@@ -5105,6 +5455,7 @@ fn execute_tool_resolved_boxed<'a>(
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
     catalog_service_slug: Option<&'a str>,
+    attested_delegated_credentials: Option<Vec<super::delegation_service::DelegatedCredential>>,
     service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(execute_tool_resolved_inner(
@@ -5130,17 +5481,16 @@ fn execute_tool_resolved_boxed<'a>(
         has_server_credential,
         billing_context_builder,
         catalog_service_slug,
+        attested_delegated_credentials,
         service_lease,
     ))
 }
 
 // Keep forwarding-only temporaries off the authorization/acknowledgement stack.
 // Invoke the constructor outside the caller's poll frame before boxing.
-fn box_mcp_forwarding<'a, F>(
-    make: impl FnOnce() -> F,
-) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>>
+fn box_mcp_forwarding<'a, F>(make: impl FnOnce() -> F) -> futures::future::BoxFuture<'a, F::Output>
 where
-    F: std::future::Future<Output = AppResult<McpToolExecutionOutcome>> + Send + 'a,
+    F: std::future::Future + Send + 'a,
 {
     Box::pin(make())
 }
@@ -5169,8 +5519,33 @@ async fn execute_tool_resolved_inner(
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
     catalog_service_slug: Option<&str>,
+    attested_delegated_credentials: Option<Vec<super::delegation_service::DelegatedCredential>>,
     service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> AppResult<McpToolExecutionOutcome> {
+    if super::lark_attachment_tool::is_attachment_operation(endpoint)
+        && prepared.managed_base.is_none()
+    {
+        let binding = prepared
+            .attachment_binding
+            .as_ref()
+            .ok_or_else(super::lark_attachment_tool::refused)?;
+        if !super::lark_attachment_tool::binding_matches(binding, user_id, exec_ctx.api_key_id)
+            || prepared.async_submission.is_some()
+            || prepared.async_continuation.is_some()
+        {
+            return Err(super::lark_attachment_tool::refused());
+        }
+        super::lark_attachment_tool::validate_binding(db, service, endpoint, binding).await?;
+    }
+    if let Some(base) = &prepared.managed_base
+        && (base.chat.user_id != user_id
+            || exec_ctx.api_key_id != Some(base.chat.api_key_id.as_str())
+            || prepared.async_submission.is_some()
+            || prepared.async_continuation.is_some()
+            || node_route.is_some())
+    {
+        return Err(super::lark_attachment_tool::refused());
+    }
     super::org_agent_service::authorize_service_with_access(
         db,
         user_id,
@@ -5302,7 +5677,11 @@ async fn execute_tool_resolved_inner(
                 &target,
                 Some((
                     prepared.body.as_deref().unwrap_or_default(),
-                    Some("application/json"),
+                    if prepared.attachment_binding.is_some() {
+                        prepared.body_content_type.as_deref()
+                    } else {
+                        Some("application/json")
+                    },
                 )),
             )
             .await?
@@ -5332,7 +5711,11 @@ async fn execute_tool_resolved_inner(
                 false,
                 Some((
                     prepared.body.as_deref().unwrap_or_default(),
-                    Some("application/json"),
+                    if prepared.attachment_binding.is_some() {
+                        prepared.body_content_type.as_deref()
+                    } else {
+                        Some("application/json")
+                    },
                 )),
             )
             .await?
@@ -5356,6 +5739,8 @@ async fn execute_tool_resolved_inner(
 
     box_mcp_forwarding(move || async move {
         let PreparedProxyCall {
+            managed_base,
+            attachment_binding,
             resource_source: _,
             automatic_receipt,
             async_submission: _,
@@ -5368,7 +5753,7 @@ async fn execute_tool_resolved_inner(
             parameter_headers,
             server_owned_headers,
             body,
-            body_content_type: _,
+            body_content_type,
             is_generic_proxy_endpoint,
             approval_metadata: _,
         } = prepared;
@@ -5499,10 +5884,25 @@ async fn execute_tool_resolved_inner(
 
         identity_headers.extend(parameter_headers);
 
-        // Resolve delegated credentials (only for platform services).
+        // Resolve legacy delegation or the guarded automatic no-auth exception.
         // When a node route exists, swallow errors -- the node agent may inject
         // the credential locally, matching proxy.rs:891 behavior.
-        let delegated = match &service.source {
+        // Exact redemption supplies the same vector whose metadata authority
+        // was checked after materialization. Re-resolving here would reopen it.
+        let delegated = if let Some(credentials) = attested_delegated_credentials {
+            credentials
+        } else { match &service.source {
+            McpToolSource::UserManaged {
+                user_service_id,
+                catalog_service_id: Some(catalog_service_id),
+                effective_owner_id,
+                ..
+            } if node_route.is_none() => {
+                delegation_service::resolve_optional_auto_provision_credentials(
+                    db, encryption_keys, effective_owner_id, user_service_id,
+                    catalog_service_id, &target, Some(connection_expiry_notifier),
+                ).await?
+            }
             McpToolSource::UserManaged { .. } | McpToolSource::Internal => Vec::new(),
             McpToolSource::Platform {
                 downstream_service_id,
@@ -5538,12 +5938,12 @@ async fn execute_tool_resolved_inner(
                     }
                 }
             }
-        };
+        }};
 
         proxy_service::validate_ifttt_delegation(&target, &delegated)?;
 
         // Content-Type header
-        let req_headers = if is_generic_proxy_endpoint {
+        let mut req_headers = if is_generic_proxy_endpoint {
             let mut h = reqwest::header::HeaderMap::new();
             if body.is_some() {
                 h.insert(
@@ -5555,6 +5955,11 @@ async fn execute_tool_resolved_inner(
         } else {
             build_downstream_request_headers(endpoint, body.is_some())?
         };
+        if attachment_binding.is_some() {
+            req_headers.insert(reqwest::header::CONTENT_TYPE,
+                body_content_type.as_deref().ok_or_else(super::lark_attachment_tool::refused)?.parse()
+                .map_err(|_|super::lark_attachment_tool::refused())?);
+        }
         let resource_owner_id = billing_context_builder.effective_owner_id.clone();
         let billing_ctx = billing_context_builder
             .build(
@@ -5570,7 +5975,10 @@ async fn execute_tool_resolved_inner(
                 (!is_generic_proxy_endpoint).then_some(endpoint.name.as_str()),
             )
             .await?;
-        let billing_ctx = billing_ctx.with_request_body(body.as_deref());
+        let billing_ctx = billing_ctx.with_assistant_provenance(
+            assistant_chat.is_some(), false,
+            super::llm_usage_service::model_execution(super::llm_usage_service::inference_service(&target.service), method.as_str(), &path, false),
+        ).with_request_body(body.as_deref());
         let attribution = exec_ctx.attribution.clone().unwrap_or_else(|| {
             super::service_insights_activity::RequestAttribution {
                 actor: super::audit_service::AuditActor {
@@ -5616,7 +6024,7 @@ async fn execute_tool_resolved_inner(
                 (&billing_ctx, &resource_owner_id, assistant_chat.as_ref()),
             );
             destination_audit.dispatch();
-            let managed = match super::telnyx_platform_service::execute(
+            let managed = match box_mcp_forwarding(|| super::telnyx_platform_service::execute(
                 db,
                 billing.clone(),
                 billing_ctx,
@@ -5627,7 +6035,7 @@ async fn execute_tool_resolved_inner(
                 body.as_deref().unwrap_or_default(),
                 service_lease,
                 managed_guard,
-            )
+            ))
             .await
             {
                 Ok(response) => response,
@@ -5660,11 +6068,41 @@ async fn execute_tool_resolved_inner(
                 origin: ToolResponseOrigin::Downstream,
             }));
         }
-        let metered = billing
-            .open(&billing_ctx)
+        let metered = box_mcp_forwarding(|| billing.open(&billing_ctx))
             .await
             .inspect_err(|error| request_audit.admission_error(error))?;
         let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
+
+        if let Some(base)=managed_base.as_ref() {
+            return box_mcp_forwarding(|| async move {
+            let admission=assistant_admission.as_ref().ok_or_else(super::lark_attachment_tool::refused)?;
+            let guard=super::assistant_service_execution::LarkManagedGuard::new(db,encryption_keys,admission,
+                &target,service,endpoint,base,&path,body.as_deref().unwrap_or_default())?;
+            guard.revalidate().await?;
+            billing.mark_forwarded(&metered).await?;
+            destination_audit.dispatch();
+            let result=super::lark_base_writes::execute(db,encryption_keys,base,&guard,
+                super::lark_base_writes::transport::Transport {
+                    target:&target,tokens:token_exchange_cache,cache:cloud_response_cache,
+                    permit:billing_egress_permit,identity:identity_headers,delegated,caller:exec_ctx.caller_token,
+                }).await;
+            let (status,text)=match result {
+                Ok(value)=>(200,serde_json::to_string(&value).map_err(|_|AppError::Internal("Invalid Base result".into()))?),
+                Err(error)=>{
+                    billing.settle(&metered,mcp_platform_usage_for_path(&[],request_len,&target.service,&path,409),None,None).await?;
+                    return Err(error);
+                }
+            };
+            billing.settle(&metered,mcp_platform_usage_for_path(text.as_bytes(),request_len,&target.service,&path,status),None,None).await?;
+            destination_audit.complete(status);
+            request_audit.response(status);
+            if let Some(chat)=assistant_chat.as_ref() {
+                if let Some(receipt)=&automatic_receipt {receipt.record(db,chat).await;}
+                else {admission.receipt(db,chat,assistant_auto).await;}
+            }
+            Ok(McpToolExecutionOutcome::Response(tool_response(status,Some("application/json"),text.as_bytes())))
+            }).await;
+        }
 
         // -------------------------------------------------------------------
         // Route through node when a node route exists (primary + fallbacks).
@@ -5710,7 +6148,7 @@ async fn execute_tool_resolved_inner(
                 method: method_str,
                 path: prepared.path,
                 query: prepared.query,
-                headers: prepared.headers,
+                headers: (prepared.headers),
                 body: body.as_ref().map(|b| b.to_vec()),
             };
 
@@ -5772,6 +6210,9 @@ async fn execute_tool_resolved_inner(
                         .await?;
                     return Err(error);
                 }
+                if let Some(binding)=attachment_binding.as_ref() {
+                    super::lark_attachment_tool::validate_binding(db,service,endpoint,binding).await?;
+                }
                 match node_ws_manager
                     .send_proxy_request_classified(
                         nid,
@@ -5782,8 +6223,7 @@ async fn execute_tool_resolved_inner(
                     .await
                 {
                     Ok(ProxyResponseType::Complete(resp)) => {
-                        billing
-                            .settle(
+                        box_mcp_forwarding(|| billing.settle(
                                 &metered,
                                 mcp_platform_usage_for_path(
                                     &resp.body,
@@ -5794,7 +6234,7 @@ async fn execute_tool_resolved_inner(
                                 ),
                                 None,
                                 None,
-                            )
+                            ))
                             .await?;
                         destination_audit.complete(resp.status);
                         request_audit.response(resp.status);
@@ -5828,8 +6268,7 @@ async fn execute_tool_resolved_inner(
                                 return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
                             }
                         };
-                        billing
-                            .settle(
+                        box_mcp_forwarding(|| billing.settle(
                                 &metered,
                                 mcp_platform_usage_for_path(
                                     &body_buf,
@@ -5840,7 +6279,7 @@ async fn execute_tool_resolved_inner(
                                 ),
                                 None,
                                 None,
-                            )
+                            ))
                             .await?;
                         destination_audit.complete(status);
                         request_audit.response(status);
@@ -5916,13 +6355,33 @@ async fn execute_tool_resolved_inner(
                 return Err(error);
             }
         }
+        let proof_connection_id = match &service.source {
+            McpToolSource::UserManaged { user_service_id, .. } => Some(user_service_id.as_str()),
+            _ => None,
+        };
+        let resource_proof = match super::resource_request_proof::prepare_admitted(
+            db, jwt_keys, config, user_id, exec_ctx.api_key_id, exec_ctx.api_key_credential_id,
+            proof_connection_id, &target, &target.service.id, method.as_str(), &path,
+            query.as_deref(), exec_ctx.assistant_chat.is_some()
+                && assistant_admission.is_some() && node_route.is_none()
+                && body.as_ref().is_none_or(|bytes| bytes.is_empty())
+                && delegated.is_empty() && server_owned_headers.is_empty(),
+        ).await {
+            Ok(proof) => proof,
+            Err(error) => {
+                billing.reject_before_send(&metered, "resource_proof_authority_changed", false).await?;
+                return Err(error);
+            }
+        };
         billing.mark_forwarded(&metered).await?;
         let egress_guard = assistant_admission.as_ref().map(|admission| {
             admission
                 .http_egress(db, encryption_keys, &target, method.as_str(), &path)
                 .routed(node_route.as_ref())
         });
-        let response = match proxy_service::forward_request_with_egress_guard(
+        let egress_guard = super::assistant_service_execution::HttpEgressGuard::with_attachment(
+            egress_guard,db,service,endpoint,attachment_binding.as_ref());
+        let response = match proxy_service::forward_request_with_resource_proof(
             http_client,
             &target,
             method,
@@ -5938,6 +6397,7 @@ async fn execute_tool_resolved_inner(
             server_owned_headers,
             billing_egress_permit,
             egress_guard.as_ref(),
+            resource_proof.as_ref(),
         )
         .await
         {
@@ -6037,8 +6497,7 @@ async fn execute_tool_resolved_inner(
                 ));
             }
         };
-        billing
-            .settle(
+        box_mcp_forwarding(|| billing.settle(
                 &metered,
                 mcp_platform_usage_for_path(
                     body_text.as_bytes(),
@@ -6049,7 +6508,7 @@ async fn execute_tool_resolved_inner(
                 ),
                 None,
                 None,
-            )
+            ))
             .await?;
 
         destination_audit.complete(status);
@@ -6313,6 +6772,49 @@ pub fn rank_search_candidates(
         .collect()
 }
 
+/// Return the one connected service named by an exact, trimmed, case-
+/// insensitive connection-ID query. IDs are intentionally excluded from the
+/// ordinary text matcher so UUID fragments cannot affect search results.
+pub fn exact_connection_query<'a>(
+    services: &'a [McpToolService],
+    query: &str,
+) -> Option<&'a McpToolService> {
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+    services
+        .iter()
+        .find(|service| service.service_id.eq_ignore_ascii_case(query))
+}
+
+fn search_tool_definition(
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+) -> McpToolDefinition {
+    let name = format!("{}__{}", service.service_slug, endpoint.name);
+    let mut description = format!(
+        "[{}] {}",
+        service.service_name,
+        endpoint.description.as_deref().unwrap_or(&endpoint.name),
+    );
+    if endpoint.async_operation.is_some() {
+        description.push_str(
+            " Asynchronous submit: NyxID resumes assistant threads with the result. Prefer for long work; end the turn instead of polling.",
+        );
+    }
+    let input_schema = if service.is_generic_proxy {
+        build_generic_proxy_input_schema()
+    } else {
+        build_input_schema(endpoint)
+    };
+    McpToolDefinition {
+        name,
+        description,
+        input_schema,
+    }
+}
+
 /// Search ALL user tools (regardless of activation state) and return matches
 /// plus the service IDs they belong to.
 pub fn search_all_tools_ranked(
@@ -6320,11 +6822,26 @@ pub fn search_all_tools_ranked(
     query: &str,
     ranks: &HashMap<String, u32>,
 ) -> SearchResult {
+    if let Some(service) = exact_connection_query(services, query) {
+        let matches = service
+            .endpoints
+            .iter()
+            .take(MAX_SEARCH_RESULTS)
+            .map(|endpoint| search_tool_definition(service, endpoint))
+            .collect();
+        return SearchResult {
+            matches,
+            matched_service_ids: vec![service.service_id.clone()],
+        };
+    }
+
     // Models phrase queries freely ("skill search", "light state"), so match
-    // each query word independently against the qualified tool name, the
-    // service identity and the description, then rank tools that contain
-    // every word above partial matches. Words are substrings so concatenated
-    // operation names such as `getentitystate` still match "entity state".
+    // each query word independently against the qualified tool name and the
+    // service description, then rank tools that contain every word above
+    // partial matches. Words are substrings so concatenated operation names
+    // such as `getentitystate` still match "entity state". A connection ID is
+    // a separate exact-match escape hatch; it must never become searchable
+    // text because UUID substrings would pollute ordinary discovery.
     let matcher = ToolSearch::new(query);
     let mut candidates: Vec<(
         usize,
@@ -6337,16 +6854,8 @@ pub fn search_all_tools_ranked(
     )> = Vec::new();
     for service in services {
         for endpoint in &service.endpoints {
-            let name = format!("{}__{}", service.service_slug, endpoint.name);
-            let mut description = format!(
-                "[{}] {}",
-                service.service_name,
-                endpoint.description.as_deref().unwrap_or(&endpoint.name),
-            );
-            if endpoint.async_operation.is_some() {
-                description.push_str(" Asynchronous submit: NyxID resumes assistant threads with the result. Prefer for long work; end the turn instead of polling.");
-            }
-            if let Some((matched, in_name)) = matcher.rank(&name, &description) {
+            let tool = search_tool_definition(service, endpoint);
+            if let Some((matched, in_name)) = matcher.rank(&tool.name, &tool.description) {
                 let order = candidates.len();
                 candidates.push((
                     matched,
@@ -6354,8 +6863,8 @@ pub fn search_all_tools_ranked(
                     order,
                     service,
                     endpoint,
-                    name,
-                    description,
+                    tool.name,
+                    tool.description,
                 ));
             }
         }
@@ -6390,16 +6899,10 @@ pub fn search_all_tools_ranked(
     let mut matched_ids: HashSet<String> = HashSet::new();
     for (_, _, _, service, endpoint, name, description) in candidates {
         matched_ids.insert(service.service_id.clone());
-        let input_schema = if service.is_generic_proxy {
-            build_generic_proxy_input_schema()
-        } else {
-            build_input_schema(endpoint)
-        };
-        matches.push(McpToolDefinition {
-            name,
-            description,
-            input_schema,
-        });
+        let mut tool = search_tool_definition(service, endpoint);
+        tool.name = name;
+        tool.description = description;
+        matches.push(tool);
     }
 
     SearchResult {
@@ -6418,18 +6921,23 @@ pub fn list_connected_services(
     services: &[McpToolService],
     query: Option<&str>,
 ) -> serde_json::Value {
-    list_connected_services_ranked(services, query, &HashMap::new())
+    list_connected_services_ranked(services, query, &HashMap::new(), "")
 }
 
 pub fn list_connected_services_ranked(
     services: &[McpToolService],
     query: Option<&str>,
     ranks: &HashMap<String, u32>,
+    actor_user_id: &str,
 ) -> serde_json::Value {
     let query = query
         .map(str::trim)
         .filter(|query| !query.is_empty())
         .map(str::to_lowercase);
+    let exact_service_id = query
+        .as_deref()
+        .and_then(|query| exact_connection_query(services, query))
+        .map(|service| service.service_id.as_str());
 
     let mut ordered: Vec<_> = services.iter().collect();
     if !ranks.is_empty() {
@@ -6442,20 +6950,31 @@ pub fn list_connected_services_ranked(
     let results: Vec<serde_json::Value> = ordered
         .into_iter()
         .filter(|service| {
-            query.as_ref().is_none_or(|query| {
-                service.service_name.to_lowercase().contains(query)
-                    || service.service_slug.to_lowercase().contains(query)
-                    || service
-                        .description
-                        .as_deref()
-                        .is_some_and(|description| description.to_lowercase().contains(query))
-            })
+            exact_service_id.is_some_and(|id| service.service_id == id)
+                || (exact_service_id.is_none()
+                    && query.as_ref().is_none_or(|query| {
+                        service.service_name.to_lowercase().contains(query)
+                            || service.service_slug.to_lowercase().contains(query)
+                            || service.description.as_deref().is_some_and(|description| {
+                                description.to_lowercase().contains(query)
+                            })
+                    }))
         })
         .map(|service| {
             let source = match &service.source {
                 McpToolSource::Internal => "internal",
                 McpToolSource::Platform { .. } => "platform",
                 McpToolSource::UserManaged { .. } => "user_service",
+            };
+            let owner_kind = match &service.source {
+                McpToolSource::UserManaged {
+                    effective_owner_id, ..
+                } => Some(if effective_owner_id == actor_user_id {
+                    "personal"
+                } else {
+                    "organization"
+                }),
+                _ => None,
             };
             serde_json::json!({
                 "service_id": service.service_id,
@@ -6464,6 +6983,7 @@ pub fn list_connected_services_ranked(
                 "description": service.description,
                 "category": service.service_category,
                 "source": source,
+                "owner_kind": owner_kind,
                 "executable": service.executable,
                 "tool_count": service.endpoints.len(),
                 "preference_rank": preference_rank(service, ranks),
@@ -7153,6 +7673,7 @@ mod tests {
                         agent_owner: None,
                         operation_scopes: None,
                         api_key_id: None,
+                        api_key_credential_id: None,
                         allow_all_nodes: true,
                         allowed_node_ids: &[],
                     },
@@ -7255,6 +7776,7 @@ mod tests {
             .find(|endpoint| endpoint.name == name)
             .unwrap();
         McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: name.to_string(),
@@ -7406,6 +7928,7 @@ mod tests {
     fn selected_typed_operation_cannot_shift_to_another_allowlisted_custom_method() {
         use crate::models::downstream_service::ProxyOperationRule;
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             method: "POST".into(),
@@ -7450,6 +7973,7 @@ mod tests {
             .is_err()
         );
         let other = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             path: "/v1/items/{id}:other".into(),
@@ -7532,6 +8056,7 @@ mod tests {
     #[test]
     fn google_ai_no_policy_keeps_generate_content_path_bytes() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             method: "POST".into(),
@@ -7651,7 +8176,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["b", "platform", "a", "c"]
         );
-        let listed = list_connected_services_ranked(&services, None, &ranks);
+        let listed = list_connected_services_ranked(&services, None, &ranks, "test-actor");
         assert_eq!(listed["count"], 4);
         assert_eq!(listed["services"][0]["preference_rank"], 1);
         assert_eq!(listed["services"][2]["preference_rank"], 2);
@@ -7702,7 +8227,7 @@ mod tests {
                 "a1__op2", "a2__op0"
             ]
         );
-        let listed = list_connected_services_ranked(&services, None, &ranks);
+        let listed = list_connected_services_ranked(&services, None, &ranks, "test-actor");
         let ids: Vec<_> = listed["services"]
             .as_array()
             .unwrap()
@@ -7716,7 +8241,7 @@ mod tests {
         );
         assert_eq!(
             list_connected_services(&services, None),
-            list_connected_services_ranked(&services, None, &HashMap::new())
+            list_connected_services_ranked(&services, None, &HashMap::new(), "test-actor")
         );
         let mut mixed = vec![
             connection("a1", "a", &["search"]),
@@ -7809,6 +8334,7 @@ mod tests {
 
     fn make_endpoint(name: &str, description: &str) -> McpToolEndpoint {
         McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: format!("endpoint-{name}"),
@@ -7937,6 +8463,7 @@ mod tests {
             .unwrap();
         db.collection::<UserServiceConnection>(CONNECTIONS)
             .insert_one(UserServiceConnection {
+                secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: owner.clone(),
                 service_id: catalog.id.clone(),
@@ -7976,7 +8503,15 @@ mod tests {
             .await
             .unwrap();
         let manager = NodeWsManager::new(30, 100);
-        let load = || load_user_tools_all_scoped(&db, &manager, &owner, NodeScope::Unrestricted);
+        let load = || {
+            load_user_tools_all_scoped(
+                &db,
+                &manager,
+                &owner,
+                NodeScope::Unrestricted,
+                ServiceScope::Unrestricted,
+            )
+        };
         let inherited = load().await.unwrap();
         let inherited = inherited
             .iter()
@@ -7987,6 +8522,29 @@ mod tests {
             catalog.recommended_skill_refs
         );
         assert_eq!(inherited.skills_revision, Some(4));
+        let allowed_ids = vec![instance.id.clone()];
+        let allowed = load_user_tools_all_scoped(
+            &db,
+            &manager,
+            &owner,
+            NodeScope::Unrestricted,
+            ServiceScope::Allowed(&allowed_ids),
+        )
+        .await
+        .unwrap();
+        let allowed_instance = allowed
+            .iter()
+            .find(|s| s.service_id == instance.id)
+            .unwrap();
+        assert_eq!(
+            allowed_instance.recommended_skills, inherited.recommended_skills,
+            "restricted user-service catalog fallback must preserve recommended skills"
+        );
+        assert_eq!(
+            allowed_instance.recommended_skill_refs, inherited.recommended_skill_refs,
+            "restricted user-service catalog fallback must preserve skill refs"
+        );
+        assert_eq!(allowed_instance.skills_revision, inherited.skills_revision);
         for names in [vec!["local"], vec![]] {
             db.collection::<mongodb::bson::Document>(USER_ENDPOINTS)
                 .update_one(
@@ -8003,6 +8561,179 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn restricted_scopes_preserve_catalog_skill_fallbacks() {
+        use crate::models::assistant_agent::AgentGrants;
+        use crate::models::catalog_skill_revision::SkillReference;
+        use crate::services::assistant_team_service::{self, GrantChange};
+        use crate::services::org_agent_tests::Fixture;
+
+        let f = Fixture::new("mcp_restricted_catalog_skill_fallbacks").await;
+        let (agent, row) = f.create().await;
+
+        let mut auto_catalog = dummy_service();
+        auto_catalog.id = uuid::Uuid::new_v4().to_string();
+        auto_catalog.slug = "auto-skill-catalog".into();
+        auto_catalog.requires_user_credential = false;
+        auto_catalog.recommended_skills = Some(vec!["auto-skill".into()]);
+        auto_catalog.skills_revision = 7;
+        auto_catalog.recommended_skill_refs = Some(vec![SkillReference {
+            source: "ornn".into(),
+            skill_id: "auto-skill-id".into(),
+            name: "auto-skill".into(),
+            version: "1.0".into(),
+            sha256: "a".repeat(64),
+            dependencies: vec![],
+            disabled: false,
+        }]);
+        let mut credential_catalog = dummy_service();
+        credential_catalog.id = uuid::Uuid::new_v4().to_string();
+        credential_catalog.slug = "credential-skill-catalog".into();
+        credential_catalog.requires_user_credential = true;
+        credential_catalog.recommended_skills = Some(vec!["credential-skill".into()]);
+        credential_catalog.skills_revision = 9;
+        credential_catalog.recommended_skill_refs = Some(vec![SkillReference {
+            source: "ornn".into(),
+            skill_id: "credential-skill-id".into(),
+            name: "credential-skill".into(),
+            version: "1.0".into(),
+            sha256: "b".repeat(64),
+            dependencies: vec![],
+            disabled: false,
+        }]);
+        let auto_catalog_id = auto_catalog.id.clone();
+        let credential_catalog_id = credential_catalog.id.clone();
+        f.state
+            .db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many(vec![auto_catalog, credential_catalog])
+            .await
+            .unwrap();
+
+        let auto_endpoint_id = uuid::Uuid::new_v4().to_string();
+        let credential_endpoint_id = uuid::Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_many(vec![
+                test_user_endpoint(
+                    &auto_endpoint_id,
+                    &f.org,
+                    "Auto instance",
+                    "https://auto.example.com",
+                    None,
+                    Some(&auto_catalog_id),
+                ),
+                test_user_endpoint(
+                    &credential_endpoint_id,
+                    &f.org,
+                    "Credential instance",
+                    "https://credential.example.com",
+                    None,
+                    Some(&credential_catalog_id),
+                ),
+            ])
+            .await
+            .unwrap();
+        let auto_user_id = uuid::Uuid::new_v4().to_string();
+        let credential_user_id = uuid::Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection::<UserService>(USER_SERVICES)
+            .insert_many(vec![
+                test_user_service(
+                    &auto_user_id,
+                    &f.org,
+                    "auto-skill-instance",
+                    &auto_endpoint_id,
+                    Some(&auto_catalog_id),
+                    None,
+                ),
+                test_user_service(
+                    &credential_user_id,
+                    &f.org,
+                    "credential-skill-instance",
+                    &credential_endpoint_id,
+                    Some(&credential_catalog_id),
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+        assistant_team_service::set_grants(
+            &f.state.db,
+            &f.admin,
+            &agent.id,
+            GrantChange::Add(AgentGrants {
+                service_ids: vec![auto_user_id.clone(), credential_user_id.clone()],
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+        let key = f.key(&row).await;
+        let auth = crate::mw::auth::api_key_auth_user(&f.state.db, &key, None, None, None)
+            .await
+            .unwrap();
+        let manager = NodeWsManager::new(30, 100);
+        let unrestricted = load_user_tools_all_scoped(
+            &f.state.db,
+            &manager,
+            &f.admin,
+            NodeScope::Unrestricted,
+            ServiceScope::Unrestricted,
+        )
+        .await
+        .unwrap();
+        let allowed_ids = vec![auto_user_id.clone(), credential_user_id.clone()];
+        let allowed = load_user_tools_all_scoped(
+            &f.state.db,
+            &manager,
+            &f.admin,
+            NodeScope::Unrestricted,
+            ServiceScope::Allowed(&allowed_ids),
+        )
+        .await
+        .unwrap();
+        let organization = load_user_tools_all_scoped(
+            &f.state.db,
+            &manager,
+            &f.admin,
+            NodeScope::Unrestricted,
+            ServiceScope::Organization {
+                access: auth.org_agent_access.as_ref().unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let expected_refs = unrestricted
+            .iter()
+            .find(|service| service.service_id == auto_user_id)
+            .unwrap()
+            .recommended_skill_refs
+            .clone();
+        for services in [&unrestricted, &allowed, &organization] {
+            let auto = services
+                .iter()
+                .find(|service| service.service_id == auto_user_id)
+                .unwrap();
+            assert_eq!(auto.recommended_skills, vec!["auto-skill"]);
+            assert_eq!(auto.recommended_skill_refs, expected_refs);
+            assert_eq!(auto.skills_revision, Some(7));
+            let credential = services
+                .iter()
+                .find(|service| service.service_id == credential_user_id)
+                .unwrap();
+            assert!(credential.recommended_skills.is_empty());
+            assert!(credential.recommended_skill_refs.is_none());
+            assert_eq!(credential.skills_revision, None);
+        }
+
+        f.state.db.drop().await.unwrap();
+    }
+
     // ---- Canonical exact-operation projection (#1440) ---------------------
 
     fn user_managed(mut service: McpToolService, user_service_id: &str) -> McpToolService {
@@ -8014,6 +8745,42 @@ mod tests {
             has_server_credential: true,
         };
         service
+    }
+
+    #[test]
+    fn preferred_same_slug_connections_still_choose_personal_first() {
+        let personal = test_user_service("personal", "actor", "shared", "endpoint-p", None, None);
+        let organization =
+            test_user_service("organization", "org", "shared", "endpoint-o", None, None);
+        let candidates = vec![
+            ResolvedUserService {
+                service: organization,
+                effective_owner_id: "org".into(),
+                has_server_credential: true,
+                executable: true,
+            },
+            ResolvedUserService {
+                service: personal,
+                effective_owner_id: "actor".into(),
+                has_server_credential: true,
+                executable: true,
+            },
+        ];
+        for preferred in [
+            vec!["organization".to_string(), "personal".to_string()],
+            vec!["personal".to_string(), "organization".to_string()],
+        ] {
+            let winners = select_slug_winner_indices(
+                &candidates,
+                ServiceScope::Preferring(&preferred),
+                "actor",
+            );
+            assert_eq!(
+                winners,
+                HashSet::from([1]),
+                "preferred list order must not win"
+            );
+        }
     }
 
     #[test]
@@ -8280,6 +9047,7 @@ mod tests {
     #[test]
     fn mcp_preparation_denies_before_approval_descriptor_for_blocked_order_read() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             method: "GET".to_string(),
@@ -8304,6 +9072,7 @@ mod tests {
     #[test]
     fn mcp_cancellation_prepares_a_write_for_the_existing_approval_path() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             method: "POST".to_string(),
@@ -8335,6 +9104,7 @@ mod tests {
     #[test]
     fn mcp_no_policy_keeps_existing_passthrough_preparation() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             method: "GET".to_string(),
@@ -8627,6 +9397,139 @@ mod tests {
         }
     }
 
+    fn test_chat(
+        role: crate::models::assistant_conversation::AgentRole,
+    ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
+        crate::services::assistant_acknowledgement_service::ChatAuthority {
+            channel_adapter_origin: None,
+            invocation_controlled: false,
+            invocation_id: None,
+            platform_thread: false,
+            platform_origin: None,
+            org_agent_access: None,
+            turn_id: None,
+            turn_stopped: false,
+            turn_live: false,
+            machine_node_ids: Vec::new(),
+            saved_login_ids: Vec::new(),
+            conversation_id: "conversation".into(),
+            user_id: "actor".into(),
+            api_key_id: "key".into(),
+            role,
+            agent_id: "agent".into(),
+            agent_name: "agent".into(),
+            guest: false,
+            confirmation_policy: None,
+            report_to: None,
+            with_nyxbot: false,
+        }
+    }
+
+    #[test]
+    fn caller_service_scope_covers_unbound_human_and_chat_branches() {
+        let ids = ["preferred".to_string()];
+        assert!(matches!(
+            caller_service_scope("actor", None, None, None, true, &ids),
+            ServiceScope::Unrestricted
+        ));
+        assert!(matches!(
+            caller_service_scope("actor", None, None, None, false, &ids),
+            ServiceScope::Allowed(values) if values == ids
+        ));
+        let orchestrator =
+            test_chat(crate::models::assistant_conversation::AgentRole::Orchestrator);
+        assert!(matches!(
+            caller_service_scope("actor", None, None, Some(&orchestrator), false, &ids),
+            ServiceScope::Unrestricted
+        ));
+        let specialist = test_chat(crate::models::assistant_conversation::AgentRole::Subagent);
+        assert!(matches!(
+            caller_service_scope("actor", None, None, Some(&specialist), false, &ids),
+            ServiceScope::Preferring(values) if values == ids
+        ));
+        let mut guest = test_chat(crate::models::assistant_conversation::AgentRole::Subagent);
+        guest.guest = true;
+        assert!(matches!(
+            caller_service_scope("actor", None, None, Some(&guest), false, &ids),
+            ServiceScope::Preferring(values) if values == ids
+        ));
+        assert!(matches!(
+            caller_service_scope("actor", Some("actor"), None, Some(&specialist), false, &ids),
+            ServiceScope::Preferring(values) if values == ids
+        ));
+    }
+
+    #[test]
+    fn caller_service_scope_fails_closed_for_bound_owner_without_matching_chat_snapshot() {
+        let ids = ["granted".to_string()];
+        assert!(matches!(
+            caller_service_scope(
+                "actor",
+                Some("org"),
+                None,
+                None,
+                true,
+                &ids,
+            ),
+            ServiceScope::Allowed(values) if values == ids
+        ));
+        let matching_access = crate::services::org_agent_service::test_request_access(
+            "actor",
+            "org",
+            crate::services::org_service::OwnerAccess::AsOrgMember {
+                org_user_id: "org".into(),
+                membership_id: "membership".into(),
+                role: crate::models::org_membership::OrgRole::Member,
+                allowed_service_ids: None,
+            },
+        );
+        assert!(matches!(
+            caller_service_scope(
+                "actor",
+                Some("org"),
+                Some(&matching_access),
+                None,
+                true,
+                &ids,
+            ),
+            ServiceScope::Allowed(values) if values == ids
+        ));
+        assert!(matches!(
+            caller_service_scope(
+                "other-actor",
+                Some("org"),
+                Some(&matching_access),
+                Some(&test_chat(crate::models::assistant_conversation::AgentRole::Subagent)),
+                true,
+                &ids,
+            ),
+            ServiceScope::Allowed(values) if values == ids
+        ));
+        assert!(matches!(
+            caller_service_scope(
+                "actor",
+                Some("other-org"),
+                Some(&matching_access),
+                Some(&test_chat(crate::models::assistant_conversation::AgentRole::Subagent)),
+                true,
+                &ids,
+            ),
+            ServiceScope::Allowed(values) if values == ids
+        ));
+        let specialist = test_chat(crate::models::assistant_conversation::AgentRole::Subagent);
+        assert!(matches!(
+            caller_service_scope(
+                "actor",
+                Some("org"),
+                Some(&matching_access),
+                Some(&specialist),
+                true,
+                &ids,
+            ),
+            ServiceScope::Organization { .. }
+        ));
+    }
+
     #[test]
     fn mcp_operation_descriptor_extracts_generic_proxy_method_and_path() {
         let endpoint = build_generic_proxy_endpoint("custom");
@@ -8729,6 +9632,7 @@ mod tests {
             assert!(!overrides(args.clone()), "{args}");
         }
         let header = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             method: "POST".to_string(),
             path: "/posts/{id}".to_string(),
@@ -8751,6 +9655,7 @@ mod tests {
         // A form endpoint's body is read as a form even when it looks like
         // JSON.
         let form = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             method: "POST".to_string(),
             path: "/Messages.json".to_string(),
@@ -8820,6 +9725,7 @@ mod tests {
     #[test]
     fn mounted_specs_of_catalog_services_keep_overlay_markers() {
         let endpoint = |name: &str, path: &str| McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             method: "POST".to_string(),
             path: path.to_string(),
@@ -9113,6 +10019,76 @@ mod tests {
         assert!(result.matched_service_ids.is_empty());
     }
 
+    #[test]
+    fn search_all_tools_matches_connection_id_only_exactly() {
+        let shadowed_uuid = "550e8400-e29b-41d4-a716-446655440add";
+        let services = vec![
+            make_service(
+                shadowed_uuid,
+                "Weather",
+                "weather",
+                vec![
+                    make_endpoint("get_forecast", "Get weather forecast"),
+                    make_endpoint("get_alerts", "Get weather alerts"),
+                ],
+            ),
+            make_service(
+                "svc-2",
+                "Address Book",
+                "contacts",
+                vec![make_endpoint(
+                    "search_contacts",
+                    "Search contacts; unrelated identifier fragment e29b",
+                )],
+            ),
+            make_service(
+                "svc-3",
+                "Add Entries",
+                "address-tools",
+                vec![make_endpoint("add_entry", "Add an entry")],
+            ),
+        ];
+
+        let exact = search_all_tools(&services, &format!("  {shadowed_uuid}  "));
+        assert_eq!(
+            exact
+                .matches
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            ["weather__get_forecast", "weather__get_alerts"]
+        );
+
+        // The UUID contains "add", but ordinary search must not inspect ID
+        // substrings or return the unrelated Weather connection.
+        let ordinary = search_all_tools(&services, "add");
+        assert!(
+            !ordinary
+                .matched_service_ids
+                .contains(&shadowed_uuid.to_string())
+        );
+        assert_eq!(
+            ordinary
+                .matches
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            ["address-tools__add_entry", "contacts__search_contacts"]
+        );
+
+        // Removing the ID from the searchable text preserves normal relevance
+        // and input ordering for a non-ID query.
+        let normal = search_all_tools(&services, "search");
+        assert_eq!(
+            normal
+                .matches
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            ["contacts__search_contacts"]
+        );
+    }
+
     // -- list_connected_services tests --
 
     #[test]
@@ -9261,6 +10237,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn list_connected_services_matches_connection_id_only_exactly() {
+        let id = "550e8400-e29b-41d4-a716-446655440add";
+        let services = [
+            make_service(
+                id,
+                "Weather",
+                "weather",
+                vec![make_endpoint("get_forecast", "Get weather forecast")],
+            ),
+            make_service(
+                "svc-2",
+                "Address Book",
+                "contacts",
+                vec![make_endpoint("search_contacts", "Search contacts")],
+            ),
+        ];
+
+        let exact =
+            list_connected_services(&services, Some("  550E8400-E29B-41D4-A716-446655440ADD  "));
+        assert_eq!(exact["count"], 1);
+        assert_eq!(exact["services"][0]["service_id"], id);
+
+        let ordinary = list_connected_services(&services, Some("add"));
+        assert_eq!(ordinary["count"], 1);
+        assert_eq!(ordinary["services"][0]["service_id"], "svc-2");
+    }
+
     #[tokio::test]
     async fn connected_service_loader_excludes_unconnected_and_marks_unavailable() {
         let Some(db) = connect_test_database("mcp_connected_services").await else {
@@ -9293,6 +10297,7 @@ mod tests {
 
         db.collection::<UserServiceConnection>(CONNECTIONS)
             .insert_one(UserServiceConnection {
+                secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
                 service_id: connected_id.clone(),
@@ -9365,10 +10370,15 @@ mod tests {
             .expect("insert unavailable user service");
 
         let node_ws_manager = NodeWsManager::new(30, 100);
-        let loaded =
-            load_user_tools_all_scoped(&db, &node_ws_manager, &user_id, NodeScope::Unrestricted)
-                .await
-                .expect("load connected services");
+        let loaded = load_user_tools_all_scoped(
+            &db,
+            &node_ws_manager,
+            &user_id,
+            NodeScope::Unrestricted,
+            ServiceScope::Unrestricted,
+        )
+        .await
+        .expect("load connected services");
         let result = list_connected_services(&loaded, None);
         let services = result["services"].as_array().expect("services array");
 
@@ -9427,18 +10437,26 @@ mod tests {
             .await
             .expect("insert member membership");
 
-        let visible_while_disabled = load_callable_user_services(
+        let grants =
+            crate::services::platform_key_service::OwnerGrants::load_for_listing(&db, &member_id)
+                .await
+                .unwrap();
+        let providers = crate::services::platform_key_service::load_providers(&db)
+            .await
+            .unwrap();
+        let options = UserToolLoadOptions {
+            providers: &providers,
+            service_scope: ServiceScope::Unrestricted,
+        };
+
+        let (visible_while_disabled, _) = load_callable_user_services(
             &db,
             &NodeWsManager::new(30, 100),
             &member_id,
             false,
             NodeScope::Unrestricted,
-            &crate::services::platform_key_service::OwnerGrants::load_for_listing(&db, &member_id)
-                .await
-                .unwrap(),
-            &crate::services::platform_key_service::load_providers(&db)
-                .await
-                .unwrap(),
+            &grants,
+            &options,
         )
         .await
         .expect("load member-callable services");
@@ -9453,18 +10471,14 @@ mod tests {
             .await
             .expect("enable admin-only policy");
 
-        let hidden_while_enabled = load_callable_user_services(
+        let (hidden_while_enabled, _) = load_callable_user_services(
             &db,
             &NodeWsManager::new(30, 100),
             &member_id,
             false,
             NodeScope::Unrestricted,
-            &crate::services::platform_key_service::OwnerGrants::load_for_listing(&db, &member_id)
-                .await
-                .unwrap(),
-            &crate::services::platform_key_service::load_providers(&db)
-                .await
-                .unwrap(),
+            &grants,
+            &options,
         )
         .await
         .expect("reload member-callable services after enabling policy");
@@ -9482,18 +10496,14 @@ mod tests {
             .await
             .expect("disable admin-only policy");
 
-        let visible_again = load_callable_user_services(
+        let (visible_again, _) = load_callable_user_services(
             &db,
             &NodeWsManager::new(30, 100),
             &member_id,
             false,
             NodeScope::Unrestricted,
-            &crate::services::platform_key_service::OwnerGrants::load_for_listing(&db, &member_id)
-                .await
-                .unwrap(),
-            &crate::services::platform_key_service::load_providers(&db)
-                .await
-                .unwrap(),
+            &grants,
+            &options,
         )
         .await
         .expect("reload member-callable services after disabling policy");
@@ -9958,6 +10968,7 @@ mod tests {
 
         db.collection::<UserServiceConnection>(CONNECTIONS)
             .insert_one(UserServiceConnection {
+                secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
                 service_id: auto_disconnected_id.clone(),
@@ -9974,10 +10985,15 @@ mod tests {
             .expect("insert explicit disconnect");
 
         let node_ws_manager = NodeWsManager::new(30, 100);
-        let loaded =
-            load_user_tools_all_scoped(&db, &node_ws_manager, &user_id, NodeScope::Unrestricted)
-                .await
-                .expect("load connected services");
+        let loaded = load_user_tools_all_scoped(
+            &db,
+            &node_ws_manager,
+            &user_id,
+            NodeScope::Unrestricted,
+            ServiceScope::Unrestricted,
+        )
+        .await
+        .expect("load connected services");
         let connected = list_connected_services(&loaded, None);
         let discover = discover_services(&db, &user_id, None, Some("connection"))
             .await
@@ -10646,10 +11662,15 @@ mod tests {
             .unwrap();
         assert_eq!(saved.status, "active");
         assert_eq!(
-            encryption
-                .decrypt(saved.access_token_encrypted.as_ref().unwrap())
+            crate::services::credential_record_service::CredentialRecord::key(&saved)
+                .decrypt(
+                    &encryption,
+                    "access_token_encrypted",
+                    saved.access_token_encrypted.as_deref().unwrap()
+                )
                 .await
-                .unwrap(),
+                .unwrap()
+                .as_slice(),
             b"ifttt-access"
         );
         assert_eq!(saved.token_scopes.as_deref(), Some("mcp"));
@@ -10658,10 +11679,15 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(
-            encryption
-                .decrypt(refreshed.refresh_token_encrypted.as_ref().unwrap())
+            crate::services::credential_record_service::CredentialRecord::key(&refreshed)
+                .decrypt(
+                    &encryption,
+                    "refresh_token_encrypted",
+                    refreshed.refresh_token_encrypted.as_deref().unwrap()
+                )
                 .await
-                .unwrap(),
+                .unwrap()
+                .as_slice(),
             b"rotated-refresh"
         );
         assert_eq!(refreshed.credential_epoch, saved.credential_epoch);
@@ -10703,7 +11729,7 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(resolved.target.credential, "rotated-access");
+        assert_eq!(resolved.target.credential.as_str(), "rotated-access");
         assert_eq!(resolved.target.base_url, ifttt_mcp::BASE_URL);
         assert_eq!(resolved.target.auth_method, ifttt_mcp::AUTH_METHOD);
         for (auth_method, endpoint_url) in [
@@ -10952,7 +11978,11 @@ mod tests {
         let encrypted = stored.credential_encrypted.as_ref().unwrap();
         assert!(!encrypted.windows(key.len()).any(|b| b == key.as_bytes()));
         assert_eq!(
-            encryption.decrypt(encrypted).await.unwrap().as_slice(),
+            crate::services::credential_record_service::CredentialRecord::key(&stored)
+                .decrypt(&encryption, "credential_encrypted", encrypted)
+                .await
+                .unwrap()
+                .as_slice(),
             key.as_bytes()
         );
         for invalid in [
@@ -11139,6 +12169,7 @@ mod tests {
     #[test]
     fn build_input_schema_uses_base64_string_for_binary_bodies() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11176,6 +12207,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_non_json_object_bodies() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11210,6 +12242,7 @@ mod tests {
     #[test]
     fn build_input_schema_exposes_body_when_content_type_has_no_schema() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11238,6 +12271,7 @@ mod tests {
     #[test]
     fn build_input_schema_treats_unknown_application_uploads_as_binary() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11266,6 +12300,7 @@ mod tests {
     #[test]
     fn build_input_schema_includes_supported_header_and_cookie_params() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11313,6 +12348,7 @@ mod tests {
     #[test]
     fn build_input_schema_uses_alternate_body_field_when_body_param_exists() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11351,6 +12387,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_json_body_when_properties_collide_with_params() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11408,6 +12445,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_json_body_when_properties_collide_with_blocked_header_params() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11447,6 +12485,7 @@ mod tests {
     fn build_input_schema_wraps_json_body_when_properties_collide_with_header_params_case_insensitively()
      {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11492,6 +12531,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_optional_json_body_without_requiring_it() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11526,6 +12566,7 @@ mod tests {
     #[test]
     fn build_input_schema_defaults_binary_media_type_when_missing() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11555,6 +12596,7 @@ mod tests {
     #[test]
     fn build_input_schema_defaults_wildcard_binary_media_type_to_octet_stream() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11585,6 +12627,7 @@ mod tests {
     fn build_input_schema_uses_alternate_body_field_when_body_header_param_exists_case_insensitively()
      {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11639,6 +12682,7 @@ mod tests {
             Some(serde_json::json!([parameter.clone()])),
         ] {
             let mut endpoint = McpToolEndpoint {
+                attachment_input: None,
                 async_operation: None,
                 method: "GET".into(),
                 path: "/search".into(),
@@ -11669,6 +12713,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11703,6 +12748,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11737,6 +12783,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11766,6 +12813,7 @@ mod tests {
     #[test]
     fn build_proxy_args_preserves_flattened_json_body_named_body_property() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11804,6 +12852,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_flattened_json_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11835,6 +12884,7 @@ mod tests {
     #[test]
     fn build_proxy_args_routes_header_and_cookie_params_out_of_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11906,6 +12956,7 @@ mod tests {
     #[test]
     fn build_proxy_args_accepts_header_parameters_case_insensitively() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11958,6 +13009,7 @@ mod tests {
     #[test]
     fn build_proxy_args_allows_missing_optional_wrapped_json_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -11990,6 +13042,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12028,6 +13081,7 @@ mod tests {
     #[test]
     fn build_proxy_args_wraps_json_body_when_properties_collide_with_params() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12104,6 +13158,7 @@ mod tests {
     #[test]
     fn build_proxy_args_wraps_json_body_when_properties_collide_with_blocked_header_params() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12158,6 +13213,7 @@ mod tests {
     fn build_proxy_args_wraps_json_body_when_properties_collide_with_header_params_case_insensitively()
      {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12216,6 +13272,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_binary_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12242,6 +13299,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_reserved_header_parameters() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12281,6 +13339,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_reserved_header_parameters_case_insensitively() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12321,6 +13380,7 @@ mod tests {
     fn build_proxy_args_uses_alternate_body_field_when_body_header_param_exists_case_insensitively()
     {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12366,6 +13426,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_extra_fields_for_wrapped_json_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12400,6 +13461,7 @@ mod tests {
     #[test]
     fn build_proxy_args_preserves_urlencoded_body_as_raw_text() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12432,6 +13494,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_unknown_args_when_endpoint_has_no_request_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12474,6 +13537,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_body_for_bodyless_post_endpoint() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12508,6 +13572,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_path_parameter() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12544,6 +13609,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_unresolved_path_templates_without_required_metadata() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12580,6 +13646,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_non_body_parameters() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12656,6 +13723,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_multipart_body() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12690,6 +13758,7 @@ mod tests {
     #[test]
     fn build_proxy_args_error_mentions_alternate_body_field_name() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12729,6 +13798,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_defaults_binary_schema_to_octet_stream() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12756,6 +13826,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_defaults_wildcard_binary_schema_to_octet_stream() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12783,6 +13854,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_uses_endpoint_content_type() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12810,6 +13882,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_omits_optional_body_without_payload() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12831,6 +13904,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_omits_default_json_without_payload() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12859,6 +13933,7 @@ mod tests {
     #[test]
     fn build_downstream_request_headers_sets_content_type_without_forcing_accept() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -12995,6 +14070,7 @@ mod tests {
     #[test]
     fn request_body_field_name_avoids_collision() {
         let endpoint = McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             target_id: None,
             endpoint_id: String::new(),
@@ -13174,7 +14250,7 @@ mod tests {
                 base_url: service.base_url.clone(),
                 auth_method: service.auth_method.clone(),
                 auth_key_name: service.auth_key_name.clone(),
-                credential: String::new(),
+                credential: Default::default(),
                 service,
                 catalog_default_headers: Vec::new(),
                 user_service_default_headers: Vec::new(),
@@ -13217,7 +14293,7 @@ mod tests {
             let mut resolution = mcp_billing_resolution("actor", None);
             resolution.credential_source = source.map(str::to_string);
             resolution.target.auth_method = "bearer".into();
-            resolution.target.credential = "test-token".into();
+            resolution.target.credential = "test-token".to_owned().into();
             resolution.target.service.billing =
                 Some(crate::models::service_billing::ServiceBilling {
                     platform_billable: true,
@@ -13540,6 +14616,7 @@ mod tests {
         /// supplied by the caller.
         fn safe_service(slug: &str, rules: Vec<AnonymousEndpointRule>) -> DownstreamService {
             DownstreamService {
+                secret_context_versions: Default::default(),
                 offering_kind: Default::default(),
                 topics: Vec::new(),
                 supplier: None,
@@ -13601,6 +14678,7 @@ mod tests {
                 default_request_headers: None,
                 ws_frame_injections: Vec::new(),
                 developer_app_ids: None,
+                introspection_client_ids: None,
                 token_exchange_config: None,
                 anonymous_endpoints: rules,
                 proxy_operation_policy: None,

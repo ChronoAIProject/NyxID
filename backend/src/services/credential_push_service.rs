@@ -692,21 +692,31 @@ fn build_credential_params_from_fields(
 async fn decrypt_api_key_credential(
     api_key: &UserApiKey,
     encryption_keys: &EncryptionKeys,
-) -> Option<String> {
-    let encrypted = match api_key.credential_type.as_str() {
-        "oauth2" => api_key.access_token_encrypted.as_ref(),
-        _ => api_key.credential_encrypted.as_ref(),
-    }?;
-
-    let decrypted_bytes = match encryption_keys.decrypt(encrypted).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to decrypt credential for push");
-            return None;
-        }
+) -> Option<zeroize::Zeroizing<String>> {
+    let (field, encrypted) = match api_key.credential_type.as_str() {
+        "oauth2" => (
+            "access_token_encrypted",
+            api_key.access_token_encrypted.as_ref(),
+        ),
+        _ => (
+            "credential_encrypted",
+            api_key.credential_encrypted.as_ref(),
+        ),
     };
-
-    String::from_utf8(decrypted_bytes).ok()
+    let encrypted = encrypted?;
+    match super::credential_record_service::CredentialRecord::key(api_key)
+        .text(encryption_keys, field, encrypted)
+        .await
+    {
+        Ok(value) => Some(value),
+        Err(_) => {
+            tracing::warn!(
+                category = "credential_decode_failed",
+                "Failed to decode credential for push"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]

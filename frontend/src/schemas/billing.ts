@@ -257,3 +257,52 @@ export type ProvisionBillingWalletRequest = z.infer<
 >;
 export type TopUpBillingRequest = z.infer<typeof topUpBillingRequestSchema>;
 export type TopUpBillingResponse = z.infer<typeof topUpBillingResponseSchema>;
+
+export const billTaxSchema = z.object({
+  code: z.string(),
+  name: z.string(),
+  rate_percent: creditsSchema,
+  amount: creditsSchema,
+});
+export const currentBillSchema = z.object({
+  owner_id: z.string(),
+  currency: z.string(),
+  from: z.string(),
+  to: z.string(),
+  charges: z.array(
+    z.object({
+      metric_code: z.string(),
+      name: z.string(),
+      units: z.string(),
+      amount: creditsSchema,
+    }),
+  ),
+  subtotal: creditsSchema,
+  taxes: z.array(billTaxSchema),
+  tax_breakdown_available: z.boolean().default(false),
+  tax_total: creditsSchema,
+  rounding: creditsSchema,
+  total: creditsSchema,
+});
+export const usageInvoiceSchema = z.object({
+  id: z.string(),
+  number: z.string(),
+  issuing_date: z.string(),
+  currency: z.string(),
+  payment_status: z.string(),
+  subtotal: creditsSchema,
+  taxes: z.array(billTaxSchema),
+  tax_total: creditsSchema,
+  total: creditsSchema,
+  prepaid_credits_applied: creditsSchema,
+  amount_due: creditsSchema,
+});
+export const usageInvoicesSchema = z.object({
+  owner_id: z.string(),
+  page: z.number().int().positive(),
+  per_page: z.number().int().positive(),
+  total: z.number().int().nonnegative(),
+  invoices: z.array(usageInvoiceSchema),
+});
+export type CurrentBill = z.infer<typeof currentBillSchema>;
+export type UsageInvoice = z.infer<typeof usageInvoiceSchema>;

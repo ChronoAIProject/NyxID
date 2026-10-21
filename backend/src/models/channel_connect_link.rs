@@ -20,6 +20,7 @@ pub enum Receiver {
     },
     Direct {
         url: String,
+        #[serde(with = "super::bson_bytes::required")]
         secret_encrypted: Vec<u8>,
         key_id: String,
     },
@@ -27,6 +28,8 @@ pub enum Receiver {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelConnectLink {
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,

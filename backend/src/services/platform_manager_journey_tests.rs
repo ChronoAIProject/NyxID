@@ -1906,6 +1906,7 @@ async fn asynchronous_public_failure_sends_only_fixed_notice_and_live_revocation
             .db
             .collection::<PlatformPublicTurn>(TURNS)
             .insert_one(PlatformPublicTurn {
+                secret_context_versions: Default::default(),
                 proof_record_id: context.proof_record_id.clone(),
                 id: context.turn.turn_id.clone(),
                 public_session_id: session.id.clone(),
@@ -2488,7 +2489,9 @@ async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmati
                 .state
                 .db
                 .collection::<bson::Document>(crate::models::session::COLLECTION_NAME);
-            let authenticated_filter = doc! {"user_id":&registered.user_id,"revoked":false,"user_agent":{"$ne":"mfa_pending"}};
+            let authenticated_filter = crate::services::session_authority::authenticated(
+                doc! {"user_id":&registered.user_id,"revoked":false},
+            );
             let before = sessions
                 .count_documents(authenticated_filter.clone())
                 .await
@@ -2498,8 +2501,8 @@ async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmati
                 peer,
                 HeaderMap::new(),
                 Json(crate::handlers::mfa::MfaLoginVerifyRequest {
-                    code: wrong,
-                    mfa_token: pending.to_string(),
+                    code: wrong.into(),
+                    mfa_token: pending.to_string().into(),
                     client: Some("token".into()),
                 }),
             )
@@ -2514,7 +2517,29 @@ async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmati
                     .unwrap(),
                 before
             );
-            assert!(sessions.find_one(doc! {"token_hash":crate::crypto::token::hash_token(&pending),"user_agent":"mfa_pending","revoked":false}).await.unwrap().is_some());
+            let pending_hash = crate::crypto::token::hash_token(&pending);
+            assert!(
+                j.state
+                    .db
+                    .collection::<bson::Document>(crate::models::session::MFA_CHALLENGES)
+                    .find_one(crate::services::session_authority::pending(
+                        doc! {"user_id":&registered.user_id,"token_hash":&pending_hash,"revoked":false,
+                            "expires_at":{"$gt":bson::DateTime::now()}},
+                        false,
+                    ))
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "an invalid factor must leave the dedicated MFA challenge redeemable"
+            );
+            assert!(
+                sessions
+                    .find_one(doc! {"token_hash":&pending_hash})
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a pending MFA challenge must never be an ordinary session"
+            );
             assert_eq!(
                 j.state
                     .db
@@ -2537,14 +2562,16 @@ async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmati
                 .0,
                 StatusCode::UNAUTHORIZED
             );
-            let code = totp.generate_current().unwrap();
+            // Enrollment consumed the current step and TOTP counters are single
+            // use, so log in with the next step (inside the one-step skew).
+            let code = totp.generate((Utc::now().timestamp() as u64 / 30 + 1) * 30);
             let (_, Json(verified)) = crate::handlers::mfa::verify(
                 State(j.state.clone()),
                 peer,
                 HeaderMap::new(),
                 Json(crate::handlers::mfa::MfaLoginVerifyRequest {
-                    code,
-                    mfa_token: pending.to_string(),
+                    code: code.into(),
+                    mfa_token: pending.to_string().into(),
                     client: Some("token".into()),
                 }),
             )

@@ -1,4 +1,5 @@
 //! Message-bound, envelope-encrypted uploads. Every read rechecks live scope.
+pub mod byte_budget;
 use super::{
     assistant_acknowledgement_service::ChatAuthority,
     assistant_nyxagent as engine,
@@ -133,6 +134,38 @@ pub(crate) async fn upload_authorized(
     bytes: Vec<u8>,
     access: Option<super::org_group_service::Access>,
 ) -> AppResult<TurnAttachment> {
+    store_authorized(db, keys, user, scope, name, bytes, access, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upload_channel_authorized(
+    db: &Database,
+    keys: &EncryptionKeys,
+    user: &str,
+    scope: &str,
+    name: &str,
+    bytes: Vec<u8>,
+    source: crate::models::assistant_channel_media::UploadSource,
+) -> AppResult<TurnAttachment> {
+    owner_scope(db, user, scope).await?;
+    store_authorized(db, keys, user, scope, name, bytes, None, Some(source)).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn store_authorized(
+    db: &Database,
+    keys: &EncryptionKeys,
+    user: &str,
+    scope: &str,
+    name: &str,
+    bytes: Vec<u8>,
+    access: Option<super::org_group_service::Access>,
+    source: Option<crate::models::assistant_channel_media::UploadSource>,
+) -> AppResult<TurnAttachment> {
+    use sha2::{Digest, Sha256};
+    // Legacy rows may lack a digest; attachment-write egress can hash their
+    // decrypted bytes under its byte reservation. Every new upload has one.
+    let content_sha256 = Some(format!("{:x}", Sha256::digest(&bytes)));
     let label = safe_name(name);
     let extension = label
         .rsplit_once('.')
@@ -141,7 +174,10 @@ pub(crate) async fn upload_authorized(
     let size = bytes.len() as i64;
     // A bounded copy is retained for encrypted storage; the parser receives its own process.
     let extracted = attachment_extraction::extract(bytes.clone(), extension).await?;
-    let row = AssistantUpload {
+    let mut row = AssistantUpload {
+        source,
+        content_sha256,
+        secret_context_versions: Default::default(),
         id: Uuid::new_v4().to_string(),
         origin: "user_upload".into(),
         user_id: user.into(),
@@ -158,58 +194,108 @@ pub(crate) async fn upload_authorized(
         pages: extracted.sections.len(),
         extracted_chars: Some(extracted.text.chars().count() as i64),
         chunks: bytes.len().div_ceil(CHUNK),
-        text_encrypted: keys
-            .encrypt(&serde_json::to_vec(&extracted).map_err(|_| missing())?)
-            .await?,
+        text_encrypted: Vec::new(),
         created_at: Utc::now(),
         expires_at: None,
         bound_at: None,
         reads: 0,
         coverage: Vec::new(),
     };
+    let encoded =
+        crate::crypto::secret_json::to_secret_string(&extracted).map_err(|_| missing())?;
+    row.text_encrypted = super::record_field_service::encrypt(
+        keys,
+        COLLECTION_NAME,
+        &row.id,
+        user,
+        "text_encrypted",
+        encoded.as_bytes(),
+    )
+    .await?;
+    super::credential_record_service::mark_version(
+        &mut row.secret_context_versions,
+        keys,
+        "text_encrypted",
+    );
     let mut documents = vec![bson::to_document(&row).map_err(|_| missing())?];
     for (index, chunk) in bytes.chunks(CHUNK).enumerate() {
+        let chunk_id = Uuid::new_v4().to_string();
+        let mut versions = std::collections::BTreeMap::new();
+        super::credential_record_service::mark_version(&mut versions, keys, "data_encrypted");
         documents.push(doc! {
-            "_id": Uuid::new_v4().to_string(),
+            "_id": &chunk_id,
+            "secret_context_versions":bson::to_bson(&versions).map_err(|_|missing())?,
             "parent_attachment_id": &row.id,
             "chunk_index": index as i64,
             "user_id": user,
             "conversation_id": &row.conversation_id,
             "group_id": &row.group_id,
-            "data_encrypted": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: keys.encrypt(chunk).await?},
+            "data_encrypted": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: super::assistant_record_service::encrypt_chunk(keys,&chunk_id,user,&row.id,index as i64,chunk).await?},
         });
     }
     let mut session = db.client().start_session().await?;
-    session.start_transaction().await?;
-    // Writing the parent fences concurrent deletion; no orphan payload is committed.
-    let parent = if row.group_id.is_some() {
-        crate::models::assistant_group::COLLECTION_NAME
-    } else {
-        crate::models::assistant_conversation::COLLECTION_NAME
-    };
-    let mut parent_filter = doc! {"_id": scope, "user_id": user};
-    if let Some(access) = &access
-        && access.org.is_some()
-    {
-        if access.actor != user || access.group.id != scope {
+    session
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result: AppResult<()> = async {
+        super::erasure_admission::fence_in_session(db, user, &mut session).await?;
+        // Writing the parent fences concurrent deletion; no orphan payload is committed.
+        let parent = if row.group_id.is_some() {
+            crate::models::assistant_group::COLLECTION_NAME
+        } else {
+            crate::models::assistant_conversation::COLLECTION_NAME
+        };
+        let mut parent_filter = doc! {"_id": scope, "user_id": user};
+        if let Some(access) = &access
+            && access.org.is_some()
+        {
+            if access.actor != user || access.group.id != scope {
+                return Err(missing());
+            }
+            parent_filter =
+                doc! {"_id":scope,"user_id":&access.group.user_id,"participant_user_ids":user};
+        }
+        let present = db
+            .collection::<bson::Document>(parent)
+            .update_one(parent_filter, doc! {"$inc": {"upload_generation": 1}})
+            .session(&mut session)
+            .await?;
+        if present.matched_count != 1 {
             return Err(missing());
         }
-        parent_filter =
-            doc! {"_id":scope,"user_id":&access.group.user_id,"participant_user_ids":user};
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .insert_many(documents)
+            .session(&mut session)
+            .await?;
+        Ok(())
     }
-    let present = db
-        .collection::<bson::Document>(parent)
-        .update_one(parent_filter, doc! {"$inc": {"upload_generation": 1}})
-        .session(&mut session)
-        .await?;
-    if present.matched_count != 1 {
-        return Err(missing());
+    .await;
+    #[cfg(test)]
+    if result.is_ok()
+        && let Some(source) = &row.source
+    {
+        super::assistant_channel_media::test_hooks::reach(
+            db,
+            &source.turn_id,
+            "upload_before_commit",
+        )
+        .await;
     }
-    db.collection::<bson::Document>(COLLECTION_NAME)
-        .insert_many(documents)
-        .session(&mut session)
-        .await?;
-    session.commit_transaction().await?;
+    // The shared helper aborts definite errors and retries only COMMIT on the
+    // same transaction when its outcome is unknown.
+    super::org_membership_authority::finish(session, result).await?;
+    #[cfg(test)]
+    if let Some(source) = &row.source
+        && super::assistant_channel_media::test_hooks::reach(
+            db,
+            &source.turn_id,
+            "upload_after_commit",
+        )
+        .await
+    {
+        return Err(AppError::Internal("Channel upload commit uncertain".into()));
+    }
     Ok(metadata(&row))
 }
 
@@ -338,10 +424,23 @@ async fn payload(
             .await?;
             return Err(missing());
         };
-        let encrypted = chunk
-            .get_binary_generic("data_encrypted")
-            .map_err(|_| missing())?;
-        bytes.extend_from_slice(&keys.decrypt(encrypted).await?);
+        let encrypted = super::record_field_service::stored_bytes(
+            chunk.get("data_encrypted").ok_or_else(missing)?,
+        )?;
+        let chunk_id = chunk.get_str("_id").map_err(|_| missing())?;
+        let versions = super::record_field_service::stored_versions(&chunk)?;
+        bytes.extend_from_slice(
+            &super::assistant_record_service::decrypt_chunk(
+                keys,
+                chunk_id,
+                &row.user_id,
+                &row.id,
+                index as i64,
+                versions.get("data_encrypted").copied(),
+                &encrypted,
+            )
+            .await?,
+        );
         if bytes.len() > attachment_extraction::MAX_BYTES {
             return Err(missing());
         }
@@ -422,12 +521,11 @@ pub async fn for_chat(db: &Database, chat: &ChatAuthority, id: &str) -> AppResul
 }
 
 /// Tool pixels belong only to the producing live turn, including a guest turn.
-async fn tool_image_bytes(
+async fn tool_image_for_chat(
     db: &Database,
-    keys: &EncryptionKeys,
     chat: &ChatAuthority,
     id: &str,
-) -> AppResult<Option<(String, Vec<u8>)>> {
+) -> AppResult<Option<crate::models::assistant_attachment::AssistantAttachment>> {
     if chat.turn_stopped || chat.turn_id.is_none() || Uuid::parse_str(id).is_err() {
         return Err(missing());
     }
@@ -467,11 +565,23 @@ async fn tool_image_bytes(
     if !row.content_type.starts_with("image/") {
         return Err(missing());
     }
-    let bytes = keys.decrypt(&row.data_encrypted).await?;
-    Box::pin(super::assistant_upload_retention::require_available(
-        db, filter,
-    ))
-    .await?;
+    Ok(Some(row))
+}
+
+async fn tool_image_bytes(
+    db: &Database,
+    keys: &EncryptionKeys,
+    chat: &ChatAuthority,
+    id: &str,
+) -> AppResult<Option<(String, Vec<u8>)>> {
+    let Some(row) = tool_image_for_chat(db, chat, id).await? else {
+        return Ok(None);
+    };
+    let mut protected = super::assistant_record_service::decrypt_image(keys, &row).await?;
+    let bytes = std::mem::take(&mut *protected);
+    tool_image_for_chat(db, chat, id)
+        .await?
+        .ok_or_else(missing)?;
     Ok(Some((row.content_type, bytes)))
 }
 
@@ -506,7 +616,16 @@ pub async fn read(
             "instructions": "Use the image input or nyx__machine_save_attachment; never assume OCR text.",
         }));
     }
-    let bytes = keys.decrypt(&row.text_encrypted).await?;
+    let bytes = super::record_field_service::decrypt(
+        keys,
+        COLLECTION_NAME,
+        &row.id,
+        &row.user_id,
+        "text_encrypted",
+        row.secret_context_versions.get("text_encrypted").copied(),
+        &row.text_encrypted,
+    )
+    .await?;
     let extracted: Extracted = serde_json::from_slice(&bytes).map_err(|_| missing())?;
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
     let limit = (args["limit"].as_u64().unwrap_or(4000) as usize).clamp(1, 6000);
@@ -874,15 +993,28 @@ pub async fn review_coverage(
             let legacy = db
                 .collection::<bson::Document>(COLLECTION_NAME)
                 .find_one(doc! {"_id":id,"user_id":user,"conversation_id":conversation})
-                .projection(doc! {"text_encrypted":1})
+                .projection(doc! {"text_encrypted":1,"secret_context_versions":1})
                 .await?;
             let count: AppResult<i64> = async {
                 let legacy = legacy.ok_or_else(missing)?;
-                let bytes = legacy
-                    .get_binary_generic("text_encrypted")
-                    .map_err(|_| missing())?;
-                let extracted: Extracted =
-                    serde_json::from_slice(&keys.decrypt(bytes).await?).map_err(|_| missing())?;
+                let bytes = super::record_field_service::stored_bytes(
+                    legacy.get("text_encrypted").ok_or_else(missing)?,
+                )?;
+                let extracted: Extracted = serde_json::from_slice(
+                    &super::record_field_service::decrypt(
+                        keys,
+                        COLLECTION_NAME,
+                        id,
+                        user,
+                        "text_encrypted",
+                        super::record_field_service::stored_versions(&legacy)?
+                            .get("text_encrypted")
+                            .copied(),
+                        &bytes,
+                    )
+                    .await?,
+                )
+                .map_err(|_| missing())?;
                 Ok(extracted.text.chars().count() as i64)
             }
             .await;
@@ -1022,6 +1154,113 @@ pub async fn group_attachments(
         .try_collect()
         .await?;
     Ok(rows.into_iter().flat_map(|r| r.attachments).collect())
+}
+
+/// An authorized origin selected before any egress decryption. Never retry a
+/// failed origin lookup against the other attachment model.
+pub enum EgressAttachment {
+    User(Box<AssistantUpload>),
+    Tool(Box<crate::models::assistant_attachment::AssistantAttachment>),
+}
+impl EgressAttachment {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::User(row) => &row.id,
+            Self::Tool(row) => &row.id,
+        }
+    }
+    pub fn size(&self) -> i64 {
+        match self {
+            Self::User(row) => row.size,
+            Self::Tool(row) => row.size,
+        }
+    }
+    pub fn label(&self) -> &str {
+        match self {
+            Self::User(row) => &row.label,
+            Self::Tool(row) => match row.content_type.as_str() {
+                "image/jpeg" => "tool-image.jpg",
+                "image/gif" => "tool-image.gif",
+                "image/webp" => "tool-image.webp",
+                "image/png" => "tool-image.png",
+                _ => "tool-image",
+            },
+        }
+    }
+    pub fn content_type(&self) -> &str {
+        match self {
+            Self::User(row) => &row.content_type,
+            Self::Tool(row) => &row.content_type,
+        }
+    }
+}
+
+pub async fn for_egress(
+    db: &Database,
+    chat: &ChatAuthority,
+    id: &str,
+) -> AppResult<EgressAttachment> {
+    if chat.guest || Uuid::parse_str(id).is_err() {
+        return Err(missing());
+    }
+    super::assistant_resource_service::require_live(db, chat).await?;
+    let key = db
+        .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+        .find_one(doc! {"_id":&chat.api_key_id,"user_id":&chat.user_id,"is_active":true})
+        .await?
+        .ok_or_else(missing)?;
+    if key.expires_at.is_some_and(|at| at <= Utc::now()) {
+        return Err(missing());
+    }
+    if db.collection::<bson::Document>("assistant_agent_credentials")
+        .find_one(doc! {"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id})
+        .projection(doc! {"_id":1}).await?.is_none() { return Err(missing()); }
+    let row = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {"_id":id})
+        .projection(doc! {"origin":1})
+        .await?
+        .ok_or_else(missing)?;
+    match row.get_str("origin").ok() {
+        Some("user_upload") => Ok(EgressAttachment::User(Box::new(
+            for_chat(db, chat, id).await?,
+        ))),
+        Some("tool") | None => Ok(EgressAttachment::Tool(Box::new(
+            tool_image_for_chat(db, chat, id)
+                .await?
+                .ok_or_else(missing)?,
+        ))),
+        _ => Err(missing()),
+    }
+}
+
+/// The caller already holds a reservation for exactly this authorized size.
+pub async fn egress_bytes(
+    db: &Database,
+    keys: &EncryptionKeys,
+    chat: &ChatAuthority,
+    attachment: &EgressAttachment,
+) -> AppResult<Vec<u8>> {
+    let current = for_egress(db, chat, attachment.id()).await?;
+    if current.size() != attachment.size()
+        || current.label() != attachment.label()
+        || current.content_type() != attachment.content_type()
+        || std::mem::discriminant(&current) != std::mem::discriminant(attachment)
+    {
+        return Err(missing());
+    }
+    let bytes = match current {
+        EgressAttachment::User(row) => payload(db, keys, &row).await?.1,
+        EgressAttachment::Tool(row) => {
+            let mut protected = super::assistant_record_service::decrypt_image(keys, &row).await?;
+            std::mem::take(&mut *protected)
+        }
+    };
+    if bytes.len() as i64 != attachment.size() {
+        return Err(missing());
+    }
+    for_egress(db, chat, attachment.id()).await?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -1370,6 +1609,168 @@ mod integration_tests {
             agent_id: None,
             model: None,
             access_mode: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn live_upload_download_read_and_coverage_support_staging_arrays_and_strict_cutover() {
+        for staged in [true, false] {
+            let (mut state, user, id) = fixture().await;
+            let mut keys = crate::test_utils::test_encryption_keys();
+            keys.set_contextual_record_writes(!staged);
+            state.encryption_keys = std::sync::Arc::new(keys);
+            let item = upload(
+                &state.db,
+                &state.encryption_keys,
+                &user,
+                &id,
+                "review.txt",
+                b"Review the full document.".to_vec(),
+            )
+            .await
+            .unwrap();
+            let collection = state.db.collection::<bson::Document>(COLLECTION_NAME);
+            if staged {
+                let rows: Vec<bson::Document> = collection
+                    .find(doc! {"$or":[{"_id":&item.id},{"parent_attachment_id":&item.id}]})
+                    .await
+                    .unwrap()
+                    .try_collect()
+                    .await
+                    .unwrap();
+                for row in rows {
+                    for field in ["text_encrypted", "data_encrypted"] {
+                        if let Ok(bytes) = row.get_binary_generic(field) {
+                            let value = bson::Bson::Array(
+                                bytes
+                                    .iter()
+                                    .map(|b| bson::Bson::Int32(i32::from(*b)))
+                                    .collect(),
+                            );
+                            collection
+                                .update_one(
+                                    doc! {"_id":row.get_str("_id").unwrap()},
+                                    doc! {"$set":{field:value}},
+                                )
+                                .await
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                owner_read(&state.db, &state.encryption_keys, &user, &id, &item.id)
+                    .await
+                    .unwrap()
+                    .1,
+                b"Review the full document."
+            );
+            let turn = engine::begin_turn(
+                &state.db,
+                &user,
+                &request(&id, vec![item.id.clone()]),
+                &state.encryption_keys,
+            )
+            .await
+            .unwrap();
+            let chat = acks::for_key(&state.db, &user, Some(&turn.credential_api_key_id))
+                .await
+                .unwrap()
+                .unwrap();
+            let value = read(
+                &state.db,
+                &state.encryption_keys,
+                &chat,
+                &json!({"attachment_id":&item.id}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(value["text"], "Review the full document.");
+            collection
+                .update_one(
+                    doc! {"_id":&item.id},
+                    doc! {"$unset":{"extracted_chars":""}},
+                )
+                .await
+                .unwrap();
+            let review = review_coverage(&state.db, &state.encryption_keys, &user, &id)
+                .await
+                .unwrap();
+            assert!(
+                review
+                    .observations
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|row| row["unknown"] == false)
+            );
+            let rows: Vec<bson::Document> = collection
+                .find(doc! {"$or":[{"_id":&item.id},{"parent_attachment_id":&item.id}]})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            let mut migration_keys = crate::test_utils::test_encryption_keys();
+            migration_keys.set_contextual_record_writes(true);
+            for row in rows {
+                super::super::assistant_record_service::migrate_attachment_snapshot(
+                    &state.db,
+                    &migration_keys,
+                    &row,
+                )
+                .await
+                .unwrap();
+            }
+            let mut strict = crate::test_utils::test_encryption_keys();
+            strict.set_contextual_record_writes(true);
+            strict.set_allow_legacy_record_reads(false);
+            assert_eq!(
+                owner_read(&state.db, &strict, &user, &id, &item.id)
+                    .await
+                    .unwrap()
+                    .1,
+                b"Review the full document."
+            );
+            assert_eq!(
+                read(
+                    &state.db,
+                    &strict,
+                    &chat,
+                    &json!({"attachment_id":&item.id})
+                )
+                .await
+                .unwrap()["text"],
+                "Review the full document."
+            );
+            collection
+                .update_one(
+                    doc! {"_id":&item.id},
+                    doc! {"$unset":{"extracted_chars":""}},
+                )
+                .await
+                .unwrap();
+            review_coverage(&state.db, &strict, &user, &id)
+                .await
+                .unwrap();
+            let fresh = upload(
+                &state.db,
+                &strict,
+                &user,
+                &id,
+                "strict.txt",
+                b"New strict text".to_vec(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                owner_read(&state.db, &strict, &user, &id, &fresh.id)
+                    .await
+                    .unwrap()
+                    .1,
+                b"New strict text"
+            );
+            state.db.drop().await.unwrap();
         }
     }
 
@@ -1959,11 +2360,20 @@ mod integration_tests {
         assert_eq!(chunks.len(), 3);
         for (index, chunk) in chunks.iter().enumerate() {
             assert_eq!(chunk.get_i64("chunk_index").unwrap(), index as i64);
-            let decrypted = state
-                .encryption_keys
-                .decrypt(chunk.get_binary_generic("data_encrypted").unwrap())
-                .await
-                .unwrap();
+            let decrypted = super::super::assistant_record_service::decrypt_chunk(
+                &state.encryption_keys,
+                chunk.get_str("_id").unwrap(),
+                chunk.get_str("user_id").unwrap(),
+                attachment_id,
+                index as i64,
+                super::super::record_field_service::stored_versions(chunk)
+                    .unwrap()
+                    .get("data_encrypted")
+                    .copied(),
+                chunk.get_binary_generic("data_encrypted").unwrap(),
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 decrypted.as_slice(),
                 bytes.chunks(CHUNK).nth(index).unwrap()
@@ -2214,7 +2624,7 @@ mod integration_tests {
                 .await
                 .is_err()
         );
-        crate::services::admin_user_service::delete_current_user_cascade(
+        crate::test_utils::accept_and_process_owner_erasure(
             db,
             &user,
             crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,

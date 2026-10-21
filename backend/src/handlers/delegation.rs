@@ -190,6 +190,10 @@ pub async fn refresh_delegation_token(
         auth_user.oauth_client_id.as_deref(),
         &auth_user.scope,
         &crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(&auth_user),
+        auth_user
+            .token_jti
+            .as_deref()
+            .ok_or_else(|| AppError::Unauthorized("Delegated token identity is required".into()))?,
     )
     .await?;
 
@@ -202,7 +206,8 @@ pub async fn refresh_delegation_token(
             // Hash: raw UUID would be scrubbed to `[UUID_REDACTED]`.
             client_id: hash_short_id(acting_client_id),
         },
-    );
+    )
+    .await;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -446,6 +451,7 @@ mod tests {
                 status: NodeStatus::Online,
                 auth_token_hash: "scope-node-token-hash".to_string(),
                 signing_secret_encrypted: None,
+                signing_secret_context_version: None,
                 signing_secret_hash: "scope-node-signing-hash".to_string(),
                 last_heartbeat_at: Some(Utc::now()),
                 connected_at: Some(Utc::now()),
@@ -461,7 +467,17 @@ mod tests {
         let (node_tx, node_rx) = tokio::sync::mpsc::channel(8);
         crate::test_utils::register_test_node_connection(&state, TEST_NODE_ID, node_tx).await;
 
-        let source_token = jwt::generate_oauth_access_token(
+        let consent = crate::services::consent_service::grant_consent_with_services(
+            &db,
+            &user_id.to_string(),
+            &actor_client_id,
+            "openid",
+            Some(requested_service_ids.clone()),
+        )
+        .await
+        .expect("grant actual source OAuth authority");
+        let reference = crate::services::consent_service::protected_reference(&consent).unwrap();
+        let source_token = jwt::generate_oauth_access_token_with_consent(
             &state.jwt_keys,
             &state.config,
             &user_id,
@@ -477,6 +493,7 @@ mod tests {
                 allow_all_nodes: false,
             }),
             &actor_client_id,
+            Some(&reference),
         )
         .expect("mint full-router source token");
         let exchanged = token_exchange_service::exchange_token_with_authority(
@@ -1135,6 +1152,7 @@ mod tests {
             acting_client_id: Some(TEST_ACTOR.to_string()),
             oauth_client_id: Some(TEST_RECEIVER.to_string()),
             token_jti: Some(uuid::Uuid::new_v4().to_string()),
+            oauth_lineage: None,
             approval_owner_user_id: None,
             auth_method: method,
             allow_all_services: false,
@@ -1615,6 +1633,7 @@ mod tests {
             acting_client_id: claims.act.map(|actor| actor.sub),
             oauth_client_id: claims.client_id,
             token_jti: Some(claims.jti),
+            oauth_lineage: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::Delegated,
             allow_all_services: claims.allow_all_services.unwrap_or(true),
@@ -1802,7 +1821,17 @@ mod tests {
         .await
         .expect("seed per-request approval config");
 
-        let source_token = jwt::generate_oauth_access_token(
+        let consent = crate::services::consent_service::grant_consent_with_services(
+            &db,
+            &user_id.to_string(),
+            actor_client_id,
+            "openid",
+            Some(requested_service_ids.clone()),
+        )
+        .await
+        .expect("grant actual source OAuth authority");
+        let reference = crate::services::consent_service::protected_reference(&consent).unwrap();
+        let source_token = jwt::generate_oauth_access_token_with_consent(
             &state.jwt_keys,
             &state.config,
             &user_id,
@@ -1818,6 +1847,7 @@ mod tests {
                 allow_all_nodes: true,
             }),
             actor_client_id,
+            Some(&reference),
         )
         .expect("mint direct source token");
         let exchanged = token_exchange_service::exchange_token_with_authority(
@@ -2849,6 +2879,7 @@ mod tests {
                 status: NodeStatus::Online,
                 auth_token_hash: "out-of-scope-node-token-hash".to_string(),
                 signing_secret_encrypted: None,
+                signing_secret_context_version: None,
                 signing_secret_hash: "out-of-scope-node-signing-hash".to_string(),
                 last_heartbeat_at: Some(Utc::now()),
                 connected_at: Some(Utc::now()),
@@ -2994,6 +3025,7 @@ mod tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 id: credential_id.to_string(),
                 user_id: TEST_USER_ID.to_string(),
@@ -3477,6 +3509,7 @@ mod tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 id: credential_id.to_string(),
                 user_id: TEST_USER_ID.to_string(),
@@ -3643,6 +3676,7 @@ mod tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 id: "00000000-0000-4000-8000-000000000713".to_string(),
                 user_id: TEST_USER_ID.to_string(),
@@ -3817,7 +3851,7 @@ mod tests {
         let mut fixture = setup_full_router_fixture("exact_router_ac5_headers").await;
         let header = DefaultRequestHeader {
             name: "X-Test-Header".to_string(),
-            value: "alpha".to_string(),
+            value: "alpha".to_string().into(),
             overridable: false,
             sensitive: false,
         };

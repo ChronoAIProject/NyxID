@@ -163,9 +163,15 @@ nyxid api-key operations <ID_OR_NAME> --service <SLUG> --deny-all|--all
 # Callback URL for channel bot relay
 nyxid api-key update <ID> --callback-url "https://my-agent.example.com/webhook"
 nyxid api-key update <ID> --callback-url ""    # clear
+```
 
-# Per-key rate limits
-nyxid api-key update <ID> --rate-limit-per-second 10 --rate-limit-burst 30
+Per-key rate limits are set through the authenticated API, rather than CLI update flags:
+
+```http
+PUT /api/v1/api-keys/{key_id}
+Content-Type: application/json
+
+{"rate_limit_per_second":10,"rate_limit_burst":30}
 ```
 
 Set `NYXID_ACCESS_TOKEN` in your agent's environment to authenticate:

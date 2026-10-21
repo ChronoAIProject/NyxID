@@ -4,9 +4,8 @@ metadata:
   name: nyxid-machine-manager
   namespace: nyxid-machine
 rules:
-  # Agent Sandbox remains the Pod/PVC creator. Recovery may delete exact
-  # residual original children with UID/resourceVersion preconditions; no
-  # pod/exec, child creation, child patch or finalizer mutation is granted.
+  # Agent Sandbox creates workloads; Kubernetes GC reclaims its children.
+  # Manager only suspends/deletes the original Sandbox, never Pod/PVC objects.
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
@@ -16,7 +15,7 @@ rules:
   # Read-only observations bind Pod/PVC UIDs to Sandbox ownerReferences.
   - apiGroups: [""]
     resources: ["pods", "persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "delete"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list", "watch"]

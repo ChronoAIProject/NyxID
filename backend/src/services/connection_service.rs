@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use mongodb::bson::doc;
-use mongodb::options::ReturnDocument;
 use uuid::Uuid;
 
 use crate::crypto::aes::EncryptionKeys;
@@ -102,19 +101,18 @@ pub async fn connect_user(
         }
     }
 
-    // Check for existing active connection
-    let existing = db
-        .collection::<UserServiceConnection>(CONNECTIONS)
-        .find_one(doc! {
-            "user_id": user_id,
-            "service_id": service_id,
-            "is_active": true,
-        })
+    let raw_source = db
+        .collection::<bson::Document>(CONNECTIONS)
+        .find_one(doc! { "user_id":user_id,"service_id":service_id })
         .await?;
-
-    if existing.is_some() {
+    let previous = raw_source
+        .clone()
+        .map(bson::from_document::<UserServiceConnection>)
+        .transpose()
+        .map_err(|_| AppError::Internal("Invalid service connection storage".into()))?;
+    if previous.as_ref().is_some_and(|row| row.is_active) {
         return Err(AppError::Conflict(
-            "Already connected to this service".to_string(),
+            "Already connected to this service".into(),
         ));
     }
 
@@ -127,88 +125,40 @@ pub async fn connect_user(
         ));
     }
 
-    // Encrypt credential if provided
-    let credential_encrypted = match credential {
-        Some(cred) => Some(encryption_keys.encrypt(cred.as_bytes()).await?),
-        None => None,
-    };
-
-    let credential_type = if credential.is_some() {
-        service.auth_type.clone()
-    } else {
-        None
-    };
-
     let now = Utc::now();
-
-    // Check for an inactive (soft-deleted) connection and reactivate it
-    let inactive = db
-        .collection::<UserServiceConnection>(CONNECTIONS)
-        .find_one(doc! {
-            "user_id": user_id,
-            "service_id": service_id,
-            "is_active": false,
-        })
-        .await?;
-
-    if inactive.is_some() {
-        let mut set_doc = doc! {
-            "is_active": true,
-            "updated_at": mongodb::bson::DateTime::from_chrono(now),
-        };
-        if let Some(enc) = &credential_encrypted {
-            set_doc.insert(
-                "credential_encrypted",
-                mongodb::bson::Binary {
-                    subtype: mongodb::bson::spec::BinarySubtype::Generic,
-                    bytes: enc.clone(),
-                },
-            );
-        }
-        if let Some(ct) = &credential_type {
-            set_doc.insert("credential_type", ct.as_str());
-        }
-        if let Some(label) = credential_label {
-            set_doc.insert("credential_label", label);
-        }
-        set_doc.insert(
-            "state_version",
-            doc! { "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64] },
-        );
-
-        db.collection::<UserServiceConnection>(CONNECTIONS)
-            .update_one(
-                doc! { "user_id": user_id, "service_id": service_id, "is_active": false },
-                vec![doc! { "$set": set_doc }],
-            )
-            .await?;
-
-        return Ok(ConnectionResult {
-            service_name: service.name,
-            connected_at: now,
-        });
-    }
-
-    // Truly new connection: insert
-    let conn_id = Uuid::new_v4().to_string();
-
-    let conn = UserServiceConnection {
-        id: conn_id.clone(),
-        user_id: user_id.to_string(),
-        service_id: service_id.to_string(),
-        credential_encrypted,
-        credential_type,
-        credential_label: credential_label.map(|s| s.to_string()),
-        metadata: None,
+    let mut conn = UserServiceConnection {
+        id: previous
+            .as_ref()
+            .map(|row| row.id.clone())
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        user_id: user_id.to_owned(),
+        service_id: service_id.to_owned(),
+        credential_encrypted: None,
+        secret_context_versions: Default::default(),
+        credential_type: credential.and(service.auth_type.clone()),
+        credential_label: credential_label.map(str::to_owned).or_else(|| {
+            previous
+                .as_ref()
+                .and_then(|row| row.credential_label.clone())
+        }),
+        metadata: previous.as_ref().and_then(|row| row.metadata.clone()),
         is_active: true,
-        state_version: 1,
-        created_at: now,
+        state_version: previous
+            .as_ref()
+            .map_or(Some(1), |row| row.state_version.checked_add(1))
+            .ok_or_else(|| AppError::Conflict("Service connection revision exhausted".into()))?,
+        created_at: previous.as_ref().map_or(now, |row| row.created_at),
         updated_at: now,
     };
-
-    db.collection::<UserServiceConnection>(CONNECTIONS)
-        .insert_one(&conn)
+    if let Some(credential) = credential {
+        super::connection_record_service::encrypt(
+            encryption_keys,
+            &mut conn,
+            credential.as_bytes(),
+        )
         .await?;
+    }
+    super::connection_record_service::commit(db, raw_source.as_ref(), &conn).await?;
 
     Ok(ConnectionResult {
         service_name: service.name,
@@ -264,45 +214,25 @@ pub async fn update_credential(
         ));
     }
 
-    let encrypted = encryption_keys.encrypt(credential.as_bytes()).await?;
-    let now = Utc::now();
-
-    let mut set_doc = doc! {
-        "credential_encrypted": mongodb::bson::Binary {
-            subtype: mongodb::bson::spec::BinarySubtype::Generic,
-            bytes: encrypted,
-        },
-        "credential_type": service.auth_type.as_deref().unwrap_or("api_key"),
-        "updated_at": mongodb::bson::DateTime::from_chrono(now),
-    };
-
-    // Note: When credential_label is None, the existing label is preserved.
-    // To clear a label, pass an explicit empty string.
-    if let Some(label) = credential_label {
-        set_doc.insert("credential_label", label);
-    }
-    set_doc.insert(
-        "state_version",
-        doc! { "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64] },
-    );
-
-    let result = db
-        .collection::<UserServiceConnection>(CONNECTIONS)
-        .update_one(
-            doc! {
-                "user_id": user_id,
-                "service_id": service_id,
-                "is_active": true,
-            },
-            vec![doc! { "$set": set_doc }],
-        )
+    let raw_source = db
+        .collection::<bson::Document>(CONNECTIONS)
+        .find_one(doc! {"user_id":user_id,"service_id":service_id,"is_active":true})
+        .await?
+        .ok_or_else(|| AppError::NotFound("No active connection found for this service".into()))?;
+    let mut row: UserServiceConnection = bson::from_document(raw_source.clone())
+        .map_err(|_| AppError::Internal("Invalid service connection storage".into()))?;
+    super::connection_record_service::encrypt(encryption_keys, &mut row, credential.as_bytes())
         .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound(
-            "No active connection found for this service".to_string(),
-        ));
+    row.credential_type = Some(service.auth_type.unwrap_or_else(|| "api_key".into()));
+    if let Some(label) = credential_label {
+        row.credential_label = Some(label.to_owned());
     }
+    row.state_version = row
+        .state_version
+        .checked_add(1)
+        .ok_or_else(|| AppError::Conflict("Service connection revision exhausted".into()))?;
+    row.updated_at = Utc::now();
+    super::connection_record_service::commit(db, Some(&raw_source), &row).await?;
 
     Ok(())
 }
@@ -327,62 +257,30 @@ pub async fn disconnect_user_with_expected_state_version(
     service_id: &str,
     expected_state_version: Option<i64>,
 ) -> AppResult<UserServiceConnection> {
-    let now = Utc::now();
-    let mut filter = doc! {
-        "user_id": user_id,
-        "service_id": service_id,
-        "is_active": true,
-    };
-    if let Some(expected) = expected_state_version {
-        filter.insert(
-            "$expr",
-            doc! { "$eq": [{ "$ifNull": ["$state_version", 0_i64] }, expected] },
-        );
+    let raw_source = db
+        .collection::<bson::Document>(CONNECTIONS)
+        .find_one(doc! {"user_id":user_id,"service_id":service_id,"is_active":true})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Connection not found".into()))?;
+    let mut row: UserServiceConnection = bson::from_document(raw_source.clone())
+        .map_err(|_| AppError::Internal("Invalid service connection storage".into()))?;
+    if expected_state_version.is_some_and(|expected| expected != row.state_version) {
+        return Err(AppError::Conflict(
+            "the connection changed since this action was prepared".into(),
+        ));
     }
-
-    let updated = db
-        .collection::<UserServiceConnection>(CONNECTIONS)
-        .find_one_and_update(
-            filter,
-            vec![doc! { "$set": {
-                "is_active": false,
-                "credential_encrypted": mongodb::bson::Bson::Null,
-                "credential_type": mongodb::bson::Bson::Null,
-                "credential_label": mongodb::bson::Bson::Null,
-                "updated_at": mongodb::bson::DateTime::from_chrono(now),
-                "state_version": {
-                    "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64]
-                },
-            }}],
-        )
-        .return_document(ReturnDocument::After)
-        .await?;
-
-    if let Some(connection) = updated {
-        return Ok(connection);
-    }
-
-    let current = db
-        .collection::<UserServiceConnection>(CONNECTIONS)
-        .find_one(doc! { "user_id": user_id, "service_id": service_id })
-        .await?;
-    match current {
-        None => Err(AppError::NotFound("Connection not found".to_string())),
-        Some(connection) if !connection.is_active => {
-            Err(AppError::NotFound("Connection not found".to_string()))
-        }
-        Some(connection)
-            if expected_state_version
-                .is_some_and(|expected| connection.state_version != expected) =>
-        {
-            Err(AppError::Conflict(
-                "the connection changed since this action was prepared".to_string(),
-            ))
-        }
-        Some(_) => Err(AppError::Internal(
-            "Connection disappeared during disconnect".to_string(),
-        )),
-    }
+    row.is_active = false;
+    row.credential_encrypted = None;
+    row.secret_context_versions.clear();
+    row.credential_type = None;
+    row.credential_label = None;
+    row.updated_at = Utc::now();
+    row.state_version = row
+        .state_version
+        .checked_add(1)
+        .ok_or_else(|| AppError::Conflict("Service connection revision exhausted".into()))?;
+    super::connection_record_service::commit(db, Some(&raw_source), &row).await?;
+    Ok(row)
 }
 
 #[cfg(test)]
@@ -565,5 +463,205 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)));
+    }
+    #[tokio::test]
+    async fn staged_and_strict_connection_lifecycle_authenticates_service_and_invalidates_dependencies()
+     {
+        let Some(db) = connect_test_database("connection_context_lifecycle").await else {
+            return;
+        };
+        let owner = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        insert_connection_service(&db, &service_id, "connection", true, "http").await;
+        // Ensure this exercises the production credential branch of the proxy resolver.
+        db.collection::<bson::Document>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! {"_id":&service_id},
+                doc! {"$set":{"auth_method":"header"}},
+            )
+            .await
+            .unwrap();
+        let ws = NodeWsManager::new(30, 100);
+        let mut stage = test_encryption_keys();
+        stage.set_contextual_record_writes(false);
+        connect_user(
+            &db,
+            &stage,
+            &ws,
+            &owner,
+            &service_id,
+            Some("staged-secret"),
+            None,
+        )
+        .await
+        .unwrap();
+        let source = db
+            .collection::<bson::Document>(CONNECTIONS)
+            .find_one(doc! {"user_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        let staged: UserServiceConnection = bson::from_document(source.clone()).unwrap();
+        assert!(staged.secret_context_versions.is_empty());
+        assert_eq!(
+            stage
+                .decrypt(staged.credential_encrypted.as_deref().unwrap())
+                .await
+                .unwrap(),
+            b"staged-secret"
+        );
+        let mut migration = test_encryption_keys();
+        migration.set_contextual_record_writes(true);
+        assert!(
+            super::super::connection_record_service::migrate_snapshot(&db, &migration, &source)
+                .await
+                .unwrap()
+        );
+        let current = db
+            .collection::<bson::Document>(CONNECTIONS)
+            .find_one(doc! {"user_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        let before = db
+            .collection::<bson::Document>(super::super::erasure_admission::COLLECTION)
+            .find_one(doc! {"_id":&owner})
+            .await
+            .unwrap();
+        assert!(
+            !super::super::connection_record_service::migrate_snapshot(&db, &migration, &current)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(super::super::erasure_admission::COLLECTION)
+                .find_one(doc! {"_id":&owner})
+                .await
+                .unwrap(),
+            before
+        );
+        let mut strict = test_encryption_keys();
+        strict.set_contextual_record_writes(true);
+        strict.set_allow_legacy_record_reads(false);
+        super::super::connection_record_service::verify_current_snapshot(&strict, &current)
+            .await
+            .unwrap();
+        let target = super::super::proxy_service::resolve_proxy_target(
+            &db,
+            &strict,
+            &owner,
+            &service_id,
+            crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(target.credential.as_str(), "staged-secret");
+        let mut swapped: UserServiceConnection = bson::from_document(current.clone()).unwrap();
+        swapped.service_id = Uuid::new_v4().to_string();
+        assert!(
+            super::super::connection_record_service::text(&strict, &swapped)
+                .await
+                .is_err()
+        );
+        swapped = bson::from_document(current.clone()).unwrap();
+        swapped.user_id = Uuid::new_v4().to_string();
+        assert!(
+            super::super::connection_record_service::text(&strict, &swapped)
+                .await
+                .is_err()
+        );
+        update_credential(
+            &db,
+            &strict,
+            &owner,
+            &service_id,
+            "replacement-secret",
+            Some("new"),
+        )
+        .await
+        .unwrap();
+        // The earlier snapshot cannot replace a successor, including marker changes.
+        let old: UserServiceConnection = bson::from_document(current).unwrap();
+        assert!(matches!(
+            super::super::connection_record_service::commit(&db, Some(&source), &old).await,
+            Err(AppError::Conflict(_))
+        ));
+        let target = super::super::proxy_service::resolve_proxy_target(
+            &db,
+            &strict,
+            &owner,
+            &service_id,
+            crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(target.credential.as_str(), "replacement-secret");
+        disconnect_user_with_expected_state_version(&db, &owner, &service_id, Some(1))
+            .await
+            .unwrap_err();
+        disconnect_user(&db, &owner, &service_id).await.unwrap();
+        let disconnected = db
+            .collection::<bson::Document>(CONNECTIONS)
+            .find_one(doc! {"user_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(disconnected.get("credential_type"), Some(&bson::Bson::Null));
+        assert_eq!(
+            disconnected.get("credential_label"),
+            Some(&bson::Bson::Null)
+        );
+        assert_eq!(
+            disconnected.get("credential_encrypted"),
+            Some(&bson::Bson::Null)
+        );
+
+        connect_user(
+            &db,
+            &strict,
+            &ws,
+            &owner,
+            &service_id,
+            Some("reconnected-secret"),
+            None,
+        )
+        .await
+        .unwrap();
+        let reconnected = db
+            .collection::<bson::Document>(CONNECTIONS)
+            .find_one(doc! {"user_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reconnected.get("credential_label"), Some(&bson::Bson::Null));
+        super::super::connection_record_service::verify_current_snapshot(&strict, &reconnected)
+            .await
+            .unwrap();
+        // A durable tombstone blocks the same delayed production writer even
+        // after its source owner document has been removed.
+        db.collection::<bson::Document>(super::super::erasure_admission::COLLECTION)
+            .update_one(doc! {"_id":&owner}, doc! {"$set":{"erasure_accepted":true}})
+            .await
+            .unwrap();
+        assert!(matches!(
+            update_credential(
+                &db,
+                &strict,
+                &owner,
+                &service_id,
+                "forbidden-late-secret",
+                None
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            db.collection::<bson::Document>(CONNECTIONS)
+                .find_one(doc! {"user_id":&owner})
+                .await
+                .unwrap()
+                .unwrap(),
+            reconnected
+        );
     }
 }

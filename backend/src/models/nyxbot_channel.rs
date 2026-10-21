@@ -277,11 +277,71 @@ impl std::fmt::Debug for NyxbotThread {
     }
 }
 
+/// Authorized source selectors only. Provider keys stay on ChannelMessage.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EventMediaItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<super::assistant_channel_media::MediaOutcome>,
+    /// Index into the source row's standalone or embedded attachments.
+    pub index: usize,
+    /// Selects the embedded attachment list when true.
+    pub embedded: bool,
+    /// Declared media kind, such as image or file.
+    pub kind: String,
+    /// Provider-declared size, when known.
+    pub size_bytes: Option<u64>,
+}
+/// Native media admission identity, selectors and interruption notice lifecycle.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EventMedia {
+    /// Captured route identity; no credential material is retained here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<MediaAuthority>,
+    /// v1 native media identity shared by deliveries of the same provider message.
+    pub key: String,
+    /// Declared attachment count, including items omitted by the parser's cap.
+    pub declared: usize,
+    /// Authorized selectors retained from the source message.
+    pub items: Vec<EventMediaItem>,
+    /// Bot component of the native chat scope for notices across channel rebuilds.
+    #[serde(default)]
+    pub channel_bot_id: String,
+    /// Platform component of the native chat scope for notices across channel rebuilds.
+    #[serde(default)]
+    pub platform: String,
+    /// Provider chat component of the notice scope, stable across channel rebuilds.
+    pub platform_chat_id: String,
+    /// Set after five minutes without a source binding to a turn or queue.
+    #[serde(default)]
+    pub interrupted: bool,
+    /// Set when the interruption notice is consumed by the next owner turn.
+    #[serde(default)]
+    pub noted: bool,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MediaAuthority {
+    pub route_api_key_id: String,
+    pub route_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub bot_owner_id: Option<String>,
+    pub follow_binding_generation: i64,
+}
+impl std::fmt::Debug for EventMedia {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EventMedia([REDACTED])")
+    }
+}
+
 /// Gateway turn admission, keyed by binding and idempotency key. Holds the
 /// gateway's `event_context` verbatim (encrypted; it carries message text) so
 /// `readEventContext` returns exactly what was admitted. TTL-expired.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotEvent {
+    /// Trusted presence for every sender; independent of owner-only media claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_media_declared: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<EventMedia>,
     /// Atomic native bot budget/source-event claim. Never cleared on retries.
     #[serde(default)]
     pub native_bot_budget_claimed: bool,
@@ -309,10 +369,11 @@ pub struct NyxbotEvent {
     pub relay_message_id: Option<String>,
     #[serde(with = "crate::models::bson_bytes::optional", default)]
     pub event_context_ciphertext: Option<Vec<u8>>,
-    /// `running`, `queued`, `completed`, `failed`, or `refused`. Queued work is
+    /// `running`, `queued`, `completed`, `failed`, `refused`, or `interrupted`. Queued work is
     /// accepted with its original source before it is bound to an execution turn.
     /// A proven no-turn human Busy attempt may be `retryable`, atomically
     /// claimed as `resuming`.
+    /// Relay media events also terminalize as `completed` after intentional silence.
     pub status: String,
     #[serde(default)]
     pub conversation_id: Option<String>,
