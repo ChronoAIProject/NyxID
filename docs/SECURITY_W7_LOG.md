@@ -607,3 +607,31 @@
 - A frozen frontend npm install with lifecycle scripts disabled resolves the
   local missing-parse5 prerequisite; wizard composition verification then passes
   on this integrated head. No protected frontend/wizard source was edited.
+
+## W7 PR #1976 follow-up — final local verification
+
+- Fresh signed-snapshot installs of linux-libc-dev on both architectures match
+  the original exact file-list/content proofs: arm64 native and amd64 installed
+  under QEMU, with host-side inspection in both cases. The independent native
+  security indexes still offer 6.8.0-147.147. This validates existing payload
+  bindings; it does not approve the 77 new advisory identities or replace the
+  final-image proof in hosted CI.
+- Re-run every portable W7 policy/unit gate in the workflow inventory on the
+  integrated tree, plus locked dependency audits, original-vulnerability proofs,
+  real Syft/OCI conversion, actionlint and full-history secret scanning. Actual
+  suites pass, including 52 .github helper tests, 19 workflow tests, 26 APT tests,
+  21 SBOM evidence tests and 16 image-disposition tests. The ledger retains the
+  initial stale step-name test, mistyped nonexistent test filename, missing
+  frontend dependency and their corrected successful runs.
+- Independently replay all sixteen saved signature checks in the disposable
+  Linux VM: twelve original metadata files, three promoted trixie candidates,
+  and the recovered original pinned trixie-updates file. All verify. The host
+  lacks gpgv, so its failed prerequisite attempt is recorded separately. The
+  isolated VM is stopped after use.
+- Remaining acceptance limits are explicit: 77 new findings await PM review;
+  Ubuntu archive DNS/HTTP failures prevent full local Dockerfile-prefix replay;
+  QEMU crashes in the amd64 tamper replay; native hosted image/base-coverage and
+  CodeQL runs remain required. No integrity guard, timeout or expiry was relaxed.
+- The complete command/exit/log ledger and reviewable source/policy deltas are
+  ~/Library/Caches/nyxid-targets/w7-apt-followup/command-results.md and
+  delta-report.md, with raw JSONL ledgers and signed metadata alongside them.
