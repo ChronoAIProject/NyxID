@@ -520,19 +520,138 @@ fn terminal_responsibility_expression(machine: &ManagedMachine) -> Document {
     ]}}}
 }
 
-pub(crate) async fn creation_responsibilities_terminal_in_session(
+// Compatibility is deliberately separate from ordinary submission proof. Only
+// raw BSON missing (never null/None) is eligible; every row still participates.
+fn missing_submission_delete_expression() -> Document {
+    doc! {"$and":[
+        {"$eq":[{"$type":"$submission"},"missing"]},
+        {"$eq":["$state","applied"]},
+        {"$in":[{"$type":"$claim_id"},["missing","null"]]},
+        {"$in":[{"$type":"$claimed_until"},["missing","null"]]},
+    ]}
+}
+
+/// Recheck the original delete binding in the same transaction as the raw
+/// responsibility query. Lifecycle state alone is never deletion authority.
+async fn original_delete_context_in_session(
     db: &Database,
     session: &mut mongodb::ClientSession,
     machine: &ManagedMachine,
 ) -> AppResult<bool> {
+    if machine.writer_admitted
+        || !super::remote_machine_service::has_owner_deletion_basis(machine)
+        || !matches!(
+            machine.resource_state,
+            ResourceState::Deleting | ResourceState::Deleted
+        )
+    {
+        return Ok(false);
+    }
+    let Some(operation_id) = machine.active_operation_id.as_deref() else {
+        return Ok(false);
+    };
+    let filter = doc! {
+        "_id":&machine.node_id,"owner_id":&machine.owner_id,"revision":machine.revision,
+        "resource_state":machine.resource_state.as_str(),"writer_admitted":false,
+        "active_operation_id":operation_id,"runtime_generation":machine.runtime_generation,
+        "credential_epoch":machine.credential_epoch,"writer_fence":&machine.writer_fence,
+        "deletion_basis":mongodb::bson::to_bson(&machine.deletion_basis)
+            .map_err(|_|AppError::Internal("delete responsibility encoding failed".into()))?,
+    };
+    if db
+        .collection::<Document>(MACHINES)
+        .find_one(filter)
+        .projection(doc! {"_id":1})
+        .session(&mut *session)
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let mut operation = doc! {"_id":operation_id,"machine_id":&machine.node_id,
+    "owner_id":&machine.owner_id,"action":"delete"};
+    if machine.resource_state == ResourceState::Deleted {
+        // Finalized scans already validate historical stop/resource anchors.
+        // Retain their terminal operation and closed/revoked lifecycle here too.
+        if machine.billing_state != crate::models::remote_machine::BillingState::Closed
+            || machine.authorization_state
+                != crate::models::remote_machine::AuthorizationState::Revoked
+            || machine
+                .delete_recovery
+                .as_ref()
+                .is_none_or(|p| p.operation_id != operation_id)
+        {
+            return Ok(false);
+        }
+        operation.insert("state", "succeeded");
+        operation.insert("terminal_at", doc! {"$ne":Bson::Null});
+    } else {
+        operation.insert("state", doc! {"$in":["accepted","applying","reconciling"]});
+        operation.insert("terminal_at", Bson::Null);
+    }
+    Ok(db
+        .collection::<Document>(OPERATIONS)
+        .find_one(operation)
+        .projection(doc! {"_id":1})
+        .session(&mut *session)
+        .await?
+        .is_some())
+}
+
+pub(crate) async fn delete_creation_responsibilities_terminal_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    machine: &ManagedMachine,
+) -> AppResult<bool> {
+    responsibilities_terminal_in_session(db, session, machine, true).await
+}
+
+async fn responsibilities_terminal_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    machine: &ManagedMachine,
+    original_delete: bool,
+) -> AppResult<bool> {
     cancel_unattempted_in_session(db, session, machine, None).await?;
+    let compatibility =
+        original_delete && original_delete_context_in_session(db, session, machine).await?;
+    let mut terminal = terminal_responsibility_expression(machine);
     let mut filter = running_effect_filter();
     filter.insert("machine_id", &machine.node_id);
     filter.insert("owner_id", &machine.owner_id);
-    filter.insert(
-        "$expr",
-        doc! {"$not":[terminal_responsibility_expression(machine)]},
-    );
+    if compatibility {
+        // One sampled effect, no history materialization or unbounded count.
+        // Only validated UUID identifiers enter this fixed diagnostic.
+        let mut sample_filter = filter.clone();
+        sample_filter.insert("$expr", missing_submission_delete_expression());
+        let sample = db
+            .collection::<Document>(OUTBOX)
+            .find_one(sample_filter)
+            .projection(doc! {"_id":1})
+            .max_time(RESPONSIBILITY_QUERY_TIMEOUT)
+            .session(&mut *session)
+            .await?;
+        if let Some(sample) = sample
+            && let (Ok(machine_id), Some(operation_id), Ok(effect_id)) = (
+                Uuid::parse_str(&machine.node_id),
+                machine
+                    .active_operation_id
+                    .as_deref()
+                    .and_then(|id| Uuid::parse_str(id).ok()),
+                sample
+                    .get_str("_id")
+                    .ok()
+                    .and_then(|id| Uuid::parse_str(id).ok())
+                    .ok_or(()),
+            )
+        {
+            tracing::info!(%machine_id, %operation_id, %effect_id,
+                reason = "missing_submission_applied_empty_claims", sample_count = 1,
+                sample_limit = 1, "Remote Machine delete responsibility compatibility");
+        }
+        terminal = doc! {"$or":[terminal,missing_submission_delete_expression()]};
+    }
+    filter.insert("$expr", doc! {"$not":[terminal]});
     Ok(db
         .collection::<Document>(OUTBOX)
         .find_one(filter)
@@ -543,9 +662,25 @@ pub(crate) async fn creation_responsibilities_terminal_in_session(
         .is_none())
 }
 
+pub(crate) async fn delete_creation_responsibilities_terminal(
+    db: &Database,
+    machine: &ManagedMachine,
+) -> AppResult<bool> {
+    responsibilities_terminal(db, machine, true).await
+}
+
+#[cfg(test)]
 pub(crate) async fn creation_responsibilities_terminal(
     db: &Database,
     machine: &ManagedMachine,
+) -> AppResult<bool> {
+    responsibilities_terminal(db, machine, false).await
+}
+
+async fn responsibilities_terminal(
+    db: &Database,
+    machine: &ManagedMachine,
+    original_delete: bool,
 ) -> AppResult<bool> {
     let db_owned = db.clone();
     let machine = machine.clone();
@@ -556,7 +691,8 @@ pub(crate) async fn creation_responsibilities_terminal(
         .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             super::api_key_mutation_service::transaction_result(
-                creation_responsibilities_terminal_in_session(&db_owned, session, &machine).await,
+                responsibilities_terminal_in_session(&db_owned, session, &machine, original_delete)
+                    .await,
             )
         })
         .await
