@@ -803,21 +803,20 @@ jobs:
     with:
       coverage: true
 
-  # The base percentage is informational. Reuse only a report for the exact
-  # base SHA, measurement recipe and runner image; otherwise measure afresh
-  # as before on the base commit, in parallel with PR-head coverage.
+  # Base coverage is an informational comparison, not a correctness gate.
+  # Reuse an exact source/recipe/image report from a trusted push/publish run.
+  # Try the exact-SHA cache, then a published baseline; otherwise report N/A.
+  # Head coverage always executes all current tests; never rerun the base suite.
   coverage-backend-base:
     name: Coverage (Backend Base)
+    permissions:
+      contents: read
+      actions: read
     needs: changes
     if: github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     continue-on-error: true
-    runs-on: ubuntu-latest
-    # Same headroom as PR-head coverage; slow runners exceeded 90 minutes.
-    timeout-minutes: 120
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
-      LLVM_PROFILE_FILE_NAME: "nyxid-%4m.profraw"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - name: Identify coverage measurement inputs
@@ -830,76 +829,49 @@ jobs:
         with:
           path: coverage-backend.base.json
           key: coverage-backend-base-v2-${{ github.event.pull_request.base.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
-      - name: Checkout base tree
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: base-coverage
-      - name: Prepare backend memory reserve
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        run: bash .github/scripts/prepare-backend-runner.sh
-      - name: Start transaction-capable MongoDB
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        run: bash .github/scripts/start-test-mongodb.sh
-      - name: Install system dependencies
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 5
-        run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
-          key: coverage-backend-base
-      - uses: taiki-e/install-action@v2
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        with:
-          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
-      - name: Measure base branch
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        working-directory: base-coverage
-        run: >-
-          python3 "$GITHUB_WORKSPACE/.github/scripts/ci_resources.py" coverage-test
-          cargo llvm-cov nextest --package nyxid --profile ci
-          --config-file "$GITHUB_WORKSPACE/.config/nextest.toml" --no-report
-      - name: Test MongoDB diagnostics
-        if: (failure() || cancelled()) && steps.base-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        run: bash "$GITHUB_WORKSPACE/.github/scripts/dump-test-mongodb.sh"
-      - name: Export base coverage
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        working-directory: base-coverage
-        run: |
-          cargo llvm-cov report --package nyxid --json --summary-only \
-            --output-path "$GITHUB_WORKSPACE/coverage-backend.base.json"
-      - name: Cache measured base report
+      - name: Look up published baseline for the exact base SHA
         if: steps.base-cache.outputs.cache-hit != 'true' && steps.coverage-identity.outputs.reusable == 'true'
+        id: base-run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: >-
+          python3 .github/scripts/coverage_base_lookup.py select
+          --repository "$GITHUB_REPOSITORY" --sha "$BASE_SHA"
+      - name: Download published baseline
+        if: steps.base-run.outputs.run-id != ''
+        id: base-download
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/download-artifact@v4
         with:
-          path: coverage-backend.base.json
-          key: coverage-backend-base-v2-${{ github.event.pull_request.base.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
+          artifact-ids: ${{ steps.base-run.outputs.artifact-id }}
+          merge-multiple: true
+          run-id: ${{ steps.base-run.outputs.run-id }}
+          github-token: ${{ github.token }}
+          path: published-baseline
+      - name: Verify published baseline measurement identity
+        if: steps.base-download.outcome == 'success'
+        id: base-artifact
+        env:
+          FINGERPRINT: ${{ steps.coverage-identity.outputs.fingerprint }}
+          REUSABLE: ${{ steps.coverage-identity.outputs.reusable }}
+        run: >-
+          python3 .github/scripts/coverage_base_lookup.py verify
+          --directory published-baseline --fingerprint "$FINGERPRINT"
+          --reusable "$REUSABLE"
+      - name: Report unavailable baseline
+        if: steps.base-cache.outputs.cache-hit != 'true' && steps.base-artifact.outputs.available != 'true'
+        run: >-
+          echo 'Base coverage delta: N/A (no report for this exact base commit,
+          measurement recipe and runner image). Head tests and coverage remain required.'
+          >> "$GITHUB_STEP_SUMMARY"
       - name: Upload base report
-        if: always()
+        if: steps.base-cache.outputs.cache-hit == 'true' || steps.base-artifact.outputs.available == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: backend-base-report
           path: coverage-backend.base.json
-          if-no-files-found: warn
-
-      - name: Upload resource samples
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: resources-coverage-backend-base
-          path: ${{ runner.temp }}/nyxid-ci-resources
-          if-no-files-found: ignore
-          retention-days: 14
+          if-no-files-found: error
 
   # Restore the original PR artifact contract after the parallel base lookup.
   # This is informational; the coverage-backend job remains the threshold gate.

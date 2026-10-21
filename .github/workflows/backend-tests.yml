@@ -266,9 +266,20 @@ jobs:
           build-identity.json results/shard-1/identity.json
           results/shard-2/identity.json results/shard-3/identity.json
           results/shard-4/identity.json
+          --record coverage-backend.identity.json
       - name: Prepare reusable base report
         if: inputs.coverage && github.event_name != 'pull_request'
         run: cp coverage-backend.raw.json coverage-backend.base.json
+      - name: Publish exact-commit coverage baseline
+        if: inputs.coverage && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage-baseline
+          path: |
+            coverage-backend.base.json
+            coverage-backend.identity.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Cache reusable base report
         if: inputs.coverage && github.event_name != 'pull_request' && steps.coverage-identity.outputs.reusable == 'true'
         continue-on-error: true
