@@ -674,7 +674,7 @@ jobs:
         if: always()
         uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2.6
         with:
-          paths: ${{ runner.temp }}/backend-test-run/target/nextest/ci/junit.xml
+          paths: ${{ github.workspace }}/target/nextest/ci/junit.xml
           show: fail
 
       - name: Upload backend test results
@@ -682,7 +682,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test-results-backend-${{ matrix.partition }}
-          path: ${{ runner.temp }}/backend-test-run/target/nextest/ci/junit.xml
+          path: ${{ github.workspace }}/target/nextest/ci/junit.xml
           if-no-files-found: warn
 
       - name: Upload resource samples

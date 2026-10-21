@@ -255,7 +255,7 @@ class BackendTestPartitions(unittest.TestCase):
             self.assertIn(arg, command)
         for compile_option in ('cargo nextest archive', 'cargo build', 'cargo test', '--features', '--package'):
             self.assertNotIn(compile_option, command)
-        junit = '${{ runner.temp }}/backend-test-run/target/nextest/ci/junit.xml'
+        junit = '${{ github.workspace }}/target/nextest/ci/junit.xml'
         summary = next(step for step in run['steps'] if step.get('name') == 'Publish test summary')
         results = next(step for step in run['steps'] if step.get('name') == 'Upload backend test results')
         self.assertEqual(summary['with']['paths'], junit)
