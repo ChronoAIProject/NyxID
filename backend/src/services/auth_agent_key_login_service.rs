@@ -172,6 +172,7 @@ pub async fn request(
         let user_code = auth_device_service::generate_user_code();
         let now = Utc::now();
         let row = AgentKeyLoginRequest {
+            delivery_context_version: None,
             id: Uuid::new_v4().to_string(),
             device_code_hmac: code_hash(hmac_key, &device_code),
             user_code_hmac: code_hash(hmac_key, &user_code),
@@ -621,7 +622,17 @@ pub async fn approve(
     };
     let credential_id = Uuid::new_v4().to_string();
     let secret = credentials::generate_secret();
-    let encrypted = encryption.encrypt(secret.as_bytes()).await?;
+    let encrypted = super::agent_login_record_service::encrypt(
+        encryption,
+        &row.id,
+        actor,
+        &key_id,
+        &credential_id,
+        secret.as_bytes(),
+    )
+    .await?;
+    let delivery_context_version =
+        super::agent_login_record_service::version(encryption).map(i32::from);
     let mut session = db.client().start_session().await?;
     // Claim, key insertion, child issuance, and encrypted delivery are committed
     // together. A cancelled future or process crash cannot leave a partial grant.
@@ -658,6 +669,7 @@ pub async fn approve(
                     "approver_ip_hmac": &approver_ip_hmac,
                     "approved_at": bson::DateTime::from_chrono(now),
                     "expires_at": bson::DateTime::from_chrono(now + Duration::seconds(60)),
+                    "delivery_context_version": delivery_context_version,
                     "delivery_credential_encrypted": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted.clone()}}},
             ).session(&mut *session).await?;
             Ok(owner_type)
@@ -768,7 +780,7 @@ pub async fn poll(
     let now = Utc::now();
     let delivered = collection.find_one_and_update(
         doc! {"_id": &row.id, "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}, "delivery_credential_encrypted": {"$ne": bson::Bson::Null}},
-        doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now), "last_polled_at": bson::DateTime::from_chrono(now)}, "$unset": {"delivery_credential_encrypted": ""}},
+        doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now), "last_polled_at": bson::DateTime::from_chrono(now)}, "$unset": {"delivery_credential_encrypted": "", "delivery_context_version": ""}},
     ).return_document(ReturnDocument::Before).await?;
     let delivered = match delivered {
         Some(delivered) => delivered,
@@ -805,12 +817,12 @@ async fn prepare_delivery(
     encryption: &EncryptionKeys,
     row: &AgentKeyLoginRequest,
 ) -> AppResult<Delivery> {
-    prepare_credential_delivery(
+    let credential = super::agent_login_record_service::decrypt(encryption, row).await?;
+    prepare_decoded_credential_delivery(
         db,
-        encryption,
         row.credential_id.as_deref(),
         row.approved_user_id.as_deref(),
-        row.delivery_credential_encrypted.as_deref(),
+        credential,
         row.key_was_created || row.key_created_by_approval,
     )
     .await
@@ -822,6 +834,33 @@ pub async fn prepare_credential_delivery(
     credential_id: Option<&str>,
     approved_user_id: Option<&str>,
     encrypted: Option<&[u8]>,
+    key_was_created: bool,
+) -> AppResult<Delivery> {
+    let plaintext = Zeroizing::new(
+        encryption
+            .decrypt(encrypted.ok_or(AppError::AgentKeyCredentialNotFound)?)
+            .await?,
+    );
+    let credential = Zeroizing::new(
+        std::str::from_utf8(&plaintext)
+            .map_err(|_| AppError::Internal("Invalid Agent Key delivery encoding".into()))?
+            .to_owned(),
+    );
+    prepare_decoded_credential_delivery(
+        db,
+        credential_id,
+        approved_user_id,
+        credential,
+        key_was_created,
+    )
+    .await
+}
+
+async fn prepare_decoded_credential_delivery(
+    db: &Database,
+    credential_id: Option<&str>,
+    approved_user_id: Option<&str>,
+    credential: Zeroizing<String>,
     key_was_created: bool,
 ) -> AppResult<Delivery> {
     let id = credential_id.ok_or(AppError::AgentKeyCredentialNotFound)?;
@@ -837,15 +876,6 @@ pub async fn prepare_credential_delivery(
     )
     .await?;
     credentials::credential_expiry(parent.expires_at, child.expires_at)?;
-    let plaintext = Zeroizing::new(
-        encryption
-            .decrypt(encrypted.ok_or(AppError::AgentKeyCredentialNotFound)?)
-            .await?,
-    );
-    let credential = Zeroizing::new(
-        String::from_utf8(plaintext.to_vec())
-            .map_err(|_| AppError::Internal("Invalid Agent Key delivery encoding".into()))?,
-    );
     let api_key = key_summary(db, &parent, key_was_created).await?;
     Ok(Delivery {
         credential,
@@ -872,7 +902,7 @@ async fn expire(db: &Database, row: &AgentKeyLoginRequest) -> AppResult<()> {
     // win the same row or leave its credential to this durable cleanup marker.
     let current = collection.find_one_and_update(
         doc! {"_id": &row.id, "status": {"$in": ["pending", "approved", "expired"]}, "expires_at": {"$lte": bson::DateTime::from_chrono(Utc::now())}},
-        doc! {"$set": {"status": "expired"}, "$unset": {"delivery_credential_encrypted": ""}},
+        doc! {"$set": {"status": "expired"}, "$unset": {"delivery_credential_encrypted": "", "delivery_context_version": ""}},
     ).return_document(ReturnDocument::After).await?;
     if let Some(current) = current {
         cleanup(db, &current).await?;

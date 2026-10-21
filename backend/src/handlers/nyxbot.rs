@@ -2133,14 +2133,16 @@ async fn settle_and_wake(
         }
     } else {
         settle(state, watch, error).await;
-        super::assistant_team::notify(
+        // A notification can start a complete assistant turn. Box its future
+        // so watch dispatch does not keep that turn's storage on its poll stack.
+        Box::pin(super::assistant_team::notify(
             state,
             &watch.user_id,
             &watch.conversation_id,
             vec![crate::services::nyxbot_watch_service::watch_event(
                 watch, kind, text,
             )],
-        )
+        ))
         .await;
     }
     Ok(())
@@ -2173,19 +2175,22 @@ pub(crate) async fn process_watches(state: &AppState) -> AppResult<()> {
     Ok(())
 }
 
-async fn resolve(state: &AppState, watch: &NyxbotWatch) {
-    let result = match watch.kind.as_str() {
-        "channel_bot" => channel_bot_watch(state, watch).await,
-        "connect_link" => connect_link_watch(state, watch).await,
-        "machine_update" => machine_update_watch(state, watch).await,
-        "machine_setup" => machine_setup_watch(state, watch).await,
-        "machine_control" => machine_control_watch(state, watch).await,
-        "trigger_created" => trigger_created_watch(state, watch).await,
-        _ => Ok(()),
-    };
-    if let Err(error) = result {
-        tracing::debug!(%error, "NyxBot watch deferred");
-    }
+fn resolve<'a>(state: &'a AppState, watch: &'a NyxbotWatch) -> futures::future::BoxFuture<'a, ()> {
+    // Both sweep and live dispatch share this bounded allocation boundary.
+    Box::pin(async move {
+        let result = match watch.kind.as_str() {
+            "channel_bot" => channel_bot_watch(state, watch).await,
+            "connect_link" => connect_link_watch(state, watch).await,
+            "machine_update" => machine_update_watch(state, watch).await,
+            "machine_setup" => machine_setup_watch(state, watch).await,
+            "machine_control" => machine_control_watch(state, watch).await,
+            "trigger_created" => trigger_created_watch(state, watch).await,
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            tracing::debug!(%error, "NyxBot watch deferred");
+        }
+    })
 }
 
 /// React to live changes at once instead of on the next sweep: a watched
@@ -3216,7 +3221,7 @@ async fn start_chat_turn(
             // the answer in progress (sent to this chat too) or already queued.
             if guest
                 && exists
-                && (!guest || origin.thread.is_none())
+                && origin.thread.is_none()
                 && let Some(key) = question_key.as_deref()
                 && let Some(reply) =
                     repeated_question(state, row, &conversation_id, key, &origin).await?

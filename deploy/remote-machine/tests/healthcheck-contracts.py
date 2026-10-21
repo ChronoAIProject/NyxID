@@ -18,7 +18,7 @@ DEFAULT["metadata"]["annotations"] = {"storageclass.kubernetes.io/is-default-cla
 CASES = 0
 
 
-def check(name, selected, *, expected=0, contains=(), excludes=(), denied="", storage=None, error=""):
+def check(name, selected, *, expected=0, contains=(), excludes=(), denied="", storage=None, error="", allowed="", principal=MANAGER, auth_error=""):
     global CASES
     with tempfile.TemporaryDirectory(prefix="nyxid-healthcheck-contract-") as directory:
         root = Path(directory)
@@ -30,11 +30,27 @@ args = sys.argv[1:]
 with open(os.environ['NYXID_TEST_COMMANDS'], 'a') as target:
     target.write(json.dumps(args) + '\\n')
 joined = ' '.join(args)
+if args[:2] == ['auth', 'can-i'] and os.environ.get('NYXID_TEST_AUTH_ERROR') and os.environ['NYXID_TEST_AUTH_ERROR'] in joined:
+    print('Error from server (ServiceUnavailable): authorization API unavailable', file=sys.stderr)
+    sys.exit(1)
 if os.environ.get('NYXID_TEST_DENIED') and os.environ['NYXID_TEST_DENIED'] in joined:
+    if args[:2] == ['auth', 'can-i']: print('no')
     sys.exit(1)
+if args[:2] == ['auth', 'can-i'] and os.environ.get('NYXID_TEST_ALLOWED') not in ('', None) and os.environ['NYXID_TEST_ALLOWED'] in joined:
+    print('yes')
+    sys.exit(0)
+if args[:3] == ['auth', 'whoami', '-o']:
+    print(json.dumps({'status': {'userInfo': {'username': os.environ['NYXID_TEST_PRINCIPAL']}}}))
+    sys.exit(0)
 if args[:2] == ['auth', 'can-i'] and any(value in joined for value in
-    ['create pods', 'create persistentvolumeclaims', 'patch pods', 'patch persistentvolumeclaims']):
+    ['create pods', 'create persistentvolumeclaims', 'patch pods', 'patch persistentvolumeclaims',
+     'delete pods', 'delete persistentvolumeclaims', 'list persistentvolumes',
+     'list volumeattachments.storage.k8s.io', 'list pods --all-namespaces']):
+    print('no')
     sys.exit(1)
+if args[:2] == ['auth', 'can-i']:
+    print('yes')
+    sys.exit(0)
 if args[:2] == ['get', 'validatingadmissionpolicy']:
     print('[]')
 if args[:2] in (['get', 'storageclass'], ['get', 'storageclasses']):
@@ -44,16 +60,23 @@ if args[:2] in (['get', 'storageclass'], ['get', 'storageclasses']):
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("NYXID_REMOTE_MACHINE_", "NYXID_MACHINE_"))}
         default_storage = CLASS if selected.get("NYXID_REMOTE_MACHINE_STORAGE_CLASS") else {"items": [DEFAULT]}
+        token = root / "manager-token"
+        token.write_text("actual-manager-token")
+        token.chmod(0o600)
         environment.update({"PATH": str(root) + os.pathsep + os.environ["PATH"],
-                            "NYXID_TEST_COMMANDS": str(calls), "NYXID_TEST_DENIED": denied,
-                            "NYXID_TEST_STORAGE": json.dumps(default_storage if storage is None else storage)})
+                            "NYXID_TEST_COMMANDS": str(calls), "NYXID_TEST_DENIED": denied, "NYXID_TEST_ALLOWED": allowed,
+                            "NYXID_TEST_AUTH_ERROR": auth_error,
+                            "NYXID_TEST_STORAGE": json.dumps(default_storage if storage is None else storage),
+                            "NYXID_TEST_PRINCIPAL": principal,
+                            "NYXID_REMOTE_MACHINE_KUBE_API": "https://manager.test.invalid",
+                            "NYXID_REMOTE_MACHINE_KUBE_TOKEN_FILE": str(token)})
         environment.update(selected)
         result = subprocess.run(["sh", str(SCRIPT)], env=environment, capture_output=True, text=True, timeout=20)
         assert result.returncode == expected, (name, result.returncode, result.stdout, result.stderr)
         arguments = [json.loads(line) for line in calls.read_text().splitlines()]
         commands = [" ".join(args) for args in arguments]
         # The script may inspect permissions, but it must never issue a write.
-        assert all(args[0] == "get" or args[:2] in (["auth", "can-i"], ["rollout", "status"])
+        assert all(args[0] in ("get", "auth") or args[:2] in (["rollout", "status"],)
                    for args in arguments), (name, "mutating command", commands)
         for fragment in contains:
             assert any(fragment in command for command in commands), (name, "missing", fragment)
@@ -62,6 +85,7 @@ if args[:2] in (['get', 'storageclass'], ['get', 'storageclasses']):
         if expected == 0:
             assert "native_api_contract_healthy" in result.stdout
         if expected != 0:
+            assert "native_api_contract_healthy" not in result.stdout, (name, "false healthy pass")
             assert "Traceback" not in result.stderr, (name, result.stderr)
         if error:
             assert error in result.stderr, (name, "missing error", error, result.stderr)
@@ -69,43 +93,59 @@ if args[:2] in (['get', 'storageclass'], ['get', 'storageclasses']):
         print(name + ": passed")
 
 
+check("namespace Pod discovery succeeds when cluster Pod LIST is denied", EXPLICIT,
+      denied="list pods --all-namespaces", contains=("list pods -n nyxid-machine",),
+      excludes=("get volumeattachments.storage.k8s.io",))
 check("unset storage selects actual cluster default without runtime or provider selection", {},
-      contains=(f"get storageclasses --as={MANAGER}", "get storageclasses.storage.k8s.io",
-                "list storageclasses.storage.k8s.io", "get nodes", "get persistentvolumes", "create tokenreviews"),
+      contains=("get storageclasses", "get storageclasses.storage.k8s.io",
+                "list storageclasses.storage.k8s.io", "get nodes", "create tokenreviews"),
       excludes=("runtimeclass", "deployment", "nodes/stats", "nodes/proxy", "get storageclass existing-csi"))
-check("delete recovery requires residual deletes and complete read permissions", EXPLICIT,
-      contains=("delete pods", "delete persistentvolumeclaims", "list pods --all-namespaces",
+check("sandbox cascade requires namespace reads and rejects child/storage permissions", EXPLICIT,
+      contains=("delete pods -n nyxid-machine", "delete persistentvolumeclaims -n nyxid-machine",
+                "list pods -n nyxid-machine", "list persistentvolumeclaims -n nyxid-machine",
                 "list persistentvolumes", "get leases.coordination.k8s.io -n kube-node-lease",
-                "get volumeattachments.storage.k8s.io", "list volumeattachments.storage.k8s.io"))
-for permission in ("delete pods", "delete persistentvolumeclaims", "list pods --all-namespaces",
-                   "list persistentvolumes", "get leases.coordination.k8s.io",
-                   "get volumeattachments.storage.k8s.io", "list volumeattachments.storage.k8s.io"):
+                "list volumeattachments.storage.k8s.io"),
+      excludes=("get volumeattachments.storage.k8s.io",))
+required_cleanup_permissions = tuple(
+    f"{verb} {resource} -n nyxid-machine"
+    for resource, verbs in (("sandboxes.agents.x-k8s.io", ("get", "list", "create", "patch", "delete")),
+                            ("pods", ("get", "list")),
+                            ("persistentvolumeclaims", ("get", "list")))
+    for verb in verbs
+)
+for permission in required_cleanup_permissions:
     check(f"delete recovery missing {permission} permission fails", EXPLICIT, expected=1, denied=permission)
+for permission in ("get leases.coordination.k8s.io -n kube-node-lease", "get persistentvolumes"):
+    check(f"existing lifecycle missing {permission} permission fails", EXPLICIT, expected=1, denied=permission)
+for permission in ("delete pods -n nyxid-machine", "delete persistentvolumeclaims -n nyxid-machine",
+                   "list persistentvolumes", "list volumeattachments.storage.k8s.io",
+                   "list pods --all-namespaces"):
+    check(f"forbidden {permission} permission fails", EXPLICIT, expected=2, allowed=permission)
 check("explicit existing storage is read as manager", EXPLICIT,
-      contains=(f"get storageclass existing-csi --as={MANAGER}",), excludes=("get storageclasses --as=",))
+      contains=("get storageclass existing-csi",), excludes=("--as=",))
 check("blank optional storage also selects cluster default", {"NYXID_REMOTE_MACHINE_STORAGE_CLASS": ""},
-      contains=(f"get storageclasses --as={MANAGER}",))
+      contains=("get storageclasses",))
 check("whitespace-only optional storage selects cluster default", {"NYXID_REMOTE_MACHINE_STORAGE_CLASS": " \t\n "},
-      storage={"items": [DEFAULT]}, contains=(f"get storageclasses --as={MANAGER}",))
+      storage={"items": [DEFAULT]}, contains=("get storageclasses",))
 check("configured storage name trims surrounding whitespace", {"NYXID_REMOTE_MACHINE_STORAGE_CLASS": " existing-csi \t"},
-      contains=(f"get storageclass existing-csi --as={MANAGER}",))
+      contains=("get storageclasses",))
 check("legacy storage alias cannot override unset canonical cluster default", {"NYXID_MACHINE_STORAGE_CLASS": "legacy-csi"},
-      contains=(f"get storageclasses --as={MANAGER}",), excludes=("get storageclass legacy-csi",))
+      contains=("get storageclasses",), excludes=("get storageclass legacy-csi",))
 check("legacy storage alias cannot make a missing default healthy", {"NYXID_MACHINE_STORAGE_CLASS": "legacy-csi"},
       storage={"items": [CLASS]}, expected=2, error="storageclass_default_unverified")
 check("legacy storage alias cannot override blank canonical default", {
     "NYXID_REMOTE_MACHINE_STORAGE_CLASS": "", "NYXID_MACHINE_STORAGE_CLASS": "legacy-csi"},
-      contains=(f"get storageclasses --as={MANAGER}",), excludes=("get storageclass legacy-csi",))
+      contains=("get storageclasses",), excludes=("get storageclass legacy-csi",))
 check("canonical explicit storage controls conflicting legacy alias", {
     **EXPLICIT, "NYXID_MACHINE_STORAGE_CLASS": "legacy-csi"},
-      contains=(f"get storageclass existing-csi --as={MANAGER}",), excludes=("get storageclass legacy-csi",))
+      contains=("get storageclasses",), excludes=("get storageclass legacy-csi",))
 check("missing cluster default fails clearly", {}, storage={"items": [CLASS]}, expected=2,
       error="storageclass_default_unverified")
 check("no classes fails clearly", {}, storage={"items": []}, expected=2, error="storageclass_default_unverified")
 check("explicit unknown StorageClass is rejected", EXPLICIT, expected=2,
       denied="get storageclass existing-csi", error="storageclass_unverified")
 check("default API permission failure is rejected", {}, expected=2,
-      denied=f"get storageclasses --as={MANAGER}", error="storageclass_default_unverified")
+      denied="get storageclasses --chunk-size=100", error="storageclass_default_unverified")
 for verb in ("get", "list"):
     check(f"required StorageClass {verb} permission is checked", EXPLICIT, expected=2,
           denied=f"{verb} storageclasses.storage.k8s.io", error="storageclass_read_permission_unverified")
@@ -168,4 +208,15 @@ check("optional detailed Deployment checks run only on request", {
     "NYXID_REMOTE_MACHINE_CONTROLLER_NAMESPACE": "controller-system",
     "NYXID_REMOTE_MACHINE_CONTROLLER_DEPLOYMENT": "agent-sandbox"},
     contains=("get deployment/agent-sandbox", "rollout status deployment/agent-sandbox"))
+check("actual broad Manager principal is rejected", EXPLICIT, expected=2,
+      error="manager_principal_mismatch", principal="system:serviceaccount:nyxid-machine:cluster-admin")
+for permission in ("delete pods -n nyxid-machine", "delete persistentvolumeclaims -n nyxid-machine",
+                   "list persistentvolumes", "list volumeattachments.storage.k8s.io",
+                   "list pods --all-namespaces", "create pods -n nyxid-machine",
+                   "create persistentvolumeclaims -n nyxid-machine", "patch pods -n nyxid-machine",
+                   "patch persistentvolumeclaims -n nyxid-machine", "create pods/exec"):
+    check(f"forbidden {permission} API error is not denial", EXPLICIT, expected=2,
+          auth_error=permission, error="manager_permission_check_unavailable")
+for permission in required_cleanup_permissions:
+    check(f"required {permission} API error fails", EXPLICIT, expected=1, auth_error=permission)
 print(f"healthcheck contract: {CASES} cases passed; local kubectl fixture only; no resource writes")

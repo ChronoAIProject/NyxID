@@ -19,7 +19,7 @@ const MAX_DEVICES_PER_USER: usize = 10;
 
 // --- Request types ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct RegisterDeviceRequest {
     pub platform: String,
     pub token: String,
@@ -28,7 +28,7 @@ pub struct RegisterDeviceRequest {
     pub app_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct UnregisterCurrentDeviceRequest {
     pub platform: String,
     pub token: String,
@@ -303,7 +303,8 @@ pub async fn register_device(
         TelemetryEvent::NotificationDeviceRegistered {
             platform: body.platform.clone(),
         },
-    );
+    )
+    .await;
 
     Ok(Json(DeviceResponse {
         device_id,
@@ -420,7 +421,8 @@ pub async fn remove_device(
             auth_user.api_key_id.as_deref(),
             &tele,
             TelemetryEvent::NotificationDeviceRemoved { platform },
-        );
+        )
+        .await;
     }
 
     let message = if approval_suspended {
@@ -506,7 +508,8 @@ pub async fn remove_current_device(
             TelemetryEvent::NotificationDeviceRemoved {
                 platform: body.platform.clone(),
             },
-        );
+        )
+        .await;
     }
 
     let message = if approval_suspended {
@@ -726,6 +729,20 @@ fn disable_push_update_doc() -> Document {
     doc! {
         "push_enabled": false,
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
+    }
+}
+
+impl std::fmt::Debug for RegisterDeviceRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisterDeviceRequest")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for UnregisterCurrentDeviceRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnregisterCurrentDeviceRequest")
+            .finish_non_exhaustive()
     }
 }
 

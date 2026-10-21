@@ -309,15 +309,15 @@ async fn verify_github_token_bound_to_app(
         .json(&serde_json::json!({ "access_token": access_token }))
         .send()
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "GitHub token check HTTP error");
+        .map_err(|_| {
+            tracing::error!("GitHub token check HTTP error");
             AppError::SocialAuthFailed("Failed to verify token with GitHub".to_string())
         })?;
 
     match response.status() {
         reqwest::StatusCode::OK => {
-            let body: GitHubTokenCheckResponse = response.json().await.map_err(|e| {
-                tracing::error!(error = %e, "GitHub token check parse error");
+            let body: GitHubTokenCheckResponse = response.json().await.map_err(|_| {
+                tracing::error!("Invalid GitHub token check response");
                 AppError::SocialAuthFailed(
                     "Invalid token verification response from GitHub".to_string(),
                 )

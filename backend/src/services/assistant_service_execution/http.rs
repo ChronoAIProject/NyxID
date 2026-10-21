@@ -476,9 +476,7 @@ pub(super) async fn persist_model_consent(
         "operation":digest(operation.clone()),
         "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(35))},
     );
-    db.collection::<Document>(COLLECTION)
-        .insert_one(grant)
-        .await?;
+    crate::services::erasure_admission::insert_owned(db, COLLECTION, &chat.user_id, &grant).await?;
     Ok(())
 }
 

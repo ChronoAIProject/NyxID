@@ -779,8 +779,9 @@ async fn machine_access_org_contexts_partition_people_and_recheck_membership() {
     )
     .await
     .unwrap();
-    let (_, token, _) = super::node_service::create_registration_token(
+    let (_, token, _) = super::node_service::create_registration_token_for_actor(
         &f.state.db,
+        &f.admin,
         &f.org,
         "org-machine",
         100,

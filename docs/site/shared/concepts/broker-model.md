@@ -59,10 +59,14 @@ NyxID supports several injection strategies, chosen per service:
 | `header` | A named HTTP header (e.g. `x-api-key`) |
 | `query` | A query parameter |
 | `basic` | HTTP Basic auth (`Authorization: Basic base64(user:pass)`) |
+| `body` | Configured credential field in a JSON request body on supported methods |
+| `path` | Credential substitution in the configured target path |
+
+These are examples, not an exhaustive mode list. The backend also supports provider-specific token exchange/signing and adapter modes; the live service configuration and auth dispatch define their behavior.
 
 ## What the broker does not do
 
-The broker model is about credential isolation, not content filtering. NyxID forwards the request body as-is. It does not parse, modify, or store request or response bodies (approvals inspect the body just enough to build a human-readable action description, but never persist it).
+The proxy normally forwards bodies without content filtering. Explicit features can parse or transform them: body credential injection rewrites JSON, protocol adapters translate requests, and approval preparation inspects buffered content. Assistant attachments, trigger replay and other product subsystems have separate persistence contracts; there is no universal promise that all NyxID paths never store bodies.
 
 ## Related guides
 

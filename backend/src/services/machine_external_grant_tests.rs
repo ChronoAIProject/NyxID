@@ -113,6 +113,7 @@ async fn fixture(label: &str) -> Fixture {
         status: NodeStatus::Online,
         auth_token_hash: "11".repeat(32),
         signing_secret_encrypted: None,
+        signing_secret_context_version: None,
         signing_secret_hash: "22".repeat(32),
         last_heartbeat_at: None,
         connected_at: None,

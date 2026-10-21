@@ -4,42 +4,79 @@
 # only when explicitly requested; no provider or kubelet credential is needed.
 set -eu
 namespace="${NYXID_MACHINE_NAMESPACE:-nyxid-machine}"
-manager="${NYXID_MACHINE_MANAGER_SA:-system:serviceaccount:${namespace}:nyxid-machine-manager}"
-for resource in sandboxes.agents.x-k8s.io pods persistentvolumeclaims resourcequotas; do
-  kubectl auth can-i --as="$manager" get "$resource" -n "$namespace" >/dev/null
-  kubectl auth can-i --as="$manager" list "$resource" -n "$namespace" >/dev/null
-done
-kubectl auth can-i --as="$manager" create sandboxes.agents.x-k8s.io -n "$namespace" >/dev/null
-kubectl auth can-i --as="$manager" patch sandboxes.agents.x-k8s.io -n "$namespace" >/dev/null
-kubectl auth can-i --as="$manager" delete sandboxes.agents.x-k8s.io -n "$namespace" >/dev/null
-# Recovery may delete exact residual children in this namespace. The API uses
-# original UID/resourceVersion guards; child creation/patch/exec stay forbidden.
-for resource in pods persistentvolumeclaims; do
-  kubectl auth can-i --as="$manager" delete "$resource" -n "$namespace" >/dev/null
-done
-for action in 'create pods' 'create persistentvolumeclaims' 'patch pods' 'patch persistentvolumeclaims' 'create pods/exec'; do
-  if kubectl auth can-i --as="$manager" $action -n "$namespace" >/dev/null; then
-    echo manager_has_forbidden_workload_permissions >&2
+manager="${NYXID_MACHINE_MANAGER_PRINCIPAL:-${NYXID_MACHINE_MANAGER_SA:-system:serviceaccount:${namespace}:nyxid-machine-manager}}"
+auth_mode="${NYXID_REMOTE_MACHINE_KUBE_AUTH_MODE:-token_file}"
+[ "$auth_mode" = token_file ] || { echo manager_healthcheck_requires_token_file_mode >&2; exit 2; }
+kube_api="${NYXID_REMOTE_MACHINE_KUBE_API:-}"
+token_file="${NYXID_REMOTE_MACHINE_KUBE_TOKEN_FILE:-}"
+[ -n "$kube_api" ] && [ -n "$token_file" ] || { echo manager_credential_configuration_missing >&2; exit 2; }
+[ "${kube_api#https://}" != "$kube_api" ] || { echo manager_api_must_use_https >&2; exit 2; }
+[ -f "$token_file" ] && [ ! -L "$token_file" ] || { echo manager_token_file_invalid >&2; exit 2; }
+[ -s "$token_file" ] || { echo manager_token_invalid >&2; exit 2; }
+[ "$(wc -c <"$token_file")" -le 16384 ] || { echo manager_token_invalid >&2; exit 2; }
+manager_kubeconfig=$(mktemp "${TMPDIR:-/tmp}/nyxid-manager-kubeconfig.XXXXXX")
+trap 'rm -f "$manager_kubeconfig"' EXIT HUP INT TERM
+python3 - "$manager_kubeconfig" "$kube_api" "$token_file" "${NYXID_REMOTE_MACHINE_KUBE_CA_FILE:-}" <<'PY'
+import json, pathlib, sys
+path, server, token_path, ca = sys.argv[1:]
+token = pathlib.Path(token_path).read_text(encoding="utf-8").strip()
+if not token or len(token) > 16384:
+    raise SystemExit("invalid manager token")
+cluster = {"server": server}
+if ca: cluster["certificate-authority"] = ca
+document = {"apiVersion":"v1", "kind":"Config", "clusters":[{"name":"nyxid-manager","cluster":cluster}], "users":[{"name":"nyxid-manager","user":{"token":token}}], "contexts":[{"name":"nyxid-manager","context":{"cluster":"nyxid-manager","user":"nyxid-manager"}}], "current-context":"nyxid-manager"}
+pathlib.Path(path).write_text(json.dumps(document), encoding="utf-8")
+PY
+chmod 600 "$manager_kubeconfig"
+manager_kubectl() { KUBECONFIG="$manager_kubeconfig" kubectl "$@"; }
+# Ordinary can-i prints no and exits 1 on denial, but API errors also exit
+# nonzero. Only an explicit, unqualified no proves a forbidden action denied.
+manager_require_denied() {
+  forbidden_error=$1
+  shift
+  if answer=$(manager_kubectl auth can-i "$@" 2>/dev/null); then
+    echo "$forbidden_error" >&2
     exit 2
+  else
+    status=$?
+    [ "$status" -eq 1 ] && [ "$answer" = no ] || {
+      echo manager_permission_check_unavailable >&2
+      exit 2
+    }
   fi
+}
+actual_principal=$(manager_kubectl auth whoami -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"]["userInfo"]["username"])') || { echo manager_principal_unavailable >&2; exit 2; }
+[ "$actual_principal" = "$manager" ] || { echo manager_principal_mismatch >&2; exit 2; }
+for resource in sandboxes.agents.x-k8s.io pods persistentvolumeclaims resourcequotas; do
+  manager_kubectl auth can-i get "$resource" -n "$namespace" >/dev/null
+  manager_kubectl auth can-i list "$resource" -n "$namespace" >/dev/null
 done
-kubectl auth can-i --as="$manager" create tokenreviews.authentication.k8s.io >/dev/null
-kubectl auth can-i --as="$manager" get nodes >/dev/null
-kubectl auth can-i --as="$manager" get persistentvolumes >/dev/null
-kubectl auth can-i --as="$manager" list persistentvolumes >/dev/null
-kubectl auth can-i --as="$manager" list pods --all-namespaces >/dev/null
-kubectl auth can-i --as="$manager" get leases.coordination.k8s.io -n kube-node-lease >/dev/null
-for verb in get list; do
-  kubectl auth can-i --as="$manager" "$verb" volumeattachments.storage.k8s.io >/dev/null
+manager_kubectl auth can-i create sandboxes.agents.x-k8s.io -n "$namespace" >/dev/null
+manager_kubectl auth can-i patch sandboxes.agents.x-k8s.io -n "$namespace" >/dev/null
+manager_kubectl auth can-i delete sandboxes.agents.x-k8s.io -n "$namespace" >/dev/null
+# Sandbox-cascade evidence v2 forbids Manager child deletion and storage inventory.
+for resource in pods persistentvolumeclaims; do
+  manager_require_denied manager_has_forbidden_workload_permissions delete "$resource" -n "$namespace"
 done
+for resource in persistentvolumes volumeattachments.storage.k8s.io; do
+  manager_require_denied manager_has_forbidden_storage_permissions list "$resource"
+done
+manager_require_denied manager_has_forbidden_cluster_pod_permissions list pods --all-namespaces
+for action in 'create pods' 'create persistentvolumeclaims' 'patch pods' 'patch persistentvolumeclaims' 'create pods/exec'; do
+  manager_require_denied manager_has_forbidden_workload_permissions $action -n "$namespace"
+done
+manager_kubectl auth can-i create tokenreviews.authentication.k8s.io >/dev/null
+manager_kubectl auth can-i get nodes >/dev/null
+manager_kubectl auth can-i get persistentvolumes >/dev/null
+manager_kubectl auth can-i get leases.coordination.k8s.io -n kube-node-lease >/dev/null
 for verb in get list; do
-  kubectl auth can-i --as="$manager" "$verb" storageclasses.storage.k8s.io >/dev/null || {
+  manager_kubectl auth can-i "$verb" storageclasses.storage.k8s.io >/dev/null || {
     echo storageclass_read_permission_unverified >&2; exit 2;
   }
 done
 kubectl get crd sandboxes.agents.x-k8s.io >/dev/null
 kubectl get --raw /apis/agents.x-k8s.io/v1beta1 >/dev/null
-kubectl get resourcequotas --as="$manager" -n "$namespace" >/dev/null
+manager_kubectl get resourcequotas -n "$namespace" >/dev/null
 kubectl get limitrange remote-machine-defaults -n "$namespace" >/dev/null
 kubectl get configmap nyxid-machine-approved-runtime -n "$namespace" >/dev/null
 kubectl get validatingadmissionpolicybinding nyxid-machine-sandbox-contract >/dev/null
@@ -58,12 +95,12 @@ command -v python3 >/dev/null 2>&1 || { echo storageclass_validation_requires_py
 storage_class=$(python3 -c 'import sys; print(sys.argv[1].strip())' "$storage_class")
 if [ -n "$storage_class" ]; then
   storage_error=storageclass_unverified
-  storage_document=$(kubectl get storageclass "$storage_class" --as="$manager" -o json) || {
+  storage_document=$(manager_kubectl get storageclass "$storage_class" -o json) || {
     echo "$storage_error" >&2; exit 2;
   }
 else
   storage_error=storageclass_default_unverified
-  storage_document=$(kubectl get storageclasses --as="$manager" --chunk-size=100 -o json) || {
+  storage_document=$(manager_kubectl get storageclasses --chunk-size=100 -o json) || {
     echo "$storage_error" >&2; exit 2;
   }
 fi
@@ -119,8 +156,8 @@ if [ "${NYXID_REMOTE_MACHINE_CHECK_CONTROLLER:-0}" = 1 ]; then
   controller_namespace="${NYXID_REMOTE_MACHINE_CONTROLLER_NAMESPACE:-}"
   controller_deployment="${NYXID_REMOTE_MACHINE_CONTROLLER_DEPLOYMENT:-}"
   [ -n "$controller_namespace" ] && [ -n "$controller_deployment" ] || { echo controller_diagnostic_selection_required >&2; exit 2; }
-  kubectl auth can-i --as="$manager" get deployment/"$controller_deployment" -n "$controller_namespace" >/dev/null
-  kubectl get deployment/"$controller_deployment" --as="$manager" -n "$controller_namespace" >/dev/null
+  manager_kubectl auth can-i get deployment/"$controller_deployment" -n "$controller_namespace" >/dev/null
+  manager_kubectl get deployment/"$controller_deployment" -n "$controller_namespace" >/dev/null
   kubectl rollout status deployment/"$controller_deployment" -n "$controller_namespace" --timeout=10s >/dev/null
 fi
 printf '%s\n' native_api_contract_healthy_selected_cluster_acceptance_still_required

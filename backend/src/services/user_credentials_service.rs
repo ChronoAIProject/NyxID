@@ -52,102 +52,175 @@ pub async fn upsert_user_credentials_with_expected_state_version(
     let collection = db.collection::<UserProviderCredentials>(COLLECTION_NAME);
     let now = Utc::now();
 
-    let client_id_enc = encryption_keys.encrypt(client_id.as_bytes()).await?;
+    // Allocate or load the authoritative record identity before KMS work.
+    // Recheck the exact raw storage snapshot in the commit transaction.
+    let raw_source = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {"user_id":user_id,"provider_config_id":provider_config_id})
+        .await?;
+    let record_id = match &raw_source {
+        Some(row) => row
+            .get_str("_id")
+            .map_err(|_| AppError::Internal("Invalid OAuth client record".into()))?
+            .to_owned(),
+        None => Uuid::new_v4().to_string(),
+    };
+    let mut versions = std::collections::BTreeMap::new();
+    // Public clients have no secret. Treat an explicitly empty optional secret
+    // exactly like absence, including its storage dispatch marker.
+    let client_secret = client_secret.filter(|value| !value.is_empty());
+    super::credential_record_service::mark_version(
+        &mut versions,
+        encryption_keys,
+        "client_id_encrypted",
+    );
+    if client_secret.is_some() {
+        super::credential_record_service::mark_version(
+            &mut versions,
+            encryption_keys,
+            "client_secret_encrypted",
+        );
+    }
+    let client_id_enc = super::credential_record_service::encrypt(
+        encryption_keys,
+        COLLECTION_NAME,
+        &record_id,
+        user_id,
+        "client_id_encrypted",
+        client_id.as_bytes(),
+    )
+    .await?;
     let client_secret_enc = match client_secret {
-        Some(s) => Some(encryption_keys.encrypt(s.as_bytes()).await?),
+        Some(s) => Some(
+            super::credential_record_service::encrypt(
+                encryption_keys,
+                COLLECTION_NAME,
+                &record_id,
+                user_id,
+                "client_secret_encrypted",
+                s.as_bytes(),
+            )
+            .await?,
+        ),
         None => None,
     };
 
-    let existing = collection
-        .find_one(doc! { "user_id": user_id, "provider_config_id": provider_config_id })
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
-
-    if let Some(existing) = existing {
-        if expected_state_version.is_some_and(|expected| existing.state_version != expected) {
-            return Err(stale_credentials_conflict());
-        }
-        let mut set_doc = doc! {
-            "client_id_encrypted": bson::Binary {
-                subtype: bson::spec::BinarySubtype::Generic,
-                bytes: client_id_enc,
-            },
-            "updated_at": bson::DateTime::from_chrono(now),
-        };
-
-        if let Some(enc) = client_secret_enc {
-            set_doc.insert(
-                "client_secret_encrypted",
-                bson::Binary {
-                    subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: enc,
-                },
-            );
-        } else {
-            set_doc.insert("client_secret_encrypted", bson::Bson::Null);
-        }
-
-        // PATCH semantics: None = "don't change", Some("") = "clear label"
-        if let Some(l) = label {
-            set_doc.insert("label", l);
-        }
-        set_doc.insert(
-            "state_version",
-            doc! { "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64] },
-        );
-
-        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
-
-        let mut filter = doc! { "_id": &existing.id };
-        if let Some(expected) = expected_state_version {
-            filter.insert(
-                "$expr",
-                doc! { "$eq": [{ "$ifNull": ["$state_version", 0_i64] }, expected] },
-            );
-        }
-
-        let updated = collection
-            .find_one_and_update(filter, vec![doc! { "$set": set_doc }])
-            .with_options(
-                FindOneAndUpdateOptions::builder()
-                    .return_document(ReturnDocument::After)
-                    .build(),
+    let result: AppResult<UserProviderCredentials> = async {
+        super::erasure_admission::credential_change_in_session(db, user_id, &mut tx).await?;
+        let owner = db
+            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":user_id,"is_active":true,"platform_personal_deleting":{"$ne":true}},
+                doc! {"$inc":{"credential_owner_fence":1_i64}},
             )
-            .await?
-            .ok_or_else(stale_credentials_conflict)?;
-
-        tracing::info!(
-            user_id = %user_id,
-            provider_config_id = %provider_config_id,
-            "User provider credentials updated"
-        );
-
-        Ok(updated)
-    } else {
-        if expected_state_version.is_some_and(|expected| expected != 0) {
-            return Err(stale_credentials_conflict());
+            .session(&mut tx)
+            .await?;
+        if owner.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Credential owner is unavailable or changed".into(),
+            ));
         }
-        let cred = UserProviderCredentials {
-            id: Uuid::new_v4().to_string(),
-            user_id: user_id.to_string(),
-            provider_config_id: provider_config_id.to_string(),
-            client_id_encrypted: Some(client_id_enc),
-            client_secret_encrypted: client_secret_enc,
-            label: label.map(String::from),
-            state_version: 1,
-            created_at: now,
-            updated_at: now,
-        };
+        let current_source = db.collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! {"user_id":user_id,"provider_config_id":provider_config_id}).session(&mut tx).await?;
+        if current_source != raw_source { return Err(stale_credentials_conflict()); }
+        let existing = current_source.map(bson::from_document::<UserProviderCredentials>)
+            .transpose().map_err(|_| AppError::Internal("Invalid OAuth client storage".into()))?;
 
-        collection.insert_one(&cred).await?;
+        if let Some(existing) = existing {
+            if expected_state_version.is_some_and(|expected| existing.state_version != expected) {
+                return Err(stale_credentials_conflict());
+            }
+            let mut set_doc = doc! {
+                "client_id_encrypted": bson::Binary {
+                    subtype: bson::spec::BinarySubtype::Generic,
+                    bytes: client_id_enc,
+                },
+                "updated_at": bson::DateTime::from_chrono(now),
+                "secret_context_versions": {"$literal":bson::to_bson(&versions).map_err(|_| AppError::Internal("Invalid credential versions".into()))?},
+            };
 
-        tracing::info!(
-            user_id = %user_id,
-            provider_config_id = %provider_config_id,
-            "User provider credentials created"
-        );
+            if let Some(enc) = client_secret_enc {
+                set_doc.insert(
+                    "client_secret_encrypted",
+                    bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: enc,
+                    },
+                );
+            } else {
+                set_doc.insert("client_secret_encrypted", bson::Bson::Null);
+            }
 
-        Ok(cred)
+            // PATCH semantics: None = "don't change", Some("") = "clear label"
+            if let Some(l) = label {
+                set_doc.insert("label", doc! {"$literal":l});
+            }
+            set_doc.insert(
+                "state_version",
+                doc! { "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64] },
+            );
+
+            use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+
+            let mut filter = super::record_storage::source_predicate(raw_source.as_ref().unwrap(),
+                &["user_id","provider_config_id","client_id_encrypted","client_secret_encrypted","secret_context_versions","state_version"]);
+            if let Some(expected) = expected_state_version {
+                let source_check = filter.remove("$expr").unwrap();
+                filter.insert("$expr", doc! {"$and":[source_check,{"$eq":[{"$ifNull":["$state_version",0_i64]},expected]}]});
+            }
+
+            let updated = collection
+                .find_one_and_update(filter, vec![doc! { "$set": set_doc }])
+                .session(&mut tx)
+                .with_options(
+                    FindOneAndUpdateOptions::builder()
+                        .return_document(ReturnDocument::After)
+                        .build(),
+                )
+                .await?
+                .ok_or_else(stale_credentials_conflict)?;
+
+            tracing::info!(
+                user_id = %user_id,
+                provider_config_id = %provider_config_id,
+                "User provider credentials updated"
+            );
+
+            Ok(updated)
+        } else {
+            if expected_state_version.is_some_and(|expected| expected != 0) {
+                return Err(stale_credentials_conflict());
+            }
+            let cred = UserProviderCredentials {
+                secret_context_versions: versions,
+                id: record_id,
+                user_id: user_id.to_string(),
+                provider_config_id: provider_config_id.to_string(),
+                client_id_encrypted: Some(client_id_enc),
+                client_secret_encrypted: client_secret_enc,
+                label: label.map(String::from),
+                state_version: 1,
+                created_at: now,
+                updated_at: now,
+            };
+
+            collection.insert_one(&cred).session(&mut tx).await?;
+
+            tracing::info!(
+                user_id = %user_id,
+                provider_config_id = %provider_config_id,
+                "User provider credentials created"
+            );
+
+            Ok(cred)
+        }
     }
+    .await;
+    super::org_membership_authority::finish(tx, result).await
 }
 
 fn stale_credentials_conflict() -> AppError {
@@ -199,33 +272,49 @@ pub async fn delete_user_credentials(
     user_id: &str,
     provider_config_id: &str,
 ) -> AppResult<()> {
-    let result = db
-        .collection::<UserProviderCredentials>(COLLECTION_NAME)
-        .delete_one(doc! { "user_id": user_id, "provider_config_id": provider_config_id })
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
-
-    if result.deleted_count == 0 {
-        return Err(AppError::NotFound("User credentials not found".to_string()));
+    let result: AppResult<()> = async {
+        super::erasure_admission::credential_change_in_session(db, user_id, &mut tx).await?;
+        let removed = db
+            .collection::<UserProviderCredentials>(COLLECTION_NAME)
+            .delete_one(doc! {"user_id":user_id,"provider_config_id":provider_config_id})
+            .session(&mut tx)
+            .await?;
+        if removed.deleted_count != 1 {
+            return Err(AppError::NotFound("User credentials not found".into()));
+        }
+        Ok(())
     }
-
-    tracing::info!(
-        user_id = %user_id,
-        provider_config_id = %provider_config_id,
-        "User provider credentials deleted"
-    );
-
-    Ok(())
+    .await;
+    super::org_membership_authority::finish(tx, result).await
 }
 
 /// Resolved OAuth client credentials (decrypted).
-#[derive(Debug)]
 pub struct ResolvedOAuthCredentials {
     pub app_source: super::oauth_app_source::OAuthAppSource,
-    pub client_id: String,
-    pub client_secret: Option<String>,
+    pub client_id: Zeroizing<String>,
+    pub client_secret: Option<Zeroizing<String>>,
     /// Legacy user-provider credential lookup. Embedded connection apps also
     /// leave this empty; use `app_source` to identify the selected app source.
     pub credential_user_id: Option<String>,
+}
+
+impl std::fmt::Debug for ResolvedOAuthCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedOAuthCredentials")
+            .field("app_source", &self.app_source)
+            .field("client_id", &"[REDACTED]")
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("credential_user_id", &self.credential_user_id)
+            .finish()
+    }
 }
 
 pub fn provider_has_admin_oauth_credentials(provider: &ProviderConfig) -> bool {
@@ -341,9 +430,6 @@ async fn resolve_user_credentials_for_owner(
 
 /// Decrypt provider-level (admin) OAuth credentials.
 ///
-/// Note: `Zeroizing` is best-effort here — the `String::from_utf8` clone means the
-/// plaintext remains in memory until deallocated. Acceptable for our threat model
-/// (encrypted at rest, decrypted in-memory only when needed).
 pub(crate) async fn decrypt_provider_credentials(
     encryption_keys: &EncryptionKeys,
     provider: &ProviderConfig,
@@ -352,24 +438,22 @@ pub(crate) async fn decrypt_provider_credentials(
         AppError::Internal(format!("Provider {} missing client_id", provider.slug))
     })?;
 
-    let decrypted_cid = Zeroizing::new(encryption_keys.decrypt(encrypted_cid).await?);
-    let client_id = String::from_utf8((*decrypted_cid).clone())
-        .map_err(|e| AppError::Internal(format!("Failed to decode client_id: {e}")))?;
-
-    let client_secret = if let Some(ref encrypted) = provider.client_secret_encrypted {
-        let decrypted = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
-        Some(
-            String::from_utf8((*decrypted).clone())
-                .map_err(|e| AppError::Internal(format!("Failed to decode client_secret: {e}")))?,
-        )
-    } else {
-        None
+    let client_id = super::credential_record_service::CredentialRecord::provider(provider)
+        .text(encryption_keys, "client_id_encrypted", encrypted_cid)
+        .await?;
+    let client_secret = match provider.client_secret_encrypted.as_deref() {
+        Some(value) => Some(
+            super::credential_record_service::CredentialRecord::provider(provider)
+                .text(encryption_keys, "client_secret_encrypted", value)
+                .await?,
+        ),
+        None => None,
     };
 
     Ok(ResolvedOAuthCredentials {
         app_source: super::oauth_app_source::OAuthAppSource::Platform,
         client_id,
-        client_secret,
+        client_secret: client_secret.filter(|secret| !secret.is_empty()),
         credential_user_id: None,
     })
 }
@@ -386,32 +470,33 @@ pub async fn decrypt_claimed_key_oauth_credentials(
         return decrypt_provider_credentials(encryption_keys, provider).await;
     };
 
-    let mut client_id_bytes = Zeroizing::new(encryption_keys.decrypt(encrypted_client_id).await?);
-    let client_id = String::from_utf8(std::mem::take(&mut *client_id_bytes))
-        .map_err(|_| AppError::Internal("Failed to decode OAuth client id".to_string()))?;
-    let client_secret =
-        if let Some(encrypted_secret) = key.user_oauth_client_secret_encrypted.as_ref() {
-            let mut secret_bytes = Zeroizing::new(encryption_keys.decrypt(encrypted_secret).await?);
-            Some(
-                String::from_utf8(std::mem::take(&mut *secret_bytes)).map_err(|_| {
-                    AppError::Internal("Failed to decode OAuth client secret".to_string())
-                })?,
-            )
-        } else {
-            None
-        };
+    let client_id = super::credential_record_service::CredentialRecord::key(key)
+        .text(
+            encryption_keys,
+            "user_oauth_client_id_encrypted",
+            encrypted_client_id,
+        )
+        .await?;
+    let client_secret = match key.user_oauth_client_secret_encrypted.as_deref() {
+        Some(value) => Some(
+            super::credential_record_service::CredentialRecord::key(key)
+                .text(encryption_keys, "user_oauth_client_secret_encrypted", value)
+                .await?,
+        ),
+        None => None,
+    };
 
     Ok(ResolvedOAuthCredentials {
         app_source: super::oauth_app_source::OAuthAppSource::Byo,
         client_id,
-        client_secret,
+        client_secret: client_secret.filter(|secret| !secret.is_empty()),
         credential_user_id: Some(key.user_id.clone()),
     })
 }
 
 /// Decrypt user-level OAuth credentials.
 ///
-/// Note: `Zeroizing` is best-effort — see `decrypt_provider_credentials` doc comment.
+/// The returned client material owns zeroizing strings.
 async fn decrypt_user_credentials(
     encryption_keys: &EncryptionKeys,
     creds: &UserProviderCredentials,
@@ -422,24 +507,22 @@ async fn decrypt_user_credentials(
         .as_ref()
         .ok_or_else(|| AppError::Internal("User credentials missing client_id".to_string()))?;
 
-    let decrypted_cid = Zeroizing::new(encryption_keys.decrypt(encrypted_cid).await?);
-    let client_id = String::from_utf8((*decrypted_cid).clone())
-        .map_err(|e| AppError::Internal(format!("Failed to decode user client_id: {e}")))?;
-
-    let client_secret =
-        if let Some(ref encrypted) = creds.client_secret_encrypted {
-            let decrypted = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
-            Some(String::from_utf8((*decrypted).clone()).map_err(|e| {
-                AppError::Internal(format!("Failed to decode user client_secret: {e}"))
-            })?)
-        } else {
-            None
-        };
+    let client_id = super::credential_record_service::CredentialRecord::user_credentials(creds)
+        .text(encryption_keys, "client_id_encrypted", encrypted_cid)
+        .await?;
+    let client_secret = match creds.client_secret_encrypted.as_deref() {
+        Some(value) => Some(
+            super::credential_record_service::CredentialRecord::user_credentials(creds)
+                .text(encryption_keys, "client_secret_encrypted", value)
+                .await?,
+        ),
+        None => None,
+    };
 
     Ok(ResolvedOAuthCredentials {
         app_source: super::oauth_app_source::OAuthAppSource::Byo,
         client_id,
-        client_secret,
+        client_secret: client_secret.filter(|secret| !secret.is_empty()),
         credential_user_id: Some(credential_user_id.to_string()),
     })
 }
@@ -515,23 +598,22 @@ pub async fn resolve_connection_oauth_credentials(
         return Ok(None);
     };
 
-    let dec_cid = Zeroizing::new(encryption_keys.decrypt(enc_cid).await?);
-    let client_id = String::from_utf8((*dec_cid).clone())
-        .map_err(|e| AppError::Internal(format!("Failed to decode connection client_id: {e}")))?;
-
-    let client_secret = if let Some(enc_sec) = key.user_oauth_client_secret_encrypted.as_ref() {
-        let dec_sec = Zeroizing::new(encryption_keys.decrypt(enc_sec).await?);
-        Some(String::from_utf8((*dec_sec).clone()).map_err(|e| {
-            AppError::Internal(format!("Failed to decode connection client_secret: {e}"))
-        })?)
-    } else {
-        None
+    let client_id = super::credential_record_service::CredentialRecord::key(&key)
+        .text(encryption_keys, "user_oauth_client_id_encrypted", enc_cid)
+        .await?;
+    let client_secret = match key.user_oauth_client_secret_encrypted.as_deref() {
+        Some(value) => Some(
+            super::credential_record_service::CredentialRecord::key(&key)
+                .text(encryption_keys, "user_oauth_client_secret_encrypted", value)
+                .await?,
+        ),
+        None => None,
     };
 
     Ok(Some(ResolvedOAuthCredentials {
         app_source: super::oauth_app_source::OAuthAppSource::Byo,
         client_id,
-        client_secret,
+        client_secret: client_secret.filter(|secret| !secret.is_empty()),
         // The `credential_user_id` field on `ResolvedOAuthCredentials`
         // is load-bearing only for the legacy `user_provider_credentials`
         // path (it identifies which user-owned cred row a token was
@@ -547,15 +629,33 @@ pub async fn resolve_connection_oauth_credentials(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolved_oauth_credentials_debug_redacts_client_material() {
+        let credentials = super::ResolvedOAuthCredentials {
+            app_source: super::super::oauth_app_source::OAuthAppSource::Byo,
+            client_id: "distinctive-resolved-client-id".to_owned().into(),
+            client_secret: Some("distinctive-resolved-client-secret".to_owned().into()),
+            credential_user_id: Some("credential-owner".into()),
+        };
+        for output in [format!("{credentials:?}"), format!("{credentials:#?}")] {
+            assert!(!output.contains(credentials.client_id.as_str()));
+            assert!(!output.contains(credentials.client_secret.as_ref().unwrap().as_str()));
+            assert!(output.contains("Byo"));
+        }
+    }
     use chrono::Utc;
 
     use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
     use crate::test_utils::{connect_test_database, test_encryption_keys};
 
     use super::resolve_connection_oauth_credentials;
+    use crate::errors::AppError;
+    use crate::models::user_provider_credentials::COLLECTION_NAME;
+    use mongodb::bson::doc;
 
     fn placeholder_key(connection_id: &str) -> UserApiKey {
         UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -675,6 +775,7 @@ mod tests {
     ) -> crate::models::provider_config::ProviderConfig {
         let now = Utc::now();
         crate::models::provider_config::ProviderConfig {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             slug: "test-provider".to_string(),
             name: "Test Provider".to_string(),
@@ -722,6 +823,120 @@ mod tests {
         }
     }
 
+    async fn seed_live_owner(db: &mongodb::Database, id: &str) {
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn credential_label_update_preserves_expression_looking_literal() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("credential_label_literal").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &owner).await;
+        let keys = test_encryption_keys();
+        let provider = uuid::Uuid::new_v4().to_string();
+        super::upsert_user_credentials(
+            &db,
+            &keys,
+            &owner,
+            &provider,
+            "id",
+            Some("secret"),
+            Some("initial"),
+        )
+        .await
+        .unwrap();
+        let updated = super::upsert_user_credentials(
+            &db,
+            &keys,
+            &owner,
+            &provider,
+            "id",
+            Some("secret"),
+            Some("$state_version"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.label.as_deref(), Some("$state_version"));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn credential_upsert_cannot_recreate_rows_after_owner_closure() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("credential_owner_closure").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &owner).await;
+        let keys = test_encryption_keys();
+        let provider = uuid::Uuid::new_v4().to_string();
+        super::upsert_user_credentials(
+            &db,
+            &keys,
+            &owner,
+            &provider,
+            "first-id",
+            Some("first-secret"),
+            None,
+        )
+        .await
+        .unwrap();
+        db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&owner},
+                doc! {"$set":{"is_active":false,"platform_personal_deleting":true}},
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .delete_many(doc! {"user_id":&owner})
+            .await
+            .unwrap();
+        assert!(matches!(
+            super::upsert_user_credentials(
+                &db,
+                &keys,
+                &owner,
+                &provider,
+                "late-id",
+                Some("late-secret"),
+                None
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+        db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .delete_one(doc! {"_id":&owner})
+            .await
+            .unwrap();
+        assert!(matches!(
+            super::upsert_user_credentials(
+                &db,
+                &keys,
+                &owner,
+                &provider,
+                "late-id",
+                Some("late-secret"),
+                None
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            db.collection::<bson::Document>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    }
+
     // ── Integration tests: upsert / get / delete / resolve credentials ──
 
     #[tokio::test]
@@ -732,6 +947,7 @@ mod tests {
         };
         let enc = test_encryption_keys();
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
         let provider_id = uuid::Uuid::new_v4().to_string();
 
         let cred = super::upsert_user_credentials(
@@ -761,6 +977,7 @@ mod tests {
         };
         let enc = test_encryption_keys();
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
         let provider_id = uuid::Uuid::new_v4().to_string();
 
         let first = super::upsert_user_credentials(
@@ -794,6 +1011,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_client_none_empty_set_clear_strict_reads_and_migration() {
+        use super::super::credential_record_service as records;
+        use crate::models::user_provider_credentials::UserProviderCredentials;
+        let db =
+            crate::test_utils::connect_transaction_test_database("byo_public_client_matrix").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &owner).await;
+        let provider = uuid::Uuid::new_v4().to_string();
+        let mut strict = test_encryption_keys();
+        strict.set_allow_legacy_record_reads(false);
+        let migration = test_encryption_keys();
+        let mut version = 0;
+        for secret in [
+            None,
+            Some(""),
+            Some("distinctive-client-secret"),
+            Some(""),
+            Some("replacement-secret"),
+            None,
+        ] {
+            let row = super::upsert_user_credentials_with_expected_state_version(
+                &db,
+                &strict,
+                &owner,
+                &provider,
+                "public-client",
+                secret,
+                None,
+                Some(version),
+            )
+            .await
+            .unwrap();
+            version += 1;
+            assert_eq!(row.state_version, version);
+            let expected = secret.filter(|value| !value.is_empty());
+            assert_eq!(row.client_secret_encrypted.is_some(), expected.is_some());
+            assert_eq!(
+                row.secret_context_versions
+                    .contains_key("client_secret_encrypted"),
+                expected.is_some()
+            );
+            let resolved = super::decrypt_user_credentials(&strict, &row, &owner)
+                .await
+                .unwrap();
+            assert_eq!(
+                resolved
+                    .client_secret
+                    .as_deref()
+                    .map(|value| value.as_str()),
+                expected
+            );
+            let raw = db
+                .collection::<bson::Document>(COLLECTION_NAME)
+                .find_one(doc! {"_id":&row.id})
+                .await
+                .unwrap()
+                .unwrap();
+            records::verify_current_snapshot(&strict, COLLECTION_NAME, &raw)
+                .await
+                .unwrap();
+            assert!(
+                !records::migrate_snapshot(&db, &migration, COLLECTION_NAME, &raw)
+                    .await
+                    .unwrap()
+            );
+            let migrated = db
+                .collection::<bson::Document>(COLLECTION_NAME)
+                .find_one(doc! {"_id":&row.id})
+                .await
+                .unwrap()
+                .unwrap();
+            records::verify_current_snapshot(&strict, COLLECTION_NAME, &migrated)
+                .await
+                .unwrap();
+            let migrated: UserProviderCredentials = bson::from_document(migrated).unwrap();
+            assert_eq!(
+                super::decrypt_user_credentials(&strict, &migrated, &owner)
+                    .await
+                    .unwrap()
+                    .client_secret
+                    .as_deref()
+                    .map(|value| value.as_str()),
+                expected
+            );
+        }
+
+        // Exercise the former accepted encrypted-empty storage contract,
+        // rather than fabricating a contextual marker over absent material.
+        let mut legacy = test_encryption_keys();
+        legacy.set_contextual_record_writes(false);
+        let row = super::upsert_user_credentials(
+            &db,
+            &legacy,
+            &owner,
+            &provider,
+            "legacy-public-client",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let encrypted_empty = legacy.encrypt(b"").await.unwrap();
+        db.collection::<bson::Document>(COLLECTION_NAME).update_one(doc! {"_id":&row.id}, doc! {"$set":{
+            "client_secret_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted_empty}
+        }}).await.unwrap();
+        let raw = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let historical: UserProviderCredentials = bson::from_document(raw.clone()).unwrap();
+        assert!(
+            super::decrypt_user_credentials(&legacy, &historical, &owner)
+                .await
+                .unwrap()
+                .client_secret
+                .is_none()
+        );
+        assert!(
+            records::migrate_snapshot(&db, &migration, COLLECTION_NAME, &raw)
+                .await
+                .unwrap()
+        );
+        let current = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        records::verify_current_snapshot(&strict, COLLECTION_NAME, &current)
+            .await
+            .unwrap();
+        let current: UserProviderCredentials = bson::from_document(current).unwrap();
+        assert!(current.client_secret_encrypted.is_none());
+        assert!(
+            !current
+                .secret_context_versions
+                .contains_key("client_secret_encrypted")
+        );
+        assert!(
+            super::decrypt_user_credentials(&strict, &current, &owner)
+                .await
+                .unwrap()
+                .client_secret
+                .is_none()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn upsert_user_credentials_without_secret() {
         let Some(db) = connect_test_database("uc_svc_upsert_no_secret").await else {
             eprintln!("skipping: no MongoDB");
@@ -801,6 +1169,7 @@ mod tests {
         };
         let enc = test_encryption_keys();
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
         let provider_id = uuid::Uuid::new_v4().to_string();
 
         let cred = super::upsert_user_credentials(
@@ -828,6 +1197,7 @@ mod tests {
         };
         let enc = test_encryption_keys();
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
         let provider_id = uuid::Uuid::new_v4().to_string();
 
         // Create with label
@@ -883,6 +1253,7 @@ mod tests {
         };
         let enc = test_encryption_keys();
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
         let provider_id = uuid::Uuid::new_v4().to_string();
 
         super::upsert_user_credentials(
@@ -914,6 +1285,7 @@ mod tests {
         };
         let enc = test_encryption_keys();
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
         let provider_id = uuid::Uuid::new_v4().to_string();
 
         super::upsert_user_credentials(
@@ -960,6 +1332,7 @@ mod tests {
         };
         let enc = test_encryption_keys();
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
         let provider_id = uuid::Uuid::new_v4().to_string();
 
         super::upsert_user_credentials(&db, &enc, &user_id, &provider_id, "cid", Some("sec"), None)
@@ -1010,12 +1383,19 @@ mod tests {
         provider.credential_mode = "admin".to_string();
 
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
         let resolved = super::resolve_oauth_credentials(&db, &enc, &provider, &user_id)
             .await
             .unwrap();
 
-        assert_eq!(resolved.client_id, "admin-client-id");
-        assert_eq!(resolved.client_secret.as_deref(), Some("admin-secret"));
+        assert_eq!(resolved.client_id.as_str(), "admin-client-id");
+        assert_eq!(
+            resolved
+                .client_secret
+                .as_ref()
+                .map(|secret| secret.as_str()),
+            Some("admin-secret")
+        );
         assert!(resolved.credential_user_id.is_none());
     }
 
@@ -1030,6 +1410,7 @@ mod tests {
         provider.credential_mode = "user".to_string();
 
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
         let result = super::resolve_oauth_credentials(&db, &enc, &provider, &user_id).await;
         assert!(result.is_err(), "should fail without user creds");
         assert!(matches!(
@@ -1049,6 +1430,7 @@ mod tests {
         provider.credential_mode = "user".to_string();
 
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
 
         // Store user credentials
         super::upsert_user_credentials(
@@ -1067,8 +1449,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolved.client_id, "user-cid");
-        assert_eq!(resolved.client_secret.as_deref(), Some("user-secret"));
+        assert_eq!(resolved.client_id.as_str(), "user-cid");
+        assert_eq!(
+            resolved
+                .client_secret
+                .as_ref()
+                .map(|secret| secret.as_str()),
+            Some("user-secret")
+        );
         assert_eq!(
             resolved.credential_user_id.as_deref(),
             Some(user_id.as_str())
@@ -1091,6 +1479,7 @@ mod tests {
         provider.credential_mode = "both".to_string();
 
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
 
         // Store user credentials (should be preferred over admin)
         super::upsert_user_credentials(
@@ -1109,8 +1498,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolved.client_id, "user-cid-both");
-        assert_eq!(resolved.client_secret.as_deref(), Some("user-sec-both"));
+        assert_eq!(resolved.client_id.as_str(), "user-cid-both");
+        assert_eq!(
+            resolved
+                .client_secret
+                .as_ref()
+                .map(|secret| secret.as_str()),
+            Some("user-sec-both")
+        );
         assert_eq!(
             resolved.credential_user_id.as_deref(),
             Some(user_id.as_str())
@@ -1133,15 +1528,19 @@ mod tests {
         provider.credential_mode = "both".to_string();
 
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
         // No user credentials stored, should fall back to admin
 
         let resolved = super::resolve_oauth_credentials(&db, &enc, &provider, &user_id)
             .await
             .unwrap();
 
-        assert_eq!(resolved.client_id, "admin-fallback-cid");
+        assert_eq!(resolved.client_id.as_str(), "admin-fallback-cid");
         assert_eq!(
-            resolved.client_secret.as_deref(),
+            resolved
+                .client_secret
+                .as_ref()
+                .map(|secret| secret.as_str()),
             Some("admin-fallback-sec")
         );
         assert!(resolved.credential_user_id.is_none());
@@ -1158,6 +1557,7 @@ mod tests {
         provider.credential_mode = "both".to_string();
 
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
 
         let result = super::resolve_oauth_credentials(&db, &enc, &provider, &user_id).await;
         assert!(result.is_err(), "should fail with no creds in 'both' mode");
@@ -1187,8 +1587,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolved.client_id, "tok-admin-cid");
-        assert_eq!(resolved.client_secret.as_deref(), Some("tok-admin-sec"));
+        assert_eq!(resolved.client_id.as_str(), "tok-admin-cid");
+        assert_eq!(
+            resolved
+                .client_secret
+                .as_ref()
+                .map(|secret| secret.as_str()),
+            Some("tok-admin-sec")
+        );
     }
 
     #[tokio::test]
@@ -1200,6 +1606,7 @@ mod tests {
         let enc = test_encryption_keys();
         let provider = make_provider("oauth2", false, false);
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
 
         super::upsert_user_credentials(
             &db,
@@ -1217,8 +1624,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolved.client_id, "tok-user-cid");
-        assert_eq!(resolved.client_secret.as_deref(), Some("tok-user-sec"));
+        assert_eq!(resolved.client_id.as_str(), "tok-user-cid");
+        assert_eq!(
+            resolved
+                .client_secret
+                .as_ref()
+                .map(|secret| secret.as_str()),
+            Some("tok-user-sec")
+        );
         assert_eq!(
             resolved.credential_user_id.as_deref(),
             Some(user_id.as_str())
@@ -1252,6 +1665,7 @@ mod tests {
         };
         let enc = test_encryption_keys();
         let user_id = uuid::Uuid::new_v4().to_string();
+        seed_live_owner(&db, &user_id).await;
         let provider_id = uuid::Uuid::new_v4().to_string();
 
         // 1. Create
@@ -1379,8 +1793,14 @@ mod tests {
             .await
             .unwrap()
             .expect("BYO creds should resolve to Some");
-        assert_eq!(resolved.client_id, "cli_marketing");
-        assert_eq!(resolved.client_secret.as_deref(), Some("super-secret"));
+        assert_eq!(resolved.client_id.as_str(), "cli_marketing");
+        assert_eq!(
+            resolved
+                .client_secret
+                .as_ref()
+                .map(|secret| secret.as_str()),
+            Some("super-secret")
+        );
         // Per §12: the multi-connection branch leaves credential_user_id None.
         assert!(resolved.credential_user_id.is_none());
         assert_eq!(

@@ -680,6 +680,16 @@ pub async fn llm_proxy_request(
                 .inspect_err(|error| request_audit.admission_error(error))?
         };
     let billing_ctx = billing_ctx
+        .with_assistant_provenance(
+            auth_user.assistant_turn_fence.is_some(),
+            false,
+            crate::services::llm_usage_service::model_execution(
+                true,
+                &request_method_str,
+                &operation_path,
+                false,
+            ),
+        )
         .with_operation(priced_operation.as_deref())
         .with_request_body(Some(&body_bytes));
     let metered = state
@@ -1431,6 +1441,16 @@ async fn gateway_provider_request(
                 .inspect_err(|error| request_audit.admission_error(error))?
         };
     let billing_ctx = billing_ctx
+        .with_assistant_provenance(
+            auth_user.assistant_turn_fence.is_some(),
+            false,
+            crate::services::llm_usage_service::model_execution(
+                true,
+                "POST",
+                &requested_path,
+                false,
+            ),
+        )
         .with_operation(priced_operation.as_deref())
         .with_request_body(Some(&body_bytes));
     let metered = state
@@ -1503,7 +1523,7 @@ async fn gateway_provider_request(
                     provider_slug: provider_slug.clone(),
                     injection_method: "header".to_string(),
                     injection_key: key.clone(),
-                    credential: value.clone(),
+                    credential: value.clone().into(),
                 }
             }))
             .collect();
@@ -1918,7 +1938,7 @@ async fn resolve_provider_slug_with_fallback(
 /// Extract the bearer token from delegated credentials.
 fn extract_bearer_token(
     delegated: &[delegation_service::DelegatedCredential],
-) -> AppResult<String> {
+) -> AppResult<zeroize::Zeroizing<String>> {
     delegated
         .iter()
         .find(|c| c.injection_method == "bearer")
@@ -2861,7 +2881,7 @@ mod tests {
             base_url: service.base_url.clone(),
             auth_method: "bearer".into(),
             auth_key_name: "Authorization".into(),
-            credential: "test-token".into(),
+            credential: "test-token".to_owned().into(),
             service,
             catalog_default_headers: Vec::new(),
             user_service_default_headers: Vec::new(),
@@ -3083,18 +3103,18 @@ mod tests {
                 provider_slug: "openai".into(),
                 injection_method: "header".into(),
                 injection_key: "X-Custom".into(),
-                credential: "custom-val".into(),
+                credential: "custom-val".to_owned().into(),
             },
             DelegatedCredential {
                 provider_slug: "openai".into(),
                 injection_method: "bearer".into(),
                 injection_key: "Authorization".into(),
-                credential: "sk-test-12345".into(),
+                credential: "sk-test-12345".to_owned().into(),
             },
         ];
 
         let token = extract_bearer_token(&creds).unwrap();
-        assert_eq!(token, "sk-test-12345");
+        assert_eq!(token.as_str(), "sk-test-12345");
     }
 
     #[test]
@@ -3104,18 +3124,18 @@ mod tests {
                 provider_slug: "openai".into(),
                 injection_method: "bearer".into(),
                 injection_key: "Authorization".into(),
-                credential: "first-token".into(),
+                credential: "first-token".to_owned().into(),
             },
             DelegatedCredential {
                 provider_slug: "openai".into(),
                 injection_method: "bearer".into(),
                 injection_key: "Authorization".into(),
-                credential: "second-token".into(),
+                credential: "second-token".to_owned().into(),
             },
         ];
 
         let token = extract_bearer_token(&creds).unwrap();
-        assert_eq!(token, "first-token");
+        assert_eq!(token.as_str(), "first-token");
     }
 
     #[test]
@@ -3124,7 +3144,7 @@ mod tests {
             provider_slug: "openai".into(),
             injection_method: "header".into(),
             injection_key: "X-Key".into(),
-            credential: "not-a-bearer".into(),
+            credential: "not-a-bearer".to_owned().into(),
         }];
 
         let result = extract_bearer_token(&creds);

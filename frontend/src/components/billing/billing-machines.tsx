@@ -45,10 +45,10 @@ export function BillingMachines() {
         </p>
         <p className="text-12 text-muted-foreground">
           New Machine fixed profile: 2 vCPU, 2 GiB memory and 20 GiB /workspace.
-          Each eligible personal account has one free slot
-          with no expiry or monthly runtime limit. Paused Machines and
-          unfinished cleanup still occupy that slot; additional Machines require
-          paid review. Retained Machines keep their historical specifications.
+          Each eligible personal account has one free slot with no expiry or
+          monthly runtime limit. Paused Machines and unfinished cleanup still
+          occupy that slot; additional Machines require paid review. Retained
+          Machines keep their historical specifications.
         </p>
         <p className="text-12 text-muted-foreground">
           Temporary storage is managed by the deployment environment, with no
@@ -66,13 +66,16 @@ export function BillingMachines() {
         </p>
         <p className="text-12 text-muted-foreground">
           Paused workspaces are retained indefinitely without a storage fee.
-          Deletion is irreversible, with no snapshots or restore. Workspace and
-          volume cleanup targets 24 hours and remains pending until stop,
-          cleanup and accounting evidence is verified. A retained tombstone and
-          necessary billing evidence remain; the free slot is released only
-          after finalization. Job metadata lasts 30 days and terminal operation
-          history 90 days; live output lasts at most one hour after completion
-          and may disappear sooner.
+          Deletion is irreversible, with no snapshots or restore. Deletion
+          queues workspace and runtime cleanup with a 24-hour target. Cleanup
+          remains pending until applicable control-plane stop or absence,
+          Sandbox object-cascade checks, creation obligations and accounting are
+          verified. Underlying storage follows its reclaim policy; physical
+          storage release is not verified. The target is not guaranteed erasure.
+          A retained tombstone and necessary billing evidence remain; the free
+          slot is released only after finalization. Job metadata lasts 30 days
+          and terminal operation history 90 days; live output lasts at most one
+          hour after completion and may disappear sooner.
         </p>
         <Button aria-expanded={open} onClick={() => setOpen((value) => !value)}>
           {open ? "Hide machine runtime" : "Review machine runtime"}

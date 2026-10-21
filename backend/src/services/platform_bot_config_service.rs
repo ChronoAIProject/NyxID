@@ -754,7 +754,7 @@ pub(crate) async fn admit_cleanup_effect(
                 }
                 db.collection::<Document>(crate::models::async_service_operation::COLLECTION_NAME).update_many(
                     doc! {"_id": {"$in": &task.async_operation_ids}, "user_id": &task.owner_user_id, "conversation_id": &task.resource_id, "state": {"$in": ["submitting", "waiting", "ready", "queued"]}},
-                    doc! {"$set": {"state": "cancelling", "result_encrypted": bson::Bson::Null, "lease_id": bson::Bson::Null, "lease_until": bson::Bson::Null, "poll_at": bson::DateTime::now()}}).session(&mut *session).await?;
+                    doc! {"$unset":{"secret_context_versions.result_encrypted":""},"$set": {"state": "cancelling", "result_encrypted": bson::Bson::Null, "lease_id": bson::Bson::Null, "lease_until": bson::Bson::Null, "poll_at": bson::DateTime::now()}}).session(&mut *session).await?;
                 db.collection::<Document>(crate::models::machine_job::COLLECTION_NAME).update_many(
                     doc! {"_id": {"$in": task.machine_jobs.iter().map(|job| job.id.clone()).collect::<Vec<_>>()}, "user_id": &task.owner_user_id, "conversation_id": &task.resource_id, "state": "running"},
                     doc! {"$set": {"state": "finished", "finished_at": bson::DateTime::now()}}).session(&mut *session).await?;

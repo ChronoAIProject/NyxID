@@ -71,15 +71,15 @@ pub struct TriggerResponse {
 #[derive(Serialize)]
 pub struct CreateTriggerResponse {
     pub trigger: TriggerResponse,
-    pub secret: Option<String>,
-    pub delivery_signing_secret: Option<String>,
+    pub secret: Option<zeroize::Zeroizing<String>>,
+    pub delivery_signing_secret: Option<zeroize::Zeroizing<String>>,
     pub delivery_signing_key_id: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct UpdateTriggerResponse {
     pub trigger: TriggerResponse,
-    pub delivery_signing_secret: Option<String>,
+    pub delivery_signing_secret: Option<zeroize::Zeroizing<String>>,
     pub delivery_signing_key_id: Option<String>,
 }
 
@@ -91,15 +91,21 @@ pub struct ListTriggersResponse {
 #[derive(Serialize)]
 pub struct RotateTriggerSecretResponse {
     pub trigger: TriggerResponse,
-    pub secret: String,
+    pub secret: zeroize::Zeroizing<String>,
 }
 
 #[derive(Serialize)]
 pub struct RotateTriggerDeliverySecretResponse {
     pub trigger: TriggerResponse,
-    pub delivery_signing_secret: String,
+    pub delivery_signing_secret: zeroize::Zeroizing<String>,
     pub key_id: String,
 }
+crate::errors::redacted_debug!(
+    CreateTriggerResponse,
+    UpdateTriggerResponse,
+    RotateTriggerSecretResponse,
+    RotateTriggerDeliverySecretResponse
+);
 
 #[derive(Debug, Deserialize)]
 pub struct ListTriggerDeliveriesQuery {
@@ -780,6 +786,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<Trigger>(TRIGGERS)
             .insert_one(Trigger {
+                secret_context_versions: Default::default(),
                 source: Default::default(),
                 setup_watch_id: None,
                 schedule: None,
@@ -807,6 +814,7 @@ mod tests {
             .unwrap();
         db.collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
             .insert_one(TriggerDeliveryRecord {
+                secret_context_versions: Default::default(),
                 id: "record-id".to_string(),
                 trigger_id: trigger_id.clone(),
                 user_id: owner.clone(),

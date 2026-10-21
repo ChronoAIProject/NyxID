@@ -567,6 +567,7 @@ pub(crate) async fn stored_x_fixture() -> (
     NativeEntryConfiguration,
     String,
 ) {
+    crate::test_utils::init_test_audit_chain_hmac_key();
     use super::super::platform_entry_credentials::EntryCredentialSnapshot;
     use bson::doc;
     let db =
@@ -825,14 +826,34 @@ async fn real_oauth_refresh_before_admission_preserves_scope_set_identity_and_li
         )
         .await
         .unwrap();
-    let refresh_token = state
-        .encryption_keys
-        .encrypt(b"synthetic-refresh-token")
+    let mut key = state
+        .db
+        .collection::<crate::models::user_api_key::UserApiKey>(
+            crate::models::user_api_key::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":bot.connection_id.as_ref().unwrap()})
         .await
+        .unwrap()
         .unwrap();
+    let refresh_token = crate::services::credential_record_service::encrypt(
+        &state.encryption_keys,
+        crate::models::user_api_key::COLLECTION_NAME,
+        &key.id,
+        &key.user_id,
+        "refresh_token_encrypted",
+        b"synthetic-refresh-token",
+    )
+    .await
+    .unwrap();
+    crate::services::credential_record_service::mark_version(
+        &mut key.secret_context_versions,
+        &state.encryption_keys,
+        "refresh_token_encrypted",
+    );
     state.db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
-        .update_one(doc! {"_id":bot.connection_id.as_ref().unwrap()},doc! {"$set":{
+        .update_one(doc! {"_id":&key.id},doc! {"$set":{
             "refresh_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:refresh_token},
+            "secret_context_versions":bson::to_bson(&key.secret_context_versions).unwrap(),
             "expires_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::minutes(1))}})
         .await.unwrap();
     let body = stored_x_message(&bot, "What is NyxID?");
@@ -875,11 +896,15 @@ async fn real_oauth_refresh_before_admission_preserves_scope_set_identity_and_li
     assert_eq!(current.token_scopes.as_deref(), Some(reordered.as_str()));
     assert!(current.expires_at.unwrap() > chrono::Utc::now() + chrono::Duration::minutes(30));
     assert_eq!(
-        state
-            .encryption_keys
-            .decrypt(current.access_token_encrypted.as_ref().unwrap())
+        crate::services::credential_record_service::CredentialRecord::key(&current)
+            .decrypt(
+                &state.encryption_keys,
+                "access_token_encrypted",
+                current.access_token_encrypted.as_ref().unwrap()
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .as_slice(),
         b"synthetic-refreshed-access-token"
     );
     assert_eq!(
@@ -1289,4 +1314,78 @@ fn faq_alias_uses_the_same_trimmed_unicode_boundary() {
             "/unsupported"
         );
     }
+}
+
+#[tokio::test]
+async fn strict_native_snapshot_and_live_channel_use_context_and_preserve_captured_generation() {
+    use crate::services::platform_entry_credentials::EntryCredentialSnapshot;
+    use bson::doc;
+    let (state, bot, config, _profile) = stored_x_fixture().await;
+    let collection = crate::models::user_api_key::COLLECTION_NAME;
+    let source = state
+        .db
+        .collection::<bson::Document>(collection)
+        .find_one(doc! {"_id":bot.connection_id.as_deref().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::services::credential_record_service::migrate_snapshot(
+            &state.db,
+            &state.encryption_keys,
+            collection,
+            &source,
+        )
+        .await
+        .unwrap()
+    );
+    let mut strict = crate::test_utils::test_encryption_keys();
+    strict.set_allow_legacy_record_reads(false);
+    let adapter = crate::services::channel_adapters::x::XAdapter::default();
+    let captured = EntryCredentialSnapshot::load(&state.db, &adapter, &bot)
+        .await
+        .unwrap();
+    assert_eq!(
+        captured.fingerprint().unwrap(),
+        config.credential_fingerprint
+    );
+    assert_eq!(
+        captured.send_token(&strict).await.unwrap().as_str(),
+        "synthetic-user-token"
+    );
+    assert_eq!(
+        crate::services::channel_credentials::connection_token(
+            &state.db,
+            &strict,
+            &bot.user_id,
+            bot.connection_id.as_deref().unwrap(),
+            "twitter",
+            crate::services::channel_adapters::x::REQUIRED_SCOPES,
+        )
+        .await
+        .unwrap()
+        .as_str(),
+        "synthetic-user-token"
+    );
+    crate::services::user_api_key_service::update_api_key(
+        &state.db,
+        &strict,
+        &bot.user_id,
+        bot.connection_id.as_deref().unwrap(),
+        None,
+        Some("successor-user-token"),
+    )
+    .await
+    .unwrap();
+    // Captured authority keeps the captured credential; a later same-ID row
+    // cannot substitute a different epoch into an admitted native effect.
+    assert_eq!(
+        captured.send_token(&strict).await.unwrap().as_str(),
+        "synthetic-user-token"
+    );
+    let mut tx = state.db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    assert!(!captured.fence_in_session(&state.db, &mut tx).await.unwrap());
+    tx.abort_transaction().await.unwrap();
+    state.db.drop().await.unwrap();
 }

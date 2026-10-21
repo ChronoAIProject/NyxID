@@ -659,7 +659,36 @@ async fn curation_late_old_generation_issuance_fails_real_extractor_and_legacy_f
         result
     };
     let (late, (_, secret)) = tokio::join!(issuance, rotate);
-    let late = late.unwrap().access_token;
+    assert!(
+        late.is_err(),
+        "held issuance must recheck current account authority before inserting a token"
+    );
+    // Preserve extractor coverage with a genuinely historical row, rather
+    // than asking the guarded current issuer to create invalid authority.
+    let (late, jti) = jwt::generate_service_account_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &f.sa.id,
+        &f.sa.allowed_scopes,
+        3600,
+        0,
+    )
+    .unwrap();
+    f.state
+        .db
+        .collection::<ServiceAccountToken>(TOKENS)
+        .insert_one(ServiceAccountToken {
+            id: uuid::Uuid::new_v4().to_string(),
+            jti,
+            service_account_id: f.sa.id.clone(),
+            scope: f.sa.allowed_scopes.clone(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            revoked: false,
+            credential_generation: 0,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
     let claims = jwt::verify_token(&f.state.jwt_keys, &f.state.config, &late).unwrap();
     let row = f
         .state
@@ -671,7 +700,7 @@ async fn curation_late_old_generation_issuance_fails_real_extractor_and_legacy_f
         .unwrap();
     assert!(
         !row.revoked,
-        "late token inserted after rotation's revoke sweep"
+        "historical fixture deliberately remains outside the prior revoke sweep"
     );
     assert_eq!(row.credential_generation, 0);
     assert_eq!(
@@ -899,6 +928,7 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
             .db
             .collection::<UserServiceConnection>(CONNECTIONS)
             .insert_one(UserServiceConnection {
+                secret_context_versions: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: owner.clone(),
                 service_id: f.service.id.clone(),
@@ -1201,6 +1231,7 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
             .db
             .collection::<UserProviderToken>(PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
+                secret_context_versions: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: owner.clone(),
                 provider_config_id: provider.id.clone(),
@@ -1846,6 +1877,7 @@ async fn curation_router_rejects_other_credential_classes_and_live_grant_changes
         .db
         .collection::<crate::models::session::Session>("sessions")
         .insert_one(crate::models::session::Session {
+            purpose: Some(crate::models::session::SessionPurpose::Authenticated),
             id: Uuid::new_v4().to_string(),
             user_id: f.owner.clone(),
             token_hash: hash_token(&session_token),

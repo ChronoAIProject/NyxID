@@ -182,6 +182,23 @@ impl Drop for Fixture {
     }
 }
 impl Fixture {
+    async fn erase_owner(&self) -> crate::errors::AppResult<()> {
+        TEST_ORIGIN
+            .scope(
+                self.adapter
+                    .origin
+                    .clone()
+                    .expect("fixture provider origin"),
+                crate::test_utils::accept_and_process_erasure_with_state(
+                    &self.state,
+                    &self.bot.user_id,
+                    &self.bot.user_id,
+                    Some(crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION),
+                ),
+            )
+            .await
+    }
+
     async fn new() -> Self {
         let db = crate::test_utils::connect_test_database("aurinko")
             .await
@@ -1071,8 +1088,26 @@ async fn aurinko_owner_deletion_removes_bot_secrets_and_cannot_recreate_ingress_
         .unwrap();
     let legacy_id = uuid::Uuid::new_v4().to_string();
     let other_owner = uuid::Uuid::new_v4().to_string();
+    // A valid historical shared-manager bot has no personally owned webhook.
+    // It still belongs to this person and must be removed by full erasure.
+    let mut legacy_bot = f.bot.clone();
+    legacy_bot.id = legacy_id.clone();
+    legacy_bot.platform = "telegram".into();
+    legacy_bot.credential_source = "telegram_manager".into();
+    legacy_bot.webhook_registered = false;
+    f.state
+        .db
+        .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(&legacy_bot)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(doc! {"_id": &other_owner, "user_id": &other_owner, "platform": "aurinko"})
+        .await
+        .unwrap();
     for collection in [
-        crate::models::channel_bot::COLLECTION_NAME,
         crate::models::channel_conversation::COLLECTION_NAME,
         crate::models::channel_message::COLLECTION_NAME,
     ] {
@@ -1086,13 +1121,15 @@ async fn aurinko_owner_deletion_removes_bot_secrets_and_cannot_recreate_ingress_
             .await
             .unwrap();
     }
-    crate::services::admin_user_service::delete_current_user_cascade(
-        &f.state.db,
-        &f.bot.user_id,
-        crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
-    )
-    .await
-    .unwrap();
+    f.erase_owner().await.unwrap();
+    assert!(
+        f.mock
+            .lock()
+            .await
+            .requests
+            .iter()
+            .any(|(method, path)| method == "DELETE" && path == "/v1/subscriptions/100")
+    );
     assert!(f.event(&["two"]).await.is_err());
     for collection in [
         crate::models::channel_bot::COLLECTION_NAME,
@@ -1127,7 +1164,7 @@ async fn aurinko_owner_deletion_removes_bot_secrets_and_cannot_recreate_ingress_
             rows.count_documents(doc! { "_id": &legacy_id })
                 .await
                 .unwrap(),
-            1
+            0
         );
         assert_eq!(
             rows.count_documents(doc! { "_id": &other_owner })
@@ -1337,11 +1374,15 @@ async fn aurinko_catalog_account_token_connection_owner_scope_and_disable() {
         TOKEN.as_bytes()
     );
     assert_eq!(
-        state
-            .encryption_keys
-            .decrypt(credential.credential_encrypted.as_deref().unwrap())
+        crate::services::credential_record_service::CredentialRecord::key(&credential)
+            .decrypt(
+                &state.encryption_keys,
+                "credential_encrypted",
+                credential.credential_encrypted.as_deref().unwrap()
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .as_slice(),
         TOKEN.as_bytes()
     );
     assert!(
@@ -1498,15 +1539,7 @@ async fn aurinko_owner_deletion_fences_delayed_ingress_and_reply() {
             .unwrap();
             // Busy effects make deletion retryable before deactivation.
             // The user must still be able to authenticate to retry.
-            assert!(
-                crate::services::admin_user_service::delete_current_user_cascade(
-                    &f.state.db,
-                    &f.bot.user_id,
-                    crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
-                )
-                .await
-                .is_err()
-            );
+            assert!(f.erase_owner().await.is_err());
             assert!(
                 f.state
                     .db
@@ -1519,13 +1552,15 @@ async fn aurinko_owner_deletion_fences_delayed_ingress_and_reply() {
             );
         };
         tokio::join!(effect, deletion);
-        crate::services::admin_user_service::delete_current_user_cascade(
-            &f.state.db,
-            &f.bot.user_id,
-            crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
-        )
-        .await
-        .unwrap();
+        f.erase_owner().await.unwrap();
+        assert!(
+            f.mock
+                .lock()
+                .await
+                .requests
+                .iter()
+                .any(|(method, path)| method == "DELETE" && path == "/v1/subscriptions/100")
+        );
         assert!(f.event(&["after-delete"]).await.is_err());
         assert_eq!(f.mock.lock().await.replies.len(), usize::from(replying));
         assert_eq!(f.mock.lock().await.callbacks.len(), 1);

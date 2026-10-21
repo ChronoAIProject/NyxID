@@ -19,7 +19,7 @@ pub struct DelegatedCredential {
     pub provider_slug: String,
     pub injection_method: String,
     pub injection_key: String,
-    pub credential: String,
+    pub credential: zeroize::Zeroizing<String>,
 }
 
 fn normalize_delegated_injection(
@@ -502,7 +502,7 @@ async fn materialize_provider_requirements(
             provider_slug: provider.slug.clone(),
             injection_method,
             injection_key,
-            credential,
+            credential: credential.into(),
         });
     }
 
@@ -597,11 +597,11 @@ mod tests {
             provider_slug: "github".to_string(),
             injection_method: "bearer".to_string(),
             injection_key: "Authorization".to_string(),
-            credential: "secret-token".to_string(),
+            credential: "secret-token".to_string().into(),
         };
         let cloned = cred.clone();
         assert_eq!(cloned.injection_method, "bearer");
-        assert_eq!(cloned.credential, "secret-token");
+        assert_eq!(cloned.credential.as_str(), "secret-token");
     }
 
     #[tokio::test]
@@ -619,6 +619,7 @@ mod tests {
         let service_id = uuid::Uuid::new_v4().to_string();
 
         let provider = ProviderConfig {
+            secret_context_versions: Default::default(),
             id: provider_id.clone(),
             slug: "github".to_string(),
             name: "GitHub".to_string(),
@@ -678,6 +679,7 @@ mod tests {
             .unwrap();
 
         let token = UserProviderToken {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: org_user_id.clone(),
             provider_config_id: provider_id,
@@ -720,6 +722,6 @@ mod tests {
         assert_eq!(credentials[0].provider_slug, "github");
         assert_eq!(credentials[0].injection_method, "bearer");
         assert_eq!(credentials[0].injection_key, "Authorization");
-        assert_eq!(credentials[0].credential, "org-access-token");
+        assert_eq!(credentials[0].credential.as_str(), "org-access-token");
     }
 }

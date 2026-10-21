@@ -3256,13 +3256,14 @@ fn pending_sms_send(b: &Binding, s: &CallSession) -> EventReceipt {
 }
 
 #[tokio::test]
-async fn deletion_closes_owner_admission_before_pending_check_and_remains_retryable() {
+async fn rejected_deletion_preserves_admission_until_channel_effects_are_reconciled() {
     let f = fixture(Profile::TwilioSms, false).await;
     let s = active_session(&f, "deletion-pending").await;
-    let error = crate::services::admin_user_service::delete_user_cascade(
-        &f.state.db,
+    let error = crate::test_utils::accept_and_process_erasure_with_state(
+        &f.state,
         &Uuid::new_v4().to_string(),
         &f.b.user_id,
+        None,
     )
     .await
     .unwrap_err();
@@ -3279,23 +3280,17 @@ async fn deletion_closes_owner_admission_before_pending_check_and_remains_retrya
         owner.is_active,
         "Pending cleanup must retain authentication for retry"
     );
-    assert!(binding::read_authority(&f.state.db, &f.b).await.is_err());
-    assert!(
-        session::prepare(&f.state, &f.b, "after-close", &s.from, &s.to)
-            .await
-            .is_err()
-    );
-    let mut replacement = f.b.clone();
-    replacement.id = Uuid::new_v4().to_string();
-    replacement.resource_id = "PNreplacement".into();
-    replacement.application_id = "APreplacement".into();
-    replacement.phone_number = "+18005550124".into();
-    assert!(binding::persist(&f.state, &replacement).await.is_err());
-    assert!(
-        session::insert_sms_send(&f.state, &f.b, &s, &pending_sms_send(&f.b, &s))
-            .await
-            .is_err()
-    );
+    binding::read_authority(&f.state.db, &f.b).await.unwrap();
+    super::owner_admission::check(&f.state.db, &f.b.user_id)
+        .await
+        .unwrap();
+    let (later, _) = session::prepare(&f.state, &f.b, "after-rejected-delete", &s.from, &s.to)
+        .await
+        .unwrap();
+    let send = pending_sms_send(&f.b, &s);
+    session::insert_sms_send(&f.state, &f.b, &s, &send)
+        .await
+        .unwrap();
     assert_eq!(
         f.state
             .db
@@ -3303,15 +3298,44 @@ async fn deletion_closes_owner_admission_before_pending_check_and_remains_retrya
             .count_documents(doc! {"event_kind":"sms_send"})
             .await
             .unwrap(),
-        0
+        1
     );
+    super::sms_delivery::record_correlated(
+        &f.state,
+        &f.b,
+        super::sms_delivery::Receipt {
+            event: "deletion-reconciled-send",
+            message: "SM44444444444444444444444444444444",
+            from: &f.b.phone_number,
+            to: &s.from,
+            status: "delivered",
+            parts: Some(1),
+            send: Some(&send.id),
+        },
+    )
+    .await
+    .unwrap();
+    let evidence = f
+        .state
+        .db
+        .collection::<EventReceipt>(EVENTS)
+        .find_one(doc! {"_id":&send.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(evidence.billing_finalized);
+    assert_eq!(evidence.delivery, "delivered");
+    session::finish_noncall(&f.state, &later.id, "finished_before_deletion")
+        .await
+        .unwrap();
     session::finish_noncall(&f.state, &s.id, "owner_deleted")
         .await
         .unwrap();
-    crate::services::admin_user_service::delete_user_cascade(
-        &f.state.db,
+    crate::test_utils::accept_and_process_erasure_with_state(
+        &f.state,
         &Uuid::new_v4().to_string(),
         &f.b.user_id,
+        None,
     )
     .await
     .unwrap();
@@ -3340,7 +3364,12 @@ async fn deletion_and_sms_send_preparation_serialize_without_orphan_effect_ident
     let admin = Uuid::new_v4().to_string();
     let (admitted, deletion) = tokio::join!(
         session::insert_sms_send(&f.state, &f.b, &s, &send),
-        crate::services::admin_user_service::delete_user_cascade(&f.state.db, &admin, &f.b.user_id),
+        crate::test_utils::accept_and_process_erasure_with_state(
+            &f.state,
+            &admin,
+            &f.b.user_id,
+            None
+        ),
     );
     assert!(
         deletion.is_err(),
@@ -3357,7 +3386,7 @@ async fn deletion_and_sms_send_preparation_serialize_without_orphan_effect_ident
     assert!(
         super::owner_admission::check(&f.state.db, &f.b.user_id)
             .await
-            .is_err()
+            .is_ok()
     );
     session::finish_noncall(&f.state, &s.id, "closed_during_send")
         .await
@@ -3371,10 +3400,11 @@ async fn deletion_and_sms_send_preparation_serialize_without_orphan_effect_ident
         // The send identity remains even after local session closure: deletion
         // waits for the admitted outcome, and never invents or repeats a POST.
         assert!(
-            crate::services::admin_user_service::delete_user_cascade(
-                &f.state.db,
+            crate::test_utils::accept_and_process_erasure_with_state(
+                &f.state,
                 &admin,
-                &f.b.user_id
+                &f.b.user_id,
+                None
             )
             .await
             .is_err()
@@ -3633,7 +3663,12 @@ async fn late_authenticated_receipts_cannot_recreate_data_after_binding_or_owner
                 send: None,
             },
         ),
-        crate::services::admin_user_service::delete_user_cascade(&f.state.db, &admin, &f.b.user_id),
+        crate::test_utils::accept_and_process_erasure_with_state(
+            &f.state,
+            &admin,
+            &f.b.user_id,
+            None
+        ),
     );
     deleted.unwrap();
     // Either ordering is valid; the person cascade removes every receipt

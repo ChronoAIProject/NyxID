@@ -66,6 +66,20 @@ pub async fn analytics(
     }))
 }
 
+/// Kept behind the assistant admin/operator guard, independently of Usage Viewer.
+pub async fn model_usage(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<crate::services::admin_usage_service::AdminUsageQuery>,
+) -> AppResult<Json<crate::services::admin_usage_service::nyxbot::Response>> {
+    super::admin_helpers::require_admin_or_operator(&state, &auth, "admin.assistant.model_usage")
+        .await?;
+    Ok(Json(
+        crate::services::admin_usage_service::nyxbot::get(&state.db, query.validate(Utc::now())?)
+            .await?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

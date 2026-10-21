@@ -1890,6 +1890,7 @@ pub(crate) async fn begin_owner_turn_in_session(
     platform: Option<&crate::models::assistant_conversation::PlatformTurnOrigin>,
     voice_request_id: Option<&str>,
 ) -> AppResult<OwnerTurnAdmission> {
+    super::erasure_admission::fence_in_session(db, user_id, session).await?;
     if let Some(ack) = &start.acknowledgement_id
         && db
             .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
@@ -3787,9 +3788,8 @@ pub async fn turn_tool_images(
                 {
                     Err("unavailable")
                 } else {
-                    keys.decrypt(&row.data_encrypted)
+                    super::assistant_record_service::decrypt_image(keys, &row)
                         .await
-                        .map(zeroize::Zeroizing::new)
                         .map_err(|_| "unavailable")
                 }
             }
@@ -3874,19 +3874,27 @@ pub async fn attach_routed_image(
         &claimed.active_turn,
     );
     let stored = async {
-        let data_encrypted = keys.encrypt(bytes).await?;
+        let mut attachment = AssistantAttachment {
+            secret_context_versions: Default::default(),
+            origin: "tool".into(),
+            id: meta.id.clone(),
+            user_id: user_id.to_owned(),
+            conversation_id: conversation_id.to_owned(),
+            turn_id,
+            content_type: meta.content_type.clone(),
+            size: meta.size,
+            data_encrypted: Vec::new(),
+            created_at: Utc::now(),
+        };
+        attachment.data_encrypted =
+            super::assistant_record_service::encrypt_image(keys, &attachment, bytes).await?;
+        super::credential_record_service::mark_version(
+            &mut attachment.secret_context_versions,
+            keys,
+            "data_encrypted",
+        );
         db.collection::<AssistantAttachment>(ATTACHMENTS)
-            .insert_one(AssistantAttachment {
-                origin: "tool".into(),
-                id: meta.id.clone(),
-                user_id: user_id.to_owned(),
-                conversation_id: conversation_id.to_owned(),
-                turn_id,
-                content_type: meta.content_type.clone(),
-                size: meta.size,
-                data_encrypted,
-                created_at: Utc::now(),
-            })
+            .insert_one(attachment)
             .await?;
         AppResult::Ok(())
     }
@@ -3940,9 +3948,36 @@ pub(crate) async fn attach_resource_image(
         image_input: None,
         pages: None,
     });
-    let data_encrypted = match media {
-        Some(media) => Some(keys.encrypt(&media.bytes).await?),
-        None => None,
+    // Prepare encryption outside the retryable transaction, using the same
+    // attachment identity that the transaction installs. Resource images share
+    // the contextual tool-image contract with all other assistant attachments.
+    let attachment = if let Some(media) = media {
+        let meta = meta.as_ref().ok_or_else(resources::missing)?;
+        let mut row = AssistantAttachment {
+            secret_context_versions: Default::default(),
+            id: meta.id.clone(),
+            origin: "tool".into(),
+            user_id: chat.user_id.clone(),
+            conversation_id: chat.conversation_id.clone(),
+            turn_id: chat
+                .turn_id
+                .clone()
+                .ok_or(AppError::AssistantTurnRequired)?,
+            content_type: meta.content_type.clone(),
+            size: meta.size,
+            data_encrypted: Vec::new(),
+            created_at: Utc::now(),
+        };
+        row.data_encrypted =
+            super::assistant_record_service::encrypt_image(keys, &row, &media.bytes).await?;
+        super::credential_record_service::mark_version(
+            &mut row.secret_context_versions,
+            keys,
+            "data_encrypted",
+        );
+        Some(row)
+    } else {
+        None
     };
     let mut session = db.client().start_session().await?;
     let db = db.clone();
@@ -3950,8 +3985,11 @@ pub(crate) async fn attach_resource_image(
     let resource = resource.clone();
     session
         .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let operation: AppResult<_> = async {
+                super::erasure_admission::fence_in_session(&db, &chat.user_id, session).await?;
                 let now = Utc::now();
                 let current = db
                     .collection::<AssistantResource>(RESOURCES)
@@ -4032,20 +4070,8 @@ pub(crate) async fn attach_resource_image(
                     )
                 })?;
                 if !current.completed {
-                    let meta = meta.as_ref().ok_or_else(resources::missing)?;
-                    let data_encrypted = data_encrypted.as_ref().ok_or_else(resources::missing)?;
                     db.collection::<AssistantAttachment>(ATTACHMENTS)
-                        .insert_one(AssistantAttachment {
-                            id: meta.id.clone(),
-                            origin: "tool".into(),
-                            user_id: chat.user_id.clone(),
-                            conversation_id: chat.conversation_id.clone(),
-                            turn_id: current.turn_id,
-                            content_type: meta.content_type.clone(),
-                            size: meta.size,
-                            data_encrypted: data_encrypted.clone(),
-                            created_at: now,
-                        })
+                        .insert_one(attachment.as_ref().ok_or_else(resources::missing)?)
                         .session(&mut *session)
                         .await?;
                     db.collection::<AssistantResource>(RESOURCES)
@@ -4148,7 +4174,8 @@ pub async fn read_group_tool_attachment(
     if !attachment.content_type.starts_with("image/") {
         return Err(missing());
     }
-    let bytes = keys.decrypt(&attachment.data_encrypted).await?;
+    let mut protected = super::assistant_record_service::decrypt_image(keys, &attachment).await?;
+    let bytes = std::mem::take(&mut *protected);
     Box::pin(super::assistant_upload_retention::require_available(
         db, filter,
     ))
@@ -4205,7 +4232,8 @@ pub async fn read_attachment(
         .await?;
         return Err(not_found());
     };
-    let bytes = keys.decrypt(&row.data_encrypted).await?;
+    let mut protected = super::assistant_record_service::decrypt_image(keys, &row).await?;
+    let bytes = std::mem::take(&mut *protected);
     Box::pin(super::assistant_upload_retention::require_available(
         db, filter,
     ))

@@ -208,9 +208,12 @@ async fn issue_many(
     let continuation = continuation.cloned();
     session
         .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let operation: AppResult<_> =
                 async {
+                    super::erasure_admission::fence_in_session(&db, &chat.user_id, session).await?;
                     if !super::assistant_invocation_service::fence_in_session(
                         &db,
                         session,
@@ -400,7 +403,6 @@ pub async fn bind_confirmation(
     acknowledgement_id: &str,
 ) -> AppResult<()> {
     use crate::models::assistant_resource::ResourceConfirmation;
-    require_live(db, chat).await?;
     let pending = bson::to_bson(&ResourceConfirmation {
         acknowledgement_id: acknowledgement_id.into(),
         output,
@@ -411,8 +413,12 @@ pub async fn bind_confirmation(
     let chat = chat.clone();
     let row = row.clone();
     let acknowledgement_id = acknowledgement_id.to_owned();
-    session.start_transaction().and_run2(async move |session| {
+    session.start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
         let operation: AppResult<_> = async {
+            super::erasure_admission::fence_in_session(&db, &chat.user_id, session).await?;
             if !super::assistant_invocation_service::fence_in_session(
                 &db, session, &chat.user_id, chat.invocation_id.as_deref(),
             ).await? {
@@ -563,6 +569,141 @@ mod tests {
             content_type: "image/png".into(),
             bytes: vec![1, 2, 3, 4],
         }
+    }
+
+    #[tokio::test]
+    async fn captured_resource_writers_cannot_cross_accepted_erasure_or_recreate_after_cleanup() {
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let (state, chat) = setup("resource_erasure_fence").await;
+        super::super::personal_erasure_service::ensure_indexes(&state.db)
+            .await
+            .unwrap();
+        let read = read("2026-10-17T00:00:00Z");
+        let captured = issue(&state.db, &chat, &read, &read.candidates[0])
+            .await
+            .unwrap()
+            .unwrap();
+        let records = state.db.collection::<AssistantResource>(COLLECTION_NAME);
+        // Exceed a local cleanup page, and retain a different owner's locator.
+        let mut seeded = Vec::new();
+        for index in 0..40 {
+            let mut row = captured.clone();
+            row.id = Uuid::new_v4().to_string();
+            row.identity = format!("legacy-resource-{index}");
+            seeded.push(row);
+        }
+        let mut retained = captured.clone();
+        retained.id = Uuid::new_v4().to_string();
+        retained.user_id = Uuid::new_v4().to_string();
+        seeded.push(retained.clone());
+        records.insert_many(&seeded).await.unwrap();
+        super::super::personal_erasure_service::accept(
+            &state.db,
+            &chat.user_id,
+            &chat.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        // Parent and resource still exist here: rejection must come from the
+        // durable owner barrier, rather than depending on eventual deletion.
+        assert!(matches!(
+            issue(&state.db, &chat, &read, &read.candidates[0]).await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            bind_confirmation(&state.db, &chat, &captured, Output::Attach, "held-card").await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            engine::attach_resource_image(
+                &state.db,
+                &state.encryption_keys,
+                &chat,
+                &captured,
+                Some(&media()),
+                Output::Attach
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+        crate::test_utils::accept_and_process_erasure_with_state(
+            &state,
+            &chat.user_id,
+            &chat.user_id,
+            Some(super::super::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION),
+        )
+        .await
+        .unwrap();
+        assert!(
+            issue(&state.db, &chat, &read, &read.candidates[0])
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            records
+                .count_documents(doc! {"user_id":&chat.user_id})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            records
+                .find_one(doc! {"_id":&retained.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resource_image_uses_contextual_storage_and_strict_reader() {
+        let (state, chat) = setup("resource_contextual_image").await;
+        let read = read("2026-10-17T00:00:00Z");
+        let resource = issue(&state.db, &chat, &read, &read.candidates[0])
+            .await
+            .unwrap()
+            .unwrap();
+        let mut strict = crate::test_utils::test_encryption_keys();
+        strict.set_contextual_record_writes(true);
+        strict.set_allow_legacy_record_reads(false);
+        let media = media();
+        engine::attach_resource_image(
+            &state.db,
+            &strict,
+            &chat,
+            &resource,
+            Some(&media),
+            Output::Attach,
+        )
+        .await
+        .unwrap();
+        let row = state
+            .db
+            .collection::<crate::models::assistant_attachment::AssistantAttachment>(
+                crate::models::assistant_attachment::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":&resource.attachment_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.secret_context_versions.get("data_encrypted"), Some(&3));
+        assert_eq!(
+            super::super::assistant_record_service::decrypt_image(&strict, &row)
+                .await
+                .unwrap()
+                .as_slice(),
+            media.bytes.as_slice()
+        );
+        let mut moved = row.clone();
+        moved.turn_id = Uuid::new_v4().to_string();
+        assert!(
+            super::super::assistant_record_service::decrypt_image(&strict, &moved)
+                .await
+                .is_err()
+        );
+        state.db.drop().await.unwrap();
     }
     #[tokio::test]
     async fn resource_handles_are_scoped_bounded_deduplicated_and_url_free() {
@@ -866,12 +1007,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            state
-                .encryption_keys
-                .decrypt(&stored.data_encrypted)
+            super::super::assistant_record_service::decrypt_image(&state.encryption_keys, &stored)
                 .await
-                .unwrap(),
-            media.bytes
+                .unwrap()
+                .as_slice(),
+            media.bytes.as_slice()
         );
         assert_eq!(
             state

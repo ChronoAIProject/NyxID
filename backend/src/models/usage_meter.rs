@@ -253,6 +253,9 @@ pub struct UsageMeterRow {
     pub actor_user_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_id: Option<String>,
+    /// Server-authenticated execution provenance. None means legacy, not external.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_id: Option<String>,
     /// Exact connection selected at execution; legacy catalog-only rows stay unknown.

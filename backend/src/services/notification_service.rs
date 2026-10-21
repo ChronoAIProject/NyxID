@@ -278,6 +278,29 @@ pub async fn send_channel_bot_failed_notification(
     .await
 }
 
+/// Security notice contains no credential, recovery code or challenge token.
+pub async fn send_mfa_recovery_notification(
+    state: &crate::AppState,
+    user_id: &str,
+) -> AppResult<NotificationResult> {
+    let rendered = RenderedConnectionExpiredNotification {
+        title: "MFA recovery code used".into(),
+        body: "A single-use recovery code accessed your account. Review your sessions and replace your authenticator if it was lost. If this was unexpected, secure your account immediately.".into(),
+        data: HashMap::from([("type".into(), "mfa_recovery_used".into())]),
+    };
+    deliver_best_effort(
+        &state.db,
+        &state.config,
+        &state.http_client,
+        state.fcm_auth.as_deref(),
+        state.apns_auth.as_deref(),
+        user_id,
+        &rendered,
+        "MFA recovery",
+    )
+    .await
+}
+
 /// Deliver metadata-only lifecycle notices through existing configured channels.
 /// The durable in-site timeline remains the authoritative owner notification.
 #[allow(clippy::too_many_arguments)]

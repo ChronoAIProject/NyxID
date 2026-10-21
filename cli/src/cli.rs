@@ -207,6 +207,9 @@ pub enum Commands {
     },
     /// Manage telemetry consent on this machine (see `docs/TELEMETRY.md` §3)
     Telemetry {
+        /// Saved login profile whose account/device settings to manage
+        #[arg(long, env = "NYXID_PROFILE", global = true)]
+        profile: Option<String>,
         #[command(subcommand)]
         command: TelemetryCommands,
     },
@@ -626,6 +629,27 @@ pub enum AdminPlatformCredentialsCommands {
 
 #[derive(Subcommand)]
 pub enum AdminUserCommands {
+    /// Reconcile one durable provider revocation outcome
+    ErasureReconcile {
+        /// User ID, including a deleted account
+        user_id: uuid::Uuid,
+        #[arg(long)]
+        effect_id: uuid::Uuid,
+        #[arg(long, value_parser = ["retry", "retry_with_current_provider_config", "record_external_revocation_confirmed", "record_remote_revocation_unavailable"])]
+        action: String,
+        #[arg(long)]
+        expected_retry_generation: u64,
+        /// UUID identifying this exact request; reuse only for an identical retry
+        #[arg(long)]
+        idempotency_key: uuid::Uuid,
+        /// Reference to operator evidence (never a credential)
+        #[arg(long)]
+        evidence_reference: String,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// List platform users (paginated)
     List {
         /// Page number (1-based)
@@ -1100,12 +1124,15 @@ pub enum SessionCommands {
 /// `docs/TELEMETRY.md` §3 for the full precedence ladder.
 #[derive(Subcommand)]
 pub enum TelemetryCommands {
-    /// Opt in: persist `{enabled=true, asked=true}` to config.
+    /// Opt this saved account/profile in on this device (account permission is separate).
     Enable,
-    /// Opt out: persist `{enabled=false, asked=true}` and clear the
-    /// local anon UUID so a future re-enable starts fresh.
+    /// Stop analytics from this CLI profile/device, including with env=on.
     Disable,
-    /// Print the resolved consent state and its source.
+    /// Enable global account analytics permission (does not opt in this device)
+    AccountEnable,
+    /// Withdraw global account permission across devices
+    AccountDisable,
+    /// Print this device choice and fresh account permission
     Status,
 }
 

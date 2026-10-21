@@ -1318,7 +1318,8 @@ pub async fn expire_pending_requests(
                 service_slug: req.service_slug.clone(),
                 mode: req.approval_mode.as_str().to_string(),
             },
-        );
+        )
+        .await;
     }
 
     Ok(count)

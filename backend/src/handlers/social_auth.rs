@@ -491,6 +491,8 @@ pub async fn callback(
     let tele_social = TelemetryContext {
         surface,
         client_version: None,
+        analytics_allowed: false,
+        analytics_account: None,
     };
 
     // Telemetry: only the new-user branch of `find_or_create_user` emits
@@ -519,7 +521,8 @@ pub async fn callback(
                 via_org: None,
                 invite_code_used: reserved_invite_id.is_some(),
             },
-        );
+        )
+        .await;
         if let Some(ref iid) = reserved_invite_id
             && let Some(meta) = invite_code_service::fetch_telemetry_meta(&state.db, iid).await
         {
@@ -534,7 +537,8 @@ pub async fn callback(
                     created_by_user_id: hash_short_id(&meta.created_by),
                     days_to_redemption: days,
                 },
-            );
+            )
+            .await;
         }
     }
 
@@ -597,7 +601,8 @@ pub async fn callback(
                     method: provider.as_str().to_string(),
                     mfa_required: false,
                 },
-            );
+            )
+            .await;
 
             build_web_auth_redirect(
                 &session,
@@ -653,7 +658,8 @@ pub async fn callback(
                     method: provider.as_str().to_string(),
                     mfa_required: false,
                 },
-            );
+            )
+            .await;
 
             build_mobile_auth_redirect(
                 &tokens,
@@ -669,7 +675,7 @@ pub async fn callback(
 
 // --- Apple POST callback (response_mode=form_post) ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct AppleCallbackForm {
     pub code: Option<String>,
     pub state: Option<String>,
@@ -925,6 +931,8 @@ pub async fn apple_callback(
     let tele_social = TelemetryContext {
         surface,
         client_version: None,
+        analytics_allowed: false,
+        analytics_account: None,
     };
 
     // Telemetry: gate `user.signed_up` and `invite.code_redeemed` on the
@@ -950,7 +958,8 @@ pub async fn apple_callback(
                 via_org: None,
                 invite_code_used: reserved_invite_id.is_some(),
             },
-        );
+        )
+        .await;
         if let Some(ref iid) = reserved_invite_id
             && let Some(meta) = invite_code_service::fetch_telemetry_meta(&state.db, iid).await
         {
@@ -965,7 +974,8 @@ pub async fn apple_callback(
                     created_by_user_id: hash_short_id(&meta.created_by),
                     days_to_redemption: days,
                 },
-            );
+            )
+            .await;
         }
     }
 
@@ -1028,7 +1038,8 @@ pub async fn apple_callback(
                     method: "apple".to_string(),
                     mfa_required: false,
                 },
-            );
+            )
+            .await;
 
             build_web_auth_redirect(
                 &session,
@@ -1084,7 +1095,8 @@ pub async fn apple_callback(
                     method: "apple".to_string(),
                     mfa_required: false,
                 },
-            );
+            )
+            .await;
 
             build_mobile_auth_redirect(&tokens, &redirect_target, "apple", &user.id, secure, domain)
         }
@@ -1515,6 +1527,12 @@ fn extract_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
                 }
             })
         })
+}
+
+impl std::fmt::Debug for AppleCallbackForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppleCallbackForm").finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]

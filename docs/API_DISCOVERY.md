@@ -342,6 +342,31 @@ and `/api/v1/mcp/config` for the whole user.
 
 ### Tool search semantics
 
+#### Connection selection and slug collisions
+
+NyxID applies the caller's service authority before resolving duplicate
+connection slugs. An organization specialist considers only the bound
+organization's live member ACL; personal and other-organization connections
+cannot shadow those rows. A specialist's ungranted but live organization
+connection may remain discoverable with `chat_access: acknowledgement_required`,
+because the execution service gate still gives the final grant decision.
+
+Restricted keys see only their allowed `UserService` IDs, with personal rows
+winning same-slug collisions among the visible rows. Specialist chat keys
+prefer their granted connections, then apply the usual personal-before-
+organization order. For an organization-bound REST key, a granted,
+ACL-permitted bound-org connection (or an eligible bound-org pool) owns the
+slug first, including when a same-slug personal connection exists. An
+unavailable granted connection remains selected so its own credential or route
+error surfaces; the existing personal, legacy and membership cascade runs only
+when no granted bound-org service or eligible pool has that slug. A selected
+row keeps its exact connection ID through discovery and dispatch; availability
+never causes NyxID to substitute another credential. `/api/v1/mcp/config`
+reports the caller-authorized rows shadowed by a same-slug winner as
+`diagnostics.shadowed_connections`. An ID query is trimmed and
+case-insensitive, and matches only that exact connection ID; ID substrings never
+affect ordinary search or ranking.
+
 Personal agent order applies within an immutable catalog group, preserving
 slots occupied by unrelated services. `nyx__list_connected_services` starts from
 the caller's original loader vector and refills each group's existing slots with

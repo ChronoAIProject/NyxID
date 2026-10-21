@@ -682,7 +682,7 @@ mod tests {
             base_url: "https://api.telnyx.com/v2".into(),
             auth_method: "bearer".into(),
             auth_key_name: String::new(),
-            credential: "test-only".into(),
+            credential: "test-only".to_owned().into(),
             service,
             catalog_default_headers: vec![],
             user_service_default_headers: vec![],

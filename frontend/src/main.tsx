@@ -68,6 +68,7 @@ function Root() {
     [],
   );
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const telemetryAccountId = useAuthStore((s) => s.user?.id);
   const consentAsked = useConsentStore((s) => s.asked);
   const consentEnabled = useConsentStore((s) => s.enabled);
 
@@ -118,7 +119,7 @@ function Root() {
     if (isAuthenticated && user?.id) {
       telemetryIdentify(user.id);
     }
-  }, [ready, publicConfig, consentEnabled, isAuthenticated, agentKeyLogin]);
+  }, [ready, publicConfig, consentEnabled, isAuthenticated, agentKeyLogin, telemetryAccountId]);
 
   // When auth resolves, redirect as needed:
   // - Authenticated user on landing → dashboard

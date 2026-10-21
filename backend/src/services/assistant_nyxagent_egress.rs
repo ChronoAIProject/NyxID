@@ -327,6 +327,7 @@ impl NyxAgentEgress for Egress {
             .http_operation(&context, request.method.as_str(), &request.relative_path)
             .await?;
         let context = context
+            .with_assistant_provenance(false, true, false)
             .with_operation(priced_operation.as_deref())
             .with_request_body((!payload.is_empty()).then_some(payload.as_slice()));
         let lease =

@@ -154,6 +154,7 @@ fn authority_projection(service: &DownstreamService) -> AppResult<Document> {
         "auth_key_name",
         "oauth_client_id",
         "credential_encrypted",
+        "secret_context_versions",
         "platform_key",
         "tools_credential_frozen",
         "destination_targets",
@@ -187,15 +188,16 @@ pub async fn commit_update(
     let fields = fields.clone();
     let filter = filter.clone();
     let key = zeroize::Zeroizing::new(audit_key.to_vec());
-    let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
-        let result = async {
-            let (live, admin) = fence(&db, session, &observed, Some(&authority)).await?;
+    let context = (&db, &observed, &authority, &fields, &filter, &key);
+    super::transaction_service::run_db_only(&db, &context, |session, context| {
+        let &(db, observed, authority, fields, filter, key) = context;
+        Box::pin(async move {
+            let (live, admin) = fence(db, session, observed, Some(authority)).await?;
             let tool = live.offering_kind == OfferingKind::Tool;
-            require_desired_kind(&live, &fields, &authority, admin)?;
-            validate_update_fields(&db, session, &live, &fields, &authority, admin).await?;
+            require_desired_kind(&live, fields, authority, admin)?;
+            validate_update_fields(db, session, &live, fields, authority, admin).await?;
             if fields.get_str("offering_kind") == Ok("tool") {
-                require_providerless_tool(&db, session, &live).await?;
+                require_providerless_tool(db, session, &live).await?;
             }
             if tool && (fields.contains_key("credential_encrypted") || fields.contains_key("base_url")) && live.updated_at != observed.updated_at {
                 return Err(AppError::Conflict("Tool credential or destination revision changed".into()));
@@ -206,28 +208,27 @@ pub async fn commit_update(
             }
             if let Ok(url) = fields.get_str("icon_url") {
                 let id = super::catalog_icon_service::asset_id(&authority.catalog_base_url, url)?;
-                super::catalog_icon_service::require_asset(&db, id, Some(&mut *session)).await?;
+                super::catalog_icon_service::require_asset(db, id, Some(&mut *session)).await?;
             }
             if let Some(rules) = fields.get("anonymous_endpoints") {
                 let rules: Vec<crate::models::downstream_service::AnonymousEndpointRule> = bson::from_bson(rules.clone()).map_err(|e| AppError::Internal(format!("Invalid anonymous rules: {e}")))?;
                 super::anonymous_endpoint_service::validate_rules_for_service(&live, &rules)?;
             }
-            if tool && (tools_manager_service::tool_contract_changed(&live, &fields)?
+            if tool && (tools_manager_service::tool_contract_changed(&live, fields)?
                 || fields.get_str("offering_kind").is_ok_and(|kind| kind != "tool")) {
-                super::service_endpoint_service::demote_tool_in_session(&db, session, &live.id, None, Some((&authority.actor, &key))).await?;
+                super::service_endpoint_service::demote_tool_in_session(db, session, &live.id, None, Some((&authority.actor, key))).await?;
             }
             let updated = db.collection::<DownstreamService>(COLLECTION_NAME).find_one_and_update(
                 filter.clone(), doc! {"$set": &fields, "$unset": {"api_spec_url": ""}}
             ).return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?
                 .ok_or_else(|| AppError::Conflict("Service changed or identity reconciliation is pending".into()))?;
             if tool {
-                super::audit_service::log_actor_event_in_session(&db, session, &key, &authority.actor, "tools_manager_updated",
+                super::audit_service::log_actor_event_in_session(db, session, key, &authority.actor, "tools_manager_updated",
                     serde_json::json!({"service_id":live.id,"authority":if admin {"admin"} else {"tools_manager"},"fields":fields.keys().filter(|k| k.as_str() != "updated_at").collect::<Vec<_>>()})).await?;
             }
             Ok(updated)
-        }.await;
-        super::api_key_mutation_service::transaction_result(result)
-    }).await.map_err(super::api_key_mutation_service::map_transaction_error)
+        })
+    }).await
 }
 
 /// Recheck the field-dependent boundaries against live rows within the same

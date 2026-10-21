@@ -1,3 +1,4 @@
+import { useConsentStore } from "@/stores/consent-store";
 import { useServiceCardView } from "@/stores/service-card-view-store";
 import { create } from "zustand";
 import type { User, LoginResponse } from "@/types/api";
@@ -24,7 +25,9 @@ function applyIdentityTransition(
   previousUser: User | null,
   nextUser: User | null,
 ): void {
+  useConsentStore.getState().bindAccount(nextUser?.id ?? null);
   if (previousUser?.id === nextUser?.id) return;
+  telemetryReset();
   useServiceCardView.setState({ accountId: nextUser?.id, filters: undefined, expanded: [], savedViewId: undefined });
   if (previousUser !== null) clearAccountLocalState();
   transitionAssistantIdentity(nextUser?.id ?? null);
@@ -98,9 +101,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     try {
       await api.post<void>("/auth/logout");
     } finally {
-      // Clear telemetry identity BEFORE state wipe so the next event
-      // the app emits already carries a fresh anon distinct_id.
+      // Clear local analytics identity and pending admissions before state wipe.
       telemetryReset();
+      useConsentStore.getState().bindAccount(null);
       clearAccountLocalState();
       transitionAssistantIdentity(null);
       set({
@@ -120,18 +123,17 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         : await api.get<User>("/users/me");
       applyIdentityTransition(get().user, user);
       set({ user, isAuthenticated: true, isLoading: false });
-      // Associate the restored session with its user_id so pageviews
-      // captured after boot attribute correctly. Safe no-op when
-      // telemetry is off.
+      // Bind explicit events to the restored account; no anonymous/pageview
+      // collection occurs. The relay authenticates admission and dispatch.
       if (!ephemeral) telemetryIdentify(user.id);
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         // Session expired / server rejected — this is a sign-out path
         // and must reset the telemetry identity before we wipe state
-        // so subsequent pageviews attribute to a fresh anon, not the
-        // ex-user. Parity with the explicit `logout()` branch above.
+        // so no later event retains the former account.
         if (!ephemeral) {
           telemetryReset();
+          useConsentStore.getState().bindAccount(null);
           clearAccountLocalState();
         }
         transitionAssistantIdentity(null);
@@ -145,6 +147,8 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   setUser: (user: User | null): void => {
     const previousUser = get().user;
     if (user === null) {
+      telemetryReset();
+      useConsentStore.getState().bindAccount(null);
       clearAccountLocalState();
       transitionAssistantIdentity(null);
     } else {

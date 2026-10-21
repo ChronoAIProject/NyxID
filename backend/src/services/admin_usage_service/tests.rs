@@ -368,8 +368,8 @@ async fn exact_and_legacy_costs_use_model_rates_and_preserve_unknowns() {
     funded.insert("wallet_id", "wallet");
     funded.insert("funding", doc! { "grant_consumptions": [{ "amount_micros": 100 }], "allowance_consumptions": [{ "quantity": 2 }] });
     insert(&db, funded).await;
-    // Exact and legacy in the same billing group; missing rate poisons that
-    // group's gross/wallet/allowance, while grant remains known (get_usage).
+    // Exact and legacy in the same billing group: a missing legacy rate leaves
+    // the exact subtotal available and still reports the unpriced event.
     for exact in [false, true] {
         let mut unknown = meter(&actor, &actor, "unknown", 10);
         unknown.insert("lago_metric_code", "missing");
@@ -377,7 +377,7 @@ async fn exact_and_legacy_costs_use_model_rates_and_preserve_unknowns() {
         if exact {
             unknown.insert(
                 "funding",
-                doc! { "total_charge_micros": 500, "grant_funded_micros": 30 },
+                doc! { "total_charge_micros": 500, "wallet_funded_micros": 470, "grant_funded_micros": 30 },
             );
         }
         insert(&db, unknown).await;
@@ -406,12 +406,15 @@ async fn exact_and_legacy_costs_use_model_rates_and_preserve_unknowns() {
         .iter()
         .find(|s| s.service.service_slug.as_deref() == Some("unknown"))
         .unwrap();
-    assert_eq!(unknown.usage.gross_cost_micros, None);
+    assert_eq!(unknown.usage.gross_cost_micros, Some(500));
+    assert_eq!(unknown.usage.wallet_cost_micros, Some(470));
     assert_eq!(unknown.usage.grant_cost_micros, Some(30));
+    assert_eq!(unknown.usage.allowance_cost_micros, Some(0));
+    assert_eq!(unknown.usage.unknown_cost_events, 1);
     assert_eq!(
         result.totals.gross_cost_micros,
-        Some(991),
-        "skip unknown groups, retain known costs"
+        Some(1491),
+        "retain known subtotals within partially unpriced groups"
     );
     assert_eq!(result.totals.unknown_cost_events, 1);
     db.drop().await.unwrap();
@@ -519,6 +522,17 @@ async fn handler_allows_admin_and_operator_and_rejects_regular_users() {
             axum::extract::Query(query()),
         )
         .await;
+        let nyxbot_result = crate::handlers::admin_assistant::model_usage(
+            axum::extract::State(state.clone()),
+            test_auth_user(&uid),
+            axum::extract::Query(query()),
+        )
+        .await;
+        if admin || operator {
+            assert_eq!(nyxbot_result.unwrap().0.totals.requests, 0);
+        } else {
+            assert!(matches!(nyxbot_result, Err(AppError::Forbidden(_))));
+        }
         if admin || operator {
             assert_eq!(result.unwrap().0.totals.requests, 0);
         } else {
@@ -2761,4 +2775,596 @@ async fn operation_usage_is_reported_per_service_before_and_after_folding() {
             "folded: {folded}"
         );
     }
+}
+
+fn nyx_meter(
+    actor: &str,
+    owner: &str,
+    model: Option<&str>,
+    cost: Option<&str>,
+    at: DateTime<Utc>,
+) -> Document {
+    let mut row = meter(actor, owner, "provider", 1);
+    row.insert("assistant_source", "model");
+    row.insert("metric", "requests");
+    row.insert("model", model.map(Bson::from).unwrap_or(Bson::Null));
+    row.insert("created_at", bson::DateTime::from_chrono(at));
+    row.insert("token_breakdown", doc! { "prompt_tokens": 100_i64, "completion_tokens": 20_i64, "cached_tokens": 30_i64, "cache_creation_tokens": 5_i64 });
+    row.insert(
+        "audio_tokens",
+        doc! { "input_tokens": 4_i64, "output_tokens": 2_i64 },
+    );
+    row.insert(
+        "image_tokens",
+        doc! { "input_tokens": 8_i64, "output_tokens": 1_i64 },
+    );
+    if let Some(cost) = cost {
+        let amount: crate::models::credits::Credits = cost.parse().unwrap();
+        row.insert("wallet_id", "wallet");
+        row.insert("released", true);
+        row.insert("funding", doc! { "settled": true, "total_charge": amount, "wallet_funded": amount, "grant_funded": crate::models::credits::Credits::ZERO, "allowance_funded": crate::models::credits::Credits::ZERO });
+    } else {
+        row.insert("wallet_id", "unknown-price-wallet");
+        row.insert("lago_acked", true);
+        row.insert("released", true);
+    }
+    row
+}
+async fn nyx_read(
+    db: &mongodb::Database,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    model: Option<&str>,
+    unknown: bool,
+) -> nyxbot::Response {
+    nyxbot::get(
+        db,
+        AdminUsageQuery {
+            from: Some(from.to_rfc3339()),
+            to: Some(to.to_rfc3339()),
+            model: model.map(str::to_owned),
+            unknown_model: Some(unknown),
+            ..Default::default()
+        }
+        .validate(to)
+        .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn nyxbot_models_exact_primary_scope_filters_and_rollup_daily_parity() {
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+    let db = connect_test_database("nyx_models")
+        .await
+        .expect("real MongoDB required");
+    let end = hour(Utc::now());
+    let from = end - chrono::Duration::days(3);
+    let actor = uuid::Uuid::new_v4().to_string();
+    let owner = uuid::Uuid::new_v4().to_string();
+    let at = end - chrono::Duration::hours(30);
+    let first = nyx_meter(
+        &actor,
+        &owner,
+        Some(" model-a "),
+        Some("0.000000000001"),
+        at,
+    );
+    let request = first.get_str("billing_request_id").unwrap().to_owned();
+    insert(&db, first.clone()).await;
+    for (layer, suffix) in [("platform", "platform:output"), ("resale", "resale")] {
+        let mut component = first.clone();
+        component.insert("_id", uuid::Uuid::new_v4().to_string());
+        component.insert("layer", layer);
+        component.insert("transaction_id", format!("{request}:{suffix}"));
+        insert(&db, component).await;
+    }
+    insert(
+        &db,
+        nyx_meter(
+            &actor,
+            &actor,
+            Some("model-b"),
+            Some("2"),
+            at + chrono::Duration::days(1),
+        ),
+    )
+    .await;
+    insert(&db, nyx_meter(&actor, &actor, Some("   "), None, at)).await;
+    insert(
+        &db,
+        nyx_meter(&actor, &actor, Some("__unknown__"), Some("0"), at),
+    )
+    .await;
+    for source in ["other", "orchestration", "tool"] {
+        let mut excluded = nyx_meter(&actor, &actor, Some("model-b"), Some("100"), at);
+        excluded.insert("assistant_source", source);
+        insert(&db, excluded).await;
+    }
+    let mut legacy_spoof = nyx_meter(&actor, &actor, Some("model-b"), Some("100"), at);
+    legacy_spoof.remove("assistant_source");
+    legacy_spoof.insert("api_key_id", "spoofed");
+    db.collection::<Document>("api_keys")
+        .insert_one(doc! { "_id": "spoofed", "user_id": &actor, "platform": "nyxid-assistant" })
+        .await
+        .unwrap();
+    insert(&db, legacy_spoof).await;
+    let mut before = None;
+    for folded in [false, true] {
+        if folded {
+            while fold_once(&db, end).await.unwrap() > 0 {}
+        }
+        let report = nyx_read(&db, from, end, None, false).await;
+        assert_eq!(report.totals.requests, 4);
+        assert_eq!(report.totals.events, 6);
+        assert_eq!(report.totals.total_tokens, 480);
+        assert_eq!(report.totals.cached_tokens, 120);
+        assert_eq!(report.totals.image_input_tokens, 32);
+        assert_eq!(
+            report.totals.gross_cost.unwrap().to_string(),
+            "2.000000000003"
+        );
+        assert_eq!(report.totals.unknown_cost_events, 1);
+        assert_eq!(report.accounts.len(), 2);
+        assert!(report.daily.len() >= 4);
+        let encoded = serde_json::to_value((
+            &report.totals,
+            &report.models,
+            &report.accounts,
+            &report.daily,
+        ))
+        .unwrap();
+        if let Some(expected) = &before {
+            assert_eq!(&encoded, expected);
+        } else {
+            before = Some(encoded);
+        }
+        let filtered = nyx_read(&db, from, end, Some("model-a"), false).await;
+        assert_eq!(filtered.totals.requests, 1);
+        assert_eq!(filtered.accounts.len(), 1);
+        assert_eq!(filtered.daily.len(), 1);
+        assert_eq!(
+            nyx_read(&db, from, end, None, true).await.totals.requests,
+            1
+        );
+        assert_eq!(
+            nyx_read(&db, from, end, Some("__unknown__"), false)
+                .await
+                .totals
+                .requests,
+            1
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_top_accounts_and_unknown_only_other_models_are_honest() {
+    let db = connect_test_database("nyx_other")
+        .await
+        .expect("real MongoDB required");
+    let end = Utc::now();
+    let from = end - chrono::Duration::days(2);
+    let actor = uuid::Uuid::new_v4().to_string();
+    let owner = uuid::Uuid::new_v4().to_string();
+    let at = end - chrono::Duration::hours(3);
+    for index in 0..23 {
+        insert(
+            &db,
+            nyx_meter(
+                &actor,
+                &owner,
+                Some(&format!("m{index:02}")),
+                (index < 20).then_some("0.000000000001"),
+                at,
+            ),
+        )
+        .await;
+    }
+    for index in 0..14 {
+        let account = uuid::Uuid::new_v4().to_string();
+        insert(
+            &db,
+            nyx_meter(
+                &actor,
+                &account,
+                Some("free-or-unknown"),
+                (index < 7).then_some("0"),
+                at,
+            ),
+        )
+        .await;
+    }
+    let report = nyx_read(&db, from, end, None, false).await;
+    assert_eq!(report.accounts.len(), 10);
+    assert!(report.accounts.iter().all(|a| !a.models.is_empty()));
+    let account = report
+        .accounts
+        .iter()
+        .find(|a| a.account.id == owner)
+        .unwrap();
+    assert_eq!(account.other_model_count, 3);
+    let other = account.models.iter().find(|m| m.is_other).unwrap();
+    assert_eq!(other.usage.requests, 3);
+    assert_eq!(other.usage.total_tokens, 360);
+    assert_eq!(other.usage.gross_cost, None);
+    assert_eq!(other.usage.unknown_cost_events, 3);
+    assert_eq!(
+        account.usage.gross_cost.unwrap().to_string(),
+        "0.00000000002"
+    );
+    let other_accounts = report.other_accounts.unwrap();
+    assert_eq!(other_accounts.groups, 5);
+    assert_eq!(other_accounts.usage.requests, 5);
+    assert_eq!(other_accounts.usage.gross_cost, None);
+    let total_daily: i64 = report.daily.iter().map(|d| d.model.usage.requests).sum();
+    assert_eq!(total_daily, report.totals.requests);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_recovers_historical_predecessor_from_current_successor_only() {
+    let db = connect_test_database("nyx_lineage")
+        .await
+        .expect("real MongoDB required");
+    db.collection::<Document>("downstream_services")
+        .insert_one(doc! { "_id": "provider", "inference": { "protocol": "openai" } })
+        .await
+        .unwrap();
+    let actor = uuid::Uuid::new_v4().to_string();
+    db.collection::<Document>("api_keys").insert_many([
+        doc! { "_id": "old", "user_id": &actor, "is_active": false },
+        doc! { "_id": "new", "user_id": &actor, "rotation_predecessor_id": "old", "is_active": true },
+    ]).await.unwrap();
+    db.collection::<Document>("assistant_agent_credentials")
+        .insert_one(doc! { "_id": "credential", "user_id": &actor, "api_key_id": "new" })
+        .await
+        .unwrap();
+    let end = Utc::now();
+    let mut row = nyx_meter(
+        &actor,
+        &actor,
+        Some("historical"),
+        Some("1"),
+        end - chrono::Duration::hours(2),
+    );
+    row.remove("assistant_source");
+    row.insert("api_key_id", "old");
+    insert(&db, row).await;
+    let report = nyx_read(&db, end - chrono::Duration::days(1), end, None, false).await;
+    assert_eq!(report.totals.requests, 1);
+    db.collection::<Document>("assistant_agent_credentials")
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    assert_eq!(
+        nyx_read(&db, end - chrono::Duration::days(1), end, None, false)
+            .await
+            .totals
+            .requests,
+        0
+    );
+    // A durable meter snapshot needs none of these mutable links.
+    db.collection::<Document>(COLLECTION_NAME)
+        .update_many(doc! {}, doc! { "$set": { "assistant_source": "model" } })
+        .await
+        .unwrap();
+    assert_eq!(
+        nyx_read(&db, end - chrono::Duration::days(1), end, None, false)
+            .await
+            .totals
+            .requests,
+        1
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_legacy_free_residual_survives_same_root_and_daily_promotion() {
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+    let db = connect_test_database("nyx_free_residual")
+        .await
+        .expect("real MongoDB required");
+    let end = hour(Utc::now());
+    let at = end - chrono::Duration::hours(50);
+    let actor = uuid::Uuid::new_v4().to_string();
+    let mut old = nyx_meter(&actor, &actor, Some("free"), Some("0"), at);
+    old.remove("assistant_source");
+    old.remove("wallet_id");
+    old.remove("funding");
+    insert(&db, old.clone()).await;
+    while fold_once(&db, end).await.unwrap() > 0 {}
+    let root = db
+        .collection::<Document>("usage_rollup_hourly")
+        .find_one(doc! {})
+        .await
+        .unwrap()
+        .unwrap();
+    let root_id = root.get_str("_id").unwrap().to_owned();
+    assert!(root.get_document("cost_partitions").unwrap().is_empty());
+    let mut modern = old.clone();
+    let request = uuid::Uuid::new_v4().to_string();
+    modern.insert("_id", uuid::Uuid::new_v4().to_string());
+    modern.insert("billing_request_id", &request);
+    modern.insert("transaction_id", format!("{request}:platform"));
+    modern.insert("assistant_source", "model");
+    modern.remove("rollup_pending");
+    insert(&db, modern).await;
+    while fold_once(&db, end).await.unwrap() > 0 {}
+    let root = db
+        .collection::<Document>("usage_rollup_hourly")
+        .find_one(doc! { "_id": root_id })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(root.get_i64("requests").unwrap(), 2);
+    assert_eq!(
+        db.collection::<Document>("usage_rollup_hourly")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    for end in [end, end + chrono::Duration::days(2)] {
+        while fold_once(&db, end).await.unwrap() > 0 {}
+        let from = end - chrono::Duration::days(7);
+        // Simulate an old replica rebuilding its count<=1 shortcut from the
+        // only new partition, even though the root includes legacy residual.
+        let mut misleading = Document::new();
+        for field in crate::services::billing::usage_rollup::DIMENSIONS {
+            misleading.insert(*field, root.get(*field).cloned().unwrap_or(Bson::Null));
+        }
+        misleading.insert("assistant_source", "model");
+        misleading.insert("api_key", Bson::Null);
+        misleading.insert("acked", false);
+        for collection in ["usage_rollup_hourly", "usage_rollup_daily"] {
+            db.collection::<Document>(collection)
+                .update_many(
+                    doc! {},
+                    doc! { "$set": { "single_display_key": misleading.clone() } },
+                )
+                .await
+                .unwrap();
+        }
+        let report = nyx_read(&db, from, end, None, false).await;
+        assert_eq!(report.totals.requests, 1);
+        assert_eq!(
+            report
+                .excluded
+                .iter()
+                .find(|e| e.population == "unattributable_legacy")
+                .unwrap()
+                .usage
+                .requests,
+            1
+        );
+        let generic = read(
+            &db,
+            AdminUsageQuery {
+                from: Some(from.to_rfc3339()),
+                to: Some(end.to_rfc3339()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(generic.totals.requests, 2);
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_mixed_exact_unknown_same_group_preserves_known_subtotal() {
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+    let db = connect_test_database("nyx_mixed_price")
+        .await
+        .expect("real MongoDB required");
+    let end = hour(Utc::now());
+    let from = end - chrono::Duration::days(3);
+    let actor = uuid::Uuid::new_v4().to_string();
+    let at = end - chrono::Duration::hours(30);
+    for cost in [Some("0.000000000001"), None] {
+        let mut row = nyx_meter(&actor, &actor, Some("mixed"), cost, at);
+        row.insert("api_key_id", "same");
+        row.insert("lago_acked", true);
+        insert(&db, row).await;
+    }
+    for folded in [false, true] {
+        if folded {
+            while fold_once(&db, end).await.unwrap() > 0 {}
+        }
+        let report = nyx_read(&db, from, end, None, false).await;
+        assert_eq!(
+            report.totals.gross_cost.unwrap().to_string(),
+            "0.000000000001"
+        );
+        assert_eq!(report.totals.unknown_cost_events, 1);
+        assert_eq!(
+            report.daily[0].model.usage.gross_cost,
+            report.totals.gross_cost
+        );
+        let generic = read(
+            &db,
+            AdminUsageQuery {
+                from: Some(from.to_rfc3339()),
+                to: Some(end.to_rfc3339()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(generic.totals.gross_cost, report.totals.gross_cost);
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_lineage_recovery_uses_partial_index_with_unrelated_key_volume() {
+    let db = connect_test_database("nyx_lineage_index")
+        .await
+        .expect("real MongoDB required");
+    let mut keys = (0..10_000)
+        .map(|n| doc! { "_id": format!("unrelated-{n}"), "user_id": "unrelated" })
+        .collect::<Vec<_>>();
+    for n in 0..32 {
+        let mut key = doc! { "_id": format!("lineage-{n}"), "user_id": "owner" };
+        if n > 0 {
+            key.insert("rotation_predecessor_id", format!("lineage-{}", n - 1));
+        }
+        keys.push(key);
+    }
+    db.collection::<Document>("api_keys")
+        .insert_many(keys)
+        .await
+        .unwrap();
+    let explanation = db.run_command(doc! { "explain": { "find": "api_keys", "filter": { "rotation_predecessor_id": { "$in": ["lineage-0"], "$type": "string" } }, "projection": { "_id": 1, "user_id": 1, "rotation_predecessor_id": 1, "assistant_usage": 1 } }, "verbosity": "executionStats" }).await.unwrap();
+    let stats = explanation.get_document("executionStats").unwrap();
+    assert!(
+        number_for_test(stats, "totalDocsExamined") <= 2,
+        "{explanation:?}"
+    );
+    assert!(format!("{explanation:?}").contains("api_keys_rotation_predecessor_unique"));
+    let stages = nyxbot::attribution_stages();
+    let graph = stages
+        .iter()
+        .filter_map(|s| s.get_document("$graphLookup").ok())
+        .find(|s| s.get_str("as").ok() == Some("descendants"))
+        .unwrap();
+    assert!(
+        graph
+            .get_document("restrictSearchWithMatch")
+            .unwrap()
+            .contains_key("rotation_predecessor_id")
+    );
+    let start = std::time::Instant::now();
+    let result = db
+        .collection::<Document>("api_keys")
+        .aggregate(vec![
+            doc! { "$match": { "_id": "lineage-0" } },
+            doc! { "$set": { "recovery_key": ["lineage-0"] } },
+            doc! { "$graphLookup": graph.clone() },
+        ])
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(result[0].get_array("descendants").unwrap().len(), 31);
+    eprintln!(
+        "indexed descendant walk through 10,032 keys: {:?}",
+        start.elapsed()
+    );
+    db.drop().await.unwrap();
+}
+fn number_for_test(doc: &Document, field: &str) -> i64 {
+    doc.get_i64(field)
+        .ok()
+        .or_else(|| doc.get_i32(field).ok().map(i64::from))
+        .unwrap_or(-1)
+}
+
+#[tokio::test]
+async fn nyxbot_historical_audit_proof_is_event_and_actor_bound() {
+    let db = connect_test_database("nyx_audit_proof")
+        .await
+        .expect("real MongoDB required");
+    let actor = uuid::Uuid::new_v4().to_string();
+    let other = uuid::Uuid::new_v4().to_string();
+    let end = Utc::now();
+    let at = end - chrono::Duration::hours(2);
+    db.collection::<Document>("downstream_services")
+        .insert_one(doc! { "_id": "provider", "inference": {} })
+        .await
+        .unwrap();
+    for (key, proof_actor, event) in [
+        (
+            "valid",
+            actor.as_str(),
+            "assistant_agent_credential_provisioned",
+        ),
+        (
+            "wrong-actor",
+            other.as_str(),
+            "assistant_agent_credential_provisioned",
+        ),
+        ("wrong-event", actor.as_str(), "api_key_created"),
+    ] {
+        db.collection::<Document>("api_keys")
+            .insert_one(doc! { "_id": key, "user_id": &actor, "is_active": false })
+            .await
+            .unwrap();
+        // Duplicate evidence is bounded by each lookup's projection + limit1.
+        db.collection::<Document>("audit_log").insert_many((0..10).map(|_| doc! { "_id": uuid::Uuid::new_v4().to_string(), "api_key_id": key, "user_id": proof_actor, "event_type": event })).await.unwrap();
+        let mut row = nyx_meter(&actor, &actor, Some("historical"), Some("1"), at);
+        row.remove("assistant_source");
+        row.insert("api_key_id", key);
+        insert(&db, row).await;
+    }
+    let report = nyx_read(&db, end - chrono::Duration::days(1), end, None, false).await;
+    assert_eq!(report.totals.requests, 1);
+    assert_eq!(
+        report
+            .excluded
+            .iter()
+            .find(|e| e.population == "unattributable_legacy")
+            .unwrap()
+            .usage
+            .requests,
+        2
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_daily_top_membership_matches_exact_period_order_at_zero_null_ties() {
+    let db = connect_test_database("nyx_daily_rank")
+        .await
+        .expect("real MongoDB required");
+    let actor = uuid::Uuid::new_v4().to_string();
+    let end = Utc::now();
+    let at = end - chrono::Duration::hours(3);
+    for n in 0..19 {
+        insert(
+            &db,
+            nyx_meter(
+                &actor,
+                &actor,
+                Some(&format!("paid-{n:02}")),
+                Some("0.000000000001"),
+                at,
+            ),
+        )
+        .await;
+    }
+    insert(&db, nyx_meter(&actor, &actor, None, Some("0"), at)).await;
+    insert(
+        &db,
+        nyx_meter(&actor, &actor, Some("__unknown__"), Some("0"), at),
+    )
+    .await;
+    for _ in 0..9 {
+        insert(&db, nyx_meter(&actor, &actor, Some("unpriced"), None, at)).await;
+    }
+    let report = nyx_read(&db, end - chrono::Duration::days(1), end, None, false).await;
+    let chosen = report
+        .models
+        .iter()
+        .filter(|m| !m.is_other)
+        .map(|m| m.model.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(chosen.len(), 20);
+    assert_eq!(chosen.last(), Some(&None));
+    assert!(!chosen.contains(&Some("__unknown__".into())));
+    for row in &report.daily {
+        if !row.model.is_other {
+            assert!(chosen.contains(&row.model.model));
+        }
+    }
+    let other = report.daily.iter().find(|d| d.model.is_other).unwrap();
+    assert_eq!(other.model.usage.requests, 10);
+    assert_eq!(other.model.usage.unknown_cost_events, 9);
+    assert_eq!(
+        other.model.usage.gross_cost,
+        Some(crate::models::credits::Credits::ZERO)
+    );
+    db.drop().await.unwrap();
 }

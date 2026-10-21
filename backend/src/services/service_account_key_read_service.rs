@@ -169,10 +169,20 @@ pub async fn issue(
         issued_at: Utc::now(),
         expires_at,
     };
-    db.collection::<ServiceAccountKeyReadGrant>(GRANTS)
-        .replace_one(doc! {"_id": sa_id}, &grant)
-        .upsert(true)
-        .await?;
+    let mut tx = super::erasure_admission::begin_write(db, owner).await?;
+    let result: AppResult<()> = async {
+        super::erasure_admission::fence_in_session(db, actor, &mut tx).await?;
+        super::erasure_admission::fence_credential_target_in_session(db, sa_id, owner, &mut tx)
+            .await?;
+        db.collection::<ServiceAccountKeyReadGrant>(GRANTS)
+            .replace_one(doc! {"_id": sa_id}, &grant)
+            .upsert(true)
+            .session(&mut tx)
+            .await?;
+        Ok(())
+    }
+    .await;
+    super::org_membership_authority::finish(tx, result).await?;
     Ok(grant)
 }
 

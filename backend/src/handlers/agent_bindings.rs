@@ -329,7 +329,8 @@ pub async fn create_binding(
             platform,
             service_slug: response.service_slug.clone(),
         },
-    );
+    )
+    .await;
 
     Ok(Json(response))
 }
@@ -541,7 +542,8 @@ pub async fn delete_binding(
             platform,
             service_slug: service_slug_for_telemetry,
         },
-    );
+    )
+    .await;
 
     Ok(Json(DeleteBindingResponse {
         message: "Binding deleted".to_string(),
@@ -677,6 +679,7 @@ mod tests {
 
     fn fixture_user_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: id.to_string(),
