@@ -6609,6 +6609,7 @@ pub async fn seed_default_services(
             default_request_headers,
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
+            introspection_client_ids: None,
             token_exchange_config,
             anonymous_endpoints: Vec::new(),
             proxy_operation_policy: super::google_workspace::GoogleProduct::from_slug(

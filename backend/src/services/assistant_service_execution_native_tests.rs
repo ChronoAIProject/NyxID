@@ -298,6 +298,7 @@ pub(super) async fn node_service_call(f: &Fixture, id: &str, mcp: bool) -> AppRe
         agent_owner: None,
         operation_scopes: None,
         api_key_id: Some(&f.chat.api_key_id),
+        api_key_credential_id: None,
         allow_all_nodes: true,
         allowed_node_ids: &[],
     };

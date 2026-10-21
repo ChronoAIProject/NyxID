@@ -205,6 +205,8 @@ pub struct UserCapabilitiesResponse {
 
 #[derive(Debug, Serialize)]
 pub struct UserProfileResponse {
+    /// Authoritative subject type for downstream organization ownership.
+    pub user_type: crate::models::user::UserType,
     pub id: String,
     pub email: String,
     pub display_name: Option<String>,
@@ -364,6 +366,7 @@ pub async fn get_me(
         crate::services::feature_flag_service::resolve_personal_features(&state.db, &user_id)
             .await?;
     Ok(Json(UserProfileResponse {
+        user_type: user_model.user_type,
         id: user_model.id,
         email: user_model.email,
         display_name: user_model.display_name,
@@ -1114,6 +1117,7 @@ mod tests {
     #[test]
     fn user_profile_response_serialization_full() {
         let resp = UserProfileResponse {
+            user_type: crate::models::user::UserType::Person,
             id: "user-1".to_string(),
             email: "test@example.com".to_string(),
             display_name: Some("Alice".to_string()),
@@ -1172,6 +1176,7 @@ mod tests {
     #[test]
     fn user_profile_response_serialization_minimal() {
         let resp = UserProfileResponse {
+            user_type: crate::models::user::UserType::Person,
             id: "user-2".to_string(),
             email: "minimal@example.com".to_string(),
             display_name: None,
@@ -1221,6 +1226,7 @@ mod tests {
         // Falsifier: replace `javascript_string_length` with `str::len` and
         // this reports UTF-8 bytes (10) instead of JavaScript code units (7).
         let profile = UserProfileResponse {
+            user_type: crate::models::user::UserType::Person,
             id: "user-multibyte".to_string(),
             email: "multibyte@example.com".to_string(),
             display_name: Some("café 🧭".to_string()),
@@ -1416,6 +1422,7 @@ mod tests {
     #[test]
     fn user_profile_response_has_all_expected_json_keys() {
         let resp = UserProfileResponse {
+            user_type: crate::models::user::UserType::Person,
             id: "u1".to_string(),
             email: "e@e.com".to_string(),
             display_name: None,
@@ -1453,6 +1460,7 @@ mod tests {
         let obj = json.as_object().unwrap();
 
         let expected_keys = vec![
+            "user_type",
             "id",
             "email",
             "display_name",

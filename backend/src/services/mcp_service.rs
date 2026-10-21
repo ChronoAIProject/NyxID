@@ -185,6 +185,9 @@ pub struct McpExecContext<'a> {
     /// API key ID that is acting on behalf of the user. Enables per-agent
     /// credential override via [`proxy_service::resolve_agent_credential_override`].
     pub api_key_id: Option<&'a str>,
+    /// Exact authenticated child credential, so revoking it invalidates proof
+    /// introspection without silently widening to its parent key's authority.
+    pub api_key_credential_id: Option<&'a str>,
     /// When true, node routing and fallbacks are not filtered.
     pub allow_all_nodes: bool,
     /// Permitted node IDs when `allow_all_nodes` is false.
@@ -6313,6 +6316,24 @@ async fn execute_tool_resolved_inner(
                 return Err(error);
             }
         }
+        let proof_connection_id = match &service.source {
+            McpToolSource::UserManaged { user_service_id, .. } => Some(user_service_id.as_str()),
+            _ => None,
+        };
+        let resource_proof = match super::resource_request_proof::prepare_admitted(
+            db, jwt_keys, config, user_id, exec_ctx.api_key_id, exec_ctx.api_key_credential_id,
+            proof_connection_id, &target, &target.service.id, method.as_str(), &path,
+            query.as_deref(), exec_ctx.assistant_chat.is_some()
+                && assistant_admission.is_some() && node_route.is_none()
+                && body.as_ref().is_none_or(|bytes| bytes.is_empty())
+                && delegated.is_empty() && server_owned_headers.is_empty(),
+        ).await {
+            Ok(proof) => proof,
+            Err(error) => {
+                billing.reject_before_send(&metered, "resource_proof_authority_changed", false).await?;
+                return Err(error);
+            }
+        };
         billing.mark_forwarded(&metered).await?;
         let egress_guard = assistant_admission.as_ref().map(|admission| {
             admission
@@ -6321,7 +6342,7 @@ async fn execute_tool_resolved_inner(
         });
         let egress_guard = super::assistant_service_execution::HttpEgressGuard::with_attachment(
             egress_guard,db,service,endpoint,attachment_binding.as_ref());
-        let response = match proxy_service::forward_request_with_egress_guard(
+        let response = match proxy_service::forward_request_with_resource_proof(
             http_client,
             &target,
             method,
@@ -6337,6 +6358,7 @@ async fn execute_tool_resolved_inner(
             server_owned_headers,
             billing_egress_permit,
             egress_guard.as_ref(),
+            resource_proof.as_ref(),
         )
         .await
         {
@@ -7612,6 +7634,7 @@ mod tests {
                         agent_owner: None,
                         operation_scopes: None,
                         api_key_id: None,
+                        api_key_credential_id: None,
                         allow_all_nodes: true,
                         allowed_node_ids: &[],
                     },
@@ -14616,6 +14639,7 @@ mod tests {
                 default_request_headers: None,
                 ws_frame_injections: Vec::new(),
                 developer_app_ids: None,
+                introspection_client_ids: None,
                 token_exchange_config: None,
                 anonymous_endpoints: rules,
                 proxy_operation_policy: None,

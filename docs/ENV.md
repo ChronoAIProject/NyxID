@@ -53,6 +53,31 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
 | `ENVIRONMENT` | `development` | `development`, `staging`, `production` |
 
+## Request-bound resource reads
+
+| Variable | Default | Description |
+|---|---|---|
+| `NYXID_RESOURCE_REQUEST_PROOF_ENABLED` | `false` | Emit and introspect exact GET/HEAD proofs for an owner's live personal NyxBot turn after existing proxy admission. Requires a registered confidential resource client, JWT identity propagation and current AutoAllow policy. No guest, specialist, org-agent, node, mutation or deferred-command authority is enabled. |
+
+This is an additive transport using the server-owned `X-NyxID-Resource-Request`
+header. It does not replace `X-NyxID-Identity-Token` or make an ordinary identity
+JWT a bearer credential. Keep this flag off until every resource-server replica
+implements the exact-request verifier, and every NyxID replica implements the
+authenticated `resource_request` introspection path. Register the confidential
+client in the catalog's `introspection_client_ids`, enable the resource verifier
+(`CHRONO_NYXID_RESOURCE_REQUEST_ENABLED` for CMA), and only then enable this flag
+on NyxID. Verify with isolated read fixtures before admitting live traffic. For
+rollback, disable NyxID issuance first and allow the 60-second proof lifetime to
+expire before removing resource verification support. No runtime restart or
+sandbox change is required by this feature. See [Agent Isolation](AGENT_ISOLATION.md#request-bound-nyxbot-resource-reads).
+
+Deploying the provider still needs a verified drain of existing proxy streams
+and NyxBot turns. The current backend does not track those tasks through a
+graceful shutdown; losing a worker can end its turn as `turn_lost`, without
+automatic replay. Keep existing processes alive until their admitted work is
+complete and new work has been routed elsewhere. The disabled feature flag
+does not protect unrelated in-flight work from a backend process replacement.
+
 ## Remote Machine backend Kubernetes authentication
 
 | Variable | Default | Description |

@@ -6531,6 +6531,38 @@ async fn execute_resolved_proxy_inner<'a>(
                     return Err(error);
                 }
             }
+            let resource_proof = match crate::services::resource_request_proof::prepare(
+                state,
+                auth_user,
+                resolved_user_service_id.as_deref(),
+                &target,
+                service_id,
+                method.as_str(),
+                path,
+                query.as_deref(),
+                assistant_decision.admission.is_some()
+                    && node_route.is_none()
+                    && !is_ws
+                    && streaming_body.is_none()
+                    && body.as_ref().is_none_or(|bytes| bytes.is_empty())
+                    && delegated.is_empty()
+                    && extra_outbound_headers.is_empty(),
+            )
+            .await
+            {
+                Ok(proof) => proof,
+                Err(error) => {
+                    state
+                        .billing
+                        .reject_before_send(
+                            &metered,
+                            "resource_proof_authority_changed",
+                            had_dispatched_failure,
+                        )
+                        .await?;
+                    return Err(error);
+                }
+            };
             if let Err(error) = state.billing.mark_forwarded(&metered).await {
                 if let Some(reservation) = durable_reservation.as_ref() {
                     durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -6567,7 +6599,7 @@ async fn execute_resolved_proxy_inner<'a>(
                 });
             let downstream_result = until_client_disconnect(
                 &downstream_cancellation,
-                Box::pin(proxy_service::forward_request_with_egress_guard(
+                Box::pin(proxy_service::forward_request_with_resource_proof(
                     if is_pool_attempt
                         || operation_scoped
                         || permission_ingress.is_some()
@@ -6595,6 +6627,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     extra_outbound_headers,
                     billing_egress_permit,
                     egress_guard.as_ref(),
+                    resource_proof.as_ref(),
                 )),
             )
             .await;

@@ -486,6 +486,7 @@ fn service_create_denied_fields(body: &CreateServiceRequest) -> Vec<&'static str
         skills_request_id: _,
         recommended_skill_refs,
         developer_app_ids,
+        introspection_client_ids,
         forward_access_token,
         token_exchange_config,
         default_request_headers,
@@ -524,6 +525,9 @@ fn service_create_denied_fields(body: &CreateServiceRequest) -> Vec<&'static str
             .as_ref()
             .map(|_| "recommended_skill_refs"),
         developer_app_ids.as_ref().map(|_| "developer_app_ids"),
+        introspection_client_ids
+            .as_ref()
+            .map(|_| "introspection_client_ids"),
         forward_access_token.then_some("forward_access_token"),
         token_exchange_config
             .as_ref()
@@ -593,6 +597,7 @@ fn service_update_denied_fields(body: &UpdateServiceRequest) -> Vec<&'static str
         clear_skill_refs,
         recommended_skill_refs,
         developer_app_ids,
+        introspection_client_ids,
         custom_user_agent: _,
         default_request_headers,
         token_exchange_config,
@@ -637,6 +642,9 @@ fn service_update_denied_fields(body: &UpdateServiceRequest) -> Vec<&'static str
             .as_ref()
             .map(|_| "recommended_skill_refs"),
         developer_app_ids.as_ref().map(|_| "developer_app_ids"),
+        introspection_client_ids
+            .as_ref()
+            .map(|_| "introspection_client_ids"),
         default_request_headers
             .as_ref()
             .map(|_| "default_request_headers"),
@@ -786,6 +794,39 @@ fn forbid_tool_fields(fields: Vec<&'static str>) -> AppResult<()> {
 #[cfg(test)]
 mod authorization_nonce_tests {
     use super::*;
+
+    #[test]
+    fn introspection_trust_is_admin_only_for_catalog_and_tools_managers() {
+        for ids in [
+            serde_json::json!([]),
+            serde_json::json!(["resource-server"]),
+        ] {
+            let create: CreateServiceRequest = serde_json::from_value(serde_json::json!({
+                "name": "Resource", "introspection_client_ids": ids,
+            }))
+            .unwrap();
+            let update: UpdateServiceRequest = serde_json::from_value(serde_json::json!({
+                "introspection_client_ids": ids,
+            }))
+            .unwrap();
+            for result in [
+                check_service_create(&create),
+                check_service_update(&update),
+                check_tool_create(&create),
+                check_tool_update(&update),
+            ] {
+                assert!(matches!(
+                    result,
+                    Err(AppError::Forbidden(message)) if message.contains("introspection_client_ids")
+                ));
+            }
+        }
+        let create = serde_json::from_value(serde_json::json!({"name": "Resource"})).unwrap();
+        let update =
+            serde_json::from_value(serde_json::json!({"description": "Metadata"})).unwrap();
+        assert!(check_service_create(&create).is_ok());
+        assert!(check_service_update(&update).is_ok());
+    }
 
     #[tokio::test]
     async fn authorization_nonce_preserves_shared_provider_client_and_connection_permissions() {

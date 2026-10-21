@@ -272,6 +272,7 @@ async fn call(f: &Fixture, id: &str, mcp: bool) -> crate::errors::AppResult<u16>
         agent_owner: None,
         operation_scopes: None,
         api_key_id: f.auth.api_key_id.as_deref(),
+        api_key_credential_id: f.auth.api_key_credential_id.as_deref(),
         allow_all_nodes: true,
         allowed_node_ids: &[],
     };

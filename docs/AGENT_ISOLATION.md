@@ -412,6 +412,106 @@ All changes are additive. No breaking changes for existing users:
 | `cli/src/commands/api_key.rs` | bind command, --platform flag |
 | `cli/docker-entrypoint.sh` | Auto-register in Docker |
 
+## Service-bound agent key introspection
+
+A downstream resource server can verify an ordinary agent key directly through
+`POST /oauth/introspect`. Send a form with `token`, `token_type_hint=api_key`,
+`client_id`, `client_secret` and the target catalog `service_id`. The active
+confidential OAuth client must appear in that catalog's `introspection_client_ids`. Administrators set or clear this field through the catalog service create/update API; it accepts active confidential clients for either public or private services and never changes visibility or automatic connections.
+Public clients and unrelated confidential clients receive `active: false`.
+
+Successful evidence includes `active`, `token_type: api_key`, `aud` (the catalog
+service ID), `sub` (the exact key owner), `scope`, `jti`, `iat`, `iss` and current
+RBAC `permissions`. `exp` is the earlier parent/child credential expiry; it is
+omitted only for a nonexpiring credential. The resource server must validate
+the audience and credential type before accepting permissions.
+
+Verification reuses the live API-key authentication constructor and requires an
+active owner, a general-purpose key with `proxy` scope, an active owner-bound
+HTTP connection to the catalog, and a current key service grant. Connection IDs
+and catalog grants remain distinct; auto-connected and platform-bound connections
+also retain their current eligibility and platform access checks. Verification
+does not provision connections or widen service scopes.
+
+Only self-authenticating HTTP resource servers are eligible: the catalog must use
+`auth_method: none`, must not require a user credential, and must have no provider
+configuration or provider requirements. The live connection must likewise use
+`auth_method: none` with no attached user credential or node route. Credential-bearing proxy
+transports are refused even when their catalog has no explicit operation policy;
+introspection cannot substitute for their credential admission. No-auth platform
+ACLs still apply.
+
+This is whole-service evidence. Keys with operation scopes, actual assistant
+conversation authority, organization-specialist or group authority are refused;
+their method, input, turn, guest and approval restrictions cannot be represented
+by an audience and owner permissions alone. Restricted key purposes, Tool
+offerings, provider services, retired services and services with a proxy operation
+policy are also ineligible. This endpoint by itself therefore does **not** enable
+NyxBot calls to an external resource server. Those calls require a separate proof
+bound to the actual authorized request, preserving the existing proxy admission
+and deferred-command authority. An ordinary-key success must not be reported as
+NyxBot compatibility.
+
+Invalid, revoked, expired, unsupported and out-of-scope keys return `active: false`;
+unexpected database failures in agent-key verification return 503 so consumers
+can distinguish an outage from revocation. Existing JWT introspection remains
+unchanged, apart from the additive optional audience field.
+
+## Request-bound NyxBot resource reads
+
+The default-off `NYXID_RESOURCE_REQUEST_PROOF_ENABLED` flag adds a narrow read
+transport for an owner's live, unstopped personal NyxBot turn. Both the HTTP
+proxy and NyxBot's MCP service-call path retain their existing authorization,
+approval, billing and final egress gates. Only direct GET/HEAD requests with an
+empty body are eligible. The key must have current `proxy` and service access;
+the target must be an active, provider-less, no-auth HTTP catalog connection with
+JWT identity propagation and a registered confidential introspection client.
+The authenticated child credential, when present, remains part of the binding.
+
+After building the final HTTP request, NyxID signs a 60-second RS256 JWT with
+`typ=nyxid-resource-request+jwt`. `aud` and `nyx_service_id` identify the immutable
+catalog UUID. The dedicated `X-NyxID-Resource-Request` header is generated only
+at this point; caller, catalog, user, delegation and node header layers cannot
+supply it. Ordinary `X-NyxID-Identity-Token` propagation remains separate and
+unchanged. The proof signs the exact final method, encoded path and raw query,
+single Content-Type value and SHA-256 of the empty body. An Idempotency-Key,
+method override, nonempty/streaming body or non-identity Content-Encoding is
+refused. The final destination must match the admitted URL and redirects are
+not followed.
+
+A resource server sends the proof to authenticated `POST /oauth/introspect` with
+`token_type_hint=resource_request`, its `client_id` and `client_secret`, catalog
+`service_id`, `request_method`, `request_path_and_query`,
+`request_body_sha256`, and optional `request_content_type`. NyxID checks its own
+configured issuer, exact audience, signature, UUID `jti`, expiry, exact request
+descriptor, client registration and current live authority. Successful evidence
+has `token_type=resource_request`, `scope=proxy`, current subject and complete
+RBAC permissions, the exact `resource_request` descriptor, and
+`independent_commands=false`. Invalid or unsupported proofs return
+`{"active":false}`; unexpected provider failures return 503. There is no
+completed-proof verification cache. Identical reads can be retried during the
+short lifetime only while all current authority checks still pass.
+
+The initial slice requires the current service approval policy to resolve to
+AutoAllow. A new Deny or RequireApproval policy invalidates an issued proof;
+explicit per-request approvals are not consumed again or translated into wider
+authority. The shared approval evaluator matches method/path/verb and currently
+has no query/body predicates; raw query remains bound by the proof. Guest,
+specialist, organization-agent, node, mutation, durable-command and independent
+continuation authority are unsupported. A resource server must never retain
+the proof as a reusable API credential, accept it as ordinary Bearer authority,
+or use it for a mutation. When the explicit proof header is present, malformed,
+expired, unavailable or disabled proof verification must fail closed without
+falling back to ambient bearer/cookie authority.
+
+Deploy all resource verifiers and all NyxID introspection readers before
+enabling issuance. Register the catalog's confidential client, enable the
+resource verifier, then enable the NyxID flag and validate isolated requests.
+Rollback stops issuance first and keeps verification available for the maximum
+60-second lifetime. This integration changes no sandbox, PV or running agent
+session. Ordinary-key introspection by itself remains insufficient evidence of
+NyxBot compatibility; the exact MCP/HTTP request path must also pass acceptance.
+
 ### NyxBot access authority
 
 Specialist agents cannot widen access or grant permissions. For work NyxBot assigned, or in a personal group NyxBot is a member of, access requests go through NyxBot and the backend rejects card and connection-link creation from specialist chat keys with the stable `access_request_denied` refusal. When a person talks to a specialist directly, that work is not NyxBot's: an ungranted call returns a neutral `missing_access` result (scope, target, "no request was created", a link to the agent's details) and the specialist continues; it never asks NyxBot to take over. Only the owner, in the agent's details, or a legitimately involved NyxBot under routed mode can widen a specialist's access.
