@@ -1608,6 +1608,7 @@ mod tests {
                         token_breakdown: None,
                         audio_tokens: None,
                         image_tokens: None,
+                        reported_model: None,
                     },
                     None,
                     None,

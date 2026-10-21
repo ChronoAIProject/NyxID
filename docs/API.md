@@ -7067,7 +7067,10 @@ An optional `model` selects an exact, case-sensitive billing model (trimmed,
 cannot be combined with `model`.
 
 The response contains `window`, `freshness`, `totals`, `models`, `daily`,
-`accounts`, `other_accounts`, and `excluded`. Costs are exact decimal credit
+`accounts`, `other_accounts`, `services`, and `excluded`. `services` breaks
+model executions down by inference service (Top 20 plus a summed Other row with
+`service: null`); the service is recorded on every execution, including those
+whose model is unknown. Costs are exact decimal credit
 strings or null. Top 20 models and Top 10 accounts include summed Other usage;
 account rows include their own model breakdown. Excluded populations disclose
 orchestration, ordinary tools, unclassified assistant activity, and historical
