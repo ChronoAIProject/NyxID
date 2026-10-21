@@ -17,10 +17,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const EXTRAS: &[&str] = &[
+    "frontend/.npmrc",
     "frontend/package-lock.json",
     "frontend/vite.wizard.config.ts",
     "frontend/wizard.html",
     "frontend/vite-plugins/wizard-manifest.ts",
+    "frontend/vite-plugins/shipped-composition.ts",
+    "frontend/scripts/install-wizard-bundle.mjs",
+    "frontend/scripts/seal-shipped-composition.mjs",
+    "frontend/scripts/html-composition.mjs",
+    "frontend/html-resource-policy.json",
+    "frontend/static-asset-provenance.json",
     ".node-version",
 ];
 

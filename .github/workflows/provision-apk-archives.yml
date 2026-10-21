@@ -1,0 +1,82 @@
+name: Provision APK Archives
+
+# Maintainer only. No PR, schedule, application release or signing trigger.
+on:
+  workflow_dispatch:
+    inputs:
+      catalog_commit:
+        description: Full reviewed commit containing the six APK catalogs to archive
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Verify APK Archive Payload (${{ matrix.arch }})
+    permissions:
+      contents: read
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: trusted
+      - name: Extract catalogs from a reviewed ancestor of main
+        env:
+          CATALOG_COMMIT: ${{ inputs.catalog_commit }}
+        run: >-
+          python3 trusted/scripts/provision-apk-archives.py extract
+          --catalog-commit "$CATALOG_COMMIT" --output "$RUNNER_TEMP/apk-catalog-source"
+      - name: Authenticate exact upstream archives and stage durable assets
+        run: >-
+          python3 trusted/scripts/provision-apk-archives.py prepare
+          --root "$RUNNER_TEMP/apk-catalog-source" --arch '${{ matrix.arch }}'
+          --output "$RUNNER_TEMP/apk-provision"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-apk-payload-${{ matrix.arch }}
+          path: ${{ runner.temp }}/apk-provision/payload/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Store Verified APK Archives
+    needs: prepare
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Only this maintainer-dispatched job may write. No repository secrets/OIDC.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: verified-apk-payload-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/apk-payload
+      - name: Recheck candidate catalog binding and store immutable assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CATALOG_COMMIT: ${{ inputs.catalog_commit }}
+        run: >-
+          python3 scripts/provision-apk-archives.py publish
+          --catalog-commit "$CATALOG_COMMIT" --payload "$RUNNER_TEMP/apk-payload"

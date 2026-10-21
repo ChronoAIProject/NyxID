@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import json
+import re
 import shlex
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -105,21 +108,59 @@ def is_staged(dependency: Path, copy_sources: list[Path]) -> bool:
     return False
 
 
-def check(dep_info: Path, dockerfile: Path, dockerignore: Path) -> int:
+def generated_identity_outputs(messages: Path | None) -> set[Path]:
+    if messages is None:
+        return set()
+    outputs: set[Path] = set()
+    finished = []
+    packages = {"backend": "nyxid", "cli": "nyxid-cli", "machine-updater": "nyxid-machine-updater"}
+    for line in messages.read_text(encoding="utf-8").splitlines():
+        entry = json.loads(line)
+        if entry.get("reason") == "build-finished":
+            finished.append(entry.get("success"))
+        if entry.get("reason") != "build-script-executed":
+            continue
+        identifier = entry.get("package_id", "")
+        location, separator, package = identifier.partition("#")
+        if not separator or not location.startswith("path+file://"):
+            continue
+        parsed = urlsplit(location.removeprefix("path+"))
+        if parsed.scheme != "file" or parsed.netloc or parsed.query or parsed.fragment:
+            raise ValueError("local Cargo build-script identity requires an unambiguous file URL")
+        directory = Path(unquote(parsed.path)).resolve()
+        matching = [name for name, expected in packages.items()
+                    if directory == REPO_ROOT / name and
+                    re.fullmatch(re.escape(expected) + r"@[0-9A-Za-z.+-]+", package)]
+        if not matching:
+            continue
+        out_dir = Path(entry["out_dir"]).resolve()
+        # Only this generated source, attributed to the actual package build
+        # script's Cargo OUT_DIR, is derived rather than a Docker COPY input.
+        # Other files under target retain normal missing/COPY/ignore checks.
+        out_dir.relative_to(REPO_ROOT / "target")
+        output = out_dir / "nyxid_build_identity.rs"
+        if output.is_symlink() or not output.is_file():
+            raise ValueError("missing regular generated build identity")
+        outputs.add(output)
+    if finished != [True]:
+        raise ValueError("actual Cargo messages require one successful completed build")
+    return outputs
+
+
+def check(dep_info: Path, dockerfile: Path, dockerignore: Path, messages: Path | None = None) -> int:
     dependencies = parse_dep_info(dep_info)
     copy_sources = builder_copy_sources(dockerfile)
     ignore_patterns = dockerignore_patterns(dockerignore)
     failures: list[str] = []
     checked = 0
+    generated = generated_identity_outputs(messages)
 
     for dependency in dependencies:
         try:
             relative = dependency.relative_to(REPO_ROOT)
         except ValueError:
             continue
-        if relative.parts[:2] == ("backend", ".git"):
-            # build.rs reads git metadata locally; the image receives the hash
-            # through NYXID_GIT_HASH because .git is intentionally not staged.
+        if dependency in generated:
             continue
         checked += 1
         if not dependency.exists():
@@ -158,12 +199,14 @@ def main() -> int:
     parser.add_argument("--dep-info", type=Path, default=DEFAULT_DEP_INFO)
     parser.add_argument("--dockerfile", type=Path, default=DEFAULT_DOCKERFILE)
     parser.add_argument("--dockerignore", type=Path, default=DEFAULT_DOCKERIGNORE)
+    parser.add_argument("--build-messages", type=Path,
+                        help="actual Cargo JSON from the verified exported build")
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return 0
     try:
-        return check(args.dep_info, args.dockerfile, args.dockerignore)
+        return check(args.dep_info, args.dockerfile, args.dockerignore, args.build_messages)
     except (OSError, ValueError) as error:
         print(f"Backend Docker embed guard failed: {error}", file=sys.stderr)
         return 1

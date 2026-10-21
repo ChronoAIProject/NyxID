@@ -1,0 +1,641 @@
+{
+  "schema_version": 1,
+  "rsa_guard": {
+    "reference_files": {
+      "backend/src/crypto/gcp_kms_provider_tests.rs": "d3876380581ce4e768c847a4a39780189e8036342c32b76fcd12ef2dd36934ed",
+      "backend/src/crypto/jwt.rs": "35dcf9fad9da1cb74277a71d3391312e19c551c3f0f9430369463b01a804a2cf",
+      "backend/src/crypto/jwt/key_material.rs": "10d3153b038f79d6a2bbcbef1120f70e18e80224604f2554691638981758837d",
+      "backend/src/handlers/ssh_tunnel.rs": "b47c03ce706a4f7eb548fa7fd66b89f6c7e41ff83187ea38c39896ec80ae151f",
+      "backend/src/handlers/ssh_web_terminal.rs": "6f1f780550a5d64830807ee7b72a2dd8793259f8d7f7899ac156cfe16da84891",
+      "backend/src/main.rs": "8dfe867aac149d0de6dc6b0ef1c1c2c21e5149bc4a1f6572b8ac0503f4b750fa",
+      "backend/src/services/assistant_service_execution_ssh_session_tests.rs": "b47cc442855ed4002a520b759558c3af74563d71dc1d4d3b7cbff02cf819399b",
+      "backend/src/services/remote_machine_bootstrap_verifier.rs": "4e42819ce69bb34592b52ea15be7136092363fdada9333e6d3cb796d53e1ed8f",
+      "backend/src/services/ssh_ca_record_service.rs": "66337f5d8b5c2c4cfc602fd9c54b50cc50ced9727ae6fc3b819bfff68f7a6bc5",
+      "backend/src/services/ssh_service.rs": "23a43923e01c7fd63119ffc26506aae7d206fcc794dcd642191b5fc987a74400",
+      "cli/src/commands/update_attestation.rs": "e1d0e0f2d41c07eb2c18e60c52c634d71b252d6ee3fe861b1132846b50090c79",
+      "cli/src/node/ssh_algos.rs": "1d249511944efea95d48c5065bf0b8c77d15d7fddc45b0c4628bafe4e6e285ec",
+      "cli/src/node/ssh_node_exec.rs": "56fa572cdde62bf0bb6c6b4f5baeaa3a6c32374dd1a03bf42571d01326e43f79",
+      "machine/src/bootstrap.rs": "8009dbf45d88df140fa7771c7c74a51536d874c489f2f36e85f45e6c24e4a443"
+    },
+    "test_fixture_reference_lines": {
+      "backend/src/test_utils.rs": {
+        "0f92fbfd09ecfe3addb277faa31dc6f3a8477fe90e7a8de5ce85e092ad1741c5": 1,
+        "2b523a5e8e4c4b9ff95df3280800bdff62236956cac5c3756fc3ae43296346ba": 1,
+        "39c7c69be09323d75337162f224ca2c6da116125215f95fe6fee2735a7fd65b5": 1,
+        "4dfdbff2516826eef5d9dad8af783e42f9551d0c21fb59713a807bcbf1a6301d": 2
+      }
+    },
+    "private_operation_lines": {
+      "backend/src/crypto/aes.rs": {
+        "04dd80d5f25f358ab368d99b7e5e07ba14c845c451f0e335a90f8904167e7fdb": 1,
+        "0ab3e938ec54c0d30b8e9516d4e5e35410116ad1107af232071f1cd22537daf2": 1,
+        "102b17375c6eb0614d9628c23dd8c75a2a3788551db353337815741183d7f800": 1,
+        "10d92478a9f93c456cbd6c8deaea37f932fa6f4ff83194002a46c889e8a10bdb": 1,
+        "11d6db653621cea578623cb270e977f7e0e92aae4129d568310cb591ca7d084c": 1,
+        "1bb6b3066628386ebb1303dbf49ac4c3ad1488611d197c78f1cca08c14be870d": 3,
+        "1d8d37240eb6434ed48cf5b1f1502bd282ded9a474f87d22183e08f55180ea99": 1,
+        "1fe7bdc8d51aea47d4368d5be07909785a029a155664bbb25a9603efa5924ee6": 1,
+        "2770ad5f1e25bfab172c017cf230d93524630e03c268b8a516961489531a32a7": 1,
+        "377e9b05e062743513f62e40449f041a5860ccf716699d2f0be587df08fab0c3": 1,
+        "3b1d9b8c925bf58e8b62a77b1707ef4273047813d2d5199d76f37982c3fb7de9": 1,
+        "3d48a7435eae1862781167f7e73c378f663d983e1d768ac8131ea609ffbe7536": 1,
+        "3f587ecd97fc4af5b6408eebeb2457e64f12a5fd819aed47361fb6efabc357c5": 1,
+        "4990d95da1c06ceee300998e7eee132ba0b25d9be78a5a2aeea015f07fc299f3": 1,
+        "558e30c0307103e5ea14fa7430e55983d2266db82b0e3cce350f155cc6e739a1": 1,
+        "5e417b4d0b897e5751877db76bba5336d9f352820c5ff9607f9dda2e3ad46bce": 1,
+        "66e2bf6b7a3026bf525b8c2fd13567611f31e191850e28059be3f4fb3bf8181c": 1,
+        "6dfdbebfa6e4589664a29b92e2b6b46563f69e4c7a49d658e384bcbc9480224d": 6,
+        "7c26fe5a551845f7e4905600f549846cade523507e654ee6d833b01565cf6105": 2,
+        "7c5beee8e09548ee787b64e99889ad404937ead01765e4e05d5146ce21ca3af3": 3,
+        "884a65a40f60b14d2ebb9428486618de02c5e5d669152ce9ac3fef631bb153c6": 1,
+        "8a948e4843b7705504aa5f1c6f7961248e11cfb58b03ac1e58125025cc9404d7": 3,
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 1,
+        "9b1a291133a70237e1e168db38c1a552dec0e4d5f9838f8926954e826a79fc35": 2,
+        "9d3304588c915f5a9873cd8ff864e0912dfaa44c33cc07e9ea2df753adc48081": 2,
+        "a355f36e37a39420a1370d34fa6329b69827acd553628b5d8f67c547480fe8ee": 1,
+        "a57d6ad1c55ea3e3bc6b19eecc141f3d024fe9ff968110f56a1deb78adc80ae7": 2,
+        "a931b7f05e70ce9821219978d7930868a2294fc17f7b1b1d62488bffd662c9b0": 1,
+        "b919b83fd64517642f84471af59f14235f89eb14f41f8988afdaaf103f80a3a2": 1,
+        "bd6fa6a81226360ce52eb2c8a9321d0875f13150cfa6ccdb1ef56a965b90644a": 6,
+        "c196806ca6d1209d7075cd3f3730bd3e23fe4db8c2e5fd44566dc177f125cee6": 2,
+        "cd63af7e173ade0777861c88c527bb657b4f26b3a5950e80927e5f6fe576fb73": 1,
+        "d02dbeadb552b1c4674f7a010a9c057de0ed6816fe1ce0231f66c9651f31a894": 3,
+        "d1215ddec9aca9c489b8bad6ca110b8d8cf465ad49f254487d2a7cc169a6c19c": 1,
+        "df9fc8339be19a079480c5d3e252aa040bbadbf88e58a46cf94dda9f6b80e891": 1,
+        "e0bba2394926ce453300ef2144cd86b48d9a45169ad4da8ce5c3d0c02f342292": 2,
+        "e835c4d9b165cd9d7abf1d5ddfbf5e8ba46fec9cbeaa3ea3b671a47e717cb36c": 1,
+        "f1134342bce5948eb873027f50885f42b1ae78d2f92b4b3262976ed03fab90eb": 1,
+        "f18fe9a045581a9cff8eca73a21453a870420122e56802d793b4980c96e93d55": 1,
+        "fb53e5044623d4f0e7bee9a6ee9f48bd2b95948c6ba1266626ade51afc86d0a4": 1,
+        "ff60ef5f910083feccddeffe607f50db16a99ee861b5302c1a6c9aba6397c2a4": 1
+      },
+      "backend/src/crypto/aes/record.rs": {
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 1
+      },
+      "backend/src/crypto/aws_kms_provider.rs": {
+        "908ec6c9e09c85ef5e7b1f634f177a686a22bf27a80f2a2c4585859e5e174fbb": 1
+      },
+      "backend/src/crypto/device_code.rs": {
+        "66f9197b6dd7a822464d11f1cd61d91c4d6ff73cfe024b865d632eb1d22f5796": 1,
+        "98c1d9f01dbbd0e8ed33da315e2bc4e9e55c0a4fce9c93b7bd594357e4d5f31e": 1,
+        "a54af691fc6ed1850046bcf4ca2889e274c2b64b74a169739f1e2e5ca2e1b097": 1,
+        "dd55199732aafebaa894e06fae7b109bea56cd6163e421349d20b9fb48abc155": 5
+      },
+      "backend/src/crypto/gcp_kms_provider.rs": {
+        "100b3627a5ae7bf8637d5f0da6ee7d70ec7001d51f6a97fd0616ac439ae32c9b": 1
+      },
+      "backend/src/crypto/local_key_provider.rs": {
+        "c196806ca6d1209d7075cd3f3730bd3e23fe4db8c2e5fd44566dc177f125cee6": 1
+      },
+      "backend/src/handlers/assistant_action_effects_endpoints.rs": {
+        "e6f6450b4b9e258d267a6bb78a7741e46719c03e68e5a61fb462976987450ecb": 1
+      },
+      "backend/src/handlers/assistant_action_effects_providers.rs": {
+        "1a3168baf87ee73a97cc2fbcfd252f74bd67f17054fd1050688e7480ca713c64": 1,
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 1
+      },
+      "backend/src/handlers/assistant_action_effects_services.rs": {
+        "e6f6450b4b9e258d267a6bb78a7741e46719c03e68e5a61fb462976987450ecb": 1
+      },
+      "backend/src/handlers/catalog_authority.rs": {
+        "58e03d720e29561d1f2562dc4a6952b2252b5d30a7e171623d61d379a8a73b7e": 1,
+        "ee6eed4e7bf926fb5a470943129b0d147dbed405d8c7b81f2e4abeacc13d1f23": 1
+      },
+      "backend/src/handlers/channel_activity_tests.rs": {
+        "114cdfeb0d2bf723ce4771c3c264c91992823786d613e0623d578445fa996e87": 1,
+        "512fe0da0dad755f79199122da3429cdf0460ccada1781b06f4d10cb59c3999a": 1,
+        "5f65c378940effea32ef9b3ddbf73b13cb82e617f437f1b454590a6f36e7b5b2": 1,
+        "a8b3767cf695146d5d4f191e69343ea1dfde37a9d1929e6bf83dbc61aa08ad41": 1
+      },
+      "backend/src/handlers/channel_managed_tests.rs": {
+        "56af1be37b1c2dc00955e349f7daa608ec8810713c022fce14b8fd3b5e41b87d": 1,
+        "850911b60dee02c41c074027edde6f164e1b32bbaa1d4537500ca62bb2c74170": 1,
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 2
+      },
+      "backend/src/handlers/channel_webhook_diagnostics_tests.rs": {
+        "114cdfeb0d2bf723ce4771c3c264c91992823786d613e0623d578445fa996e87": 1,
+        "8c6aca7a9289a47a10afdf978d546ba749d298018f673a4660cbd23bc8f685b7": 1,
+        "92467655287fc0f5bf05b0b71a9b59c3dff2d1b3b448be11d3a721ea7077cdc4": 1,
+        "bb061cc1838273f34f607e391a5c4657279e704e7e2ecb2fe45a0f92d8961786": 1
+      },
+      "backend/src/handlers/channel_webhooks.rs": {
+        "2e76ecc7803285c633e73b719f7380b69aef4f4cc9e2827659b12699d6ca3b2e": 1,
+        "3c782952ec22f4443f3db1f618e106137c38e3f6da4e582e14fb3e8198c6129b": 1,
+        "92467655287fc0f5bf05b0b71a9b59c3dff2d1b3b448be11d3a721ea7077cdc4": 3,
+        "f58c9eb91e57ad661ceab930676f646613b7c45fc35d4d89bb767d2fe6584583": 1
+      },
+      "backend/src/handlers/channel_x_public_tests.rs": {
+        "0a726d2ab5fdcbf82add7b7b1579132a5413a147f6c066ea18017044a96a6b7f": 1,
+        "aeb1e50e58ed78c18e1d5f8a1cb4ffb2b6b9ed7bd5f337113b5909e1e73cd44d": 1
+      },
+      "backend/src/handlers/keys.rs": {
+        "1ed2a055d3621f1a93d92a6bf3bab64df31cba5f2b7e5a49e99eab6e5c35b263": 1
+      },
+      "backend/src/handlers/machine_desktop.rs": {
+        "b89686c419b909fd259edbc9d90e9b99af7d97b6950bfabb4e65ba8e6cc21a13": 1
+      },
+      "backend/src/handlers/machine_service_policy_tests.rs": {
+        "53a1b8fe016bc1472a0d108d7e448375cc3bb62d3d4800c225120e2d52773fab": 1
+      },
+      "backend/src/handlers/nyxbot.rs": {
+        "293ba8bbc20f065ce95b5dc8343bea52e55d7d9aa649d0caede7ff7f6b9ad147": 1,
+        "29fba7be3235b0df7817e69a8904140235cf3a95b590c9e27858004fd888cb7c": 1,
+        "554c14bafb7f5f6701b71d0b7d2f10b4d3731d6c5711f967d77f9ce1e546f7ea": 1
+      },
+      "backend/src/handlers/nyxbot_gateway_threads.rs": {
+        "3a8601b4f1f00bd001ca8fd0f28a832a2bc5f4b7c5a98e684ed25658df5e12f9": 1
+      },
+      "backend/src/handlers/nyxbot_late_delivery.rs": {
+        "293ba8bbc20f065ce95b5dc8343bea52e55d7d9aa649d0caede7ff7f6b9ad147": 1,
+        "554c14bafb7f5f6701b71d0b7d2f10b4d3731d6c5711f967d77f9ce1e546f7ea": 1
+      },
+      "backend/src/handlers/nyxbot_source_queue_tests.rs": {
+        "df4393ca288c7d7363c10a6ff85f4e3c70bbe9cfe9915d00585edc5962b9357d": 1
+      },
+      "backend/src/handlers/nyxbot_tests.rs": {
+        "94f1ffc408f8e497adf95f9137586215e65e17ff49bf4c486ff3247b1d68076f": 1,
+        "9854a649b0c536569f01c4b1d52692d75bcc546f64508194b60b7f20aba34932": 1,
+        "cfe0c2b928ab270efce9769ed492082fe05ac3d8cb75ceb15b5dbf8d377f303c": 1,
+        "d287c39dd6cf4b0e1065e629b5f4bbc300de883bea485efd70782b5e27617c33": 1
+      },
+      "backend/src/handlers/nyxbot_transport_tests.rs": {
+        "974c7d621fece9666dc5c539e0756c920ee9c8453f2cd2a6f1dfa23897165fb3": 1
+      },
+      "backend/src/handlers/nyxbot_x_bus_tests.rs": {
+        "114cdfeb0d2bf723ce4771c3c264c91992823786d613e0623d578445fa996e87": 1,
+        "52500586573e14c6ffe5387c567950cea1fcee614bec4a4b8b08e68981042c3f": 1
+      },
+      "backend/src/handlers/oracle_login_profiles.rs": {
+        "c66ec4b4587cb4df87a6097f94f356a7cf2f05b7aff1b8b68622a948d3858af7": 1
+      },
+      "backend/src/handlers/proxy.rs": {
+        "a0576933eff50b1b7bcd359d3e81e212763d73ecb28a4d7987e499d336d128e7": 1
+      },
+      "backend/src/services/agent_login_record_service.rs": {
+        "0128524e645a23f76459e721bdc2ee20f4f6c14f550abc38ed54ada0a954a516": 1,
+        "788584e8eb1322870a9aa3b655a03db4cb31bbde1cb56d74c22d2ce0230098ec": 1,
+        "e6c9cd20b1d254c905d8a6cc1e5b1173f47c93e43f3d5a4d554fb99481884108": 1
+      },
+      "backend/src/services/assistant_agent_credential_service.rs": {
+        "5b741bd3bd9d58884b498bb1fade45b45ee0158cc288ba9a1516a39e7ef7b65e": 1,
+        "a01b4fa150154934c5f02537f9792f4c15e1d193dd09d231c04212b89eab3f47": 1,
+        "ca074c7a28296d2e07dad17a0bcaa21a56c80de70823685771f9f09acb7f5dc6": 1
+      },
+      "backend/src/services/assistant_agent_learning_review.rs": {
+        "762f49e3c14440082b70ba48bc9a81d319e79ef5f8f2059d86c242d442b2b23f": 2,
+        "7731eb240777eb2fafe8b5f9f03349be70660b428995ef1273ba8b7fbdd329ec": 2,
+        "ca02f4d63efe20a1426b44088ad974b767660902992020a7ca4fa3f1eff102f5": 2
+      },
+      "backend/src/services/assistant_learning_recovery_tests.rs": {
+        "eaccfa6a29331630b4893d4e3c3cdb9879b5e483e6717a9fab9c37ec5def14e6": 1
+      },
+      "backend/src/services/assistant_service_execution/egress.rs": {
+        "15087fbf5ec13f98ae2b936eea428bdb2ae8a62d9c51fa58c09550442dd3ae3f": 1
+      },
+      "backend/src/services/assistant_skill_authoring.rs": {
+        "7731eb240777eb2fafe8b5f9f03349be70660b428995ef1273ba8b7fbdd329ec": 1
+      },
+      "backend/src/services/assistant_skill_authoring_tests.rs": {
+        "118a75b5b7d06add80fda4bdd8dfb09154268d5e0524b6347748fc21fc9a84bd": 2,
+        "2075a5dba9b5cd5df6d4d8477a201d2cf7d4630f2de69eb3f1a7a368e90ac2f4": 3,
+        "3f0d89d42d3bd55a151f2b9d6327e501774ab9e31750edf1c8677463e8526b01": 2,
+        "9668a2b6a0d888af13a2c947dbdabd24bf886dcd10c931603dcc9efdd6f272b1": 1,
+        "beb5679cbd39f0622e6c2116aea158e0a16aa0ae81ab7be7ea533e7fd6be2f63": 1,
+        "ca02f4d63efe20a1426b44088ad974b767660902992020a7ca4fa3f1eff102f5": 7,
+        "f015ba21bd594fb6fc2476ac6967d49b42ccbb2fcdf18632ca0e3d80f3ccdde3": 1
+      },
+      "backend/src/services/assistant_upload_service.rs": {
+        "bf527bdb64596b02886c11101d875b50e1cc7579f69651f59c307036947f510c": 1,
+        "c0ba9c732275535ef7dfd1900cb2be052741daf5f69611e18f31f207caaf1ef5": 1
+      },
+      "backend/src/services/async_service_operation.rs": {
+        "e997900fa9a89ce7055fc7e30be35ed035b50a6e9713c98823be1ba4516fad24": 1
+      },
+      "backend/src/services/auth_agent_key_login_service.rs": {
+        "8abfb53152109db5a9881f154e67335319afc9d5a42d6a3c837a42beb22dbc3e": 1,
+        "bf4b329762e70b3fa180ec6918beb2710aefea3c16f81a31781764fe6d11fc8b": 1
+      },
+      "backend/src/services/auth_agent_key_login_service/tests.rs": {
+        "c9c04b920a2fb0eee9a5d2aa51d728d41be1910fe9bd76e5352a0ed49395cd15": 1,
+        "dc420616b8b0e346db0d379cb69c66804f350b54b6d4fd08050ecef37305de5d": 1
+      },
+      "backend/src/services/auth_device_service.rs": {
+        "37a5a11e59fa3a401d9e6cd37c89fb02b81f578b166616290564765b1e7454d3": 1,
+        "6a36a520253a797f148ac45f95f7a1a41bc987cf70028617a39b16e24a3ca1a5": 1
+      },
+      "backend/src/services/call_channels/tests.rs": {
+        "f73248e18171440c3735bf3618c79d0f929a1c856fd5fd401f2f20aee923c356": 1
+      },
+      "backend/src/services/catalog_credential_record_service.rs": {
+        "1786522e129745a7bb416935846e98aab20f3f2c44688d0effa8b3bbc884e316": 1,
+        "a46f189c5d11c0931902dc0a30061d974e1e7148bcc0d3ac95881315c155205d": 2,
+        "e997900fa9a89ce7055fc7e30be35ed035b50a6e9713c98823be1ba4516fad24": 1
+      },
+      "backend/src/services/catalog_service.rs": {
+        "6da72a6a1b1f1410061631d68691ef9afcafd28fbadf5251323f7ee9625f7c20": 1,
+        "9593b611584fd122168a623f026b137a0d3c8646b6e76dbe73b42216764d5682": 1
+      },
+      "backend/src/services/channel_adapters/aurinko_tests.rs": {
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 1
+      },
+      "backend/src/services/channel_adapters/discord.rs": {
+        "edd0cff8acf8f71c969ae15433bfb96d7e6fd651a6416a15fff550d98c63de7a": 1
+      },
+      "backend/src/services/channel_adapters/slack.rs": {
+        "4b1f037a60a6136c76984d5ed383383635b33af8aeb237c6bf3217b01ac5ce47": 2,
+        "8d3f61c85745a1f5cf5d9252d4e563a904e4c6a573a56cf8584c9315e6e06a9d": 1,
+        "d2a189a3af111a8a27a388b8579e071bb04525c884fd6922cf27f80a99310088": 1
+      },
+      "backend/src/services/channel_adapters/x_webhook_tests.rs": {
+        "2fa1522e86f43064809ad911dad610438be5428d056adaf42c87d982ed91e155": 2,
+        "ed6d3c4b1d0d6043b09f588a15d2c61cd6a96a778c9dfa14041fd14f7a9714ab": 1
+      },
+      "backend/src/services/channel_bot_service.rs": {
+        "4abb22ed83a5f72bc4a7141c3e2ab81597d2c94c74048c329182cb60052a8d61": 3,
+        "9d6843808d47d445d31e517c2e08915b53acef72967a1bb08b1ada4a0bda16cf": 1,
+        "a47a29169478851fab2fe128b8e6a1dfbdb873d6ca1bcc38e23a0fcc19ac719c": 3
+      },
+      "backend/src/services/channel_connect_link_service.rs": {
+        "412425504465435571e043bd7a2785dadc1e9af01d0d89ac0e3256c0f1c99ea2": 1
+      },
+      "backend/src/services/channel_credentials.rs": {
+        "922c23320ff905dfaa07f8badec24ec151dfc2fcfb10d53c5065804906dbb9a3": 1
+      },
+      "backend/src/services/channel_registration.rs": {
+        "5c6ba836aa1e21155efbfcbd05d7a56d7d3c98be851f0110228bf88b3ff08cf9": 1
+      },
+      "backend/src/services/channel_x_tests.rs": {
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 2
+      },
+      "backend/src/services/codex_connection_service.rs": {
+        "6ece287a2ad94caa9b821241774f84f0cab469b269930295aa127f61553be4a6": 1,
+        "fee75dcced8945fea523036961d68b9b3507da1c12d29318f2c5d461fabdd4b2": 1
+      },
+      "backend/src/services/codex_connection_service/tests.rs": {
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 1
+      },
+      "backend/src/services/connection_service.rs": {
+        "817ffae3b7938902d9e517ba0681dd2af37b8d2f3599026f656cc26bb69cf404": 1
+      },
+      "backend/src/services/credential_record_service.rs": {
+        "67b6074659f251a12d0dad3f7c13d9536ccfaca7f42f74fd8c45df96789d1d60": 1,
+        "b5aa10cdfb9d46f7d02f3cd226606bb2468795b2acb2a31f66db0d50e17757fe": 1,
+        "f5f8935961f5b42803f2f6bb1e6457702d8bf74efccf6f8b8de0ac77b11874b7": 1,
+        "fce499116f646a7b9337a13a428e0cbccbf66c3c46bfdfee2a50ae821191ceb2": 1
+      },
+      "backend/src/services/developer_webhook_service.rs": {
+        "32d7dff1dad7c05e6f4e5a39a8b214c8f7663f9deb26b569ed7ef3e026ec585b": 1,
+        "a47a29169478851fab2fe128b8e6a1dfbdb873d6ca1bcc38e23a0fcc19ac719c": 2
+      },
+      "backend/src/services/device_code_service/approve.rs": {
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 2
+      },
+      "backend/src/services/device_code_service/mod.rs": {
+        "a3bc16941376d8f7f9b60a719b5c2690f9daeb9ce771bb136cb905f22ebe8146": 1
+      },
+      "backend/src/services/device_code_service/poll.rs": {
+        "55391e5ff55ceee80d583726ca3dbf7d85b578e8a201ecedb27e0b73a92b1c16": 1
+      },
+      "backend/src/services/gcp_sa_service.rs": {
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 1
+      },
+      "backend/src/services/ifttt_oauth_service.rs": {
+        "50af59422276a813087614da99244c31211adb4db14535fb293fdddf931a9cc1": 1,
+        "c0c3d725c99f219f1fcae645cac65378148867dcb236628edcc665954184a3ba": 1
+      },
+      "backend/src/services/internal_auth.rs": {
+        "0a2d5ec9de96b1e06f51b84e6df4fcda6f1a1427182de2bbf694500ee75399bb": 3,
+        "3bb75cfe7b5bb52e4e7104a5fa452396743779ee5f9b97e7f8b1b9260164deb2": 1
+      },
+      "backend/src/services/machine_access_service.rs": {
+        "53a1b8fe016bc1472a0d108d7e448375cc3bb62d3d4800c225120e2d52773fab": 1
+      },
+      "backend/src/services/machine_external_gateway_policy_tests.rs": {
+        "53a1b8fe016bc1472a0d108d7e448375cc3bb62d3d4800c225120e2d52773fab": 1
+      },
+      "backend/src/services/machine_external_service.rs": {
+        "53a1b8fe016bc1472a0d108d7e448375cc3bb62d3d4800c225120e2d52773fab": 2
+      },
+      "backend/src/services/machine_service.rs": {
+        "53a1b8fe016bc1472a0d108d7e448375cc3bb62d3d4800c225120e2d52773fab": 1
+      },
+      "backend/src/services/mcp_service.rs": {
+        "1063d5f8717868289194a9be84b49ff730e695867b5d1d8becf19701efd7ec40": 1,
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 2
+      },
+      "backend/src/services/mfa_service.rs": {
+        "9e99a89b45ed369e5d1f10f5d09e775cb4cd0050ecb7545ab1a1d17ad9083781": 1,
+        "af25a2912d33334ab51e81898302c4c1ddb2be0536689f1998a271095869f333": 1,
+        "d082fc028f5f420e1c33d9973fd7ed7c39ddaad24a25aefebe3fa7c1e432a494": 1
+      },
+      "backend/src/services/node_dispatch_tests.rs": {
+        "f4d3e1bd7d2472178317c6be5964e0c1c8c8cf613f74a930489680bc39fcc590": 1
+      },
+      "backend/src/services/node_service.rs": {
+        "f5f8935961f5b42803f2f6bb1e6457702d8bf74efccf6f8b8de0ac77b11874b7": 1
+      },
+      "backend/src/services/node_service/tests/contextual_secrets.rs": {
+        "20969319988835adf5e0fcc2dbec34b53a0635f3f9c9697f80fec38ca9452bc3": 1,
+        "2e9cd0cacb49c5e48f2da9a1e20ccf4870e97c7f95e2299ae12f37dc9a37c6cd": 1,
+        "38b3f3a22bc20f700a0af2deebf5e17a562e6be8c4802534a3f1763c56a07902": 2,
+        "a68d9fd86d59d01c2b18e3476c724e9b4a24ef0bfb752200c9deb17c542cdf8d": 1
+      },
+      "backend/src/services/oauth_broker_service.rs": {
+        "cc08319c6d5479c84c78a408ca589a34eeb6a1942ee400a2ae420468de323bd2": 1
+      },
+      "backend/src/services/oauth_state_record_service.rs": {
+        "2bd8e073eae915e2275926763a009be5f501fa61cc6a09c67aa0cb640139b81c": 2,
+        "3efac5d273ef4a43ab1aff17e35ef84be258d286d737df1f73f8c97cce1bf44e": 1,
+        "64caa11da75150b061e97b7b28bdc8f08b1595819e4605382c7bbb7e52dbf29a": 1,
+        "97d29fc85a12039bca8326bdbcb5b9c7af5cf5940860ca7fc7bbd7a375e31e7e": 1,
+        "e6c9cd20b1d254c905d8a6cc1e5b1173f47c93e43f3d5a4d554fb99481884108": 1
+      },
+      "backend/src/services/oracle_login_profile_service.rs": {
+        "065799b51f4397ff7e974d5602c40873bfa99a7a9b0db99e35ce0cf5d0a16fc3": 1,
+        "0fe5b3635bcf64d19c601272cb1df670f4a01287b822e0440516e1761edeaa9a": 1,
+        "14c0c0f16bd15c4e98ec3ee85f6337fa87d0b22acc6cd59a252ddd6e9533523f": 1,
+        "efb59afee9777168792df5f8523bdf199994edeaa58475946e82e754d96d34a5": 1
+      },
+      "backend/src/services/oracle_login_record_service.rs": {
+        "6efd46b3bd3ad3f757d9f58c7f99e460d8611c6f34083eed8005725dedcd426d": 1,
+        "837d4e4beba23804a754b39faacb2a705dbb9f414774a47c9799ab62462efbdb": 1,
+        "e6c9cd20b1d254c905d8a6cc1e5b1173f47c93e43f3d5a4d554fb99481884108": 1
+      },
+      "backend/src/services/oracle_login_snapshot_service.rs": {
+        "af5dc5050cf61523c44370e6a5bc2044b226cda845cbf1ffd06db467bdfe751a": 1
+      },
+      "backend/src/services/ownership_transfer_tests.rs": {
+        "90f8461e48dec92f619a029cec0fdc6301830c5d16bfff257dc9087784220f9b": 1
+      },
+      "backend/src/services/platform_credential_service.rs": {
+        "a394cc33fa996a9c5e415397034957e2859a2b2582730c601a346f4417957ab1": 1
+      },
+      "backend/src/services/platform_entry_credentials.rs": {
+        "e933ec29f529a72f8013c2f036a81b9b7702c0c0317fe84829af6bccff459c19": 1
+      },
+      "backend/src/services/platform_entry_gateway_service.rs": {
+        "159f92620ca7b7183437b251ed13e9b305ce66aa432b518c57386ff450001237": 1
+      },
+      "backend/src/services/platform_entry_native_tests.rs": {
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 1,
+        "ad06810382d771c44d14a34f81f9dd6c29d4ee2aa6814c7dd93c3ad1220d3ded": 1
+      },
+      "backend/src/services/platform_key_service/tests.rs": {
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 2
+      },
+      "backend/src/services/platform_setup_record_service.rs": {
+        "788584e8eb1322870a9aa3b655a03db4cb31bbde1cb56d74c22d2ce0230098ec": 1,
+        "eed87f2d14bfdb67fdcef360ec62197f68961ba0501a011a6e19f94a22b8bb67": 1
+      },
+      "backend/src/services/platform_setup_service.rs": {
+        "ca0410219313064664de900548cf58f76a4e3f733bd34d6713c589000dc20fbc": 1
+      },
+      "backend/src/services/proxy_service.rs": {
+        "28421f037d29ea5d6533aa49270c5755f27dc24b12335a6e6b18dbc7b1eda29e": 1,
+        "999ad7d49f4dd764f68113c92876329fb20432c040cb4966af10dd6d38794f57": 1
+      },
+      "backend/src/services/record_field_service.rs": {
+        "2bd8e073eae915e2275926763a009be5f501fa61cc6a09c67aa0cb640139b81c": 6,
+        "70a7ab2552247165f9fe4d8f54af3e670086e3c8d8a7f7ad4073bfda49d7cb65": 1,
+        "e6c9cd20b1d254c905d8a6cc1e5b1173f47c93e43f3d5a4d554fb99481884108": 1,
+        "f5f8935961f5b42803f2f6bb1e6457702d8bf74efccf6f8b8de0ac77b11874b7": 1
+      },
+      "backend/src/services/remote_machine_runtime.rs": {
+        "b1a6403c362cab36b645d75fdbf16c7b830d07427d837f967e1bb78b9f091d8a": 1
+      },
+      "backend/src/services/saved_login_service.rs": {
+        "9648665efd66cc82975b222103db91a92a3996c05a8ad3ac091993e310cc3031": 1,
+        "b976527d0170d05ac6326b8e1fbc956ea29aa12ec80ec975c2922543ec2a469b": 1
+      },
+      "backend/src/services/ssh_service.rs": {
+        "ebb3e4efc1b3cb8f5e7279634209582daeccfa29def297cebc7051094113d2d0": 1
+      },
+      "backend/src/services/telegram_new_connect.rs": {
+        "c68a5c3e937f4ebae3dfcfa031dc78f1572c97dd424865d17b8c5db639983f56": 1
+      },
+      "backend/src/services/trigger_record_service.rs": {
+        "5cb7db56c88caf6922f94a86568a43149475247e6e4de4ed6a6adce97b18d9db": 1
+      },
+      "backend/src/services/trigger_service.rs": {
+        "74f9ec6732cf764b6d4ab17edf8966111b234da013805ee761ae2e7fc83d1427": 1,
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 1
+      },
+      "backend/src/services/unified_key_service.rs": {
+        "05320b706c9452d216227b0cb5892b40f4f517c39f64c772ffd1fd24589c26e1": 1,
+        "643c2244a9cb0cf94a34caf9967b6cdde8bb311bb6031110cfe7a5da39f459b9": 1,
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 3
+      },
+      "backend/src/services/user_api_key_service.rs": {
+        "5e712d8772eea5788ccb3f3b72e5ceaf29d85596451ad253e4ff0925ec7b48a7": 1,
+        "643c2244a9cb0cf94a34caf9967b6cdde8bb311bb6031110cfe7a5da39f459b9": 1,
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 12,
+        "d48c76afe31d1cc659d11d7d6b15e227f9cdfd87958c73ef61ebcd308cfd4ca3": 1
+      },
+      "backend/src/services/user_token_service.rs": {
+        "15ad3f88496ff2f5ae3245aac97ad1105c79e584a3973a6b8f864310a24528bb": 3,
+        "224171fe03541ee16b88d6483a2f8bb439fe5b2a85e7d0d21fbeb44670e2f370": 1,
+        "5b7ef2d69b35f4f6da9728513a932fb97ec9bed64f977c359577a853aa6ffcd2": 1,
+        "6c903c61b2212a0f85e1081011f4d86a868f0cece4b53f91824ed2f4117b5f72": 1,
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 17,
+        "9cd4eeb07b1dfaa5d1f1a8a86efcb6f3594dcf9236ac6246426a04ca59fc2006": 1,
+        "c094b801d7dd15ff2e389974a90c92906424dc62121d4b04ee793c472be7acb6": 2,
+        "cf100bca5e63adb73dca87b220b2ff8cd71e73ff323e1e98b72e89ff031cbaa5": 1,
+        "d1588fb2ebe7ccf48ab27ee59f07e367a56f4086a73215e63a7d3bb4db43561a": 1
+      },
+      "cli/src/commands/node_credential.rs": {
+        "3ffddc5aa53245e38a74156cfe8ccaa0f912b6776a3161bb7588754519112125": 1
+      },
+      "cli/src/commands/oracle.rs": {
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 3
+      },
+      "cli/src/commands/update_attestation/cache.rs": {
+        "4237a575316020d85d0c99ee45cec95947452833d64a4157e00c7c35c4b43355": 1
+      },
+      "cli/src/node/config.rs": {
+        "304f5c2f9ff5d9c9e282e5e533223be50269badbd58d15179e8b49f8a1078b9d": 1,
+        "8854d1b8b37de98d7471f38c65a09cacd139f172d71a462546e4fef6116c2577": 1
+      },
+      "cli/src/node/credential_store.rs": {
+        "1d2444cdf16e66459af1a358fa41906e9b91d9e6f3352f202ace4be86a41d013": 1,
+        "3e2e94a3a529f4521964e43c12c2e831b97ff5d31c465fa7c8867e731da31abb": 1,
+        "412bd3a1e9d6c43d3cfb1558bffcdec53bac512a97e9a2320310a1a894e11fb3": 1,
+        "7f7ae217ef7a42d4ba5c8265f19b61ce45daf3d250e8ed6db15f9c7fbdb2ade2": 1,
+        "e78bd41538824edc4a8e6f6190b0da66b08628bc801acd7eadf791970bf97f9a": 1
+      },
+      "cli/src/node/credentials/remote_crypto.rs": {
+        "2e20b79f5ee4382d56b637db715e4db875ee3b7e0040193eb3247837fdc4b9a5": 1
+      },
+      "cli/src/node/encryption.rs": {
+        "08cc5c0736fff3ea16b9f44fce4cd485443a25e877a29e3a3435cbc57c052a0f": 1,
+        "26a738323022af30cbede3242757748842ec581acfa1dd69cb4cac2ee8819d72": 1,
+        "7e84a13a04766ea3937c05e30047a5ce690ac6e7fb2324a6caedb3d04229456c": 1,
+        "817b0567db63177062096310180dbf86a37e6679f0025a5f67eafb4f013dc041": 1,
+        "d0116a90a3894fa0454c7f1b2a357dfa750e807b5ae5d1403fa23670f38afc12": 1,
+        "dcbd76f2290fec4b1ba1f120b1b6947640cfbd96827721a88be1615043859f1c": 1,
+        "f49354a7fb25cdde9623766a1d18fce075070eb5e7221fdc217e95f112a77a48": 1
+      },
+      "cli/src/node/machine/external_dispatch.rs": {
+        "02fa8eb95e8b2b25ab0ea0f83ad7d155f7f0a8c7ecf4dca8ddd1541fb1bfb191": 1,
+        "72029cdcc3b9cdf3f8e5fb749668801ec9f0a4201d7cbfba76a850e9e9001c1e": 1,
+        "7325084e019c75d405710fb0d9198d695bf3b31205bafe40db0b869e7fbf08cb": 4,
+        "dbdbf55a15c7fdeea0a72ecce0adcc4763f1d3a0db4d374ae13087aefc777564": 1
+      },
+      "cli/src/node/machine/gateway.rs": {
+        "9b3ea2d90979f2392fac30f9727abd7958beb9eafc3493f9391c90e891d37367": 1,
+        "ac420903b3014e19bddc588ff71f55e0597dcf538d1858d9ef995422aa5fe402": 1
+      },
+      "cli/src/node/machine/runtime.rs": {
+        "1c78640a12588f89aa26565bc5e44745755454db40dcae9ade8abdff7bf385fc": 1,
+        "34eeeddc4c55edaac319d0e128716183bb13a22b7d9644eeeb6d7aa1d4a3ce52": 3,
+        "6b98b9cf60bd3d6e03172a33c6f5d4a2caa8792c820d2f072604c5081ef8bdee": 1,
+        "70a32c4d45022061c8b0c429d110a8b00cb9624c123f9f32f2d7d715292b8eac": 1,
+        "72029cdcc3b9cdf3f8e5fb749668801ec9f0a4201d7cbfba76a850e9e9001c1e": 2
+      },
+      "cli/src/node/machine/transfer.rs": {
+        "9bae143e3ea0cbff1089f61860c84d7f53379ddf289cc7fd170e70090809f5ec": 1
+      },
+      "cli/src/node/proxy_upload.rs": {
+        "a30ba7f3df6efda15bddad633928bae25a79cc59cee1a5a50dcb34a5a3e0cdb5": 2
+      },
+      "cli/src/node/secret_backend.rs": {
+        "1c97c4e2c459ed40c5ac6d42bd8d6ffb58ae82863c03635c0067e2a5e693c9f8": 1,
+        "c0d9e63474b9c0a81b0f022836441eaf7bec13ff570fa4f9866893c9b101c023": 1
+      },
+      "cli/src/node/ssh_node_exec.rs": {
+        "35236414687f0e8a9e0b64421ac4985d63975b14dc884485e8b7fd6424b2bb80": 1,
+        "bb6b549fa1d1914afa49a91d843f779bea16fd449f808f0f3ca7682e8ce07520": 1
+      },
+      "cli/src/node/ws_client.rs": {
+        "a06a292bc2e160eff15970fc0bd790a8f541807c6113060eb4c299d06f05ce98": 1
+      },
+      "cloud-auth/src/aws_sigv4.rs": {
+        "906cbc2810d67aacbb424aa6b54286bea43e7f80ec8ac187b1409f0c4ab2aace": 1
+      },
+      "machine-updater/src/runtime_provider.rs": {
+        "7d7c7659ec04fd657377f79f99f93b823fffdcec261e520858d5c41e77f9f87c": 1,
+        "e1412d35b40f3ce4a1b6a897de197448342bf3d05b97c271802c8ad6722373c1": 1
+      },
+      "machine/src/bootstrap.rs": {
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 1,
+        "c1cddcb006ec655860ffe2ae57fb1d667447a0461bb6f2a8d57802d7a5bd1f7b": 1
+      },
+      "machine/src/managed.rs": {
+        "3eb2cd855dfb2b3db063ac74617b0379f422daeeeb2be8fca162289258a50299": 1,
+        "8adc6b0bfd1a0151d8fc67e8fc346dabacfc6547a126184676e706546bb880f3": 1,
+        "c8eb40b056c2858e911a28309a4c331e4a188e5a91922139927f94190875bf0c": 1,
+        "fc794290faf63755e3a8716f06b6632084e867cea403e4054befd3a3ba51320a": 1
+      },
+      "machine/src/signing.rs": {
+        "5d0dd9acd903c4700ed85639b4ded90f3cbb66ea94a1f1dce036f0d113f1d442": 1,
+        "6ab519848b8b57158d422a32db91f24518f1b711c559fd7e852f03cc82001820": 1,
+        "c9dc8b9a9bead26f7c49486dd725969f1f768f99f35ba5d30edb55b935fd02c2": 1,
+        "cacfb71e60764fd100114c000c2cf8becc8340c733eff50c9d720b879ddd87b8": 1
+      },
+      "nyxid-crypto/src/lib.rs": {
+        "3edea6504f64962413d4d3b1faa2ac2ab3c5d690083519859c852e037ad12abe": 1,
+        "461792217ae148aaaeeb56c7791c6e0369e849435bc76e399366329723e97093": 1,
+        "4ed600bd8aac47700e2a4e2e7f5e8ff20e6c1aa13903d2a215248c3486839b1c": 1,
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 1,
+        "a5a095ed5686cdafdb07dbf914dc9ad61bdaae0d8d6dae70de763785a7a82e59": 1,
+        "a8e6b2dd5fd6182d654974b690f9a1572b5d2dd88820ec9b09e1e7752bdea2a5": 1,
+        "bd01b88211b2fc905ff5a988500df823fa8d5986f809f586e6a45e755a1ce9b8": 1,
+        "f4bf98e8f288a101ef1de3236a1c37af80f8491ed87f51c1b4b7f8c42de0bef1": 1
+      }
+    }
+  },
+  "dispositions": [
+    {
+      "kind": "reviewed-rsa-uses",
+      "advisory": "RUSTSEC-2023-0071",
+      "package": "rsa",
+      "version": "0.9.10",
+      "lock": "Cargo.lock",
+      "checksum": "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d",
+      "features": [
+        "default",
+        "pem",
+        "sha2",
+        "std",
+        "u64_digit"
+      ],
+      "parents": [
+        "rsa@0.9.10 <- nyxid-machine@workspace[dev]",
+        "rsa@0.9.10 <- nyxid@workspace[normal]",
+        "rsa@0.9.10 <- ssh-key@0.6.7[normal] <- nyxid@workspace[normal]"
+      ],
+      "uses": {
+        "scope": "backend-public-operations-and-local-development-key-generation; machine-test-only-cross-provider-interop",
+        "source_files": {
+          "backend/src/crypto/jwt.rs": "35dcf9fad9da1cb74277a71d3391312e19c551c3f0f9430369463b01a804a2cf",
+          "backend/src/services/ssh_service.rs": "23a43923e01c7fd63119ffc26506aae7d206fcc794dcd642191b5fc987a74400",
+          "machine/src/bootstrap.rs": "8009dbf45d88df140fa7771c7c74a51536d874c489f2f36e85f45e6c24e4a443"
+        },
+        "call_sites": [
+          "backend/src/crypto/jwt/key_material.rs:15 validated RSA import; :50 local key generation; request JWT provider backend/Cargo.toml aws_lc_rs",
+          "backend/src/services/ssh_service.rs:303 Ed25519 CA; RSA public parse only; ssh_ca_record_service.rs:16 validates stored key pair",
+          "machine/src/bootstrap.rs private operations are AWS-LC; rsa dev-only cross-provider tests"
+        ],
+        "manifest_files": {
+          "backend/Cargo.toml": "875b5d21ccd9ad56186c4b42b4d36532b06fa582c2e5349d415f53e2afface66",
+          "machine/Cargo.toml": "f54824f576c1b6b326768f6a4c96d9b3226dba3da369312d690cf23f766aa5d9"
+        }
+      },
+      "owner": "NyxID security maintainers",
+      "expires": "2026-11-19",
+      "rationale": "Public RSA parsing/JWKS and one-off development key generation accept no attacker-controlled private-operation input. Request-time JWT signing uses jsonwebtoken AWS-LC; backend SSH CA uses Ed25519. Machine bootstrap uses AWS-LC in production; RustCrypto remains solely for interoperability/malformed-key unit tests.",
+      "lock_subgraph_sha256": "5086076268fd769bc69a39ec1b165750841cd4792c99a70157975d4411bc979e"
+    },
+    {
+      "kind": "reviewed-rsa-uses",
+      "advisory": "RUSTSEC-2023-0071",
+      "package": "rsa",
+      "version": "0.10.0-rc.18",
+      "lock": "Cargo.lock",
+      "checksum": "30b2aa4ba0d89f73d1e332df05be0eeab8840351c36ca5654341dfdb57bb3caf",
+      "features": [
+        "default",
+        "encoding",
+        "sha2",
+        "std"
+      ],
+      "parents": [
+        "rsa@0.10.0-rc.18 <- russh@0.63.3[normal] <- nyxid-cli@workspace[normal]",
+        "rsa@0.10.0-rc.18 <- ssh-key@0.7.0-rc.11[normal] <- russh@0.63.3[normal] <- nyxid-cli@workspace[normal]"
+      ],
+      "uses": {
+        "scope": "pinned-owner-host-ssh-client-signing",
+        "source_files": {
+          "cli/src/node/ssh_node_exec.rs": "56fa572cdde62bf0bb6c6b4f5baeaa3a6c32374dd1a03bf42571d01326e43f79"
+        },
+        "call_sites": [
+          "cli/src/node/ssh_node_exec.rs:511-523 imported RSA SSH client auth; pinned owner-selected target sees signatures"
+        ],
+        "manifest_files": {}
+      },
+      "owner": "NyxID security maintainers",
+      "expires": "2026-11-19",
+      "rationale": "RSA client signatures are observed only by the pinned host selected by the owner; host_key_sha256 verification must precede authentication. Ed25519 is recommended. Imported RSA support remains available; no RustCrypto private decryption is authorized.",
+      "lock_subgraph_sha256": "218a380512f7582a73d29678a1df2efdfa29958d50ff75fe2b11f5ab4819d847"
+    },
+    {
+      "kind": "build-tooling-only",
+      "advisory": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "version": "3.0.3",
+      "lock": "mobile/pnpm-lock.yaml",
+      "integrity": "sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA==",
+      "parents": [
+        "braces@3.0.3 <- micromatch@4.0.8 <- @jest/transform@29.7.0",
+        "braces@3.0.3 <- micromatch@4.0.8 <- jest-haste-map@29.7.0",
+        "braces@3.0.3 <- micromatch@4.0.8 <- jest-message-util@29.7.0",
+        "braces@3.0.3 <- micromatch@4.0.8 <- metro-file-map@0.83.5",
+        "braces@3.0.3 <- micromatch@4.0.8 <- metro-file-map@0.84.2"
+      ],
+      "bundle_checker_sha256": "887f662e9605675f738fba9e1445a3a1f57048e4696b9c2adfe72df048728f23",
+      "owner": "NyxID security maintainers",
+      "expires": "2026-11-19",
+      "rationale": "Only pinned Metro file-map and Jest consumers process repository-authored build glob configuration. Production iOS export and complete source-map inspection must prove braces/micromatch absent. New parents, runtime inclusion, changed lock, missing bundle evidence, expiry or a new upstream release fail the disposition.",
+      "lock_subgraph_sha256": "6f791c8a370dd75c6eb66bdf9d86ef247a5ed4381ba0b2ddad76ed51d6c89248"
+    }
+  ]
+}

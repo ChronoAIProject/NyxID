@@ -102,9 +102,12 @@ def transport(dist):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     runtime = parser.add_mutually_exclusive_group(required=True)
-    runtime.add_argument("--nginx", help="native nginx executable (recorded separately from production 1.27)")
+    runtime.add_argument("--nginx", help="native nginx executable (recorded separately from production 1.30)")
     runtime.add_argument("--frontend-image", help="actual built frontend image; Linux Docker host network, no bind mounts")
     parser.add_argument("--mime-types", type=Path, help="required for native nginx")
+    parser.add_argument("--dist-dir", type=Path, help="local build for native serving or independent image comparison; defaults to frontend/dist")
+    parser.add_argument("--use-image-dist", action="store_true",
+                        help="test actual image bytes even if independent local build differs; records comparison, does not establish reproducibility")
     parser.add_argument("--evidence-dir", type=Path, required=True)
     parser.add_argument("--port", type=int, default=18089)
     parser.add_argument("--upstream-port", type=int, default=18489)
@@ -114,28 +117,41 @@ def main():
     if args.connect_origins is None:
         args.connect_origins = f"https://api.nyxid.example http://127.0.0.1:{args.upstream_port}"
     frontend = Path(__file__).resolve().parents[1]
-    dist = frontend / "dist"
+    dist = (args.dist_dir or frontend / "dist").resolve()
+    if args.use_image_dist and not args.frontend_image:
+        parser.error("--use-image-dist requires --frontend-image")
     output = args.evidence_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     container_name = "nyxid-policy-" + uuid.uuid4().hex[:12]
     container_log = None
     if args.frontend_image:
-        # Inspect the actual shipped files, not a separately rebuilt page. The
-        # same tests find asset names in local dist, so enforce byte parity.
+        # Record independent build parity separately from policy acceptance of
+        # the shipped bytes. Never turn an image extraction into parity proof.
         subprocess.run(["docker", "create", "--name", container_name, args.frontend_image], check=True, capture_output=True)
         try:
             image_dist = output / "image-dist"
-            image_dist.mkdir(exist_ok=True)
+            image_dist.mkdir(exist_ok=False)
             subprocess.run(["docker", "cp", container_name + ":/usr/share/nginx/html/.", str(image_dist)], check=True)
             expected = {str(p.relative_to(dist)): hashlib.sha256(p.read_bytes()).hexdigest()
                         for p in dist.rglob("*") if p.is_file()}
             actual = {str(p.relative_to(image_dist)): hashlib.sha256(p.read_bytes()).hexdigest()
                       for p in image_dist.rglob("*") if p.is_file()}
-            if actual != expected:
-                raise ValueError("actual frontend image dist differs from the production test build")
+            comparison = {"matches": actual == expected,
+                          "local_dist": str(dist), "image_dist": str(image_dist),
+                          "missing_in_image": sorted(expected.keys() - actual.keys()),
+                          "extra_in_image": sorted(actual.keys() - expected.keys()),
+                          "different": sorted(name for name in actual.keys() & expected.keys()
+                                              if actual[name] != expected[name]),
+                          "policy_dist": "image" if args.use_image_dist else "local"}
+            (output / "dist-comparison.json").write_text(json.dumps(comparison, indent=2) + "\n")
             (output / "image-dist-sha256.json").write_text(json.dumps(actual, sort_keys=True, indent=2) + "\n")
             subprocess.run(["docker", "image", "inspect", args.frontend_image], check=True,
                            stdout=(output / "image-inspect.json").open("w"))
+            if args.use_image_dist:
+                dist = image_dist
+            elif actual != expected:
+                raise ValueError("actual frontend image dist differs from the independent local build; "
+                                 "see dist-comparison.json; --use-image-dist tests shipped policy without claiming parity")
         finally:
             subprocess.run(["docker", "rm", container_name], check=True, capture_output=True)
     spec = importlib.util.spec_from_file_location("policy", frontend / "scripts/render-nginx.py")
@@ -151,8 +167,8 @@ def main():
     if args.frontend_image:
         version = subprocess.run(["docker", "run", "--rm", "--entrypoint", "nginx", args.frontend_image, "-v"],
                                  capture_output=True, text=True, check=True)
-        if "nginx/1.27." not in version.stderr + version.stdout:
-            raise ValueError("production matrix requires actual nginx 1.27")
+        if "nginx/1.30." not in version.stderr + version.stdout:
+            raise ValueError("production matrix requires actual nginx 1.30")
         container_log = (output / "access.log").open("w")
         command = ["docker", "run", "--rm", "--name", container_name, "--network", "host", "--read-only",
                    "--tmpfs", "/tmp", "--tmpfs", "/etc/nginx/nyxid/generated:uid=101,gid=101,mode=0700",
@@ -198,7 +214,8 @@ def main():
                 time.sleep(0.1)
         else:
             raise RuntimeError("nginx readiness deadline exceeded")
-        print(f"production dist ready http://127.0.0.1:{args.port}; {version.stderr.strip()}", flush=True)
+        print(f"production dist ready http://127.0.0.1:{args.port}; {version.stderr.strip()}; "
+              f"NYXID_PRODUCTION_DIST={dist}", flush=True)
         process.wait()
     finally:
         stop() if process.poll() is None else None

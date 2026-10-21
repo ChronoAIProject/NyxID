@@ -14,12 +14,7 @@
 #     nyxid-node
 
 # -- Stage 1: Build --------------------------------------------------------
-FROM rust:1.93-bookworm AS builder
-
-# libdbus-1-dev is required at compile time by the keyring crate
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends pkg-config libdbus-1-dev \
-    && rm -rf /var/lib/apt/lists/*
+FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
 
 WORKDIR /build
 
@@ -27,7 +22,13 @@ WORKDIR /build
 # `cloud-auth/` (NyxID#716) and `nyxid-crypto/` (NyxID#773) are workspace
 # members depended on by the node agent via `cli/Cargo.toml`; missing
 # either makes the workspace refuse to resolve.
+COPY scripts/bootstrap-build-tool.py /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py
+COPY security/build-tools.json /opt/nyxid-build-inputs/security/build-tools.json
+RUN python3 /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py cargo-auditable --bin-dir /usr/local/cargo/bin
+
 COPY Cargo.toml Cargo.lock ./
+COPY build-support/ build-support/
+COPY vendor/ vendor/
 COPY backend/ backend/
 COPY cli/ cli/
 COPY cloud-auth/ cloud-auth/
@@ -40,28 +41,28 @@ COPY machine-updater/ machine-updater/
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 
 # Build only the CLI binary (includes node agent subcommand)
-RUN cargo build --release -p nyxid-cli
+ARG NYXID_GIT_HASH
+ARG SOURCE_DATE_EPOCH
+ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+RUN cargo auditable build --locked --release -p nyxid-cli
 
-# -- Stage 2: Runtime -------------------------------------------------------
-FROM debian:bookworm-slim
+# -- Stage 2: Snapshot-bound runtime package export -------------------------
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime-inputs
+COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem security/apt-transport-ca.tsv scripts/apt-transport-ca.awk /opt/nyxid-apt/
+RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv debian:bookworm -- python3 libc6 libgcc-s1 base-files netbase tzdata ca-certificates
+COPY scripts/export-node-rootfs.py /opt/nyxid-rootfs/export-node-rootfs.py
+RUN python3 /opt/nyxid-rootfs/export-node-rootfs.py --destination /rootfs
 
-# Only ca-certificates needed at runtime. No libdbus -- keychain is not
-# usable in Docker (no secret-service daemon). Node agent uses the file
-# backend (AES-GCM encrypted) which has no runtime dependencies.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-# Copy the compiled CLI binary and entrypoint
+# -- Stage 3: Minimal runtime ----------------------------------------------
+FROM scratch
+ARG NYXID_GIT_HASH
+ARG SOURCE_DATE_EPOCH
+LABEL org.opencontainers.image.revision=${NYXID_GIT_HASH} \
+      io.nyxid.source-date-epoch=${SOURCE_DATE_EPOCH}
+COPY --from=runtime-inputs /rootfs/ /
 COPY --from=builder /build/target/release/nyxid /usr/local/bin/nyxid
-COPY cli/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-
-# Config directory: mount a volume here at runtime.
-# The container must be run with --user "$(id -u):$(id -g)" so it can
-# read/write host-mounted config files (written with mode 0600 by the CLI).
-RUN mkdir -p /app/config
-
-# No ports exposed -- node agent initiates outbound WebSocket connections.
-ENTRYPOINT ["docker-entrypoint.sh"]
+WORKDIR /app
+# Mount existing file-backed config. Match the host volume owner with --user.
+# Registration and startup use the Rust CLI; no shell or DBus library ships.
+ENTRYPOINT ["/usr/local/bin/nyxid", "node", "docker-entrypoint"]

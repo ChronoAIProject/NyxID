@@ -1,4 +1,4 @@
-FROM rust:1.98.1-slim-bookworm AS builder
+FROM rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS builder
 RUN rustup component add clippy
 WORKDIR /build
 COPY cli/tests/machine_context_spike/Cargo.toml cli/tests/machine_context_spike/Cargo.lock cli/tests/machine_context_spike/
@@ -13,8 +13,8 @@ FROM scratch AS artifact
 COPY --from=builder /build/cli/tests/machine_context_spike/target/debug/nyxid-machine-context-spike /nyxid-context-spike
 
 FROM ghcr.io/chronoaiproject/nyxid/nyxid-node-machine@sha256:2f1fe82573fa86f99c3cca219be33ab846f17a7374cc40bcf51e2a56a1b4f7d4 AS spike
-RUN apt-get update && apt-get install -y --no-install-recommends cargo python3-pip python3-venv \
-    && rm -rf /var/lib/apt/lists/*
+COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem security/apt-transport-ca.tsv scripts/apt-transport-ca.awk /opt/nyxid-apt/
+RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv ubuntu:noble debian:bookworm -- cargo python3-pip python3-venv
 COPY --from=builder /build/cli/tests/machine_context_spike/target/debug/nyxid-machine-context-spike /usr/local/bin/nyxid-context-spike
 COPY cli/tests/machine_context_spike/check.py /opt/m13/check.py
 ENTRYPOINT ["python3", "/opt/m13/check.py"]

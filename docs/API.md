@@ -1115,7 +1115,7 @@ List all API keys for the authenticated user. The full key value is never return
     {
       "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       "name": "Production API Key",
-      "key_prefix": "nyx_k_a1b2c3d4",
+      "key_prefix": "<api_key_prefix>",
       "scopes": "read write",
       "last_used_at": "2025-06-01T14:22:00+00:00",
       "expires_at": null,
@@ -1187,7 +1187,7 @@ Scoped key:
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "name": "Production API Key",
   "key_prefix": "nyx_k_a1b2c3d4",
-  "full_key": "nyx_k_a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef12345678",
+  "full_key": "<new_api_key_returned_once>",
   "scopes": "read write",
   "created_at": "2025-06-01T10:00:00+00:00",
   "expires_at": null
@@ -1259,7 +1259,7 @@ Rotate an API key: deactivate the existing key and create a new one with the sam
   "id": "new-uuid-here",
   "name": "Production API Key",
   "key_prefix": "nyx_k_b2c3d4e5",
-  "full_key": "nyx_k_b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef12345678ab",
+  "full_key": "<rotated_api_key_returned_once>",
   "scopes": "read write",
   "created_at": "2025-06-02T10:00:00+00:00",
   "expires_at": null
@@ -2312,7 +2312,7 @@ Connect the authenticated user to a downstream service. For `connection` categor
 curl -X POST http://localhost:3001/api/v1/connections/d1e2f3a4-b5c6-7890-1234-567890abcdef \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
-  -d '{"credential": "sk-live-abc123", "credential_label": "Production Key"}'
+  -d '{"credential": "<your_service_credential>", "credential_label": "Production Key"}'
 
 # Connect to an "internal" service (no credential)
 curl -X POST http://localhost:3001/api/v1/connections/a1b2c3d4-e5f6-7890-1234-567890abcdef \
@@ -3096,7 +3096,7 @@ Connect to an API key provider by submitting the key. The key is encrypted with 
 curl -X POST http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890/connect/api-key \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
-  -d '{"api_key": "sk-proj-abc123", "label": "My OpenAI Key"}'
+  -d '{"api_key": "<your_provider_api_key>", "label": "My OpenAI Key"}'
 ```
 
 ---

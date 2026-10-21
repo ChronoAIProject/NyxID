@@ -1010,5 +1010,6 @@ mod tests {
                 .unwrap()
                 .all_denied()
         );
+        println!("native_linux_custody: completed cross-UID file and Secret Service checks");
     }
 }

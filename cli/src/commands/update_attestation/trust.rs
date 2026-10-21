@@ -258,13 +258,7 @@ pub(super) async fn load_github(
 struct GithubTransport(CliTransport);
 #[tough::async_trait]
 impl Transport for GithubTransport {
-    async fn fetch(
-        &self,
-        mut url: url::Url,
-    ) -> Result<
-        futures::stream::BoxStream<'static, Result<tough::Bytes, TransportError>>,
-        TransportError,
-    > {
+    async fn fetch(&self, mut url: url::Url) -> Result<tough::TransportStream, TransportError> {
         // The Git mirror stores versioned roots in root_history and current
         // metadata/targets without consistent-snapshot prefixes. tough still
         // checks every version, length, hash, expiry and signature.
@@ -314,13 +308,7 @@ struct CliTransport(reqwest::Client);
 
 #[tough::async_trait]
 impl Transport for CliTransport {
-    async fn fetch(
-        &self,
-        url: url::Url,
-    ) -> Result<
-        futures::stream::BoxStream<'static, Result<tough::Bytes, TransportError>>,
-        TransportError,
-    > {
+    async fn fetch(&self, url: url::Url) -> Result<tough::TransportStream, TransportError> {
         let mut download = Download {
             client: self.0.clone(),
             url,
@@ -362,7 +350,9 @@ impl Transport for CliTransport {
 struct Download {
     client: reqwest::Client,
     url: url::Url,
-    stream: Option<futures::stream::BoxStream<'static, reqwest::Result<tough::Bytes>>>,
+    stream: Option<
+        std::pin::Pin<Box<dyn futures::Stream<Item = reqwest::Result<tough::Bytes>> + Send + Sync>>,
+    >,
     next_byte: usize,
     accepts_ranges: bool,
     retries: u32,

@@ -11,8 +11,13 @@ mod trusted_directory;
 #[path = "../../cli/src/commands/update_attestation.rs"]
 mod update_attestation;
 
+mod build_identity {
+    include!(concat!(env!("OUT_DIR"), "/nyxid_build_identity.rs"));
+}
+
 #[tokio::main]
 async fn main() {
+    build_identity::retain();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let root = nyxid_machine::update::UPDATE_VOLUME.into();

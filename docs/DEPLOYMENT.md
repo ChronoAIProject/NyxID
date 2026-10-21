@@ -135,13 +135,19 @@ Production Dockerfiles are provided for both backend and frontend with multi-sta
 ### Building Images
 
 ```bash
-# Build backend (context is the repo root for workspace Cargo.toml)
-docker build -f backend/Dockerfile -t nyxid-backend .
+# Build backend from a verified export of the exact clean committed tree
+python3 scripts/build-local-image.py --file backend/Dockerfile --tag nyxid-backend
 
-# Build frontend (context is the repo root so the build can read docs/site,
-# the source for the in-app docs pages)
-docker build -f frontend/Dockerfile -t nyxid-frontend .
+# Build frontend, including the committed docs/site source
+python3 scripts/build-local-image.py --file frontend/Dockerfile --tag nyxid-frontend
 ```
+
+The wrapper refuses tracked edits and untracked source inputs, exports raw
+committed bytes without Git archive transformations, and passes the full commit
+and commit epoch to Docker. It verifies source before and after the build and
+prints the retained export/receipt directory. Commit intended image inputs
+before invoking it. Native Cargo builds support local investigation and retain
+an explicit `git-unverified` or `git-dirty` identity.
 
 The **backend Dockerfile** (`backend/Dockerfile`) builds the Rust binary and a
 separate Node 22.23.2 credential-accept bundle. Its Debian runtime runs as

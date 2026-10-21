@@ -9,7 +9,7 @@ Images on main and tags fail with `startup_failure`. Check it on PRs instead.
 import sys
 from pathlib import Path
 
-import yaml
+from workflow_yaml import load_unique
 
 LEVELS = {"none": 0, "read": 1, "write": 2}
 WORKFLOWS = Path(".github/workflows")
@@ -31,11 +31,28 @@ def permissions(block, where):
     return result
 
 
+def validate_permission_scopes(workflow):
+    """Every job must have an explicit scope, directly or at workflow level."""
+    failures = []
+    workflow_grant = permissions(workflow.get('permissions'), 'workflow')
+    for name, job in (workflow.get('jobs') or {}).items():
+        grant = permissions(job.get('permissions'), name)
+        if grant is None and workflow_grant is None:
+            failures.append(f'{name}: missing explicit permissions at job or workflow level')
+        effective = grant if grant is not None else (workflow_grant or {})
+        if any(step.get('uses', '').startswith('dorny/paths-filter@') and
+               step.get('with', {}).get('token') != '' for step in job.get('steps', [])) and \
+                effective.get('pull-requests', 0) < LEVELS['read']:
+            failures.append(f'{name}: paths-filter requires pull-requests: read for PR file lists')
+    return failures
+
+
 def main():
     failures = []
     callers = 0
-    for caller_path in sorted(WORKFLOWS.glob("*.yml")):
-        caller = yaml.safe_load(caller_path.read_text())
+    for caller_path in sorted(path for path in WORKFLOWS.iterdir() if path.suffix in (".yml", ".yaml")):
+        caller = load_unique(caller_path.read_text())
+        failures.extend(f'{caller_path}:{failure}' for failure in validate_permission_scopes(caller))
         workflow_grant = permissions(caller.get("permissions"), caller_path)
         for job_name, job in (caller.get("jobs") or {}).items():
             uses = job.get("uses", "")
@@ -50,7 +67,7 @@ def main():
                 # Inheriting the repository default is not checkable here.
                 continue
             called_path = Path(uses.removeprefix("./"))
-            called = yaml.safe_load(called_path.read_text())
+            called = load_unique(called_path.read_text())
             requests = [(f"{called_path} (workflow)", called.get("permissions"))]
             requests += [
                 (f"{called_path}:{name}", nested.get("permissions"))

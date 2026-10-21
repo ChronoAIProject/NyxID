@@ -1,0 +1,665 @@
+name: Artifact Packaging
+
+on:
+  workflow_call:
+  schedule:
+    - cron: '13 5 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: Artifact Packaging Policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: python3 scripts/test-credential-packaging.py
+      - run: python3 scripts/test-source-artifacts.py
+      - run: python3 scripts/test-elf-runtime.py
+      - run: python3 scripts/test-node-rootfs.py
+      - run: python3 scripts/test-native-secret-service-runner.py
+      - run: python3 scripts/test-backend-health-runner.py
+      - run: python3 scripts/test-image-dispositions.py
+      - run: python3 scripts/test-image-runtime.py
+      - run: python3 scripts/test-image-entrypoint-dispatch.py
+      - run: python3 scripts/test-build-local-image.py
+      - run: python3 scripts/test-built-image-csp.py
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - run: node --experimental-strip-types --test frontend/scripts/test-source-identity.mjs
+      - name: Test locked local WSS registration fixture
+        run: |
+          npm ci --ignore-scripts --prefix cli/tests/updater-npm
+          node --test scripts/test-machine-docker-fixture.mjs
+          python3 scripts/test-machine-docker-cli.py
+      - name: Check required PR and publication gate wiring
+        run: |
+          python3 -m venv "$RUNNER_TEMP/packaging-policy"
+          "$RUNNER_TEMP/packaging-policy/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
+          "$RUNNER_TEMP/packaging-policy/bin/python" scripts/test-packaging-workflows.py
+
+  scan-freshness:
+    name: Image Scan Catalog Freshness
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Require current APT, APK and transport CA catalogs for scheduled image scans
+        run: python3 scripts/check-build-input-freshness.py
+
+  credentials:
+    name: Backend Credential Packaging (${{ matrix.arch }})
+    needs: policy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - name: Install hash-locked offline SBOM validator and pinned Syft
+        run: sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+      - name: Export exact committed image inputs
+        id: source
+        run: |
+          commit=$(git rev-parse HEAD)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/image-source" --commit "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Prepare backend image memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: cargo, rustc, rust-std, clippy, rustfmt
+      - name: Build locked final executable inspector
+        run: CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
+      - name: Build actual backend runtime image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/backend/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          push: false
+          tags: nyxid-credential-backend:ci
+          provenance: false
+          cache-from: |
+            type=gha,scope=backend-pr-linux-${{ matrix.arch }}
+            type=gha,scope=backend-linux-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=backend-pr-linux-${{ matrix.arch }}
+      - name: Build actual frontend runtime image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/frontend/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          push: false
+          tags: nyxid-credential-frontend:ci
+          provenance: false
+          cache-from: type=gha,scope=frontend-pr-linux-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=frontend-pr-linux-${{ matrix.arch }}
+      - name: Require image-extracted manifest, fingerprint, SOURCE_COMMIT and complete byte parity
+        run: |
+          python3 scripts/check-credential-image.py --image nyxid-credential-backend:ci --component backend \
+            --compare-image nyxid-credential-frontend:ci --source-root "$RUNNER_TEMP/image-source/source" \
+            --commit '${{ steps.source.outputs.commit }}' --epoch '${{ steps.source.outputs.epoch }}'
+      - name: Require final backend/frontend identity and executable entrypoint smoke checks
+        run: |
+          for component in backend frontend; do
+            python3 scripts/check-image-identity.py --image "nyxid-credential-$component:ci" --component "$component" \
+              --arch '${{ matrix.arch }}' --source-root "$RUNNER_TEMP/image-source/source" \
+              --commit '${{ steps.source.outputs.commit }}' --epoch '${{ steps.source.outputs.epoch }}' \
+              --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
+          done
+      - name: Require shell-free health check against the final running backend
+        run: |
+          bash .github/scripts/start-test-mongodb.sh
+          python3 scripts/check-backend-health.py --image nyxid-credential-backend:ci \
+            --database-url 'mongodb://127.0.0.1:27017/nyxid_health?replicaSet=rs0&directConnection=true'
+      - name: Install checksummed actual image vulnerability tools
+        run: |
+          python3 scripts/bootstrap-build-tool.py trivy --bin-dir "$RUNNER_TEMP/scan-tools"
+          python3 scripts/bootstrap-build-tool.py regctl --bin-dir "$RUNNER_TEMP/scan-tools"
+      - name: Scan actual backend and frontend runtime bytes without publication
+        run: |
+          failed=0
+          for component in backend frontend; do
+            if python3 scripts/check-image-vulnerabilities.py --image "nyxid-credential-$component:ci" \
+              --component "$component" --platform 'linux/${{ matrix.arch }}' --commit '${{ steps.source.outputs.commit }}' \
+              --trivy "$RUNNER_TEMP/scan-tools/trivy" --regctl "$RUNNER_TEMP/scan-tools/regctl" \
+              --stage "$RUNNER_TEMP/image-scans/$component"; then
+              :
+            else
+              failed=1
+            fi
+          done
+          exit "$failed"
+      - name: Require final runtime filesystem, executable and frontend composition SBOMs
+        run: |
+          for component in backend frontend; do
+            "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-sbom.py \
+              --stage "$RUNNER_TEMP/image-scans/$component" --source-root "$RUNNER_TEMP/image-source/source" \
+              --epoch '${{ steps.source.outputs.epoch }}' --syft "$RUNNER_TEMP/sbom-tools/bin/syft" \
+              --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
+          done
+      - name: Preserve verified actual runtime SBOM evidence without publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-image-sbom-runtime-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/image-scans/backend/sbom/
+            ${{ runner.temp }}/image-scans/frontend/sbom/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve actual runtime vulnerability reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-image-scans-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/image-scans/*/trivy.json
+            ${{ runner.temp }}/image-scans/*/image-scan.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Verify exported image inputs after build and extraction
+        if: ${{ always() && steps.source.outcome == 'success' }}
+        run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit '${{ steps.source.outputs.commit }}'
+
+  worklet:
+    name: Built Image Worklet CSP (${{ matrix.arch }})
+    needs: policy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Export exact committed image and browser-test inputs
+        id: source
+        run: |
+          commit=$(git rev-parse HEAD)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/image-source" --commit "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build actual shipped frontend runtime
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/frontend/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          push: false
+          tags: nyxid-worklet-frontend:ci
+          provenance: false
+          cache-from: type=gha,scope=frontend-pr-linux-${{ matrix.arch }}
+      - name: Build locked tests with digest-pinned native browsers
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/frontend/Dockerfile.policy-tests
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          push: false
+          tags: nyxid-worklet-browser:ci
+          provenance: false
+          cache-from: type=gha,scope=policy-browser-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=policy-browser-${{ matrix.arch }}
+      - name: Require complete production browser suite through packaged default startup
+        run: |
+          python3 scripts/check-built-image-csp.py --image nyxid-worklet-frontend:ci --browser-image nyxid-worklet-browser:ci \
+            --source-root "$RUNNER_TEMP/image-source/source" --output "$RUNNER_TEMP/built-image-csp" \
+            --arch '${{ matrix.arch }}' --commit '${{ steps.source.outputs.commit }}' --epoch '${{ steps.source.outputs.epoch }}'
+      - name: Verify source after image builds and browser tests
+        if: ${{ always() && steps.source.outcome == 'success' }}
+        run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit '${{ steps.source.outputs.commit }}'
+      - name: Preserve Playwright result and failure traces
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: built-image-csp-${{ matrix.arch }}
+          path: ${{ runner.temp }}/built-image-csp/browser
+          if-no-files-found: error
+          retention-days: 7
+
+  docker-cli:
+    name: Machine Docker CLI E2E
+    needs: policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Export exact committed machine image inputs
+        id: source
+        run: |
+          commit=$(git rev-parse HEAD)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/image-source" --commit "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build actual machine desktop image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/cli/Dockerfile.machine
+          platforms: linux/amd64
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          push: false
+          tags: nyxid-docker-cli-machine:ci
+          provenance: false
+          cache-from: type=gha,scope=machine-pr
+          cache-to: type=gha,mode=max,scope=machine-pr
+      - name: Build actual node-only machine image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/cli/Dockerfile.machine-node-only
+          platforms: linux/amd64
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          push: false
+          tags: nyxid-docker-cli-node-only:ci
+          provenance: false
+          cache-from: type=gha,scope=identity-machine-node-only-amd64
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - name: Install existing locked local WSS transport without hooks
+        run: npm ci --ignore-scripts --prefix cli/tests/updater-npm
+      - name: Require actual CLI capability refusal, registration, persistence and probe cleanup
+        run: |
+          python3 scripts/check-machine-docker-cli.py --machine-image nyxid-docker-cli-machine:ci \
+            --node-only-image nyxid-docker-cli-node-only:ci
+      - name: Verify source after actual Docker engine exercises
+        if: ${{ always() && steps.source.outcome == 'success' }}
+        run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit '${{ steps.source.outputs.commit }}'
+
+  images:
+    name: Shipped Image Identity (${{ matrix.component }}, ${{ matrix.arch }})
+    needs: policy
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        component: [node-agent, nyxid-node-machine, nyxid-machine-updater, machine-node-only, machine-hosted-desktop, mcp-demo]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - component: node-agent
+            file: cli/Dockerfile.node
+          - component: nyxid-node-machine
+            file: cli/Dockerfile.machine
+          - component: nyxid-machine-updater
+            file: cli/Dockerfile.machine-updater
+            target: production
+          - component: machine-node-only
+            file: cli/Dockerfile.machine-node-only
+          - component: machine-hosted-desktop
+            file: cli/Dockerfile.machine-hosted
+            target: desktop
+          - component: mcp-demo
+            file: Dockerfile.glama
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - name: Install hash-locked offline SBOM validator and pinned Syft
+        run: sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+      - name: Export exact committed image inputs
+        id: source
+        run: |
+          commit=$(git rev-parse HEAD)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/image-source" --commit "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: cargo, rustc, rust-std, clippy, rustfmt
+      - name: Build locked final executable inspector
+        run: CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build actual final application image without publication or private inputs
+        if: matrix.component != 'machine-hosted-desktop'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/${{ matrix.file }}
+          target: ${{ matrix.target || '' }}
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          push: false
+          tags: nyxid-identity:ci
+          provenance: false
+          cache-from: type=gha,scope=identity-${{ matrix.component }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=identity-${{ matrix.component }}-${{ matrix.arch }}
+      - name: Exercise mandatory operator check before tagging the public hosted desktop
+        if: matrix.component == 'machine-hosted-desktop'
+        run: |
+          python3 scripts/build-local-image.py --file cli/Dockerfile.machine-hosted --target desktop \
+            --platform 'linux/${{ matrix.arch }}' --tag nyxid-identity:ci --destination "$RUNNER_TEMP/operator-image-source"
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          receipt = json.loads((Path(os.environ['RUNNER_TEMP']) / 'operator-image-source/image-build-execution.json').read_text())
+          assert receipt['exit_code'] == 0 and receipt['post_build_source_verified'] is True
+          assert receipt['identity_check']['status'] == 'passed' and receipt['identity_check']['exit_code'] == 0
+          assert receipt['vulnerability_check']['status'] == 'passed'
+          assert receipt['sbom_check']['status'] == 'passed' and receipt['sbom_check']['exit_code'] == 0
+          assert receipt['vulnerability_check']['exit_code'] == 0
+          assert receipt['image']['component'] == 'machine-hosted-desktop' and receipt['image']['tagged'] is True
+          actual = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', 'nyxid-identity:ci'], text=True).strip()
+          assert actual == receipt['image']['id'], 'tag differs from the identity-checked image ID'
+          PY
+      - name: Require actual final executable identity and image platform/revision/epoch
+        run: |
+          python3 scripts/check-image-identity.py --image nyxid-identity:ci --component '${{ matrix.component }}' \
+            --arch '${{ matrix.arch }}' --source-root "$RUNNER_TEMP/image-source/source" \
+            --commit '${{ steps.source.outputs.commit }}' --epoch '${{ steps.source.outputs.epoch }}' \
+            --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
+      - name: Install checksummed final image vulnerability tools
+        run: |
+          python3 scripts/bootstrap-build-tool.py trivy --bin-dir "$RUNNER_TEMP/scan-tools"
+          python3 scripts/bootstrap-build-tool.py regctl --bin-dir "$RUNNER_TEMP/scan-tools"
+      - name: Scan actual final application image bytes without publication
+        run: |
+          python3 scripts/check-image-vulnerabilities.py --image nyxid-identity:ci \
+            --component '${{ matrix.component }}' --platform 'linux/${{ matrix.arch }}' \
+            --commit '${{ steps.source.outputs.commit }}' --trivy "$RUNNER_TEMP/scan-tools/trivy" \
+            --regctl "$RUNNER_TEMP/scan-tools/regctl" --stage "$RUNNER_TEMP/image-scan"
+      - name: Require actual application filesystem and final executable SBOM
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-sbom.py \
+            --stage "$RUNNER_TEMP/image-scan" --source-root "$RUNNER_TEMP/image-source/source" \
+            --epoch '${{ steps.source.outputs.epoch }}' --syft "$RUNNER_TEMP/sbom-tools/bin/syft" \
+            --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
+      - name: Preserve application SBOM evidence and conversion diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ contains(fromJSON('["node-agent","nyxid-node-machine","nyxid-machine-updater"]'), matrix.component) && 'pr-image-sbom' || 'pr-auxiliary-sbom' }}-${{ matrix.component }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/image-scan/sbom/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve actual application image vulnerability report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: application-image-scan-${{ matrix.component }}-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/image-scan/trivy.json
+            ${{ runner.temp }}/image-scan/image-scan.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Verify exported source after build and extraction
+        if: ${{ always() && steps.source.outcome == 'success' }}
+        run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit '${{ steps.source.outputs.commit }}'
+
+  archives:
+    name: CLI Archive Identity (${{ matrix.target }})
+    needs: policy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            container: buildpack-deps:focal@sha256:2de32588f72f63229c83e3f08529cc15db231b2d95412ab4c30ad49d7cd99591
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || null }}
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install reviewed release dependencies
+        run: sh scripts/install-release-dependencies.sh
+      - name: Install checksummed Rust bootstrap in container
+        if: ${{ matrix.container }}
+        run: |
+          python3 scripts/bootstrap-build-tool.py rustup --bin-dir "$HOME/.cargo/bin"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        if: ${{ !matrix.container }}
+        with:
+          components: cargo, rustc, rust-std, clippy, rustfmt
+          targets: ${{ matrix.target }}
+      - name: Install checksummed packaging tools
+        run: |
+          python3 scripts/bootstrap-build-tool.py cargo-dist --bin-dir "$HOME/.cargo/bin"
+          python3 scripts/bootstrap-build-tool.py cargo-auditable --bin-dir "$HOME/.cargo/bin"
+      - name: Export exact committed CLI inputs
+        id: source
+        run: |
+          commit=$(python3 scripts/export-build-source.py head)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/cli-source" --commit "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - name: Require the macOS SDK used by the locked Metal bridge
+        if: contains(matrix.target, 'apple-darwin')
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          version = subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-version'], text=True).strip()
+          if int(version.split('.')[0]) < 26:
+              raise SystemExit('The locked apple-metal Swift bridge requires macOS SDK 26 or newer; found ' + version)
+          print('macOS SDK ' + version)
+          PY
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: dist-${{ matrix.target }}
+          workspaces: ${{ runner.temp }}/cli-source/source -> target
+      - name: Build and validate the real release plan and stripped CLI archive
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [ "$TARGET" = aarch64-unknown-linux-gnu ]; then export CC=clang CXX=clang++; fi
+          python3 scripts/run-exported-build.py --export "$RUNNER_TEMP/cli-source" \
+            --commit '${{ steps.source.outputs.commit }}' --receipt "$RUNNER_TEMP/cli-plan-execution.json" \
+            --generated target -- dist plan --output-format=json > "$RUNNER_TEMP/cli-dist-plan.json"
+          python3 scripts/make-publication-plan.py cli --dist-plan "$RUNNER_TEMP/cli-dist-plan.json" --output "$RUNNER_TEMP/cli-publication-plan.json"
+          python3 scripts/run-dist-build.py --export "$RUNNER_TEMP/cli-source" --plan "$RUNNER_TEMP/cli-publication-plan.json" \
+            --mode local --target "$TARGET" --evidence "$RUNNER_TEMP/cli-build"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
+          python3 scripts/check-cli-archive-identity.py --plan "$RUNNER_TEMP/cli-publication-plan.json" \
+            --artifacts "$RUNNER_TEMP/cli-build/artifacts" --target "$TARGET" \
+            --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
+      - name: Preserve actual final CLI archive for native SBOM inspection
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-cli-archive-${{ matrix.target }}
+          path: ${{ runner.temp }}/cli-build/artifacts/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve complete expected CLI publication plan
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-cli-sbom-plan
+          path: ${{ runner.temp }}/cli-publication-plan.json
+          if-no-files-found: error
+          retention-days: 7
+
+  sbom-policy:
+    name: Shipped SBOM Policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+      - run: python3 scripts/bootstrap-build-tool.py regctl --bin-dir "$RUNNER_TEMP/sbom-tools/bin"
+      - name: Test real OCI filesystem replay, schema and negative closure/publication cases
+        env:
+          SYFT_BIN: ${{ runner.temp }}/sbom-tools/bin/syft
+          REGCTL_BIN: ${{ runner.temp }}/sbom-tools/bin/regctl
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/test-sbom-evidence.py
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/test_rust_binary_sbom.py
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/test_dist_artifacts.py
+      - name: Test required SBOM workflow gates and negative mutations
+        run: |
+          python3 -m venv "$RUNNER_TEMP/sbom-policy"
+          "$RUNNER_TEMP/sbom-policy/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
+          "$RUNNER_TEMP/sbom-policy/bin/python" scripts/test-sbom-workflows.py
+
+  image-sbom-closure:
+    name: Image SBOM Publication Closure
+    needs: [credentials, images, sbom-policy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+      - name: Install hash-locked workflow parser
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: pr-image-sbom-*
+          path: ${{ runner.temp }}/platform-sboms
+      - name: Require complete actual platform and index digest/composition closure without registry writes
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/make-publication-plan.py images --output "$RUNNER_TEMP/image-plan.json"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-publication-sboms.py set \
+            --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/platform-sboms" --output "$RUNNER_TEMP/index-sboms"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-publication-sboms.py closure \
+            --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/index-sboms"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-verified-index-sboms
+          path: ${{ runner.temp }}/index-sboms/
+          if-no-files-found: error
+          retention-days: 7
+
+  archive-sboms:
+    name: CLI Archive SBOM Composition
+    needs: [archives, sbom-policy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: cargo, rustc, rust-std, clippy, rustfmt
+      - run: sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: pr-cli-archive-*
+          path: ${{ runner.temp }}/cli-artifacts
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pr-cli-sbom-plan
+          path: ${{ runner.temp }}/cli-plan
+      - name: Require all four final stripped binaries, archive members and embedded wizard membership
+        run: |
+          commit=$(python3 scripts/export-build-source.py head)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/sbom-source" --commit "$commit"
+          CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-dist-artifacts.py \
+            --plan "$RUNNER_TEMP/cli-plan/cli-publication-plan.json" --artifacts "$RUNNER_TEMP/cli-artifacts" \
+            --evidence "$RUNNER_TEMP/archive-sboms" --source-root "$RUNNER_TEMP/sbom-source/source" \
+            --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info" --syft "$RUNNER_TEMP/sbom-tools/bin/syft"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-verified-cli-sboms
+          path: ${{ runner.temp }}/archive-sboms/
+          if-no-files-found: error
+          retention-days: 7
+
+  packaging-pass:
+    name: Artifact Packaging Passed
+    if: always()
+    needs: [policy, scan-freshness, credentials, worklet, docker-cli, images, archives, sbom-policy, image-sbom-closure, archive-sboms]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every packaging check
+        env:
+          SBOM_POLICY: ${{ needs.sbom-policy.result }}
+          IMAGE_SBOMS: ${{ needs.image-sbom-closure.result }}
+          ARCHIVE_SBOMS: ${{ needs.archive-sboms.result }}
+          FRESHNESS: ${{ needs.scan-freshness.result }}
+          POLICY: ${{ needs.policy.result }}
+          CREDENTIALS: ${{ needs.credentials.result }}
+          IMAGES: ${{ needs.images.result }}
+          ARCHIVES: ${{ needs.archives.result }}
+          WORKLET: ${{ needs.worklet.result }}
+          DOCKER_CLI: ${{ needs.docker-cli.result }}
+        run: |
+          test "$SBOM_POLICY" = success
+          test "$IMAGE_SBOMS" = success
+          test "$ARCHIVE_SBOMS" = success
+          test "$FRESHNESS" = success
+          test "$POLICY" = success
+          test "$CREDENTIALS" = success
+          test "$IMAGES" = success
+          test "$ARCHIVES" = success
+          test "$WORKLET" = success
+          test "$DOCKER_CLI" = success

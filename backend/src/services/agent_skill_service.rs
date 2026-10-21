@@ -653,7 +653,14 @@ fn package(bytes: &[u8]) -> AppResult<BTreeMap<String, Vec<u8>>> {
         let mut file = archive
             .by_index(i)
             .map_err(|_| invalid("Invalid skill ZIP entry"))?;
-        let name = file.name().trim_end_matches('/').to_owned();
+        // zip 9 falls back to CP437 even for an invalid UTF-8 flagged name.
+        // Skill paths require UTF-8, so reject those bytes before decoding.
+        std::str::from_utf8(file.name_raw()).map_err(|_| invalid("Invalid skill ZIP entry"))?;
+        let name = file
+            .name()
+            .map_err(|_| invalid("Invalid skill ZIP entry"))?
+            .trim_end_matches('/')
+            .to_owned();
         if !safe_path(&name) || file.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
             return Err(invalid("Unsafe skill ZIP path"));
         }
@@ -1020,6 +1027,35 @@ pub fn instructions(agent: &AssistantAgent) -> String {
 #[cfg(test)]
 #[path = "agent_skill_service_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod zip_filename_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn non_utf8_zip_entry_name_returns_sanitized_error_without_panicking() {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("SKILL.md", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"# Skill").unwrap();
+        let mut bytes = writer.finish().unwrap().into_inner();
+        // Mark both names as UTF-8, then make their first byte invalid. Entry
+        // contents, CRCs and directory offsets remain those of the valid ZIP.
+        for (signature, flags, name) in [(b"PK\x03\x04", 6, 30), (b"PK\x01\x02", 8, 46)] {
+            let offset = bytes.windows(4).position(|w| w == signature).unwrap();
+            bytes[offset + flags + 1] |= 0x08;
+            bytes[offset + name] = 0xff;
+        }
+        let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+        assert!(std::str::from_utf8(archive.by_index(0).unwrap().name_raw()).is_err());
+        assert!(matches!(
+            package(&bytes),
+            Err(AppError::ValidationError(message)) if message == "Invalid skill ZIP entry"
+        ));
+    }
+}
 
 /// Audit events that make up an agent's skill history.
 pub const HISTORY_EVENTS: [&str; 7] = [

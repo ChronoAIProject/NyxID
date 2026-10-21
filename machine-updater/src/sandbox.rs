@@ -3836,7 +3836,10 @@ mod tests {
         let server = MockServer::start().await;
         let directory = tempfile::tempdir().unwrap();
         let token_path = directory.path().join("manager-token");
-        std::fs::write(&token_path, "first-projected-token").unwrap();
+        crate::kubernetes_credentials::write_private_token_fixture(
+            &token_path,
+            "first-projected-token",
+        );
         let api = SandboxApi::with_token_file_client(
             server.uri().parse().unwrap(),
             token_path.clone(),
@@ -3855,7 +3858,10 @@ mod tests {
             .await;
         api.health().await.unwrap();
         let replacement = directory.path().join("replacement-token");
-        std::fs::write(&replacement, "second-projected-token\n").unwrap();
+        crate::kubernetes_credentials::write_private_token_fixture(
+            &replacement,
+            "second-projected-token\n",
+        );
         std::fs::rename(&replacement, &token_path).unwrap();
         Mock::given(method("GET"))
             .and(path("/apis/agents.x-k8s.io/v1beta1"))

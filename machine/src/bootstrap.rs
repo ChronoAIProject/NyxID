@@ -13,13 +13,15 @@
 
 use crate::managed;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, Tag, aead::AeadInPlace};
+use aws_lc_rs::{
+    encoding::{AsDer, Pkcs8V1Der, PublicKeyX509Der},
+    rsa::{
+        KeySize, OAEP_SHA256_MGF1SHA256, OaepPrivateDecryptingKey, OaepPublicEncryptingKey,
+        PrivateDecryptingKey, PublicEncryptingKey,
+    },
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::{RngCore, rngs::OsRng};
-use rsa::{
-    Oaep, RsaPrivateKey, RsaPublicKey,
-    pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePublicKey, der::Encode},
-    traits::{PrivateKeyParts, PublicKeyParts},
-};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -37,10 +39,10 @@ const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 
-/// The RSA implementation zeroizes its private components and precomputations
-/// on drop. Private DER, unwrapped AES keys, and plaintext use Zeroizing buffers.
+/// AWS-LC owns and clears the private RSA components. Its DER export buffer
+/// zeroizes on drop; our private DER, AES keys and plaintext use Zeroizing.
 pub struct RecipientKey {
-    key: RsaPrivateKey,
+    key: PrivateDecryptingKey,
 }
 
 impl fmt::Debug for RecipientKey {
@@ -91,16 +93,20 @@ impl std::error::Error for Error {}
 
 /// RSA key generation is CPU-intensive; async callers must use spawn_blocking.
 pub fn generate_recipient() -> Result<RecipientKey, Error> {
-    let key = RsaPrivateKey::new(&mut OsRng, RSA_BITS).map_err(|_| Error::Cryptography)?;
+    let key = PrivateDecryptingKey::generate(KeySize::Rsa3072).map_err(|_| Error::Cryptography)?;
     Ok(RecipientKey { key })
 }
 
 impl RecipientKey {
     pub fn public_key_b64u(&self) -> Result<String, Error> {
-        let der = RsaPublicKey::from(&self.key)
-            .to_public_key_der()
+        let der: PublicKeyX509Der<'_> = self
+            .key
+            .public_key()
+            .as_der()
             .map_err(|_| Error::InvalidKey)?;
-        Ok(URL_SAFE_NO_PAD.encode(der.as_bytes()))
+        let encoded = URL_SAFE_NO_PAD.encode(der.as_ref());
+        decode_public_key(&encoded)?;
+        Ok(encoded)
     }
 }
 
@@ -112,12 +118,11 @@ pub fn encode_private_key(recipient: &RecipientKey) -> Result<Zeroizing<String>,
 pub fn decode_private_key(encoded: &str) -> Result<RecipientKey, Error> {
     let der = decode_b64(encoded, 1, MAX_PRIVATE_DER_BYTES).map_err(|_| Error::InvalidKey)?;
     // Parse borrowed DER first, before big-integer validation/precomputation.
-    let info =
-        rsa::pkcs8::PrivateKeyInfo::try_from(der.as_slice()).map_err(|_| Error::InvalidKey)?;
-    let parts =
-        rsa::pkcs1::RsaPrivateKey::try_from(info.private_key).map_err(|_| Error::InvalidKey)?;
+    let info = pkcs8::PrivateKeyInfo::try_from(der.as_slice()).map_err(|_| Error::InvalidKey)?;
+    let parts = pkcs1::RsaPrivateKey::try_from(info.private_key).map_err(|_| Error::InvalidKey)?;
     check_public_parts(parts.modulus.as_bytes(), parts.public_exponent.as_bytes())?;
-    if parts.other_prime_infos.is_some()
+    if info.algorithm != pkcs1::ALGORITHM_ID
+        || parts.other_prime_infos.is_some()
         || [
             parts.private_exponent,
             parts.prime1,
@@ -131,7 +136,7 @@ pub fn decode_private_key(encoded: &str) -> Result<RecipientKey, Error> {
     {
         return Err(Error::InvalidKey);
     }
-    let key = RsaPrivateKey::from_pkcs8_der(&der).map_err(|_| Error::InvalidKey)?;
+    let key = PrivateDecryptingKey::from_pkcs8(&der).map_err(|_| Error::InvalidKey)?;
     // Reject ignored optional fields or inconsistent CRT values as well as
     // alternate encodings; only the exact canonical persistence form is valid.
     if private_der(&key)?.as_slice() != der.as_slice() {
@@ -163,8 +168,15 @@ pub fn seal(
     OsRng
         .try_fill_bytes(&mut nonce)
         .map_err(|_| Error::Cryptography)?;
-    let wrapped_key = recipient
-        .encrypt(&mut OsRng, Oaep::new_with_label::<Sha256, _>(DOMAIN), &*key)
+    let recipient = OaepPublicEncryptingKey::new(recipient).map_err(|_| Error::Cryptography)?;
+    let mut wrapped_key = [0_u8; RSA_BYTES];
+    recipient
+        .encrypt(
+            &OAEP_SHA256_MGF1SHA256,
+            &*key,
+            &mut wrapped_key,
+            Some(DOMAIN.as_bytes()),
+        )
         .map_err(|_| Error::Cryptography)?;
     let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| Error::Cryptography)?;
     let mut ciphertext = Zeroizing::new(plaintext.to_vec());
@@ -197,19 +209,24 @@ pub fn open(
         TAG_BYTES,
         MAX_PLAINTEXT_BYTES + TAG_BYTES,
     )?;
-    let key = Zeroizing::new(
-        recipient
-            .key
-            .decrypt_blinded(
-                &mut OsRng,
-                Oaep::new_with_label::<Sha256, _>(DOMAIN),
-                &wrapped_key,
-            )
-            .map_err(|_| Error::Cryptography)?,
-    );
-    if key.len() != KEY_BYTES {
+    let decryptor =
+        OaepPrivateDecryptingKey::new(recipient.key.clone()).map_err(|_| Error::Cryptography)?;
+    // AWS-LC requires a modulus-sized output buffer. Keep the entire allocation
+    // zeroizing even when OAEP fails or produces an invalid AES key length.
+    let mut key = Zeroizing::new(vec![0_u8; decryptor.min_output_size()]);
+    let length = decryptor
+        .decrypt(
+            &OAEP_SHA256_MGF1SHA256,
+            &wrapped_key,
+            &mut key,
+            Some(DOMAIN.as_bytes()),
+        )
+        .map_err(|_| Error::Cryptography)?
+        .len();
+    if length != KEY_BYTES {
         return Err(Error::Cryptography);
     }
+    key.truncate(length);
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| Error::Cryptography)?;
     let length = plaintext.len() - TAG_BYTES;
     let tag = Tag::clone_from_slice(&plaintext[length..]);
@@ -256,13 +273,24 @@ fn check_public_parts(modulus: &[u8], exponent: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
-fn decode_public_key(encoded: &str) -> Result<(RsaPublicKey, Zeroizing<Vec<u8>>), Error> {
+fn decode_public_key(encoded: &str) -> Result<(PublicEncryptingKey, Zeroizing<Vec<u8>>), Error> {
     let der =
         decode_b64(encoded, PUBLIC_DER_BYTES, PUBLIC_DER_BYTES).map_err(|_| Error::InvalidKey)?;
-    let key = RsaPublicKey::from_public_key_der(&der).map_err(|_| Error::InvalidKey)?;
-    check_public_parts(&key.n().to_bytes_be(), &key.e().to_bytes_be())?;
-    let canonical = key.to_public_key_der().map_err(|_| Error::InvalidKey)?;
-    if canonical.as_bytes() != der.as_slice() {
+    let info =
+        pkcs8::SubjectPublicKeyInfoRef::try_from(der.as_slice()).map_err(|_| Error::InvalidKey)?;
+    if info.algorithm != pkcs1::ALGORITHM_ID {
+        return Err(Error::InvalidKey);
+    }
+    let parts = pkcs1::RsaPublicKey::try_from(
+        info.subject_public_key
+            .as_bytes()
+            .ok_or(Error::InvalidKey)?,
+    )
+    .map_err(|_| Error::InvalidKey)?;
+    check_public_parts(parts.modulus.as_bytes(), parts.public_exponent.as_bytes())?;
+    let key = PublicEncryptingKey::from_der(&der).map_err(|_| Error::InvalidKey)?;
+    let canonical: PublicKeyX509Der<'_> = key.as_der().map_err(|_| Error::InvalidKey)?;
+    if canonical.as_ref() != der.as_slice() {
         return Err(Error::InvalidKey);
     }
     Ok((key, der))
@@ -288,40 +316,13 @@ fn decode_b64(encoded: &str, min: usize, max: usize) -> Result<Zeroizing<Vec<u8>
     Ok(bytes)
 }
 
-fn private_der(key: &RsaPrivateKey) -> Result<Zeroizing<Vec<u8>>, Error> {
-    // Keep both the inner PKCS#1 and outer PKCS#8 encodings zeroizing. Building
-    // the DER explicitly avoids a non-zeroizing intermediate private Vec.
-    let modulus = key.n().to_bytes_be();
-    let exponent = key.e().to_bytes_be();
-    let d = Zeroizing::new(key.d().to_bytes_be());
-    let p = Zeroizing::new(key.primes()[0].to_bytes_be());
-    let q = Zeroizing::new(key.primes()[1].to_bytes_be());
-    let dp = Zeroizing::new(key.dp().ok_or(Error::InvalidKey)?.to_bytes_be());
-    let dq = Zeroizing::new(key.dq().ok_or(Error::InvalidKey)?.to_bytes_be());
-    let coefficient = Zeroizing::new(key.crt_coefficient().ok_or(Error::InvalidKey)?);
-    let coefficient_bytes = Zeroizing::new(coefficient.to_bytes_be());
-    let uint = |bytes| rsa::pkcs1::UintRef::new(bytes).map_err(|_| Error::InvalidKey);
-    let parts = rsa::pkcs1::RsaPrivateKey {
-        modulus: uint(&modulus)?,
-        public_exponent: uint(&exponent)?,
-        private_exponent: uint(&d)?,
-        prime1: uint(&p)?,
-        prime2: uint(&q)?,
-        exponent1: uint(&dp)?,
-        exponent2: uint(&dq)?,
-        coefficient: uint(&coefficient_bytes)?,
-        other_prime_infos: None,
-    };
-    let inner = Zeroizing::new(parts.to_der().map_err(|_| Error::InvalidKey)?);
-    let outer = Zeroizing::new(
-        rsa::pkcs8::PrivateKeyInfo::new(rsa::pkcs1::ALGORITHM_ID, &inner)
-            .to_der()
-            .map_err(|_| Error::InvalidKey)?,
-    );
-    if outer.len() > MAX_PRIVATE_DER_BYTES {
+fn private_der(key: &PrivateDecryptingKey) -> Result<Zeroizing<Vec<u8>>, Error> {
+    // AWS-LC's owned DER buffer zeroizes on drop, including this intermediate.
+    let der: Pkcs8V1Der<'_> = key.as_der().map_err(|_| Error::InvalidKey)?;
+    if der.as_ref().len() > MAX_PRIVATE_DER_BYTES {
         return Err(Error::InvalidKey);
     }
-    Ok(outer)
+    Ok(Zeroizing::new(der.as_ref().to_vec()))
 }
 
 #[cfg(test)]
@@ -329,7 +330,8 @@ mod tests {
     use super::*;
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use rsa::{
-        BigUint, RsaPublicKey,
+        BigUint, Oaep, RsaPrivateKey, RsaPublicKey,
+        pkcs8::DecodePrivateKey,
         pkcs8::{DecodePublicKey, EncodePublicKey},
         traits::PublicKeyParts,
     };
@@ -386,6 +388,39 @@ mod tests {
         assert_eq!(
             recipient_key_digest(&public).unwrap(),
             sha2::Sha256::digest(URL_SAFE_NO_PAD.decode(&public).unwrap()).as_slice()
+        );
+    }
+
+    #[test]
+    fn rustcrypto_server_seal_and_aws_lc_recipient_open_are_wire_compatible() {
+        let public =
+            RsaPublicKey::from_public_key_der(&URL_SAFE_NO_PAD.decode(PUBLIC_KEY).unwrap())
+                .unwrap();
+        let private_der = Zeroizing::new(URL_SAFE_NO_PAD.decode(PRIVATE_KEY).unwrap());
+        let legacy = RsaPrivateKey::from_pkcs8_der(&private_der).unwrap();
+        let mut envelope = seal(b"bootstrap credential", PUBLIC_KEY, &binding()).unwrap();
+        let wrapped = URL_SAFE_NO_PAD.decode(&envelope.wrapped_key).unwrap();
+        let aes_key = Zeroizing::new(
+            legacy
+                .decrypt_blinded(
+                    &mut OsRng,
+                    Oaep::new_with_label::<Sha256, _>(DOMAIN),
+                    &wrapped,
+                )
+                .unwrap(),
+        );
+        envelope.wrapped_key = URL_SAFE_NO_PAD.encode(
+            public
+                .encrypt(
+                    &mut OsRng,
+                    Oaep::new_with_label::<Sha256, _>(DOMAIN),
+                    &aes_key,
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            open(&envelope, recipient(), &binding()).unwrap().as_slice(),
+            b"bootstrap credential"
         );
     }
 
@@ -567,9 +602,9 @@ mod tests {
     fn private_keys_reject_wrong_parameters_and_inconsistent_crt_values() {
         use rsa::pkcs8::der::Encode;
         let der = URL_SAFE_NO_PAD.decode(PRIVATE_KEY).unwrap();
-        let info = rsa::pkcs8::PrivateKeyInfo::try_from(der.as_slice()).unwrap();
+        let info = pkcs8::PrivateKeyInfo::try_from(der.as_slice()).unwrap();
         for field in ["exponent", "modulus", "private_exponent", "coefficient"] {
-            let mut parts = rsa::pkcs1::RsaPrivateKey::try_from(info.private_key).unwrap();
+            let mut parts = pkcs1::RsaPrivateKey::try_from(info.private_key).unwrap();
             let oversized = [0x55; 385];
             match field {
                 "exponent" => parts.public_exponent = rsa::pkcs1::UintRef::new(&[1, 0, 3]).unwrap(),
@@ -580,7 +615,7 @@ mod tests {
                 _ => parts.coefficient = rsa::pkcs1::UintRef::new(&[1]).unwrap(),
             }
             let inner = parts.to_der().unwrap();
-            let changed = rsa::pkcs8::PrivateKeyInfo::new(rsa::pkcs1::ALGORITHM_ID, &inner)
+            let changed = pkcs8::PrivateKeyInfo::new(rsa::pkcs1::ALGORITHM_ID, &inner)
                 .to_der()
                 .unwrap();
             assert!(

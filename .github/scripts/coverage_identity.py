@@ -15,6 +15,12 @@ INPUTS = (
     ".github/scripts/start-test-mongodb.sh",
     ".github/scripts/prepare-backend-runner.sh",
     ".github/scripts/install-linux-build-deps.sh",
+    "scripts/apt-snapshot-install.sh",
+    "scripts/apt-snapshot-select.awk",
+    "scripts/apt-transport-ca.awk",
+    "security/apt-snapshots.tsv",
+    "security/apt-transport-ca.pem",
+    "security/apt-transport-ca.tsv",
 )
 
 

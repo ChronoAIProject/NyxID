@@ -308,5 +308,22 @@ impl Metadata {
 }
 
 #[cfg(test)]
+pub(crate) fn write_private_token_fixture(path: &Path, bytes: impl AsRef<[u8]>) {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .unwrap()
+        .write_all(bytes.as_ref())
+        .unwrap();
+}
+
+#[cfg(test)]
 #[path = "kubernetes_credentials_tests.rs"]
 mod tests;

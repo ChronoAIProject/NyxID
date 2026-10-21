@@ -2834,6 +2834,12 @@ pub enum NodeCommands {
     },
 
     // --- Agent-side commands (local node operations) ---
+    /// Register if needed and start the file-backed Docker node agent
+    DockerEntrypoint {
+        /// Additional arguments passed to `node start`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Register this node with a NyxID server
     Register {
         /// One-time registration token (nyx_nreg_...)

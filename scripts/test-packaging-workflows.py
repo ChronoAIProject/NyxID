@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""Required packaging and publication wiring, including negative mutations."""
+import copy
+import fnmatch
+import json
+from pathlib import Path
+import unittest
+
+from workflow_yaml import load_unique
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def workflows():
+    return {name: load_unique((ROOT / '.github/workflows' / (name + '.yml')).read_text())
+            for name in ('ci', 'artifact-packaging', 'publish-images', 'release', 'release-cache')}
+
+
+def require_gates(data):
+    ci, packaging, publisher = (data[name] for name in ('ci', 'artifact-packaging', 'publish-images'))
+    caller = ci['jobs']['artifact-packaging']
+    if caller['uses'] != './.github/workflows/artifact-packaging.yml' or caller['permissions'] != {'contents': 'read'} or \
+            'artifact-packaging' not in ci['jobs']['ci-pass']['needs'] or \
+            'artifact-packaging=${{ needs.artifact-packaging.result }}' not in str(ci['jobs']['ci-pass']['steps']):
+        raise ValueError('CI must require packaging')
+    if "needs.changes.outputs.packaging == 'true'" not in caller['if'] or \
+            ci['jobs']['changes']['outputs'].get('packaging') != '${{ steps.filter.outputs.packaging }}':
+        raise ValueError('packaging verifier changes must select the PR jobs')
+    filters = load_unique(next(step['with']['filters'] for step in ci['jobs']['changes']['steps']
+                               if step.get('uses', '').startswith('dorny/paths-filter@')))['packaging']
+    for path in ('scripts/source_artifacts.py', 'scripts/image_artifacts.py', 'scripts/credential_packaging.py',
+                 'scripts/image_runtime.py', 'scripts/elf_runtime.py', 'scripts/image-entrypoint-dispatch.sh',
+                 'scripts/image_dispositions.py', 'scripts/export-node-rootfs.py', 'security/image-dispositions.json',
+                 'scripts/check-cli-archive-identity.py', 'scripts/test-packaging-workflows.py',
+                 'scripts/check-built-image-csp.py', 'scripts/test-built-image-csp.py', 'frontend/Dockerfile.policy-tests',
+                 'scripts/check-machine-docker-cli.py', 'scripts/machine_docker_fixture.mjs', 'scripts/test-machine-docker-fixture.mjs',
+                 'scripts/release_verifier.rs', 'security/signing-tools/package-lock.json', 'scripts/sign-rehearsal.cjs',
+                 'cli/tests/updater-npm/package-lock.json', 'scripts/publication_contract.py', 'scripts/export-build-source.py', 'docs/site/index.md'):
+        if not any(fnmatch.fnmatchcase(path, pattern) for pattern in filters):
+            raise ValueError('packaging verifier input missing from PR selection')
+    native = [step for step in ci['jobs']['cli-test']['steps']
+              if 'scripts/test-native-secret-service.py' in step.get('run', '')]
+    if len(native) != 1 or 'if' in native[0] or native[0].get('continue-on-error') or not all(
+            text in native[0]['run'] for text in ('apt-snapshot-install.sh --install-only', 'gnome-keyring', 'dbus-daemon', 'dbus-bin')):
+        raise ValueError('real CLI Secret Service test must be required with snapshot-installed prerequisites')
+    if packaging['permissions'] != {'contents': 'read'}:
+        raise ValueError('PR packaging permissions')
+    jobs = packaging['jobs']
+    for script in ('test-image-runtime.py', 'test-image-entrypoint-dispatch.py', 'test-built-image-csp.py'):
+        tests = [step for step in jobs['policy']['steps']
+                 if step.get('run') == 'python3 scripts/' + script]
+        if len(tests) != 1 or 'if' in tests[0] or tests[0].get('continue-on-error'):
+            raise ValueError('final runtime and entrypoint failure regressions must run')
+    if {item['arch'] for item in jobs['credentials']['strategy']['matrix']['include']} != {'amd64', 'arm64'}:
+        raise ValueError('both native credential architectures required')
+    for job in jobs.values():
+        if job.get('continue-on-error') or 'secrets' in job or 'id-token' in str(job):
+            raise ValueError('PR packaging cannot bypass checks or need secrets/OIDC')
+        for step in job.get('steps', []):
+            if step.get('continue-on-error'):
+                raise ValueError('packaging step cannot be warning-only')
+    for name, job in jobs.items():
+        for step in job.get('steps', []):
+            if step.get('uses', '').startswith('dtolnay/rust-toolchain@'):
+                components = {value.strip() for value in step.get('with', {}).get('components', '').split(',')}
+                if not {'cargo', 'rustc', 'rust-std', 'clippy', 'rustfmt'} <= components or (name == 'credentials' and 'if' in step):
+                    raise ValueError('packaging must repair essential toolchain components even in an existing minimal install')
+    text = str(jobs['credentials']['steps'])
+    for required in ('backend/Dockerfile', 'frontend/Dockerfile', 'check-credential-image.py',
+                     '--compare-image nyxid-credential-frontend:ci', '--source-root', '--commit', '--epoch'):
+        if required not in text:
+            raise ValueError('actual image credential extraction/parity required')
+    health = [step for step in jobs['credentials']['steps'] if 'scripts/check-backend-health.py' in step.get('run', '')]
+    if len(health) != 1 or 'if' in health[0] or health[0].get('continue-on-error') or any(
+            text not in health[0]['run'] for text in ('start-test-mongodb.sh', '--image nyxid-credential-backend:ci', '--database-url')):
+        raise ValueError('both final backend images must run a real server and its shell-free health check')
+    if set(jobs['packaging-pass']['needs']) != set(jobs) - {'packaging-pass'}:
+        raise ValueError('packaging aggregator must require every job')
+    if 'credential-parity' not in publisher['jobs']['merge']['needs'] or \
+            publisher['jobs']['credential-parity']['needs'] != 'build' or \
+            'check-published-credentials.py' not in str(publisher['jobs']['credential-parity']['steps']) or \
+            publisher['jobs']['credential-parity'].get('continue-on-error'):
+        raise ValueError('publication promotion must require actual credential subjects')
+    worklet = jobs['worklet']
+    if {item['arch'] for item in worklet['strategy']['matrix']['include']} != {'amd64', 'arm64'} or \
+            any(item not in str(worklet['steps']) for item in ('frontend/Dockerfile', 'frontend/Dockerfile.policy-tests',
+                'scripts/check-built-image-csp.py', '--browser-image nyxid-worklet-browser:ci', '--commit', '--epoch')):
+        raise ValueError('both native built-image worklet/CSP browser gates required')
+    checks = [step for step in worklet['steps'] if 'scripts/check-built-image-csp.py' in step.get('run', '')]
+    if len(checks) != 1 or 'if' in checks[0] or any(value in checks[0]['run'] for value in ('||', 'set +e')):
+        raise ValueError('built-image browser acceptance must fail closed')
+    machine_cli = jobs['docker-cli']
+    if any(value not in str(machine_cli['steps']) for value in ('cli/Dockerfile.machine', 'cli/Dockerfile.machine-node-only',
+            'scripts/check-machine-docker-cli.py', '--node-only-image', 'npm ci --ignore-scripts --prefix cli/tests/updater-npm')):
+        raise ValueError('actual machine and node-only Docker CLI job required')
+    checks = [step for step in machine_cli['steps'] if 'scripts/check-machine-docker-cli.py' in step.get('run', '')]
+    if len(checks) != 1 or 'if' in checks[0] or any(value in checks[0]['run'] for value in ('||', 'set +e')):
+        raise ValueError('actual machine Docker CLI acceptance must fail closed')
+    image_job = jobs['images']
+    if set(image_job['strategy']['matrix']['arch']) != {'amd64', 'arm64'} or \
+            set(image_job['strategy']['matrix']['component']) != {'node-agent', 'nyxid-node-machine', 'nyxid-machine-updater',
+                'machine-node-only', 'machine-hosted-desktop', 'mcp-demo'} or \
+            'check-image-identity.py' not in str(image_job['steps']) or 'check-image-identity.py' not in text:
+        raise ValueError('all actual public application image identities required')
+    hosted = next(item for item in image_job['strategy']['matrix']['include'] if item.get('component') == 'machine-hosted-desktop')
+    if hosted.get('target') != 'desktop' or '--build-context' in str(image_job):
+        raise ValueError('PR hosted evidence must use the real public desktop target')
+    operator = [step for step in image_job['steps'] if 'scripts/build-local-image.py' in step.get('run', '')]
+    if len(operator) != 1 or operator[0].get('if') != "matrix.component == 'machine-hosted-desktop'" or \
+            operator[0].get('continue-on-error') or any(text not in operator[0]['run'] for text in (
+                '--file cli/Dockerfile.machine-hosted --target desktop', "['identity_check']['status'] == 'passed'",
+                "['image']['tagged'] is True", "actual == receipt['image']['id']")):
+        raise ValueError('PR hosted desktop must exercise mandatory operator verification before tagging')
+    targets = {item['target'] for item in jobs['archives']['strategy']['matrix']['include']}
+    archive_job = jobs['archives']
+    if any(item['runner'] != 'macos-latest' for item in archive_job['strategy']['matrix']['include']
+           if item['target'].endswith('apple-darwin')):
+        raise ValueError('both Apple archives need the current macOS SDK runner')
+    archive_source = next(step for step in archive_job['steps'] if step.get('id') == 'source')
+    if 'commit=$(python3 scripts/export-build-source.py head)' not in archive_source['run'] or \
+            'git rev-parse' in archive_source['run']:
+        raise ValueError('container archive identity must use exact-path Git ownership trust')
+    if not any('xcrun' in step.get('run', '') and "< 26" in step['run'] and
+               step.get('if') == "contains(matrix.target, 'apple-darwin')" and not step.get('continue-on-error')
+               for step in archive_job['steps']):
+        raise ValueError('locked Apple Metal bridge requires a current macOS SDK check')
+    policy = json.loads((ROOT / 'security/publication-policy.json').read_text())
+    if targets != set(policy['cli']['targets']) or 'run-dist-build.py' not in str(jobs['archives']['steps']) or \
+            'check-cli-archive-identity.py' not in str(jobs['archives']['steps']):
+        raise ValueError('every actual stripped CLI archive identity required')
+    for steps, checker, end in ((publisher['jobs']['build']['steps'], 'check-image-identity.py', 'scripts/publish-scanned-image.py'),
+                                (data['release']['jobs']['build-local-artifacts']['steps'], 'check-cli-archive-identity.py', 'Upload artifacts')):
+        gates = [i for i, step in enumerate(steps) if checker in step.get('run', '')]
+        stops = [i for i, step in enumerate(steps) if step.get('name') == end or end in step.get('run', '')]
+        if len(gates) != 1 or not stops or gates[0] >= stops[0] or steps[gates[0]].get('continue-on-error') or \
+                'if' in steps[gates[0]] or any(bypass in steps[gates[0]]['run'] for bypass in ('||', 'set +e')):
+            raise ValueError('final identity gate must precede required publication output')
+    for workflow, job in (('release', 'build-local-artifacts'), ('release-cache', 'warm')):
+        steps = data[workflow]['jobs'][job]['steps']
+        installs = [index for index, step in enumerate(steps)
+                    if step.get('run') == 'sh scripts/install-release-dependencies.sh']
+        build = next(index for index, step in enumerate(steps) if step.get('name') == 'Build artifacts')
+        if len(installs) != 1 or installs[0] >= build or 'if' in steps[installs[0]] or \
+                steps[installs[0]].get('continue-on-error'):
+            raise ValueError('release/cache container tools must be snapshot-installed before building')
+    triggers = data['release-cache'].get('on', data['release-cache'].get(True))
+    for event in ('pull_request', 'push'):
+        for path in ('scripts/install-release-dependencies.sh', 'scripts/apt-snapshot-install.sh',
+                     'scripts/apt-snapshot-select.awk', 'scripts/apt-transport-ca.awk',
+                     'security/apt-snapshots.tsv', 'security/apt-transport-ca.pem', 'security/apt-transport-ca.tsv'):
+            if not any(fnmatch.fnmatchcase(path, pattern) for pattern in triggers[event]['paths']):
+                raise ValueError('release/cache dependency changes must select real container builds')
+
+
+class PackagingWorkflows(unittest.TestCase):
+    def test_running_backend_health_gate_cannot_be_removed_or_made_optional(self):
+        for mutation in ('removed', 'conditional', 'warning'):
+            data = workflows()
+            steps = data['artifact-packaging']['jobs']['credentials']['steps']
+            step = next(step for step in steps if 'scripts/check-backend-health.py' in step.get('run', ''))
+            if mutation == 'removed': steps.remove(step)
+            elif mutation == 'conditional': step['if'] = 'false'
+            else: step['continue-on-error'] = True
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, 'real server|packaging step cannot be warning-only'):
+                require_gates(data)
+
+    def test_real_cli_secret_service_step_cannot_be_removed_or_made_optional(self):
+        for mutation in ('removed', 'conditional', 'warning'):
+            data = workflows()
+            steps = data['ci']['jobs']['cli-test']['steps']
+            step = next(step for step in steps if 'scripts/test-native-secret-service.py' in step.get('run', ''))
+            if mutation == 'removed': steps.remove(step)
+            elif mutation == 'conditional': step['if'] = 'false'
+            else: step['continue-on-error'] = True
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, 'Secret Service'):
+                require_gates(data)
+
+    def test_runtime_failure_regressions_cannot_be_skipped(self):
+        for script in ('test-image-runtime.py', 'test-image-entrypoint-dispatch.py'):
+            data = workflows()
+            steps = data['artifact-packaging']['jobs']['policy']['steps']
+            steps[:] = [step for step in steps if script not in step.get('run', '')]
+            with self.subTest(script=script), self.assertRaisesRegex(ValueError, 'runtime and entrypoint'):
+                require_gates(data)
+
+    def test_partial_existing_toolchains_must_install_essentials_explicitly(self):
+        for component in ('cargo', 'rustc', 'rust-std'):
+            data = workflows()
+            install = next(step for step in data['artifact-packaging']['jobs']['credentials']['steps']
+                           if step.get('uses', '').startswith('dtolnay/rust-toolchain@'))
+            install['with']['components'] = ', '.join(value for value in
+                ('cargo', 'rustc', 'rust-std', 'clippy', 'rustfmt') if value != component)
+            with self.subTest(component=component), self.assertRaisesRegex(ValueError, 'essential toolchain'):
+                require_gates(data)
+
+    def test_current_workflows_require_actual_packaging(self):
+        require_gates(workflows())
+
+    def test_release_and_cache_require_container_prerequisites_and_pr_replay(self):
+        for workflow, job in (('release', 'build-local-artifacts'), ('release-cache', 'warm')):
+            for mutation in ('missing', 'conditional', 'late'):
+                data = workflows(); steps = data[workflow]['jobs'][job]['steps']
+                install = next(step for step in steps if step.get('run') == 'sh scripts/install-release-dependencies.sh')
+                if mutation == 'conditional': install['if'] = 'false'
+                else:
+                    steps.remove(install)
+                    if mutation == 'late': steps.append(install)
+                with self.subTest(workflow=workflow, mutation=mutation), self.assertRaises(ValueError):
+                    require_gates(data)
+        for event in ('pull_request', 'push'):
+            data = workflows(); triggers = data['release-cache'].get('on', data['release-cache'].get(True))
+            triggers[event]['paths'].remove('scripts/install-release-dependencies.sh')
+            with self.subTest(event=event), self.assertRaises(ValueError): require_gates(data)
+
+    def test_old_apple_runner_bare_container_git_and_missing_sdk_check_rejected(self):
+        for mutation in ('runner', 'git', 'sdk'):
+            data = workflows()
+            job = data['artifact-packaging']['jobs']['archives']
+            if mutation == 'runner':
+                next(item for item in job['strategy']['matrix']['include']
+                     if item['target'] == 'x86_64-apple-darwin')['runner'] = 'macos-15-intel'
+            elif mutation == 'git':
+                source = next(step for step in job['steps'] if step.get('id') == 'source')
+                source['run'] = source['run'].replace('python3 scripts/export-build-source.py head', 'git rev-parse HEAD')
+            else:
+                job['steps'] = [step for step in job['steps'] if 'xcrun' not in step.get('run', '')]
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                require_gates(data)
+
+    def test_worklet_gate_cannot_be_missing_conditional_or_warning_only(self):
+        for mutation in ('missing', 'conditional', 'warning', 'ignore', 'arch'):
+            data = workflows()
+            job = data['artifact-packaging']['jobs']['worklet']
+            check = next(step for step in job['steps'] if 'check-built-image-csp.py' in step.get('run', ''))
+            if mutation == 'missing': job['steps'].remove(check)
+            elif mutation == 'conditional': check['if'] = 'false'
+            elif mutation == 'warning': check['continue-on-error'] = True
+            elif mutation == 'arch': job['strategy']['matrix']['include'].pop()
+            else: check['run'] += ' || true'
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): require_gates(data)
+
+    def test_complete_browser_gate_regressions_are_required(self):
+        for mutation in ('missing', 'conditional', 'warning'):
+            data = workflows()
+            steps = data['artifact-packaging']['jobs']['policy']['steps']
+            check = next(step for step in steps if step.get('run') == 'python3 scripts/test-built-image-csp.py')
+            if mutation == 'missing': steps.remove(check)
+            elif mutation == 'conditional': check['if'] = 'false'
+            else: check['continue-on-error'] = True
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): require_gates(data)
+
+    def test_docker_cli_cannot_be_missing_conditional_or_warning_only(self):
+        for mutation in ('missing', 'conditional', 'warning', 'ignore', 'image'):
+            data = workflows()
+            job = data['artifact-packaging']['jobs']['docker-cli']
+            check = next(step for step in job['steps'] if 'check-machine-docker-cli.py' in step.get('run', ''))
+            if mutation == 'missing': job['steps'].remove(check)
+            elif mutation == 'conditional': check['if'] = 'false'
+            elif mutation == 'warning': check['continue-on-error'] = True
+            elif mutation == 'image': job['steps'] = [step for step in job['steps'] if 'cli/Dockerfile.machine-node-only' not in str(step)]
+            else: check['run'] += ' || true'
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): require_gates(data)
+
+    def test_removing_pr_gate_fails(self):
+        data = workflows()
+        data['ci']['jobs']['ci-pass']['needs'].remove('artifact-packaging')
+        with self.assertRaises(ValueError): require_gates(data)
+
+    def test_removing_publication_gate_fails(self):
+        data = workflows()
+        data['publish-images']['jobs']['merge']['needs'].remove('credential-parity')
+        with self.assertRaises(ValueError): require_gates(data)
+
+    def test_dropping_native_architecture_fails(self):
+        data = workflows()
+        data['artifact-packaging']['jobs']['credentials']['strategy']['matrix']['include'].pop()
+        with self.assertRaises(ValueError): require_gates(data)
+
+    def test_warning_only_or_missing_extraction_fails(self):
+        for mutation in ('continue', 'extract'):
+            data = copy.deepcopy(workflows())
+            job = data['artifact-packaging']['jobs']['credentials']
+            if mutation == 'continue': job['continue-on-error'] = True
+            else: job['steps'] = [step for step in job['steps'] if 'check-credential-image.py' not in str(step)]
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): require_gates(data)
+
+    def test_missing_final_image_or_archive_identity_gate_fails(self):
+        for workflow, job, checker in (('artifact-packaging', 'images', 'check-image-identity.py'),
+                                       ('artifact-packaging', 'archives', 'check-cli-archive-identity.py'),
+                                       ('publish-images', 'build', 'check-image-identity.py'),
+                                       ('release', 'build-local-artifacts', 'check-cli-archive-identity.py')):
+            data = workflows()
+            value = data[workflow]['jobs'][job]
+            value['steps'] = [step for step in value['steps'] if checker not in step.get('run', '')]
+            with self.subTest(workflow=workflow, job=job), self.assertRaises(ValueError): require_gates(data)
+
+    def test_private_hosted_inputs_cannot_enter_pr_job(self):
+        data = workflows()
+        matrix = data['artifact-packaging']['jobs']['images']['strategy']['matrix']
+        next(item for item in matrix['include'] if item.get('component') == 'machine-hosted-desktop')['target'] = 'hosted'
+        with self.assertRaises(ValueError): require_gates(data)
+
+    def test_missing_cli_target_fails(self):
+        data = workflows()
+        data['artifact-packaging']['jobs']['archives']['strategy']['matrix']['include'].pop()
+        with self.assertRaises(ValueError): require_gates(data)
+
+    def test_operator_gate_must_have_real_pr_coverage(self):
+        data = workflows()
+        steps = data['artifact-packaging']['jobs']['images']['steps']
+        steps[:] = [step for step in steps if 'scripts/build-local-image.py' not in step.get('run', '')]
+        with self.assertRaisesRegex(ValueError, 'operator verification'): require_gates(data)
+
+    def test_verifier_changes_cannot_skip_pr_jobs(self):
+        data = workflows()
+        data['ci']['jobs']['artifact-packaging']['if'] = "inputs.force-all || needs.changes.outputs.ci == 'true'"
+        with self.assertRaisesRegex(ValueError, 'select the PR jobs'): require_gates(data)
+
+    def test_publication_identity_cannot_be_conditional_warning_only_or_late(self):
+        for mutation in ('conditional', 'continue', 'ignore', 'late'):
+            data = workflows()
+            steps = data['publish-images']['jobs']['build']['steps']
+            gate = next(step for step in steps if 'check-image-identity.py' in step.get('run', ''))
+            if mutation == 'conditional': gate['if'] = 'false'
+            elif mutation == 'continue': gate['continue-on-error'] = True
+            elif mutation == 'ignore': gate['run'] += ' || true'
+            else:
+                steps.remove(gate)
+                steps.append(gate)
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, 'publication output'):
+                require_gates(data)
+
+
+if __name__ == '__main__':
+    unittest.main()

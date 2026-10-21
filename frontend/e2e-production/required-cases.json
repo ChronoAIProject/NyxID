@@ -1,0 +1,167 @@
+[
+  {
+    "project": "production-policy",
+    "file": "e2e-production/flows.spec.ts",
+    "title": "destructive dropdown icon retains its color when keyboard focused"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/flows.spec.ts",
+    "title": "managed WhatsApp rejects an unlisted runtime API origin"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/flows.spec.ts",
+    "title": "explicit additional WebSocket origin handshakes; unlisted origin is blocked"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/flows.spec.ts",
+    "title": "one-shot MFA refresh 401 recovers without reusing a consumed challenge"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/flows.spec.ts",
+    "title": "one-shot MFA refresh 503 recovers without reusing a consumed challenge"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/flows.spec.ts",
+    "title": "uncertain MFA POST checks session before retry; issued=true"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/flows.spec.ts",
+    "title": "uncertain MFA POST checks session before retry; issued=false"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/flows.spec.ts",
+    "title": "actual Telegram loader uses bound cross-origin messages without eval, spoofing or replay"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/flows.spec.ts",
+    "title": "landing executes the authenticated Unicorn loader and actual scene under enforcing CSP"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/flows.spec.ts",
+    "title": "actual Facebook SDK loader and bundle initialize under enforcing CSP"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/flows.spec.ts",
+    "title": "claim initial documents, resource referrers and access logs hide normalized paths and encoded bearer values"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/policy.spec.ts",
+    "title": "production response/header matrix and backend .js routing"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/policy.spec.ts",
+    "title": "built login submits and completes MFA under enforcing CSP"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/policy.spec.ts",
+    "title": "real microphone, shipped AudioWorklet, fonts and allowed websocket"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/policy.spec.ts",
+    "title": "rejects injected inline scripts, event handlers and unlisted connections"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/policy.spec.ts",
+    "title": "standalone credential page keeps its policy and packaged SRI assets"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/policy.spec.ts",
+    "title": "legal pages execute the external theme asset under the same CSP"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/telemetry.spec.ts",
+    "title": "production same-origin analytics relay: consented US destination"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/telemetry.spec.ts",
+    "title": "production same-origin analytics relay: consented EU destination"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/telemetry.spec.ts",
+    "title": "production same-origin analytics relay: consented custom destination"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/telemetry.spec.ts",
+    "title": "production same-origin analytics relay: device declined"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/telemetry.spec.ts",
+    "title": "production same-origin analytics relay: account declined"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/telemetry.spec.ts",
+    "title": "production same-origin analytics relay: Do Not Track"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/telemetry.spec.ts",
+    "title": "production same-origin analytics relay: another account's device choice"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/telemetry.spec.ts",
+    "title": "production same-origin analytics relay: legacy unbound opt-in"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/telemetry.spec.ts",
+    "title": "anonymous login ignores legacy opt-in and sends no analytics"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/telemetry.spec.ts",
+    "title": "enforcing CSP blocks direct analytics ingest at https://us.i.posthog.com"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/telemetry.spec.ts",
+    "title": "enforcing CSP blocks direct analytics ingest at https://eu.i.posthog.com"
+  },
+  {
+    "project": "production-policy",
+    "file": "e2e-production/telemetry.spec.ts",
+    "title": "enforcing CSP blocks direct analytics ingest at https://analytics.example"
+  },
+  {
+    "project": "production-oauth-meta",
+    "file": "e2e/channel-whatsapp-managed.spec.ts",
+    "title": "managed Meta Cloud API signup at 1440px"
+  },
+  {
+    "project": "production-oauth-meta",
+    "file": "e2e/channel-whatsapp-managed.spec.ts",
+    "title": "managed Meta signup at 1440px"
+  },
+  {
+    "project": "production-oauth-meta",
+    "file": "e2e/channel-x-managed.spec.ts",
+    "title": "X OAuth connect and reconnect at 1440px"
+  },
+  {
+    "project": "production-telegram-privacy",
+    "file": "e2e/channel-telegram-new.spec.ts",
+    "title": "Telegram secrets stay out of live telemetry and storage"
+  }
+]

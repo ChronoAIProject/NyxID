@@ -1,0 +1,93 @@
+name: Nonpublishing Signing Rehearsal
+
+on:
+  workflow_call:
+  schedule:
+    - cron: '41 5 * * 2'
+
+permissions:
+  contents: read
+
+jobs:
+  scheduled-packaging:
+    if: github.event_name == 'schedule'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/artifact-packaging.yml
+  scheduled-verifier:
+    if: github.event_name == 'schedule'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-signing.yml
+  rehearsal:
+    name: OIDC Rehearsal and Production Rejection
+    needs: [scheduled-packaging, scheduled-verifier]
+    if: ${{ always() && (needs.scheduled-packaging.result == 'success' || needs.scheduled-packaging.result == 'skipped') && (needs.scheduled-verifier.result == 'success' || needs.scheduled-verifier.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: w6-release-verifier-amd64
+          path: ${{ runner.temp }}/verifier
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pr-verified-index-sboms
+          path: ${{ runner.temp }}/index-sboms
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: pr-cli-archive-*
+          path: ${{ runner.temp }}/cli-artifacts
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pr-cli-sbom-plan
+          path: ${{ runner.temp }}/cli-plan
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pr-verified-cli-sboms
+          path: ${{ runner.temp }}/archive-sboms
+      - name: Revalidate actual staged artifacts and generate the distinct rehearsal statement
+        run: |
+          chmod 755 "$RUNNER_TEMP/verifier/release-verifier"
+          sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/signing-tools"
+          "$RUNNER_TEMP/signing-tools/python/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
+          "$RUNNER_TEMP/signing-tools/python/bin/python" scripts/make-publication-plan.py images --output "$RUNNER_TEMP/image-plan.json"
+          "$RUNNER_TEMP/signing-tools/python/bin/python" scripts/check-official-release.py prepare --scope rehearsal \
+            --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/index-sboms" \
+            --archive-plan "$RUNNER_TEMP/cli-plan/cli-publication-plan.json" --archives "$RUNNER_TEMP/cli-artifacts" \
+            --archive-evidence "$RUNNER_TEMP/archive-sboms" --proof "$RUNNER_TEMP/rehearsal"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - name: Validate reviewed producer lock and install checksummed npm
+        run: |
+          python3 scripts/check-signing-tools.py
+          python3 scripts/bootstrap-build-tool.py npm --bin-dir "$RUNNER_TEMP/signing-npm"
+      - name: Install exact signing dependencies without lifecycle hooks
+        working-directory: security/signing-tools
+        run: '"$RUNNER_TEMP/signing-npm/npm" ci --ignore-scripts --no-audit --no-fund'
+      - name: Sign with rehearsal OIDC identity without repository or registry publication
+        run: |
+          node scripts/sign-rehearsal.cjs security/signing-tools "$RUNNER_TEMP/rehearsal"
+      - name: Require exact W6 success and rejection by every production identity
+        run: |
+          "$RUNNER_TEMP/signing-tools/python/bin/python" scripts/check-official-release.py verify --scope rehearsal \
+            --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/index-sboms" \
+            --archive-plan "$RUNNER_TEMP/cli-plan/cli-publication-plan.json" --archives "$RUNNER_TEMP/cli-artifacts" \
+            --archive-evidence "$RUNNER_TEMP/archive-sboms" --proof "$RUNNER_TEMP/rehearsal" \
+            --verifier "$RUNNER_TEMP/verifier/release-verifier"
+          python3 scripts/check-rehearsal-rejection.py --proof "$RUNNER_TEMP/rehearsal" --verifier "$RUNNER_TEMP/verifier/release-verifier"
+      - name: Preserve public signing evidence without publishing artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rehearsal-only-signing-evidence
+          path: ${{ runner.temp }}/rehearsal/
+          if-no-files-found: error
+          retention-days: 7

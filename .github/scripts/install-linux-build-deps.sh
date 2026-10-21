@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hosted Ubuntu mirrors can stall during index acquisition. Retry only package/index
-# acquisition; the calling step also bounds locks and installation scripts.
-apt_options=(
-  -o Acquire::Retries=2
-  -o Acquire::http::Timeout=20
-  -o Acquire::https::Timeout=20
-  -o APT::Update::Error-Mode=any
-)
-
-sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update
-sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" install -y libdbus-1-dev pkg-config ripgrep
+build_repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+# Main before the RustCrypto keyring migration still needs native DBus, even
+# when measured by a PR whose own CLI no longer links it. This reviewed addition
+# is restricted to the base-coverage caller and uses the same signed snapshot.
+build_packages=(pkg-config ripgrep)
+case "$#:${1:-}" in
+  0:) ;;
+  1:--base-coverage) build_packages+=(libdbus-1-dev) ;;
+  *) printf '%s\n' 'unsupported build dependency mode' >&2; exit 1 ;;
+esac
+. /etc/os-release
+case "$ID:${VERSION_CODENAME:-}" in
+  ubuntu:focal|ubuntu:noble|debian:bookworm|debian:trixie) ;;
+  *) printf '%s\n' 'CI APT root has no reviewed snapshot' >&2; exit 1 ;;
+esac
+sudo -n sh "$build_repo_root/scripts/apt-snapshot-install.sh" --install-only \
+  "$build_repo_root/security/apt-snapshots.tsv" "$ID:$VERSION_CODENAME" -- \
+  "${build_packages[@]}"

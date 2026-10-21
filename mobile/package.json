@@ -85,9 +85,42 @@
   "devDependencies": {
     "@expo/plist": "^0.5.2",
     "@types/react": "~19.2.14",
+    "babel-preset-expo": "55.0.16",
     "dotenv": "^16.4.5",
     "googleapis": "^144.0.0",
     "tsx": "^4.23.12",
     "typescript": "~5.9.3"
+  },
+  "packageManager": "pnpm@10.34.7",
+  "pnpm": {
+    "overrides": {
+      "@babel/core@7": "7.29.7",
+      "@xmldom/xmldom@<0.8.15": "0.8.15",
+      "baseline-browser-mapping@2": "2.11.29",
+      "brace-expansion@1": "1.1.21",
+      "brace-expansion@5": "5.0.12",
+      "browserslist@4": "4.29.3",
+      "compression@1": "1.8.2",
+      "js-yaml@3": "3.15.2",
+      "js-yaml@3>argparse": "2.0.1",
+      "js-yaml@4": "4.3.2",
+      "nanoid@3": "3.3.18",
+      "node-forge@1": "1.4.0",
+      "picomatch@2": "2.3.2",
+      "postcss@8": "8.5.23",
+      "qs@6": "6.16.0",
+      "shell-quote@1": "1.12.0",
+      "source-map-js@1": "1.2.2",
+      "ws@7": "7.5.11",
+      "ws@8": "8.22.0",
+      "react-native-markdown-display>markdown-it": "14.3.3",
+      "uuid@7": "11.1.1",
+      "uuid@9": "11.1.1"
+    },
+    "patchedDependencies": {
+      "decode-uri-component@0.2.2": "patches/decode-uri-component@0.2.2.patch",
+      "image-size@1.2.1": "patches/image-size@1.2.1.patch",
+      "node-forge@1.4.0": "patches/node-forge@1.4.0.patch"
+    }
   }
 }

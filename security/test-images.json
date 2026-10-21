@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "images": {
+    "migration_old_machine": "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:0.40.0@sha256:a475ebe5bd219345e99dd230ff34aed25b430fdb815203b2f526f31dc2366f32",
+    "production_machine": "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:0.41.0@sha256:98f85eb9f75d8cae7ccd7d3a1356274d6265ff13ae102cb873133d2ab6cf5e27",
+    "production_updater": "ghcr.io/chronoaiproject/nyxid/nyxid-machine-updater:0.41.0@sha256:04964cd9f4779b3010f64576d4d3ee8cf164b476d8e6148d4567130b61a079e9",
+    "mailbox": "busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
+  }
+}

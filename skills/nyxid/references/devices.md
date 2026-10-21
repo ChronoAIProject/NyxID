@@ -20,7 +20,7 @@ Device-code grant provisions NyxID operational credentials for a device:
 
 - a scoped NyxID API key with platform `device-code` for signed-poll approval, or `device-onboard` for QR onboarding
 - a NyxID node id used as the device's identity and API-key node scope
-- a one-time refresh token for future device credential refresh work
+- a one-time refresh token reserved for future device credential refresh work; no endpoint currently redeems it
 
 These devices do not run `nyxid node register`, do not redeem `nyx_nreg_...` registration tokens, and do not authenticate to `/api/v1/nodes/ws` during this grant flow. The node row is still created so the device has a stable NyxID node identity and the issued API key can be scoped to that node.
 
@@ -132,7 +132,7 @@ Approved response, returned once:
   "status": "approved",
   "api_key": "nyxid_ag_...",
   "node_id": "1d16ddfe-89f1-4ec1-a316-4a5c8960d55f",
-  "refresh_token": "1fb20ca9a1fd9b10ddfc7d2a5b7d5f54f326e2e6a2ef8e70b8a4fd9e0bd41c47",
+  "refresh_token": "<refresh_token_returned_on_delivery>",
   "expires_in": 86400
 }
 ```

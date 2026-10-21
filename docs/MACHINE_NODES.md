@@ -925,6 +925,52 @@ Debian acceptance must explicitly pass the corresponding supported package path,
 for example `NYXID_MACHINE_BROWSER=/usr/bin/chromium`; these layouts remain covered
 by package-detection tests and the Snap guest / Debian container acceptance runs.
 
+The hosted job explicitly prepares its **disposable runner** with
+`sudo -n ... python3 scripts/check-machine-native-prereqs.py --prepare-disposable-host`
+before creating fixture users or credentials. This is necessary because the
+GitHub `ubuntu-24.04` image deliberately makes `/opt` world writable. In failing
+job `119122145962` (PR #1976), the reported image is `20261012.334.1`;
+its [pinned configure-system.sh](https://github.com/actions/runner-images/blob/ubuntu24/20261012.334/images/ubuntu/scripts/build/configure-system.sh)
+contains `chmod -R 777 /opt` (blob `829f338bcdeb6093e493790d9e3856efdddd2c93`).
+The production installer checks `/opt/nyxid/machine-browser` before the Chrome
+policy path, so `/opt` fails its supervisor-ownership/no-group-or-other-write
+guard first. The original hosted log contains no directory metadata; the image
+source and the installer's ordered checks establish this cause, rather than an
+observed `stat` from that run. The workflow and harness both require effective
+UID 0; changing the acceptance user would not repair a world-writable ancestor.
+
+Preparation creates the named managed resource, policy and native-host
+directories as root:root 0755 and normalizes their ancestors beneath `/opt` and
+`/etc`; `/` and `/etc` must already be supervisor-owned and protected.
+It rejects symlinks/non-directories and uses no recursive chmod/chown. Unrelated
+tool installations under `/opt` are untouched. Without the explicit preparation
+flag, the prerequisite script only verifies these paths and fails if they are
+missing or insecure. This fixture preparation is not an owner-host repair
+command or a relaxation of production setup: production continues to refuse
+insecure ancestry. The job prints UID/EUID/GID/groups and each ancestor's numeric
+owner/group, mode and type before/after preparation. Native acceptance also
+prints that inventory at startup and on failure.
+
+After this preparation, the same required native job runs the cross-UID file and
+Secret Service custody harness (`cli/tests/node_custody_acceptance.py`) as root,
+with three distinct disposable users and its own D-Bus/GNOME Keyring session.
+It requires the Rust fixture's explicit completion receipt, so an unset fixture
+environment and early return cannot pass as native evidence. The always-uploaded
+`machine-native-amd64-custody` artifact retains the checks in `native-custody.log`.
+The workflow policy tests require this step and its actual Rust test binary,
+prerequisites and evidence. This adds custody coverage to the existing native
+browser/context/adversarial suite and preserves the disposable `/opt` preparation.
+
+The native lifecycle harness exercises the actual privileged installer with
+group-writable and other-writable policy ancestry, requires its existing refusal
+message, and restores the original directory mode in `finally`. It then retains
+the existing missing-policy refusal and effective-policy restoration checks,
+two-context lifecycle, renderer checks, full adversarial suite and 100-sample
+probe calibration. A green local filesystem reproduction does not establish
+hosted acceptance: the PM must push the reviewed commit and verify this entire
+required job on the actual Ubuntu amd64 image, including the new ancestry
+inventory and both writable-ancestor negative controls.
+
 ### D12. Documentation
 
 This document describes what shipped. Also update:
@@ -1208,7 +1254,7 @@ cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_loopback_exec_per
 cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_gateway_streaming_and_git_performance --ignored --nocapture --test-threads 1
 cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_setup_change_stream_wakes_thread_without_sweep --nocapture --test-threads 1
 cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_exec_dispatch_performance --ignored --nocapture --test-threads 1
-docker build -f cli/Dockerfile.machine -t nyxid-node-machine:local .
+python3 scripts/build-local-image.py --file cli/Dockerfile.machine --tag nyxid-node-machine:local
 docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:local -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:local .
 docker run --rm -e NYXID_MACHINE_STRICT_BENCHMARK=1 --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:local
 ```

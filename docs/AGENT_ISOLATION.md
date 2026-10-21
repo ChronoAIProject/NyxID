@@ -410,7 +410,7 @@ All changes are additive. No breaking changes for existing users:
 | `backend/src/handlers/api_keys.rs` | Usage endpoints, bindings_count |
 | `cli/src/auth.rs` | Profile-aware token storage |
 | `cli/src/commands/api_key.rs` | bind command, --platform flag |
-| `cli/docker-entrypoint.sh` | Auto-register in Docker |
+| `nyxid node docker-entrypoint` | Shell-free file-backed registration and startup in the minimal Docker node image |
 
 ## Service-bound agent key introspection
 

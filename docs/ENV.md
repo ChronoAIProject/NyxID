@@ -53,6 +53,18 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
 | `ENVIRONMENT` | `development` | `development`, `staging`, `production` |
 
+**Backend image upgrade:** the backend now contains a minimal signed-snapshot
+runtime and has no `curl` or shell. Replace custom exec health checks with
+`["CMD", "/usr/local/bin/nyxid-server", "health-check"]`, as in production Compose.
+Existing custom Compose or Kubernetes exec probes that invoke `curl` will fail
+after this upgrade. For Kubernetes, prefer an HTTP probe on `/health` at the
+configured server port. The binary probe reads only `PORT` (default `3001`),
+requires an unsigned decimal u16, contacts only `http://127.0.0.1:$PORT/health`,
+never follows redirects or proxies, and exits successfully only on 2xx within
+three seconds. It loads no `.env`, application configuration, keys or database
+connection and prints one stable reason on failure. This command checks an
+already running server; it does not start one.
+
 ### Frontend nginx policy
 
 | Variable | Default | Description |

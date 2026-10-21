@@ -83,7 +83,7 @@ impl std::fmt::Debug for GcpKmsKeyMetadata {
 }
 
 pub struct GcpKmsProvider {
-    client: google_cloud_kms::client::Client,
+    client: google_cloud_kms::grpc::apiv1::kms_client::Client,
     keys: GcpKmsKeyMetadata,
 }
 
@@ -118,7 +118,10 @@ impl GcpKmsProvider {
             "GCP Cloud KMS provider initialized"
         );
 
-        Self { client, keys }
+        Self {
+            client: (*client).clone(),
+            keys,
+        }
     }
 }
 
@@ -292,3 +295,7 @@ mod tests {
         assert!(!debug_output.contains(TEST_KEY_PREV));
     }
 }
+
+#[cfg(test)]
+#[path = "gcp_kms_provider_tests.rs"]
+mod transport_tests;

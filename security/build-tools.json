@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "rust_toolchain": "1.98.1",
+  "cargo-dist": {
+    "version": "0.30.0",
+    "targets": {
+      "aarch64-apple-darwin": {
+        "url": "https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-aarch64-apple-darwin.tar.xz",
+        "sha256": "c5bc3609e5d95cec8f575a1944afdd85b6dc0822da973889b6fb2658ed9a32e5",
+        "source": "https://api.github.com/repos/axodotdev/cargo-dist/releases/tags/v0.30.0"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-aarch64-unknown-linux-gnu.tar.xz",
+        "sha256": "7ca1d1eb3961b743bd47f0aa0bd1772986123e73d8a4bb8bf27f36f327877376",
+        "source": "https://api.github.com/repos/axodotdev/cargo-dist/releases/tags/v0.30.0"
+      },
+      "aarch64-unknown-linux-musl": {
+        "url": "https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-aarch64-unknown-linux-musl.tar.xz",
+        "sha256": "a19f13abab32c71002d7068ae6e81b2a5ce7f086758df3c4feba5f355fcd31b9",
+        "source": "https://api.github.com/repos/axodotdev/cargo-dist/releases/tags/v0.30.0"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-x86_64-apple-darwin.tar.xz",
+        "sha256": "63603c3727ddb1f202447924a9a0e2ea67d0561d3b03a96efccf93162bbfd48e",
+        "source": "https://api.github.com/repos/axodotdev/cargo-dist/releases/tags/v0.30.0"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-x86_64-unknown-linux-gnu.tar.xz",
+        "sha256": "dc965a62d704032caa5ca3ebf177dc8c1c0da5c50f502ebc87f99056aa9b2770",
+        "source": "https://api.github.com/repos/axodotdev/cargo-dist/releases/tags/v0.30.0"
+      },
+      "x86_64-unknown-linux-musl": {
+        "url": "https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-x86_64-unknown-linux-musl.tar.xz",
+        "sha256": "8802e96400b053fbdbfa05b6a724d83bb0311b483b430dece69c2f8e15aa0693",
+        "source": "https://api.github.com/repos/axodotdev/cargo-dist/releases/tags/v0.30.0"
+      }
+    }
+  },
+  "rustup": {
+    "version": "1.28.2",
+    "targets": {
+      "aarch64-unknown-linux-gnu": {
+        "target": "aarch64-unknown-linux-gnu",
+        "url": "https://static.rust-lang.org/rustup/archive/1.28.2/aarch64-unknown-linux-gnu/rustup-init",
+        "sha256": "e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c",
+        "checksum_url": "https://static.rust-lang.org/rustup/archive/1.28.2/aarch64-unknown-linux-gnu/rustup-init.sha256"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "target": "x86_64-unknown-linux-gnu",
+        "url": "https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init",
+        "sha256": "20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c",
+        "checksum_url": "https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init.sha256"
+      },
+      "aarch64-apple-darwin": {
+        "target": "aarch64-apple-darwin",
+        "url": "https://static.rust-lang.org/rustup/archive/1.28.2/aarch64-apple-darwin/rustup-init",
+        "sha256": "20ef5516c31b1ac2290084199ba77dbbcaa1406c45c1d978ca68558ef5964ef5",
+        "checksum_url": "https://static.rust-lang.org/rustup/archive/1.28.2/aarch64-apple-darwin/rustup-init.sha256"
+      },
+      "x86_64-apple-darwin": {
+        "target": "x86_64-apple-darwin",
+        "url": "https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-apple-darwin/rustup-init",
+        "sha256": "9c331076f62b4d0edeae63d9d1c9442d5fe39b37b05025ec8d41c5ed35486496",
+        "checksum_url": "https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-apple-darwin/rustup-init.sha256"
+      }
+    }
+  },
+  "npm": {
+    "version": "11.21.1",
+    "url": "https://registry.npmjs.org/npm/-/npm-11.21.1.tgz",
+    "integrity": "sha512-YTzL6QBEJXyHcTu0JiUc7RKMp+mzlJtl7rGLmERaXUQeFHIMc9atdr6G9M9C8vDWbv40epoTQAzNL2/PtZVDhQ==",
+    "source": "https://registry.npmjs.org/npm/11.21.1"
+  },
+  "cargo-nextest": {
+    "version": "0.9.146",
+    "targets": {
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.146/cargo-nextest-0.9.146-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428",
+        "source": "https://api.github.com/repos/nextest-rs/nextest/releases/tags/cargo-nextest-0.9.146"
+      }
+    }
+  },
+  "cargo-auditable": {
+    "version": "0.7.7",
+    "targets": {
+      "aarch64-apple-darwin": {
+        "url": "https://github.com/rust-secure-code/cargo-auditable/releases/download/v0.7.7/cargo-auditable-aarch64-apple-darwin.tar.xz",
+        "sha256": "a66ad6392861ca1abfe0b02b522622d91edf63e5d7b60f4d3088b5c23d240c72",
+        "source": "https://api.github.com/repos/rust-secure-code/cargo-auditable/releases/tags/v0.7.7"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/rust-secure-code/cargo-auditable/releases/download/v0.7.7/cargo-auditable-aarch64-unknown-linux-gnu.tar.xz",
+        "sha256": "bcb2d46002a8dd8e94d0d669cb39d38c9651db2ae5d1f3f1f1bab516ee1e212c",
+        "source": "https://api.github.com/repos/rust-secure-code/cargo-auditable/releases/tags/v0.7.7"
+      },
+      "aarch64-unknown-linux-musl": {
+        "url": "https://github.com/rust-secure-code/cargo-auditable/releases/download/v0.7.7/cargo-auditable-aarch64-unknown-linux-musl.tar.xz",
+        "sha256": "c324af56990601354bbf40080f582ba46f8ec8b807a1388e25bb7e429d285c18",
+        "source": "https://api.github.com/repos/rust-secure-code/cargo-auditable/releases/tags/v0.7.7"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://github.com/rust-secure-code/cargo-auditable/releases/download/v0.7.7/cargo-auditable-x86_64-apple-darwin.tar.xz",
+        "sha256": "4b87f06ea13d32466bbc68b1f5715ac11753a052d9935245380bddce8a3f0e50",
+        "source": "https://api.github.com/repos/rust-secure-code/cargo-auditable/releases/tags/v0.7.7"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/rust-secure-code/cargo-auditable/releases/download/v0.7.7/cargo-auditable-x86_64-unknown-linux-gnu.tar.xz",
+        "sha256": "4c8d3b08c3c34e9f2333367224dbbfb4aab68067698b43de59fe19aded3416dd",
+        "source": "https://api.github.com/repos/rust-secure-code/cargo-auditable/releases/tags/v0.7.7"
+      },
+      "x86_64-unknown-linux-musl": {
+        "url": "https://github.com/rust-secure-code/cargo-auditable/releases/download/v0.7.7/cargo-auditable-x86_64-unknown-linux-musl.tar.xz",
+        "sha256": "7676443367c5e33d9fb22acef63cccb5e9202de12dae1b0579995eb3e2bc7a18",
+        "source": "https://api.github.com/repos/rust-secure-code/cargo-auditable/releases/tags/v0.7.7"
+      }
+    }
+  },
+  "syft": {
+    "version": "1.54.1",
+    "source": "https://github.com/anchore/syft/releases/tag/v1.54.1",
+    "targets": {
+      "aarch64-apple-darwin": {
+        "url": "https://github.com/anchore/syft/releases/download/v1.54.1/syft_1.54.1_darwin_arm64.tar.gz",
+        "sha256": "b4319c3abaa87a0170ab76ee83ea2260ca34b53aecfa3ab0dd5428d2319d744f"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://github.com/anchore/syft/releases/download/v1.54.1/syft_1.54.1_darwin_amd64.tar.gz",
+        "sha256": "2956322838b2f64e470eea474495f0cd96be4f222b1ac037258cdc47d965064e"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/anchore/syft/releases/download/v1.54.1/syft_1.54.1_linux_arm64.tar.gz",
+        "sha256": "dfdf0537610113edbefe1f1fc6548bc957b2d77439636ec824fcf0e10d46d054"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/anchore/syft/releases/download/v1.54.1/syft_1.54.1_linux_amd64.tar.gz",
+        "sha256": "c069905b391cc4c20a5ba65ad5c10be2a7ba074f8ea6ad203e24d14e303dad47"
+      }
+    }
+  },
+  "gitleaks": {
+    "version": "8.30.1",
+    "source": "https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1",
+    "targets": {
+      "aarch64-apple-darwin": {
+        "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz",
+        "sha256": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_x64.tar.gz",
+        "sha256": "dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_arm64.tar.gz",
+        "sha256": "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz",
+        "sha256": "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      }
+    }
+  },
+  "trivy": {
+    "version": "0.76.0",
+    "source": "https://github.com/aquasecurity/trivy/releases/tag/v0.76.0",
+    "targets": {
+      "aarch64-apple-darwin": {
+        "url": "https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_macOS-ARM64.tar.gz",
+        "sha256": "e7ec0d21fe842553f59af99aba2efbcc822369fbaed27019c575408b6d135fce"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_macOS-64bit.tar.gz",
+        "sha256": "89563d4d495cf4ef06a0d1950f8710b124e9f7bd2615ec6c47b03673f4ad45a2"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-ARM64.tar.gz",
+        "sha256": "aab21e677a7b7071fc79f1711480840754c18a1b9d9cefa7ccd06af63a0e8f4c"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-64bit.tar.gz",
+        "sha256": "e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7"
+      }
+    }
+  },
+  "cargo-audit": {
+    "version": "0.22.2",
+    "source": "https://github.com/rustsec/rustsec/releases/tag/cargo-audit/v0.22.2",
+    "targets": {
+      "aarch64-apple-darwin": {
+        "url": "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-aarch64-apple-darwin-v0.22.2.tgz",
+        "sha256": "ec7ca4263769593df4d909be85b94a6b79efa2897be5d2bb8ebd516e823175af"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-apple-darwin-v0.22.2.tgz",
+        "sha256": "847831323de932155b226ab60ee4a180e13e5d007a019f0d4b7b4d89a6de2ab2"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-aarch64-unknown-linux-gnu-v0.22.2.tgz",
+        "sha256": "c6603814ddaa45e51263dafd31c0ac98808f688d26f7395804f9670b0fd599dd"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz",
+        "sha256": "ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39"
+      }
+    }
+  },
+  "regctl": {
+    "version": "0.11.6",
+    "source": "https://github.com/regclient/regclient/releases/tag/v0.11.6",
+    "targets": {
+      "aarch64-apple-darwin": {
+        "url": "https://github.com/regclient/regclient/releases/download/v0.11.6/regctl-darwin-arm64",
+        "sha256": "5b52b71861abc300ab513e87a4c3794cff6508035ac7f6b6bdfa1fa5688c0040"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/regclient/regclient/releases/download/v0.11.6/regctl-linux-arm64",
+        "sha256": "a9b71a3ee79b2d1dbbd7d51fd5e8fa214722c192864235d3d8764463c751a1ff"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://github.com/regclient/regclient/releases/download/v0.11.6/regctl-darwin-amd64",
+        "sha256": "d651381c58357e9b9446cec172761c7418b7621da57960d438175d8f4c5b479d"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/regclient/regclient/releases/download/v0.11.6/regctl-linux-amd64",
+        "sha256": "8e0e62a497fcdb8048d18aa927a139613176ba0531f412bc541044e28f9856bd"
+      }
+    }
+  },
+  "actionlint": {
+    "version": "1.7.12",
+    "source": "https://github.com/rhysd/actionlint/releases/tag/v1.7.12",
+    "checksum_source": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt",
+    "targets": {
+      "aarch64-apple-darwin": {
+        "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_darwin_arm64.tar.gz",
+        "sha256": "aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_darwin_amd64.tar.gz",
+        "sha256": "5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_arm64.tar.gz",
+        "sha256": "325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz",
+        "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+      }
+    }
+  },
+  "gh": {
+    "version": "2.102.0",
+    "targets": {
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_linux_amd64.tar.gz",
+        "sha256": "bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386",
+        "source": "https://api.github.com/repos/cli/cli/releases/tags/v2.102.0"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_linux_arm64.tar.gz",
+        "sha256": "7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484",
+        "source": "https://api.github.com/repos/cli/cli/releases/tags/v2.102.0"
+      }
+    }
+  }
+}

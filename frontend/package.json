@@ -8,9 +8,9 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build && node scripts/prerender-legal.mjs && vite build --config vite.credential-accept.config.ts && node scripts/assert-mock-footprint.mjs",
-    "build:credential-accept": "vite build --config vite.credential-accept.config.ts",
-    "build:wizard": "tsc -b && vite build --config vite.wizard.config.ts && node scripts/install-wizard-bundle.mjs",
+    "build": "tsc -b && vite build && node scripts/prerender-legal.mjs && npm run build:credential-accept && node scripts/assert-mock-footprint.mjs && node scripts/seal-shipped-composition.mjs spa",
+    "build:credential-accept": "vite build --config vite.credential-accept.config.ts && node scripts/seal-shipped-composition.mjs credential-accept",
+    "build:wizard": "tsc -b && vite build --config vite.wizard.config.ts && node scripts/install-wizard-bundle.mjs && node scripts/seal-shipped-composition.mjs wizard",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "NODE_ENV=test vitest run",
@@ -59,7 +59,6 @@
     "i18next": "^26.0.3",
     "lucide-react": "^0.563.0",
     "motion": "^14.0.0",
-    "posthog-js": "^1.280.1",
     "qrcode": "^1.5.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
@@ -92,19 +91,24 @@
     "@types/react": "^19.2.13",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.2.0",
-    "@vitest/coverage-v8": "^4.1.4",
+    "@vitest/coverage-v8": "^4.1.12",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.5.0",
     "globals": "^17.3.0",
     "happy-dom": "^20.6.0",
+    "parse5": "8.0.1",
     "prettier": "^3.8.1",
     "prettier-plugin-tailwindcss": "^0.7.2",
     "tailwindcss": "^4.2.2",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.54.0",
     "vite": "^8.0.8",
-    "vite-plugin-singlefile": "^2.3.3",
-    "vitest": "^4.1.4"
+    "vite-plugin-singlefile": "^2.3.4",
+    "vitest": "^4.1.12"
+  },
+  "packageManager": "npm@11.21.1",
+  "allowScripts": {
+    "fsevents": false
   }
 }

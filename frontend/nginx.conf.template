@@ -44,7 +44,7 @@ server {
     root @@ROOT@@;
     index index.html;
 
-    # nginx 1.27 stops inheriting add_header as soon as a child adds any.
+    # Default nginx inheritance stops as soon as a child adds any add_header.
     # Every location includes its complete, response-specific header policy.
     include @@STATIC_HEADERS@@;
     access_log /var/log/nginx/access.log nyxid_frontend;

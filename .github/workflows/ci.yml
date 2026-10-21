@@ -24,6 +24,9 @@ on:
         default: false
         required: false
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -60,10 +63,17 @@ jobs:
   # ---------------------------------------------------------------------------
   changes:
     name: Detect Changes
+    permissions:
+      contents: read
+      pull-requests: read
     runs-on: ubuntu-latest
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       backend_image: ${{ steps.filter.outputs.backend_image }}
+      packaging: ${{ steps.filter.outputs.packaging }}
+      apt: ${{ steps.filter.outputs.apt }}
+      apk: ${{ steps.filter.outputs.apk }}
+      catalogs: ${{ steps.filter.outputs.catalogs }}
       cli: ${{ steps.filter.outputs.cli }}
       machine: ${{ steps.filter.outputs.machine }}
       permissions: ${{ steps.filter.outputs.permissions }}
@@ -78,14 +88,16 @@ jobs:
       oracle_worker: ${{ steps.filter.outputs.oracle_worker }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Validate every workflow with checksummed actionlint
+        run: python3 scripts/check-actionlint.py --bin-dir "$RUNNER_TEMP/actionlint"
       - name: Test CI helpers
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
       - name: Check private security-report routing
         run: |
           python3 -m unittest discover -s scripts -p 'test_security_reporting.py'
           python3 scripts/check-security-reporting.py
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         with:
           # Shared workspace files (Cargo.toml / Cargo.lock / nextest config)
@@ -95,8 +107,80 @@ jobs:
           # YAML anchors aren't used here -- aliased sequences expand to
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
+            packaging:
+              - 'scripts/*runtime*'
+              - 'scripts/*rootfs*'
+              - 'scripts/*elf*'
+              - 'scripts/*image*entrypoint*'
+              - 'scripts/*image*disposition*'
+              - 'security/image-dispositions.json'
+              - 'scripts/*official*'
+              - 'scripts/*release*sign*'
+              - 'scripts/*rehearsal*'
+              - 'scripts/*signing*'
+              - 'scripts/release_verifier.rs'
+              - 'cli/examples/release-verifier*'
+              - 'security/signing-tools/**'
+              - 'scripts/*sbom*'
+              - 'scripts/machine_fixture_tls.py'
+              - 'scripts/check-dist-artifacts.py'
+              - 'scripts/shipped_composition_sbom.py'
+              - 'scripts/oci_subjects.py'
+              - 'scripts/setup-sbom-tools.sh'
+              - 'scripts/validate-cyclonedx.py'
+              - 'scripts/test_cyclonedx.py'
+              - 'security/schemas/**'
+              - 'security/python-sbom-requirements.txt'
+              - 'scripts/*scan*'
+              - 'scripts/*vulnerabilit*'
+              - 'scripts/*dependency*'
+              - 'scripts/*audit*'
+              - 'scripts/*csp*'
+              - 'scripts/*machine*docker*'
+              - 'cli/tests/updater-npm/**'
+              - 'frontend/Dockerfile.policy-tests'
+              - 'scripts/*identity*'
+              - 'scripts/*artifacts*'
+              - 'scripts/*packaging*'
+              - 'scripts/*credential*'
+              - 'scripts/*publication*'
+              - 'scripts/*build*.py'
+              - 'docs/site/**'
+            catalogs:
+              - 'scripts/*catalog*'
+              - 'scripts/*build-input*'
+              - 'scripts/*hosted*'
+              - 'scripts/check-build-input-freshness.py'
+              - 'renovate.json'
+              - '.github/dependabot.yml'
+              - '.node-version'
+              - 'rust-toolchain.toml'
+            apt:
+              - '**/Dockerfile*'
+              - 'Dockerfile*'
+              - 'scripts/*apt*'
+              - 'scripts/check-build-inputs.py'
+              - 'scripts/test-build-inputs.py'
+              - 'scripts/install-release-dependencies.sh'
+              - '.github/scripts/install-linux-build-deps.sh'
+              - 'security/apt-snapshots.tsv'
+              - 'security/apt-transport-ca.*'
+              - 'security/build-input-pins.json'
+              - '.dockerignore'
+            apk:
+              - '**/Dockerfile*'
+              - 'Dockerfile*'
+              - 'scripts/*apk*'
+              - 'scripts/apt_inputs.py'
+              - 'scripts/check-build-inputs.py'
+              - 'scripts/test-build-inputs.py'
+              - 'security/apk/**'
+              - 'security/build-input-pins.json'
+              - '.dockerignore'
             backend_image:
               - 'backend/Dockerfile'
+              - 'build-support/**'
+              - 'scripts/*build-source.py'
               - '.dockerignore'
               - '.github/scripts/prepare-backend-runner.sh'
               - '.github/workflows/ci.yml'
@@ -107,6 +191,9 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
             machine:
+              - 'build-support/**'
+              - 'scripts/*build-source.py'
+              - 'scripts/build-local-image.py'
               - 'frontend/scripts/machine-seccomp.ts'
               - 'frontend/src/schemas/machines.ts'
               - 'cli/src/commands/update_attestation*'
@@ -128,6 +215,10 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
             backend:
+              - 'build-support/**'
+              - 'scripts/export-build-source.py'
+              - 'scripts/run-exported-build.py'
+              - 'scripts/test-backend-docker-embeds.py'
               - 'backend/**'
               - 'permissions/**'
               - 'machine/**'
@@ -146,6 +237,7 @@ jobs:
               - '.cargo/**'
               - '.config/nextest.toml'
             cli:
+              - 'build-support/**'
               - 'cli/**'
               - 'machine/**'
               - 'machine-updater/**'
@@ -159,6 +251,7 @@ jobs:
               - '.cargo/**'
               - '.config/nextest.toml'
             rust:
+              - 'build-support/**'
               # `mcp-demo` is the fourth workspace member; workspace-wide
               # fmt + clippy must re-run on changes there even though no
               # job currently builds or tests it directly. `cloud-auth`
@@ -222,6 +315,9 @@ jobs:
               - '.claude-plugin/**'
               - 'scripts/validate-claude-plugin.py'
               - 'scripts/sync-plugins.py'
+              - '.github/tools/claude/**'
+              - 'security/build-tools.json'
+              - 'scripts/bootstrap-build-tool.py'
             oracle_worker:
               - 'integrations/oracle/cdp-worker/**'
               - '.node-version'
@@ -232,6 +328,39 @@ jobs:
               - '.github/workflows/**'
               - '.github/actions/**'
               - '.github/scripts/**'
+              - '.github/tools/**'
+              - 'security/**'
+
+  security-scans:
+    name: Security Scans
+    permissions:
+      contents: read
+    uses: ./.github/workflows/security-scans.yml
+
+  # Run the same package-boundary matrix on PRs, weekly and in publication CI.
+  apt-inputs:
+    name: APT Inputs
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.apt == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/apt-inputs.yml
+
+  apk-inputs:
+    name: APK Inputs
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.apk == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/apk-inputs.yml
+
+  catalog-maintenance:
+    name: Build Input Maintenance
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.apt == 'true' || needs.changes.outputs.apk == 'true' || needs.changes.outputs.catalogs == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-input-maintenance.yml
 
   # ---------------------------------------------------------------------------
   # Reusable workflow permissions: a ci.yml job requesting a scope that the
@@ -245,14 +374,43 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - name: Install PyYAML
-        run: pip install pyyaml==6.0.2
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - name: Install integrity-locked workflow and SBOM validators
+        run: |
+          pip install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
+          pip install --require-hashes --only-binary=:all: -r security/python-sbom-requirements.txt
       - name: Check reusable workflow permissions against their callers
-        run: python3 scripts/check-reusable-workflow-permissions.py
+        run: |
+          python3 scripts/check-actionlint.py --bin-dir "$RUNNER_TEMP/actionlint"
+          python3 -m unittest discover -s .github/scripts -p 'test_actionlint.py'
+          python3 scripts/check-workflow-yaml.py
+          python3 scripts/test-workflow-yaml.py
+          python3 scripts/check-reusable-workflow-permissions.py
+      - name: Check pinned inputs and generated release policy
+        run: |
+          python3 scripts/check-build-inputs.py
+          python3 scripts/test-build-inputs.py
+          python3 scripts/check-node-install-policy.py
+          python3 scripts/test_node_install_policy.py
+          python3 scripts/test_embedded_wizard.py
+          python3 scripts/test_rust_binary_sbom.py
+          python3 scripts/test_cyclonedx.py
+          python3 scripts/test_publication_contract.py
+          python3 scripts/test_dist_artifacts.py
+          python3 scripts/test-export-build-source.py
+          python3 scripts/test-source-identity.py
+          python3 scripts/test-build-release-source.py
+          python3 scripts/test-dist-build-completion.py
+          python3 scripts/test-run-exported-build.py
+          python3 scripts/test-build-local-image.py
+          python3 scripts/test-backend-docker-embeds.py
+          python3 scripts/test_oci_subjects.py
 
   # ---------------------------------------------------------------------------
   # Permission engine: no database or Google credentials required.
@@ -263,11 +421,11 @@ jobs:
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.permissions == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo fmt -p nyxid-permissions --check
       - run: cargo clippy -p nyxid-permissions --all-targets --locked -- -D warnings
       - run: cargo test -p nyxid-permissions --locked
@@ -280,7 +438,7 @@ jobs:
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cursor_plugin == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Validate Cursor plugin
         run: python3 scripts/validate-cursor-plugin.py
 
@@ -294,7 +452,7 @@ jobs:
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.codex_plugin == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Check generated plugin files match integrations/plugin-source
         run: python3 scripts/sync-plugins.py --check
       - name: Validate Codex plugin
@@ -311,19 +469,21 @@ jobs:
     needs: changes
     runs-on: ubuntu-latest
     env:
-      CLAUDE_CODE_VERSION: 2.1.284
       PACKAGE_CHANGED: ${{ inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.claude_plugin == 'true' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Check repository limits for the Claude directory
         run: python3 scripts/validate-claude-plugin.py --repo-only
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         if: env.PACKAGE_CHANGED == 'true'
         with:
           node-version-file: .node-version
-      - name: Install pinned Claude Code
+      - name: Install locked offline plugin validator
         if: env.PACKAGE_CHANGED == 'true'
-        run: npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+        run: |
+          python3 scripts/bootstrap-build-tool.py npm --bin-dir "$RUNNER_TEMP/nyxid-node-tools"
+          "$RUNNER_TEMP/nyxid-node-tools/npm" ci --ignore-scripts --prefix .github/tools/claude
+          echo "$GITHUB_WORKSPACE/.github/tools/claude/bin" >> "$GITHUB_PATH"
       - name: Check generated plugin files match integrations/plugin-source
         if: env.PACKAGE_CHANGED == 'true'
         run: python3 scripts/sync-plugins.py --check
@@ -346,11 +506,11 @@ jobs:
       run:
         working-directory: integrations/oracle/cdp-worker
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
-      - run: npm install --ignore-scripts --no-package-lock --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npx --no-install playwright-core install --with-deps chromium
       - run: npm run check
       - run: npm test
@@ -367,11 +527,12 @@ jobs:
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          components: rustfmt
+          components: clippy, rustfmt
       - run: cargo fmt --all -- --check
+      - run: cargo fmt --manifest-path security/artifact-tools/Cargo.toml -- --check
 
   # ---------------------------------------------------------------------------
   # Rust: clippy lint
@@ -386,18 +547,22 @@ jobs:
     env:
       CARGO_BUILD_JOBS: 1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Prepare backend memory reserve
         run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Check Clippy with resource samples
-        run: python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --all-targets -- -D warnings
+        run: python3 .github/scripts/ci_resources.py clippy cargo clippy --locked --workspace --all-targets --features nyxid/aws-kms,nyxid/gcp-kms -- -D warnings
+      - name: Check vendored compiler regression with original negative control
+        run: python3 scripts/test-proc-macro-visibility.py --evidence-dir "$RUNNER_TEMP/proc-macro-visibility"
+      - name: Check locked artifact metadata tools
+        run: cargo clippy --locked --manifest-path security/artifact-tools/Cargo.toml --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
   # Rust: backend tests
@@ -405,20 +570,77 @@ jobs:
   # container is started as a single-node replica set so atomic rotation/binding
   # tests exercise real transactions rather than silently skipping.
   # ---------------------------------------------------------------------------
-  backend-test:
-    name: Backend Test
+  backend-test-build:
+    name: Backend Test Build
+    permissions:
+      contents: read
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
-    # A measured run compiled for 28 minutes and was still passing tests at
-    # 90 minutes. Match coverage's budget for the full compile and suite.
+    # Preserve main's reviewed build budget; test partitions run below.
     timeout-minutes: 120
     # Reduce debug-information volume while retaining locations and backtraces.
     # Resource samples distinguish future compilation shutdowns from test failures.
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: backend
+      - name: Install checksum-locked nextest 0.9.146
+        run: |
+          python3 scripts/bootstrap-build-tool.py cargo-nextest --bin-dir "$RUNNER_TEMP/backend-test-tools"
+          echo "$RUNNER_TEMP/backend-test-tools" >> "$GITHUB_PATH"
+
+      - name: Check RCI backend boundary
+        run: bash scripts/check-rci-backend-boundary.sh
+
+      - name: Build and archive backend tests
+        run: python3 .github/scripts/ci_resources.py backend-test-build cargo nextest archive --locked -p nyxid -p nyxid-service-adapters --features nyxid/aws-kms,nyxid/gcp-kms --profile ci --archive-file "$RUNNER_TEMP/backend-tests.tar.zst"
+      - name: Upload backend test archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: backend-test-archive
+          path: ${{ runner.temp }}/backend-tests.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: resources-backend-test-build
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
+
+  backend-test-partition:
+    name: Backend Test Partition (${{ matrix.partition }}/2)
+    permissions:
+      contents: read
+    needs: backend-test-build
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Execute the archive from the same run; each matrix runner owns its MongoDB.
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Prepare backend memory reserve
         run: bash .github/scripts/prepare-backend-runner.sh
       - name: Start transaction-capable MongoDB
@@ -426,19 +648,23 @@ jobs:
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          key: backend
-      - uses: taiki-e/install-action@v2
+          components: clippy, rustfmt
+      - name: Install checksum-locked nextest 0.9.146
+        run: |
+          python3 scripts/bootstrap-build-tool.py cargo-nextest --bin-dir "$RUNNER_TEMP/backend-test-tools"
+          echo "$RUNNER_TEMP/backend-test-tools" >> "$GITHUB_PATH"
+
+      - name: Download backend test archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          tool: cargo-nextest@0.9.146
-
-      - name: Check RCI backend boundary
-        run: bash scripts/check-rci-backend-boundary.sh
-
-      - name: Run backend tests
-        run: python3 .github/scripts/ci_resources.py backend-test cargo nextest run -p nyxid -p nyxid-service-adapters --profile ci
+          name: backend-test-archive
+          path: ${{ runner.temp }}/backend-test-archive
+      - name: Run backend test partition
+        run: |
+          mkdir -p "$RUNNER_TEMP/backend-test-run"
+          python3 .github/scripts/ci_resources.py backend-test-partition-${{ matrix.partition }} cargo nextest run --archive-file "$RUNNER_TEMP/backend-test-archive/backend-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" --extract-to "$RUNNER_TEMP/backend-test-run" --partition hash:${{ matrix.partition }}/2 --profile ci
       - name: Test MongoDB diagnostics
         if: failure() || cancelled()
         continue-on-error: true
@@ -446,28 +672,61 @@ jobs:
 
       - name: Publish test summary
         if: always()
-        uses: test-summary/action@v2.6
+        uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2.6
         with:
-          paths: target/nextest/ci/junit.xml
+          paths: ${{ github.workspace }}/target/nextest/ci/junit.xml
           show: fail
 
       - name: Upload backend test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: test-results-backend
-          path: target/nextest/ci/junit.xml
+          name: test-results-backend-${{ matrix.partition }}
+          path: ${{ github.workspace }}/target/nextest/ci/junit.xml
           if-no-files-found: warn
 
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: resources-backend-test
+          name: resources-backend-test-${{ matrix.partition }}
           path: ${{ runner.temp }}/nyxid-ci-resources
           if-no-files-found: ignore
           retention-days: 14
+
+  # Keep the required check name and fail closed when an expected partition is
+  # skipped, cancelled or failed. Docs-only changes may intentionally skip both.
+  backend-test:
+    name: Backend Test
+    permissions: {}
+    if: always()
+    needs: [changes, backend-test-build, backend-test-partition]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify backend build and both partitions
+        env:
+          EXPECTED: ${{ inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true' }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          BUILD_RESULT: ${{ needs.backend-test-build.result }}
+          PARTITIONS_RESULT: ${{ needs.backend-test-partition.result }}
+        run: |
+          set -eu
+          printf 'Backend tests: expected=%s changes=%s build=%s partitions=%s\n' "$EXPECTED" "$CHANGES_RESULT" "$BUILD_RESULT" "$PARTITIONS_RESULT"
+          if [ "$CHANGES_RESULT" != success ]; then
+            echo '::error::Backend test change detection did not pass'
+            exit 1
+          fi
+          if [ "$EXPECTED" = true ]; then
+            if [ "$BUILD_RESULT" != success ] || [ "$PARTITIONS_RESULT" != success ]; then
+              echo '::error::Backend test build and both partitions must pass'
+              exit 1
+            fi
+          elif [ "$EXPECTED" != false ] || [ "$BUILD_RESULT" != skipped ] || [ "$PARTITIONS_RESULT" != skipped ]; then
+            echo '::error::Backend test jobs did not match the intentional skip condition'
+            exit 1
+          fi
 
   # Keep the standalone test-profile build and smoke assertion. It exercises
   # a different Cargo feature-unification path from the combined nextest run.
@@ -481,7 +740,7 @@ jobs:
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Prepare backend memory reserve
         run: bash .github/scripts/prepare-backend-runner.sh
       - name: Start transaction-capable MongoDB
@@ -489,12 +748,14 @@ jobs:
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: backend-billing-smoke
       - name: Billing route coverage smoke
-        run: python3 .github/scripts/ci_resources.py billing-smoke cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
+        run: python3 .github/scripts/ci_resources.py billing-smoke cargo test --locked -p nyxid billing_route_coverage_smoke -- --nocapture
       - name: Test MongoDB diagnostics
         if: failure() || cancelled()
         continue-on-error: true
@@ -503,7 +764,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-backend-billing-smoke
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -518,50 +779,65 @@ jobs:
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Export exact committed backend inputs
+        id: source
+        run: |
+          commit=$(git rev-parse HEAD)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/backend-source" --commit "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
       - name: Prepare backend memory reserve
         run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: backend-image-inputs
+          workspaces: ${{ runner.temp }}/backend-source/source -> target
       - name: Build backend image binary
-        run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
+        run: |
+          python3 scripts/run-exported-build.py --export "$RUNNER_TEMP/backend-source" \
+            --commit "${{ steps.source.outputs.commit }}" --receipt "$RUNNER_TEMP/backend-build-execution.json" \
+            --generated target -- cargo build --locked --release -p nyxid --bin nyxid-server \
+            --features gcp-kms --message-format=json-render-diagnostics > "$RUNNER_TEMP/backend-build.jsonl"
       - name: Check backend Docker embedded assets
-        run: python3 scripts/check-backend-docker-embeds.py
+        working-directory: ${{ runner.temp }}/backend-source/source
+        run: python3 scripts/check-backend-docker-embeds.py --build-messages "$RUNNER_TEMP/backend-build.jsonl"
 
-  # Exercise the image's compiler and release build when its infrastructure changes.
-  backend-image-smoke:
-    name: Backend Release Image
+  # Final image extraction supersedes the former cache-only backend image smoke.
+  artifact-packaging:
+    name: Artifact Packaging
     needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.backend_image == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v6
-      - name: Prepare backend image memory reserve
-        timeout-minutes: 5
-        run: bash .github/scripts/prepare-backend-runner.sh
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-      - name: Build backend release image without publishing
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: backend/Dockerfile
-          platforms: linux/amd64
-          build-args: |
-            NYXID_GIT_HASH=${{ github.sha }}
-          outputs: type=cacheonly
-          push: false
-          cache-from: |
-            type=gha,scope=backend-pr-linux-amd64
-            type=gha,scope=backend-linux-amd64
-          cache-to: type=gha,mode=max,scope=backend-pr-linux-amd64
-          provenance: false
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.packaging == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.backend_image == 'true' || needs.changes.outputs.apt == 'true' || needs.changes.outputs.apk == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/artifact-packaging.yml
+
+  release-signing:
+    name: Release Signing Policy
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-signing.yml
+
+  signing-rehearsal:
+    name: Signing Rehearsal
+    needs: [artifact-packaging, release-signing]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/security-release-rehearsal.yml
+
+  machine-native:
+    name: Machine Native Acceptance
+    permissions:
+      contents: read
+    uses: ./.github/workflows/machine-native-acceptance.yml
 
   # ---------------------------------------------------------------------------
   # Rust: CLI / node-agent build + test (no DB required)
@@ -574,31 +850,96 @@ jobs:
       attestations: read
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.machine == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The additional 100 real full-image probes can consume up to 25 minutes
+    # at the unchanged three-browser-probe observation bounds.
+    timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v4
-      - name: Build machine image
-        uses: docker/build-push-action@v7
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          context: .
-          file: cli/Dockerfile.machine
+          persist-credentials: false
+      - name: Export exact committed image inputs
+        id: source
+        run: |
+          commit=$(git rev-parse HEAD)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/image-source" --commit "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build machine image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/cli/Dockerfile.machine
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
           load: true
           tags: nyxid-node-machine:ci
           cache-from: type=gha,scope=machine-pr
           cache-to: type=gha,mode=max,scope=machine-pr
+      - name: Build updater E2E image with verified APK inputs
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/cli/Dockerfile.machine-updater
+          target: e2e
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          tags: nyxid-machine-updater-e2e:local
+          cache-from: type=gha,scope=updater-pr
+          cache-to: type=gha,mode=max,scope=updater-pr
+      - name: Build production updater image with verified APK inputs
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/cli/Dockerfile.machine-updater
+          target: production
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          tags: nyxid-machine-updater:production-test
+          cache-from: type=gha,scope=updater-pr
+      - name: Verify exported image inputs after build
+        if: ${{ always() && steps.source.outcome == 'success' }}
+        run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit "${{ steps.source.outputs.commit }}"
+      - name: Build trusted fixture overlay on the actual machine image
+        run: docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:ci -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
+      - name: Time 100 actual Debian Chromium probes without registration or persistent mounts
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/machine-container-evidence"
+          docker volume ls --format '{{.Name}}' | sort > "$RUNNER_TEMP/machine-container-evidence/volumes-before.txt"
+          docker run --rm --init --name nyxid-machine-probe-acceptance --shm-size=512m \
+            --security-opt seccomp=cli/resources/machine-container/seccomp.json \
+            --entrypoint python3 nyxid-machine-e2e:ci \
+            /test/machine_probe_acceptance.py --disposable --binary /usr/local/bin/nyxid --container --samples 100 \
+            2>&1 | tee "$RUNNER_TEMP/machine-container-evidence/probe-timings.txt"
+          docker volume ls --format '{{.Name}}' | sort > "$RUNNER_TEMP/machine-container-evidence/volumes-after.txt"
+          diff -u "$RUNNER_TEMP/machine-container-evidence/volumes-before.txt" "$RUNNER_TEMP/machine-container-evidence/volumes-after.txt"
+          test -z "$(docker ps -aq --filter name='^/nyxid-machine-probe-acceptance$')"
+      - name: Preserve fixed-label full-image timing evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: machine-container-amd64-probe-timings
+          path: ${{ runner.temp }}/machine-container-evidence/probe-timings.txt
+          if-no-files-found: error
+          retention-days: 14
       - name: Verify sandbox, isolation, saved logins, takeover and live desktop
         run: |
-          docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:ci -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
           docker run --rm --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:ci
           python3 cli/tests/machine_mount_denied_profile.py cli/resources/machine-container/seccomp.json /tmp/nyxid-machine-deny-mount.json
           docker run --rm --shm-size=256m --security-opt seccomp=/tmp/nyxid-machine-deny-mount.json nyxid-machine-e2e:ci
       - name: Verify existing-profile migration, signed updates and rollback
         env:
           MACHINE_IMAGE: nyxid-node-machine:ci
+          UPDATER_E2E_IMAGE: nyxid-machine-updater-e2e:local
           MACHINE_TEST_SECCOMP: /tmp/nyxid-machine-deny-mount.json
         run: sh cli/tests/machine_updater_e2e.sh
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
       - name: Install command-rendering dependencies
@@ -606,6 +947,7 @@ jobs:
       - name: Verify read-only production updater and rendered commands
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          UPDATER_PRODUCTION_IMAGE: nyxid-machine-updater:production-test
         run: node cli/tests/machine_updater_production.mjs
       - name: Remove test images and build cache
         if: always()
@@ -619,22 +961,24 @@ jobs:
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: cli
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest@0.9.146
 
       - name: Build CLI
-        run: cargo build -p nyxid-cli
+        run: cargo build --locked -p nyxid-cli
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
       - name: Test saved-login extension and signed package freshness
@@ -643,16 +987,23 @@ jobs:
       - name: Run CLI tests
         run: cargo nextest run -p nyxid-cli -p nyxid-machine -p nyxid-machine-updater --profile ci
 
+      - name: Real Linux Secret Service from the CLI Tokio runtime
+        timeout-minutes: 10
+        run: |
+          . /etc/os-release
+          sudo -n sh scripts/apt-snapshot-install.sh --install-only security/apt-snapshots.tsv "$ID:$VERSION_CODENAME" -- gnome-keyring dbus-daemon dbus-bin
+          python3 scripts/test-native-secret-service.py
+
       - name: Publish test summary
         if: always()
-        uses: test-summary/action@v2.6
+        uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2.6
         with:
           paths: target/nextest/ci/junit.xml
           show: fail
 
       - name: Upload CLI test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test-results-cli
           path: target/nextest/ci/junit.xml
@@ -682,22 +1033,24 @@ jobs:
           - features: aws-kms,gcp-kms
             cache-suffix: aws-and-gcp-kms
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Prepare backend memory reserve
         run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: features-${{ matrix.cache-suffix }}
       - name: Build with --features ${{ matrix.features }}
-        run: python3 .github/scripts/ci_resources.py features-${{ matrix.cache-suffix }} cargo build -p nyxid --features ${{ matrix.features }}
+        run: python3 .github/scripts/ci_resources.py features-${{ matrix.cache-suffix }} cargo build --locked -p nyxid --features ${{ matrix.features }}
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-rust-features-${{ matrix.cache-suffix }}
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -716,12 +1069,16 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: Use reviewed npm11 installer
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/bootstrap-build-tool.py" npm --bin-dir "$RUNNER_TEMP/nyxid-node-tools"
+          echo "$RUNNER_TEMP/nyxid-node-tools" >> "$GITHUB_PATH"
       - run: npm ci
       - run: npm run lint
       - run: npm run test
@@ -739,16 +1096,19 @@ jobs:
       run:
         working-directory: mobile
     steps:
-      - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
-          version: 10.17.1
-      - uses: actions/setup-node@v6
+          version: 10.34.7
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
           cache: pnpm
           cache-dependency-path: mobile/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile
+      - run: node ../scripts/test-mobile-yaml-compat.cjs
+      - name: Prove production bundle excludes build-only glob modules
+        run: node ../scripts/check-mobile-bundle.cjs
       - run: pnpm check:native-sync
       - run: pnpm test
       - run: pnpm typecheck
@@ -757,7 +1117,7 @@ jobs:
   # CLI wizard bundle: source-closure freshness check.
   #
   # The CLI embeds the React wizard bundle at `cli/src/wizard/assets/index.html`
-  # via `rust_embed`. We commit the prebuilt artifact so `cargo build -p
+  # via `rust_embed`. We commit the prebuilt artifact so `cargo build --locked -p
   # nyxid-cli` doesn't need a Node toolchain. To detect drift, `build:wizard`
   # also writes the wizard's full module graph to
   # `cli/src/wizard/bundle-meta/index.manifest` and a SHA-256 over every
@@ -779,16 +1139,26 @@ jobs:
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.wizard == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: wizard-freshness
       - name: Verify wizard bundle freshness
-        run: cargo test -p nyxid-cli --test wizard_bundle_freshness
+        run: cargo test --locked -p nyxid-cli --test wizard_bundle_freshness
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: .node-version
+      - name: Verify final wizard seal against source provenance
+        run: |
+          python3 scripts/bootstrap-build-tool.py npm --bin-dir "$RUNNER_TEMP/wizard-npm"
+          "$RUNNER_TEMP/wizard-npm/npm" ci --prefix frontend
+          node frontend/scripts/seal-shipped-composition.mjs wizard verify
 
   # ---------------------------------------------------------------------------
   # SDK: build all packages
@@ -802,12 +1172,16 @@ jobs:
       run:
         working-directory: sdk
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: sdk/package-lock.json
+      - name: Use reviewed npm11 installer
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/bootstrap-build-tool.py" npm --bin-dir "$RUNNER_TEMP/nyxid-node-tools"
+          echo "$RUNNER_TEMP/nyxid-node-tools" >> "$GITHUB_PATH"
       - run: npm ci
       - run: npm run build
 
@@ -860,7 +1234,7 @@ jobs:
       # Merge per-test coverage into four profiles per binary to bound disk use.
       LLVM_PROFILE_FILE_NAME: "nyxid-%4m.profraw"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
       - name: Identify coverage measurement inputs
@@ -873,13 +1247,13 @@ jobs:
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
+          components: clippy, llvm-tools-preview, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: coverage-backend
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
 
@@ -917,7 +1291,7 @@ jobs:
       - name: Cache reusable base report
         if: github.event_name != 'pull_request' && steps.coverage-identity.outputs.reusable == 'true'
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: coverage-backend.base.json
           key: coverage-backend-base-v2-${{ github.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
@@ -930,7 +1304,7 @@ jobs:
 
       - name: Upload coverage artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ github.event_name == 'pull_request' && 'backend-coverage-head' || 'coverage-backend' }}
           path: |
@@ -941,7 +1315,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-coverage-backend
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -964,20 +1338,20 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
       LLVM_PROFILE_FILE_NAME: "nyxid-%4m.profraw"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Identify coverage measurement inputs
         id: coverage-identity
         run: python3 .github/scripts/coverage_identity.py
       - name: Restore exact base report
         if: steps.coverage-identity.outputs.reusable == 'true'
         id: base-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: coverage-backend.base.json
           key: coverage-backend-base-v2-${{ github.event.pull_request.base.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
       - name: Checkout base tree
         if: steps.base-cache.outputs.cache-hit != 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: base-coverage
@@ -990,16 +1364,16 @@ jobs:
       - name: Install system dependencies
         if: steps.base-cache.outputs.cache-hit != 'true'
         timeout-minutes: 5
-        run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
-        if: steps.base-cache.outputs.cache-hit != 'true'
+        run: bash .github/scripts/install-linux-build-deps.sh --base-coverage
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
+          components: clippy, llvm-tools-preview, rustfmt
+        if: steps.base-cache.outputs.cache-hit != 'true'
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         if: steps.base-cache.outputs.cache-hit != 'true'
         with:
           key: coverage-backend-base
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         if: steps.base-cache.outputs.cache-hit != 'true'
         with:
           tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
@@ -1023,13 +1397,13 @@ jobs:
       - name: Cache measured base report
         if: steps.base-cache.outputs.cache-hit != 'true' && steps.coverage-identity.outputs.reusable == 'true'
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: coverage-backend.base.json
           key: coverage-backend-base-v2-${{ github.event.pull_request.base.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
       - name: Upload base report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: backend-base-report
           path: coverage-backend.base.json
@@ -1038,7 +1412,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-coverage-backend-base
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -1055,16 +1429,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Download head report
         id: head-report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: backend-coverage-head
         continue-on-error: true
       - name: Download base report
         if: steps.head-report.outcome == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: backend-base-report
         continue-on-error: true
@@ -1075,7 +1449,7 @@ jobs:
             coverage-backend.json coverage-backend.base.json
       - name: Upload coverage artifact
         if: steps.head-report.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-backend
           path: |
@@ -1092,19 +1466,19 @@ jobs:
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
+          components: clippy, llvm-tools-preview, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: coverage-cli
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-llvm-cov@0.9.1
 
@@ -1145,7 +1519,7 @@ jobs:
 
       - name: Upload coverage artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-cli
           path: |
@@ -1168,14 +1542,18 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: Use reviewed npm11 installer
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/bootstrap-build-tool.py" npm --bin-dir "$RUNNER_TEMP/nyxid-node-tools"
+          echo "$RUNNER_TEMP/nyxid-node-tools" >> "$GITHUB_PATH"
       - run: npm ci
 
       # Head: measure WITHOUT the gate (override the line threshold to 0) so the
@@ -1233,7 +1611,7 @@ jobs:
 
       - name: Upload coverage artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-frontend
           path: |
@@ -1271,9 +1649,9 @@ jobs:
       # write scopes here -- this job never touches the PR conversation.
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Download coverage summaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: coverage-*
           path: coverage-artifacts
@@ -1288,7 +1666,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: echo "$PR_NUMBER" > pr-number.txt
       - name: Upload coverage comment payload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           # Deliberately NOT matching `coverage-*` so the pattern download
           # above never picks this payload up on a re-run.
@@ -1316,6 +1694,10 @@ jobs:
     needs:
       - changes
       - workflow-permissions
+      - apt-inputs
+      - apk-inputs
+      - catalog-maintenance
+      - security-scans
       - cursor-plugin-validate
       - codex-plugin-validate
       - claude-plugin-validate
@@ -1326,7 +1708,10 @@ jobs:
       - permissions-test
       - backend-billing-smoke
       - backend-image-inputs
-      - backend-image-smoke
+      - artifact-packaging
+      - release-signing
+      - signing-rehearsal
+      - machine-native
       - cli-test
       - machine-container
       - rust-features
@@ -1348,6 +1733,10 @@ jobs:
           RESULTS: |
             changes=${{ needs.changes.result }}
             workflow-permissions=${{ needs.workflow-permissions.result }}
+            apt-inputs=${{ needs.apt-inputs.result }}
+            apk-inputs=${{ needs.apk-inputs.result }}
+            catalog-maintenance=${{ needs.catalog-maintenance.result }}
+            security-scans=${{ needs.security-scans.result }}
             cursor-plugin-validate=${{ needs.cursor-plugin-validate.result }}
             codex-plugin-validate=${{ needs.codex-plugin-validate.result }}
             claude-plugin-validate=${{ needs.claude-plugin-validate.result }}
@@ -1358,7 +1747,10 @@ jobs:
             permissions-test=${{ needs.permissions-test.result }}
             backend-billing-smoke=${{ needs.backend-billing-smoke.result }}
             backend-image-inputs=${{ needs.backend-image-inputs.result }}
-            backend-image-smoke=${{ needs.backend-image-smoke.result }}
+            artifact-packaging=${{ needs.artifact-packaging.result }}
+            release-signing=${{ needs.release-signing.result }}
+            signing-rehearsal=${{ needs.signing-rehearsal.result }}
+            machine-native=${{ needs.machine-native.result }}
             cli-test=${{ needs.cli-test.result }}
             machine-container=${{ needs.machine-container.result }}
             rust-features=${{ needs.rust-features.result }}

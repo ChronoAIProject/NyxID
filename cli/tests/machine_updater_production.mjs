@@ -2,6 +2,7 @@
 // Run from the repository root with Node >=22.18 and frontend dependencies installed.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import {
   machineMigrationCommand,
   machineCompanionCommand,
@@ -11,6 +12,8 @@ const updater = process.env.UPDATER_PRODUCTION_IMAGE ?? 'nyxid-machine-updater:p
 const testPublished = process.env.NYXID_TEST_PUBLISHED_UPDATER === '1';
 const release = '0.41.0'; // Published, attested release independent of the pending patch tag.
 const repository = 'ghcr.io/chronoaiproject/nyxid';
+const fixtures = JSON.parse(readFileSync(new URL('../../security/test-images.json', import.meta.url), 'utf8')).images;
+for (const image of Object.values(fixtures)) assert.match(image, /^[^\s@]+@sha256:[0-9a-f]{64}$/);
 const volumePath = '/var/lib/nyxid-machine-update';
 const name = `nyxid-updater-production-${process.pid}-${Date.now()}`;
 const volumes = [`${name}-with-tmp`, `${name}-without-tmp`];
@@ -19,7 +22,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const constraints = ['--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--mount', 'type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock'];
 function volume(name) { return ['--mount', `type=volume,src=${name},dst=${volumePath}`]; }
 function mailbox(updateVolume, command) {
-  return docker('run', '--rm', ...volume(updateVolume), 'busybox:latest', 'sh', '-c', command);
+  return docker('run', '--rm', ...volume(updateVolume), fixtures.mailbox, 'sh', '-c', command);
 }
 
 // Change exactly one unquoted image token and optionally forward the token by
@@ -45,7 +48,7 @@ async function renderedChecks(pinned, published) {
   // trust-root verification and the updater binary are real.
   docker('run', '-d', '--name', fixtureName, '--label', `dev.nyxid.machine=${fixtureName}`,
     ...volume(updateVolume), '--health-cmd', 'true', '--health-interval', '1s', '--health-timeout', '1s',
-    '--entrypoint', '/bin/sh', `${repository}/nyxid-node-machine:${release}`, '-c',
+    '--entrypoint', '/bin/sh', fixtures.production_machine, '-c',
     `while true; do printf '{"version":"${release}","at_ms":%s000}' "$(date +%s)" > ${volumePath}/connected.json; sleep 1; done`);
   for (const [action, render] of [['bootstrap', machineMigrationCommand], ['watch', machineCompanionCommand]]) {
     const rendered = render(fixtureName, release, pinned);
@@ -92,7 +95,8 @@ try {
   assert.ok(process.env.CI !== 'true' || process.env.GITHUB_TOKEN, 'CI requires GITHUB_TOKEN for authenticated attestation checks');
   if (!testPublished) console.log('SKIP (opt-in): published 0.41.0 updater uses unauthenticated GitHub API');
   if (!process.env.UPDATER_PRODUCTION_IMAGE) {
-    execFileSync('docker', ['build', '--target', 'production', '-f', 'cli/Dockerfile.machine-updater', '-t', updater, '.'], { stdio: 'inherit' });
+    execFileSync('python3', ['scripts/build-local-image.py', '--target', 'production',
+      '--file', 'cli/Dockerfile.machine-updater', '--tag', updater], { stdio: 'inherit' });
   } else {
     // Publish Images passes a pushed digest that is not local yet. Pull it
     // first: an implicit pull would print progress on the stderr that the
@@ -132,10 +136,10 @@ try {
 
   // The schema requires an official pinned digest. Render with the published
   // pin, then assert the sole image-token substitution for the default checks.
-  for (const image of [`${repository}/nyxid-machine-updater:${release}`, `${repository}/nyxid-node-machine:${release}`, 'busybox:latest']) {
+  for (const image of [fixtures.production_updater, fixtures.production_machine, fixtures.mailbox]) {
     docker('pull', image);
   }
-  const digests = JSON.parse(docker('image', 'inspect', `${repository}/nyxid-machine-updater:${release}`, '--format', '{{json .RepoDigests}}'));
+  const digests = JSON.parse(docker('image', 'inspect', fixtures.production_updater, '--format', '{{json .RepoDigests}}'));
   const pinned = digests.find((value) => value.startsWith(`${repository}/nyxid-machine-updater@sha256:`));
   assert.ok(pinned);
   // Assert the transformation rejects ambiguous/missing image tokens as well.

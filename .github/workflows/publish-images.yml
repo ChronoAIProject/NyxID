@@ -11,7 +11,8 @@ name: Publish Images
 # Build strategy: native runner matrix (no QEMU). The `build` job fans out
 # across (component x platform), with linux/arm64 jobs running on
 # ubuntu-24.04-arm for native speed. Each build pushes by digest only; the
-# `merge` job then creates the multi-arch manifest list with the real tags.
+# `merge` job validates/publishes indices by digest; `promote` applies real tags
+# only after the complete image publication SBOM set has passed.
 # Reference: https://docs.docker.com/build/ci/github-actions/multi-platform/
 #
 # Published images are public. A one-time visibility flip runs after each
@@ -29,10 +30,6 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
-  pull-requests: write
-  id-token: write
-  attestations: write
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -45,7 +42,11 @@ jobs:
     # start (checked on PRs by scripts/check-reusable-workflow-permissions.py).
     permissions:
       contents: read
+      # Detect Changes reads PR file lists when CI runs on pull_request.
+      pull-requests: read
       attestations: read
+      # The nested rehearsal alone requests OIDC; it never publishes.
+      id-token: write
     with:
       # The publish gate is a release validation, not a PR check, so path
       # filtering must not skip anything. Force the full suite to run
@@ -53,12 +54,20 @@ jobs:
       force-all: true
 
   # ---------------------------------------------------------------------------
-  # Build each component for each platform on its native runner while CI runs.
-  # Each job pushes by digest only (no tags). A failed CI gate leaves no tagged
-  # release because `merge` waits for both the builds and the gate.
+  # CI, including source dependency/history scans, precedes every registry write.
+  # Build and scan each final native image locally, then copy its exact digest.
   # ---------------------------------------------------------------------------
   build:
+    environment: official-release
+    env:
+      OFFICIAL_RELEASE_AUTHORIZATION: ${{ vars.OFFICIAL_RELEASE_AUTHORIZATION }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     name: Build ${{ matrix.component }} (${{ matrix.platform }})
+    needs: ci-gate
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -91,7 +100,17 @@ jobs:
             context: .
             file: cli/Dockerfile.machine-updater
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Export exact committed image inputs
+        id: source
+        run: |
+          commit=$(git rev-parse HEAD)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/image-source" --commit "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Prepare backend image memory reserve
         if: matrix.component == 'backend'
@@ -105,10 +124,10 @@ jobs:
           echo "image=ghcr.io/${owner}/nyxid/${{ matrix.component }}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -117,7 +136,7 @@ jobs:
       # Labels only -- tags are applied by the merge job on the manifest list.
       - name: Extract metadata (labels)
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ steps.repo.outputs.image }}
           labels: |
@@ -125,34 +144,54 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.licenses=Apache-2.0
 
-      - name: Compute short git hash
-        id: git
-        run: echo "hash=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Verify exported image inputs before build
+        run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit "${{ steps.source.outputs.commit }}"
 
-      - name: Build and push by digest
+      - name: Build staged image without registry writes
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.file }}
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/${{ matrix.file }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Build-args: git hash for backend/node-agent surface tagging
-          # (stamped on /health). Telemetry config is fetched at runtime
+          # Full source commit and commit epoch identify every actual builder.
+          # Telemetry config is fetched at runtime
           # from the backend's /api/v1/public/config endpoint, so no
           # build-args for telemetry are needed here.
           build-args: |
-            NYXID_GIT_HASH=${{ steps.git.outputs.hash }}
-          outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          push: false
+          tags: nyxid-publish:staged
           cache-from: type=gha,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
           provenance: false
 
+      - name: Verify exported image inputs after build
+        if: ${{ always() && steps.source.outcome == 'success' }}
+        run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit "${{ steps.source.outputs.commit }}"
+
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - name: Require final publication image source identity before attestation and promotion
+        env:
+          IMAGE: nyxid-publish:staged
+          PLATFORM: ${{ matrix.platform }}
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
+          python3 scripts/check-image-identity.py --image "$IMAGE" --component "$COMPONENT" \
+            --arch "${PLATFORM#linux/}" --source-root "$RUNNER_TEMP/image-source/source" \
+            --commit '${{ steps.source.outputs.commit }}' --epoch '${{ steps.source.outputs.epoch }}' \
+            --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
       - name: Verify machine browser and desktop
         if: matrix.component == 'nyxid-node-machine'
         timeout-minutes: 10
         env:
-          MACHINE_IMAGE: ${{ steps.repo.outputs.image }}@${{ steps.build.outputs.digest }}
+          MACHINE_IMAGE: nyxid-publish:staged
         run: |
           docker build --build-arg MACHINE_IMAGE="$MACHINE_IMAGE" \
             -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
@@ -160,35 +199,90 @@ jobs:
           python3 cli/tests/machine_mount_denied_profile.py cli/resources/machine-container/seccomp.json /tmp/nyxid-machine-deny-mount.json
           docker run --rm --shm-size=256m --security-opt seccomp=/tmp/nyxid-machine-deny-mount.json nyxid-machine-e2e:ci
 
-      - uses: actions/setup-node@v6
-        if: matrix.component == 'nyxid-machine-updater'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: '24'
+          node-version-file: .node-version
       - name: Verify production updater under documented restrictions
         if: matrix.component == 'nyxid-machine-updater'
         timeout-minutes: 10
         env:
-          UPDATER_PRODUCTION_IMAGE: ${{ steps.repo.outputs.image }}@${{ steps.build.outputs.digest }}
+          UPDATER_PRODUCTION_IMAGE: nyxid-publish:staged
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           npm ci --ignore-scripts --prefix frontend
           node cli/tests/machine_updater_production.mjs
 
-      - name: Attest published image digest
-        uses: actions/attest-build-provenance@v3
+      - name: Install checksummed final image scanners and digest copier
+        run: |
+          python3 scripts/bootstrap-build-tool.py trivy --bin-dir "$RUNNER_TEMP/scan-tools"
+          python3 scripts/bootstrap-build-tool.py regctl --bin-dir "$RUNNER_TEMP/scan-tools"
+      - name: Require vulnerability scan of the exact staged publication subject
+        run: |
+          python3 scripts/check-image-vulnerabilities.py --image nyxid-publish:staged \
+            --component '${{ matrix.component }}' --platform '${{ matrix.platform }}' \
+            --commit '${{ steps.source.outputs.commit }}' --trivy "$RUNNER_TEMP/scan-tools/trivy" \
+            --regctl "$RUNNER_TEMP/scan-tools/regctl" --stage "$RUNNER_TEMP/scanned-image"
+      - name: Require actual final filesystem, executable and frontend composition SBOM before registry writes
+        run: |
+          sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-sbom.py \
+            --stage "$RUNNER_TEMP/scanned-image" --source-root "$RUNNER_TEMP/image-source/source" \
+            --epoch '${{ steps.source.outputs.epoch }}' --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info" \
+            --syft "$RUNNER_TEMP/sbom-tools/bin/syft"
+      - name: Preserve replayable final platform SBOM evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          subject-name: ${{ steps.repo.outputs.image }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
+          name: published-platform-sbom-${{ matrix.component }}-${{ matrix.platform_pair }}
+          path: ${{ runner.temp }}/scanned-image/sbom/
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: w6-release-verifier-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: ${{ runner.temp }}/verifier
+      - run: chmod 755 "$RUNNER_TEMP/verifier/release-verifier"
+      - name: Prepare mandatory official platform publication manifest
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py prepare --scope platform --stage "$RUNNER_TEMP/scanned-image" --repository '${{ steps.repo.outputs.image }}' \
+            --proof "$RUNNER_TEMP/official-release"
+      - name: Sign official manifest and every exact platform subject
+        id: official-signature
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-checksums: ${{ runner.temp }}/official-release/subjects.sha256
+          push-to-registry: false
+      - name: Require W6-verified signing before platform publication
+        env:
+          SIGNED_BUNDLE: ${{ steps.official-signature.outputs.bundle-path }}
+        run: |
+          cp "$SIGNED_BUNDLE" "$RUNNER_TEMP/official-release/official-release-manifest.sigstore.json"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py verify --scope platform --stage "$RUNNER_TEMP/scanned-image" --repository '${{ steps.repo.outputs.image }}' \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
+      - name: Copy only the passing immutable OCI subject to GHCR
+        id: publish
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/publish-scanned-image.py --stage "$RUNNER_TEMP/scanned-image" \
+            --repository '${{ steps.repo.outputs.image }}' --regctl "$RUNNER_TEMP/scan-tools/regctl" \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
+      - name: Preserve final image vulnerability report and digest binding
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: published-image-scan-${{ matrix.component }}-${{ matrix.platform_pair }}
+          path: |
+            ${{ runner.temp }}/scanned-image/trivy.json
+            ${{ runner.temp }}/scanned-image/image-scan.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Export digest
         run: |
           mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
+          digest="${{ steps.publish.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: digests-${{ matrix.component }}-${{ matrix.platform_pair }}
           path: /tmp/digests/*
@@ -196,44 +290,215 @@ jobs:
           retention-days: 1
 
   # ---------------------------------------------------------------------------
+  # Require parity of actual publication subjects before any public tag promotion.
+  credential-parity:
+    name: Published Credential Packaging (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: digests-backend-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/credential-digests/backend
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: digests-frontend-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/credential-digests/frontend
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require exact image-extracted credential parity before promotion
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          python3 scripts/check-published-credentials.py --digests "$RUNNER_TEMP/credential-digests" \
+            --repository "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/nyxid" --arch "$ARCH" \
+            --source-root "$GITHUB_WORKSPACE" --commit "$(git rev-parse HEAD)" --epoch "$(git show -s --format=%ct HEAD)"
+
   # Merge per-arch digests into a multi-arch manifest list per component and
-  # apply the real tags. One merge job per component.
+  # validate each index before a separate complete-set tag promotion.
   # ---------------------------------------------------------------------------
   merge:
-    name: Merge ${{ matrix.component }} manifest
-    runs-on: ubuntu-latest
-    needs: [ci-gate, build]
+    environment: official-release
+    env:
+      OFFICIAL_RELEASE_AUTHORIZATION: ${{ vars.OFFICIAL_RELEASE_AUTHORIZATION }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    name: Merge ${{ matrix.component }} manifest and SBOM
+    runs-on: ubuntu-24.04
+    needs: [ci-gate, build, credential-parity]
     strategy:
       fail-fast: false
       matrix:
         component: [backend, frontend, node-agent, nyxid-node-machine, nyxid-machine-updater]
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Compute lowercase image repo
         id: repo
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           echo "image=ghcr.io/${owner}/nyxid/${{ matrix.component }}" >> "$GITHUB_OUTPUT"
-
-      - name: Download digests
-        uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          path: /tmp/digests
-          pattern: digests-${{ matrix.component }}-*
-          merge-multiple: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+          pattern: published-platform-sbom-${{ matrix.component }}-*
+          path: ${{ runner.temp }}/platform-sboms
+      - name: Install pinned SBOM validator and digest publisher
+        run: |
+          sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+          python3 scripts/bootstrap-build-tool.py regctl --bin-dir "$RUNNER_TEMP/sbom-tools/bin"
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require index subject and exact platform SBOM composition before publishing by digest
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-publication-sboms.py index \
+            --component '${{ matrix.component }}' --commit "$(git rev-parse HEAD)" --epoch "$(git show -s --format=%ct HEAD)" \
+            --evidence "$RUNNER_TEMP/platform-sboms" --output "$RUNNER_TEMP/index-sbom"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: w6-release-verifier-amd64
+          path: ${{ runner.temp }}/verifier
+      - run: chmod 755 "$RUNNER_TEMP/verifier/release-verifier"
+      - name: Prepare mandatory official index publication manifest
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py prepare --scope index --evidence "$RUNNER_TEMP/index-sbom" --repository '${{ steps.repo.outputs.image }}' \
+            --proof "$RUNNER_TEMP/official-release"
+      - name: Sign official manifest and every exact index subject
+        id: official-signature
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-checksums: ${{ runner.temp }}/official-release/subjects.sha256
+          push-to-registry: false
+      - name: Require W6-verified signing before index publication
+        env:
+          SIGNED_BUNDLE: ${{ steps.official-signature.outputs.bundle-path }}
+        run: |
+          cp "$SIGNED_BUNDLE" "$RUNNER_TEMP/official-release/official-release-manifest.sigstore.json"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py verify --scope index --evidence "$RUNNER_TEMP/index-sbom" --repository '${{ steps.repo.outputs.image }}' \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
+      - name: Publish verified index and attach its SBOM without promoting tags
+        id: merged
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-publication-sboms.py publish-index \
+            --evidence "$RUNNER_TEMP/index-sbom" --repository '${{ steps.repo.outputs.image }}' --regctl "$RUNNER_TEMP/sbom-tools/bin/regctl" \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: published-index-sbom-${{ matrix.component }}
+          path: ${{ runner.temp }}/index-sbom/
+          if-no-files-found: error
+          retention-days: 14
 
+  image-sbom-closure:
+    environment: official-release
+    env:
+      OFFICIAL_RELEASE_AUTHORIZATION: ${{ vars.OFFICIAL_RELEASE_AUTHORIZATION }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    name: Complete Image Publication SBOM Closure
+    needs: merge
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: published-index-sbom-*
+          path: ${{ runner.temp }}/index-sboms
+      - name: Require complete expected publication set before any tag promotion
+        run: |
+          sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+          "$RUNNER_TEMP/sbom-tools/python/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/make-publication-plan.py images --output "$RUNNER_TEMP/image-plan.json"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-publication-sboms.py closure \
+            --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/index-sboms" --output "$RUNNER_TEMP/image-sboms.json"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: w6-release-verifier-amd64
+          path: ${{ runner.temp }}/verifier
+      - run: chmod 755 "$RUNNER_TEMP/verifier/release-verifier"
+      - name: Prepare mandatory official images publication manifest
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py prepare --scope images --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/index-sboms" \
+            --proof "$RUNNER_TEMP/official-release"
+      - name: Sign official manifest and every exact images subject
+        id: official-signature
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-checksums: ${{ runner.temp }}/official-release/subjects.sha256
+          push-to-registry: false
+      - name: Require W6-verified signing before images publication
+        env:
+          SIGNED_BUNDLE: ${{ steps.official-signature.outputs.bundle-path }}
+        run: |
+          cp "$SIGNED_BUNDLE" "$RUNNER_TEMP/official-release/official-release-manifest.sigstore.json"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py verify --scope images --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/index-sboms" \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: official-image-release
+          path: ${{ runner.temp }}/official-release/
+          if-no-files-found: error
+          retention-days: 14
+
+  promote:
+    environment: official-release
+    env:
+      OFFICIAL_RELEASE_AUTHORIZATION: ${{ vars.OFFICIAL_RELEASE_AUTHORIZATION }}
+    permissions:
+      contents: read
+      packages: write
+    name: Promote ${{ matrix.component }} verified tags
+    needs: [merge, image-sbom-closure, credential-parity]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [backend, frontend, node-agent, nyxid-node-machine, nyxid-machine-updater]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Compute lowercase image repo
+        id: repo
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "image=ghcr.io/${owner}/nyxid/${{ matrix.component }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: published-index-sbom-*
+          path: ${{ runner.temp }}/index-sboms
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ steps.repo.outputs.image }}
           tags: |
@@ -247,30 +512,27 @@ jobs:
             type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,format=short,prefix=main-,enable=${{ github.ref == 'refs/heads/main' }}
 
-      - name: Create manifest list and push
-        working-directory: /tmp/digests
-        run: |
-          docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ steps.repo.outputs.image }}@sha256:%s ' *)
-
-      - name: Resolve merged image digest
-        id: merged
-        run: |
-          digest=$(docker buildx imagetools inspect '${{ steps.repo.outputs.image }}:${{ steps.meta.outputs.version }}' --format '{{json .Manifest.Digest}}' | jq -r .)
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Attest multi-architecture release
-        uses: actions/attest-build-provenance@v3
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          subject-name: ${{ steps.repo.outputs.image }}
-          subject-digest: ${{ steps.merged.outputs.digest }}
-          push-to-registry: true
-
-      - name: Inspect image
+          name: w6-release-verifier-amd64
+          path: ${{ runner.temp }}/verifier
+      - run: chmod 755 "$RUNNER_TEMP/verifier/release-verifier"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: official-image-release
+          path: ${{ runner.temp }}/official-release
+      - name: Revalidate every planned SBOM subject then promote exact verified index
+        env:
+          PROMOTION_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
-          docker buildx imagetools inspect \
-            ${{ steps.repo.outputs.image }}:${{ steps.meta.outputs.version }}
+          sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+          "$RUNNER_TEMP/sbom-tools/python/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
+          python3 scripts/bootstrap-build-tool.py regctl --bin-dir "$RUNNER_TEMP/sbom-tools/bin"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/make-publication-plan.py images --output "$RUNNER_TEMP/image-plan.json"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/promote-sbom-images.py \
+            --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/index-sboms" \
+            --component '${{ matrix.component }}' --tags "$PROMOTION_TAGS" --regctl "$RUNNER_TEMP/sbom-tools/bin/regctl" \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
 
   # ---------------------------------------------------------------------------
   # Flip new packages to public visibility. Idempotent: a no-op once public.
@@ -279,7 +541,7 @@ jobs:
   make-public:
     name: Ensure public visibility
     runs-on: ubuntu-latest
-    needs: merge
+    needs: promote
     if: github.event_name == 'push'
     permissions:
       packages: write
