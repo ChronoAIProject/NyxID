@@ -894,8 +894,11 @@ and content they encounter can contain prompt injection. Workspace roots
 constrain file tools and command working directories; they do not sandbox a
 shell command.
 
-On a supported Linux host, install Chromium and the desktop prerequisites below,
-then run:
+On a supported Linux host, install Chromium and the desktop prerequisites below.
+Follow the [credential custody executable prerequisite](#credential-custody-and-worker-identities):
+install `nyxid` in an administrator-controlled location every worker identity can
+execute, such as `/usr/local/bin/nyxid`, rather than inside a supervisor-private
+home. Then run:
 
 ```sh
 sudo nyxid node setup --machine --computer --separate-users

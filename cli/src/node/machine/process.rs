@@ -31,12 +31,6 @@ pub struct DesktopEnvironment {
 }
 
 impl Identity {
-    /// Probe using the same UID/GID and supplementary-group policy as commands.
-    /// A configured username alone says nothing about filesystem access.
-    pub async fn commands_isolated(&self, directories: &[PathBuf]) -> bool {
-        crate::node::custody::files_denied(self, directories).await
-    }
-
     /// Agent children inherit a namespace-denying filter. Browser/cua children
     /// use `prepare` instead, so Chromium can establish its own sandbox.
     pub fn prepare_agent(&self, command: &mut Command) -> Result<()> {
@@ -642,18 +636,6 @@ mod tests {
         assert!(protected_desktop_bus(&path).is_none());
         std::fs::write(&path, "unix:path=/tmp/first\nunix:path=/tmp/second").unwrap();
         assert!(protected_desktop_bus(&path).is_none());
-    }
-
-    #[tokio::test]
-    async fn own_uid_is_never_reported_as_command_isolated() {
-        let directory = tempfile::tempdir().unwrap();
-        let identity = Identity::resolve(None).unwrap();
-        assert!(
-            !identity
-                .commands_isolated(&[directory.path().to_owned()])
-                .await
-        );
-        assert!(!identity.commands_isolated(&[]).await);
     }
 
     #[cfg(target_os = "linux")]

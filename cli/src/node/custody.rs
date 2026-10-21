@@ -15,7 +15,7 @@ use super::{config::NodeConfig, machine::process::Identity};
 const CADENCE: Duration = Duration::from_secs(60);
 const BOUND: Duration = Duration::from_secs(5);
 const REQUEST_LIMIT: u64 = 64 * 1024;
-const WARNING: &str = "Node credential custody is not verified: agent commands or browsers may access node tokens, signing secrets and stored credentials. Use a separated Linux supervisor with private node storage; shared_legacy retains the owner's OS access.";
+const WARNING: &str = "Node credential custody is not verified: agent commands or browsers may access node tokens, signing secrets and stored credentials. Use a separated Linux supervisor with private node storage; install the node executable where every worker identity can execute it (e.g. /usr/local/bin); shared_legacy retains the owner's OS access.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -605,10 +605,7 @@ pub(crate) async fn preflight_files(identities: &[Option<Identity>; 3]) -> bool 
         let Some(identity) = identity else {
             return false;
         };
-        if !identity
-            .commands_isolated(&[profiles.join("selected")])
-            .await
-        {
+        if !files_denied(identity, &[profiles.join("selected")]).await {
             return false;
         }
     }
@@ -618,6 +615,14 @@ pub(crate) async fn preflight_files(identities: &[Option<Identity>; 3]) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn own_uid_is_never_reported_as_command_isolated() {
+        let directory = tempfile::tempdir().unwrap();
+        let identity = Identity::resolve(None).unwrap();
+        assert!(!files_denied(&identity, &[directory.path().to_owned()]).await);
+        assert!(!files_denied(&identity, &[]).await);
+    }
 
     #[test]
     fn probe_child() {

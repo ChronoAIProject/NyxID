@@ -565,7 +565,7 @@ impl MachineError {
         match self {
             Self::Custody => (
                 12419,
-                "node_custody_unverified: protect node tokens, signing secrets and stored credentials under a separate supervisor identity, then restart to repeat custody probes",
+                "node_custody_unverified: protect node tokens, signing secrets and stored credentials under a separate supervisor identity; install the node executable where every worker identity can execute it (e.g. /usr/local/bin), then restart to repeat custody probes",
             ),
             Self::AuthorityStale => (12421, "machine_authority_stale: acquire fresh authority"),
             Self::TurnStopped => (
