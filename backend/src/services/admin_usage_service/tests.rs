@@ -3465,6 +3465,11 @@ async fn analytics_models_preserve_unattributed_usage_and_shared_filters_after_f
     ] {
         let mut row = meter(person, &owner, service, tokens);
         row.insert("model", model);
+        if model == Some("model-b") {
+            // Generic inference reports model identity separately from pricing.
+            row.insert("model", Bson::Null);
+            row.insert("reported_model", "model-b");
+        }
         row.insert(
             "created_at",
             bson::DateTime::from_chrono(now - chrono::Duration::hours(age)),

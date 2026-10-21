@@ -70,6 +70,10 @@ billing from either services or linked providers. See [Service configuration and
 vendor retirement](docs/SERVICE_CONFIGURATION.md). They can also give a role read-only
 access to platform-wide usage reports, for example with the seeded **Usage
 Viewer** role, without granting other admin access. See [Admin usage](docs/BILLING_UI_GLOSSARY.md#admin-usage).
+**Usage → Dashboard / List** share top-level user, billing-owner organization,
+service, and time filters. Dashboard charts offer **Group by → Model** to inspect
+recorded model usage within a service. See [billing analytics](docs/BILLING_ANALYTICS.md#insight-controls-and-valid-data)
+for grouping, missing models, and filter semantics.
 Admins and operators can open **Usage → NyxBot** for cost and billing, token
 traffic, and top billing accounts split by model, alongside active-session
 counts, turn outcomes, and reply feedback. See [NyxBot model usage](docs/BILLING_ANALYTICS.md#nyxbot-model-usage)
