@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from urllib.parse import urlsplit
 from unittest.mock import patch
 
 import official_release as signing
@@ -20,6 +21,10 @@ from sbom_evidence import load_json, write
 from test_publication_contract import images_plan
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def ghcr_subject(name):
+    return urlsplit('//' + name).netloc == 'ghcr.io'
 
 
 def module(name, path):
@@ -59,9 +64,17 @@ class Signing(unittest.TestCase):
 
     def test_exact_complete_image_set_and_manifest_are_signed(self):
         subjects = self.document['subjects']
-        self.assertEqual(sum(s['name'].startswith('ghcr.io/') for s in subjects), 15)
+        self.assertEqual(sum(ghcr_subject(s['name']) for s in subjects), 15)
         self.assertEqual(len(self.payload['subject']), len(subjects) + 1)
         self.assertTrue(self.verify().startswith('sha256:'))
+
+    def test_registry_subject_authority_is_exact(self):
+        self.assertTrue(ghcr_subject('ghcr.io/chronoaiproject/nyxid/backend'))
+        for name in ('ghcr.io.evil.example/image', 'evil.example/ghcr.io/image',
+                     'ghcr.io@evil.example/image', 'user@ghcr.io/image', 'ghcr.io:444/image',
+                     'https://ghcr.io/image', 'release-manifest.json'):
+            with self.subTest(name=name):
+                self.assertFalse(ghcr_subject(name))
 
     def test_missing_bundle_manifest_and_verifier_fail(self):
         for path in (self.proof / signing.BUNDLE, self.proof / signing.MANIFEST, self.verifier):

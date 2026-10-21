@@ -131,6 +131,43 @@ esac
         self.assertEqual(calls, [])
 
 
+class ReviewedCatalogTests(unittest.TestCase):
+    def test_only_catalog_data_from_ancestors_of_trusted_head_is_extracted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / 'repo'; repo.mkdir()
+            def git(*args):
+                return subprocess.check_output(['git', *args], cwd=repo, text=True).strip()
+            git('init', '-q')
+            git('config', 'user.email', 'fixture@example.invalid')
+            git('config', 'user.name', 'Fixture')
+            catalogs = repo / 'security/apk'; catalogs.mkdir(parents=True)
+            for label in REQUESTS:
+                for arch in ARCHES:
+                    (catalogs / (label + '-' + arch + '.tsv')).write_text('reviewed catalog data\n')
+            (repo / 'do-not-run.sh').write_text('exit 99\n')
+            git('add', '.'); git('commit', '-qm', 'reviewed catalogs')
+            reviewed = git('rev-parse', 'HEAD')
+            git('checkout', '-qb', 'unmerged')
+            (catalogs / next(catalogs.iterdir()).name).write_text('unreviewed data\n')
+            git('commit', '-qam', 'unmerged change')
+            unmerged = git('rev-parse', 'HEAD')
+            git('checkout', '--detach', '-q', reviewed)
+            with patch.object(provision, 'ROOT', repo):
+                output = root / 'extracted'
+                provision.extract_catalogs(reviewed, output)
+                self.assertEqual({p.name for p in output.iterdir()}, {p.name for p in catalogs.iterdir()})
+                self.assertTrue(all(p.read_text() == 'reviewed catalog data\n' for p in output.iterdir()))
+                for commit in (unmerged, 'f' * 40):
+                    with self.subTest(commit=commit), self.assertRaises(subprocess.CalledProcessError):
+                        provision.extract_catalogs(commit, root / 'rejected')
+                    self.assertFalse((root / 'rejected').exists())
+                with patch.object(provision.subprocess, 'run', wraps=subprocess.run) as run:
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        provision.publish(unmerged, root / 'payload')
+                    self.assertTrue(all(c.args[0][0] == 'git' for c in run.call_args_list))
+
+
 def tar_bytes(files):
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode='w') as archive:

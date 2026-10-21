@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 import itertools
+import importlib.util
 import json
 import os
 import subprocess
@@ -8,8 +9,23 @@ import unittest
 import yaml
 from workflow_yaml import RUST_ACTION, load_unique, validate_rust_steps
 
+spec = importlib.util.spec_from_file_location('workflow_permissions',
+    Path(__file__).with_name('check-reusable-workflow-permissions.py'))
+workflow_permissions = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(workflow_permissions)
+
 
 class WorkflowYaml(unittest.TestCase):
+    def test_job_without_explicit_permissions_is_rejected(self):
+        workflow = {'jobs': {'added-job': {'runs-on': 'ubuntu-latest', 'steps': []}}}
+        self.assertEqual(workflow_permissions.validate_permission_scopes(workflow),
+                         ['added-job: missing explicit permissions at job or workflow level'])
+        workflow['jobs']['added-job']['permissions'] = {}
+        self.assertEqual(workflow_permissions.validate_permission_scopes(workflow), [])
+        del workflow['jobs']['added-job']['permissions']
+        workflow['permissions'] = {'contents': 'read'}
+        self.assertEqual(workflow_permissions.validate_permission_scopes(workflow), [])
+
     def test_conditional_step_duplicate_with_rejected(self):
         text = """jobs:
   coverage:
@@ -56,6 +72,26 @@ class CatalogWorkflowBoundary(unittest.TestCase):
     def load(self, name):
         root = Path(__file__).resolve().parents[1]
         return load_unique((root / '.github/workflows' / name).read_text())
+
+    def test_apk_provisioning_never_checks_out_dispatch_input_or_shares_caches(self):
+        workflow = self.load('provision-apk-archives.yml')
+        self.assertEqual(set(workflow.get('on', workflow.get(True))), {'workflow_dispatch'})
+        prepare, publish = (workflow['jobs'][name] for name in ('prepare', 'publish'))
+        self.assertEqual(prepare['permissions'], {'contents': 'read'})
+        self.assertEqual(publish['permissions'], {'contents': 'write'})
+        self.assertEqual(publish['needs'], 'prepare')
+        for job in (prepare, publish):
+            self.assertEqual(job['if'], "github.ref == 'refs/heads/main'")
+            checkouts = [step for step in job['steps'] if step.get('uses', '').startswith('actions/checkout@')]
+            self.assertEqual(len(checkouts), 1)
+            self.assertEqual(checkouts[0]['with']['ref'], '${{ github.workflow_sha }}')
+            self.assertEqual(checkouts[0]['with']['fetch-depth'], 0)
+            self.assertFalse(checkouts[0]['with']['persist-credentials'])
+            self.assertNotIn('cache', str(job['steps']).lower())
+        command = next(step['run'] for step in prepare['steps'] if step.get('name') ==
+                       'Extract catalogs from a reviewed ancestor of main')
+        self.assertIn('trusted/scripts/provision-apk-archives.py extract', command)
+        self.assertIn('--catalog-commit "$CATALOG_COMMIT"', command)
 
     def test_actionlint_is_required_in_both_early_workflow_policy_jobs(self):
         ci = self.load('ci.yml')
@@ -139,10 +175,16 @@ class BackendTestPartitions(unittest.TestCase):
         self.workflow = load_unique((self.root / '.github/workflows/ci.yml').read_text())
         self.jobs = self.workflow['jobs']
 
+    def test_backend_archive_jobs_have_explicit_least_privilege(self):
+        for name in ('backend-test-build', 'backend-test-partition'):
+            self.assertEqual(self.jobs[name]['permissions'], {'contents': 'read'})
+        self.assertEqual(self.jobs['backend-test']['permissions'], {})
+
     def test_one_locked_archive_build_preserves_packages_features_and_toolchain(self):
         build = self.jobs['backend-test-build']
         self.assertEqual(build['needs'], 'changes')
-        self.assertEqual(build['timeout-minutes'], 90)
+        # Main raised its backend build/test budget before the archive split.
+        self.assertEqual(build['timeout-minutes'], 120)
         self.assertEqual(build['env']['CARGO_PROFILE_TEST_DEBUG'], 'line-tables-only')
         commands = [step['run'] for step in build['steps'] if 'run' in step]
         archives = [cmd for cmd in commands if 'cargo nextest archive' in cmd]

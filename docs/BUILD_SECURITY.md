@@ -29,6 +29,11 @@ regenerated cargo-dist workflows that restore unchecked installers. Run it
 after `dist init`; `allow-dirty=["ci"]` permits the reviewed workflow patch,
 and does not exempt that policy check.
 
+The release helper requests exactly `clang`, `jq`, `pkg-config`, and `python3`
+from the signed snapshot. The CLI uses async Secret Service with RustCrypto;
+it requires no native libdbus development package. Its test checks both the
+manifest features and the installer's recorded package request set.
+
 The Glama reference image builds the supplied reviewed source context with a
 pinned Rust image and Cargo.lock. Operators copying this definition into its
 external UI must select the same immutable repository revision. It no longer
@@ -294,7 +299,11 @@ verified upstream bytes can keep builds working.
 Provisioning is a **post-merge maintainer step that restores durability**;
 it is not required for correctness. Once the workflow has landed on main,
 use GitHub Actions → **Provision APK Archives** → Run workflow on **main**,
-supplying the full reviewed catalog commit SHA in `catalog_commit`. Its two
+supplying the full reviewed catalog commit SHA in `catalog_commit`. Both
+preparation and publication require that commit to be an ancestor of the
+protected main revision running the workflow. Only the six catalog files are
+read with `git show`; dispatch input code is never checked out or executed,
+and no build caches are restored or saved. Its two
 native read-only preparation jobs execute the trusted workflow revision's
 installer against the candidate catalogs, verifying every upstream checksum,
 Alpine signature and signed identity. One separate `contents: write` publisher

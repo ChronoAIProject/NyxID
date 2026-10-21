@@ -79,7 +79,7 @@ def check(root, plan=None):
             errors.append(str(path.relative_to(root)) + ": executable generated installer/package input")
         if "sh.rustup.rs" in text or "cargo-dist-installer.sh" in text:
             errors.append(str(path.relative_to(root)) + ": unchecked bootstrap installer")
-        if re.search(r"cargo (?:auditable )?build(?![^\n]*(?:--locked|--frozen))", text):
+        if re.search(r"cargo (?:auditable )?(?:build|check|clippy|test|nextest archive)(?![^\n]*(?:--locked|--frozen))", text):
             errors.append(str(path.relative_to(root)) + ": Rust build does not enforce lockfile")
     paths = subprocess.check_output(["git", "ls-files", "*Dockerfile*"], cwd=root, text=True).splitlines()
     errors.extend(check_apt_inputs(root, paths))

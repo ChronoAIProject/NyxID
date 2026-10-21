@@ -24,6 +24,9 @@ on:
         default: false
         required: false
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -566,11 +569,12 @@ jobs:
   # ---------------------------------------------------------------------------
   backend-test-build:
     name: Backend Test Build
+    permissions:
+      contents: read
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
-    # A measured run compiled for 28 minutes and was still passing tests at
-    # 90 minutes. Match coverage's budget for the full compile and suite.
+    # Preserve main's reviewed build budget; test partitions run below.
     timeout-minutes: 120
     # Reduce debug-information volume while retaining locations and backtraces.
     # Resource samples distinguish future compilation shutdowns from test failures.
@@ -620,6 +624,8 @@ jobs:
 
   backend-test-partition:
     name: Backend Test Partition (${{ matrix.partition }}/2)
+    permissions:
+      contents: read
     needs: backend-test-build
     strategy:
       fail-fast: false
@@ -690,6 +696,7 @@ jobs:
   # skipped, cancelled or failed. Docs-only changes may intentionally skip both.
   backend-test:
     name: Backend Test
+    permissions: {}
     if: always()
     needs: [changes, backend-test-build, backend-test-partition]
     runs-on: ubuntu-latest
@@ -745,7 +752,7 @@ jobs:
         with:
           key: backend-billing-smoke
       - name: Billing route coverage smoke
-        run: python3 .github/scripts/ci_resources.py billing-smoke cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
+        run: python3 .github/scripts/ci_resources.py billing-smoke cargo test --locked -p nyxid billing_route_coverage_smoke -- --nocapture
       - name: Test MongoDB diagnostics
         if: failure() || cancelled()
         continue-on-error: true

@@ -13,17 +13,29 @@ from resolve_apk_requests import REQUESTS
 REPOSITORY = 'ChronoAIProject/NyxID'
 
 
-def publish(commit, payload):
+def require_reviewed_commit(commit):
     if not re.fullmatch('[0-9a-f]{40}', commit):
         raise ValueError('catalog_commit must be a full reviewed commit SHA')
+    # HEAD is the workflow's protected-main revision, checked out without
+    # persisted credentials. Never check out or execute dispatch input code.
+    subprocess.run(['git', 'merge-base', '--is-ancestor', commit, 'HEAD'], cwd=ROOT, check=True)
+
+
+def extract_catalogs(commit, catalogs):
+    require_reviewed_commit(commit)
+    catalogs.mkdir(parents=True, exist_ok=True)
+    for label in REQUESTS:
+        for arch in ARCHES:
+            name = label + '-' + arch + '.tsv'
+            data = subprocess.check_output(['git', 'show', commit + ':security/apk/' + name], cwd=ROOT)
+            (catalogs / name).write_bytes(data)
+
+
+def publish(commit, payload):
     # Read candidate data with git; execute only the trusted workflow's scripts.
     with tempfile.TemporaryDirectory(prefix='nyxid-apk-catalogs-') as temporary:
         catalogs = Path(temporary)
-        for label in REQUESTS:
-            for arch in ARCHES:
-                name = label + '-' + arch + '.tsv'
-                data = subprocess.check_output(['git', 'show', commit + ':security/apk/' + name], cwd=ROOT)
-                (catalogs / name).write_bytes(data)
+        extract_catalogs(commit, catalogs)
         tag, files = validate_payload(catalogs, payload, ARCHES)
         # A release with the same date may already serve other unchanged catalogs.
         # Never replace assets: matching bytes are idempotent, mismatches stop.
@@ -49,6 +61,9 @@ def publish(commit, payload):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
+    extract = commands.add_parser('extract')
+    extract.add_argument('--catalog-commit', required=True)
+    extract.add_argument('--output', type=Path, required=True)
     prep = commands.add_parser('prepare')
     prep.add_argument('--root', type=Path, required=True)
     prep.add_argument('--arch', choices=ARCHES, required=True)
@@ -57,7 +72,9 @@ if __name__ == '__main__':
     upload.add_argument('--catalog-commit', required=True)
     upload.add_argument('--payload', type=Path, required=True)
     args = parser.parse_args()
-    if args.command == 'prepare':
+    if args.command == 'extract':
+        extract_catalogs(args.catalog_commit, args.output.resolve() / 'security/apk')
+    elif args.command == 'prepare':
         prepare(args.root.resolve(), args.arch, args.output.resolve())
     else:
         publish(args.catalog_commit, args.payload.resolve())

@@ -15,6 +15,8 @@ permissions:
 jobs:
   prepare:
     name: Verify APK Archive Payload (${{ matrix.arch }})
+    permissions:
+      contents: read
     if: github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
@@ -30,21 +32,19 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
           persist-credentials: false
           path: trusted
-      - name: Require a full reviewed commit
+      - name: Extract catalogs from a reviewed ancestor of main
         env:
           CATALOG_COMMIT: ${{ inputs.catalog_commit }}
-        run: '[[ "$CATALOG_COMMIT" =~ ^[0-9a-f]{40}$ ]]'
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ inputs.catalog_commit }}
-          persist-credentials: false
-          path: candidate
+        run: >-
+          python3 trusted/scripts/provision-apk-archives.py extract
+          --catalog-commit "$CATALOG_COMMIT" --output "$RUNNER_TEMP/apk-catalog-source"
       - name: Authenticate exact upstream archives and stage durable assets
         run: >-
           python3 trusted/scripts/provision-apk-archives.py prepare
-          --root "$GITHUB_WORKSPACE/candidate" --arch '${{ matrix.arch }}'
+          --root "$RUNNER_TEMP/apk-catalog-source" --arch '${{ matrix.arch }}'
           --output "$RUNNER_TEMP/apk-provision"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -68,12 +68,6 @@ jobs:
           ref: ${{ github.workflow_sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Fetch reviewed catalog data without executing candidate code
-        env:
-          CATALOG_COMMIT: ${{ inputs.catalog_commit }}
-        run: |
-          [[ "$CATALOG_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-          git fetch --no-tags origin "$CATALOG_COMMIT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: verified-apk-payload-*

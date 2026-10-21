@@ -31,11 +31,23 @@ def permissions(block, where):
     return result
 
 
+def validate_permission_scopes(workflow):
+    """Every job must have an explicit scope, directly or at workflow level."""
+    failures = []
+    workflow_grant = permissions(workflow.get('permissions'), 'workflow')
+    for name, job in (workflow.get('jobs') or {}).items():
+        grant = permissions(job.get('permissions'), name)
+        if grant is None and workflow_grant is None:
+            failures.append(f'{name}: missing explicit permissions at job or workflow level')
+    return failures
+
+
 def main():
     failures = []
     callers = 0
     for caller_path in sorted(path for path in WORKFLOWS.iterdir() if path.suffix in (".yml", ".yaml")):
         caller = load_unique(caller_path.read_text())
+        failures.extend(f'{caller_path}:{failure}' for failure in validate_permission_scopes(caller))
         workflow_grant = permissions(caller.get("permissions"), caller_path)
         for job_name, job in (caller.get("jobs") or {}).items():
             uses = job.get("uses", "")

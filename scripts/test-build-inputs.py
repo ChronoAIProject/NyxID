@@ -171,6 +171,15 @@ class BuildPolicy(unittest.TestCase):
     def test_unlocked_rust_build_rejected(self):
         self.mutate("backend/Dockerfile", "cargo auditable build --locked", "cargo auditable build", "does not enforce lockfile")
 
+    def test_unlocked_workflow_cargo_compilation_rejected(self):
+        for command in ('build', 'check', 'clippy', 'test', 'nextest archive'):
+            path = self.root / '.github/workflows/unlocked.yml'
+            path.write_text('jobs:\n  probe:\n    steps:\n      - run: cargo ' + command + ' -p nyxid\n')
+            with self.subTest(command=command):
+                self.assertTrue(any('unlocked.yml: Rust build does not enforce lockfile' in error
+                                    for error in policy.check(self.root)))
+        path.unlink()
+
     def test_missing_binary_dependency_metadata_rejected(self):
         self.mutate("backend/Dockerfile", "cargo auditable build --locked", "cargo build --locked", "omits auditable metadata")
         self.metadata["metadata"]["dist"]["cargo-auditable"] = False
