@@ -2,6 +2,7 @@
 // Run: node scripts/website-a/generate.mjs <baseline.html>
 import { SiteLink } from "../../site-link";
 import { VisualLink } from "../../visuals/elements";
+import { BlogMenuLink } from "../../optional-features";
 import { websiteNavProps } from "../../navigation";
 import { useWebsite } from "../../website-context";
 export default function WebsiteHeader() {
@@ -80,13 +81,7 @@ export default function WebsiteHeader() {
             {"价格"}
           </SiteLink>
           {"\n      "}
-          <SiteLink
-            {...websiteNavProps(s.route, "/blog")}
-            href={s.siteHref("/blog")}
-            data-nav="blog"
-          >
-            {"博客"}
-          </SiteLink>
+          <BlogMenuLink />
           {"\n      "}
           <SiteLink
             className="nl m-only"

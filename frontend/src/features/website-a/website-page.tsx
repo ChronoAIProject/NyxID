@@ -1,3 +1,4 @@
+import { websiteVisibility, websiteConfiguration } from "./release-config";
 import { useBrowserContext } from "../public-site/browser-context";
 import { lazy, Suspense, useEffect, useState } from "react";
 import type { ReactNode, SyntheticEvent } from "react";
@@ -170,6 +171,8 @@ function Website({
       <div
         className="website-a"
         data-theme={WEBSITE_THEME}
+        data-website-visibility={JSON.stringify(websiteVisibility)}
+        data-website-config={encodeURIComponent(websiteConfiguration)}
         data-visual-version="4.1"
         data-visual-route={state.route}
         data-visual-motion={mode}

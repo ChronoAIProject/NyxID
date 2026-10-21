@@ -1,6 +1,7 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
 import { SiteLink } from "../../site-link";
+import { NewsletterSignup } from "../../optional-features";
 import { useWebsite } from "../../website-context";
 export default function BlogPage() {
   const s = useWebsite();
@@ -52,6 +53,7 @@ export default function BlogPage() {
               flexWrap: "wrap",
             }}
           >
+            <NewsletterSignup />
             <SiteLink
               className="btn"
               href="https://discord.gg/QMvcs8UQBW"

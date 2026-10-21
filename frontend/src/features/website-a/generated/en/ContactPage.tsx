@@ -1,6 +1,7 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
 import { VisualLink } from "../../visuals/elements";
+import { ContactChat } from "../../optional-features";
 import { ContactSection } from "../../contact";
 import { useWebsite } from "../../website-context";
 export default function ContactPage() {
@@ -33,6 +34,7 @@ export default function ContactPage() {
       {"\n"}
       <section className="s" style={{ paddingTop: "24px" }}>
         <ContactSection>
+          <ContactChat />
           <VisualLink
             className="card clk discord-card"
             href="https://discord.gg/QMvcs8UQBW"

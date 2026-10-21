@@ -108,7 +108,7 @@ function jsx(el) {
   if (el.hasAttribute("data-skip")) return "";
   if (tag === "a" && el.getAttribute("href")?.startsWith("#/start?")) return "<SolutionActivation />";
   if (currentRoute === "contact" && tag === "div" && cls.split(" ").includes("contact")) {
-    return `<ContactSection>${jsx(el.querySelector(".discord-card"))}</ContactSection>`;
+    return `<ContactSection><ContactChat />${jsx(el.querySelector(".discord-card"))}</ContactSection>`;
   }
   if (currentRoute === "" && tag === "h1" && el.closest(".hero")) return "<HeroTitle />";
   if (
@@ -141,6 +141,9 @@ function jsx(el) {
   if (cls === "code") {
     return `<CodeExample labels={${q([...el.querySelectorAll(".tabs button")].map((b) => b.textContent))}} snippets={[${[...el.querySelectorAll("pre")].map((e) => `<>${jsxChildren(e)}</>`).join(",")}]} />`;
   }
+  if (el.hasAttribute("data-optional-newsletter")) return "<NewsletterSignup />";
+  if (el.hasAttribute("data-optional-status")) return "<FooterStatus />";
+  if (currentRoute === "nav" && tag === "a" && el.getAttribute("data-nav") === "blog") return "<BlogMenuLink />";
   if (cls === "film") return "<SolutionFilm />";
   if (id === "nbSide") return "<DemoAgents />";
   if (id === "nbMsgs") return "<DemoMessages />";
@@ -403,7 +406,7 @@ for (locale of ["en", "zh"]) {
     }
     tree.querySelectorAll(".ann").forEach((e) => e.remove());
     tree.querySelectorAll(".legal-links a").forEach((a, i) => {
-      if (i === 2) a.remove();
+      if (i === 2) { a.setAttribute("data-optional-status", ""); }
       else a.setAttribute("href", ["/terms", "/privacy"][i]);
     });
     if (route === "agents") {
@@ -457,7 +460,9 @@ for (locale of ["en", "zh"]) {
     if (newsletter) {
       const card = newsletter.closest(".card");
       const discord = newsletter.querySelector('a[href^="https://discord.gg/"]');
-      card.replaceChildren(discord);
+      const slot = dom.document.createElement("div");
+      slot.setAttribute("data-optional-newsletter", "");
+      card.replaceChildren(slot, discord);
     }
     tree.querySelectorAll("p").forEach((p) => {
       if (/\[Placeholder:|［占位：/.test(p.textContent))
@@ -504,6 +509,7 @@ for (locale of ["en", "zh"]) {
       banner +
       (body.includes("<SiteLink") ? "import {SiteLink} from '../../site-link';\n" : "") +
       imports + visualImports +
+      (["NewsletterSignup", "ContactChat", "FooterStatus", "BlogMenuLink"].some(name => body.includes("<"+name)) ? `import {${["NewsletterSignup", "ContactChat", "FooterStatus", "BlogMenuLink"].filter(name => body.includes("<"+name)).join(",")}} from '../../optional-features';\n` : "") +
       (body.includes("<ContactSection") ? "import {ContactSection} from '../../contact';\n" : "") +
       (body.includes("websiteNavProps") ? "import {websiteNavProps} from '../../navigation';\n" : "") +
       (body.includes("<SolutionActivation") ? "import {SolutionActivation} from '../../solution-activation';\n" : "") +

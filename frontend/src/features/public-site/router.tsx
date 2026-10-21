@@ -1,3 +1,4 @@
+import { websiteRelease } from "../website-a/release-config";
 import { useEffect, useState, useRef } from "react";
 import type { ComponentType } from "react";
 import {
@@ -71,13 +72,17 @@ export async function loadPublicPage(
       route,
       locale,
       title: module.titles[route] ?? "Page not found",
-      description: route.startsWith("/solutions/")
-        ? `${module.descriptions[route]} ${locale === "zh" ? "暂未开放。" : "Not available yet."}`
-        : route === "/integrations"
-          ? locale === "zh"
-            ? "浏览 NyxID 集成，区分已上线和即将上线的服务；各项可用状态以页面标记为准。"
-            : "Browse NyxID integrations, including live and coming soon services. Check the status shown for each integration."
-          : (module.descriptions[route] ?? "This page is unavailable."),
+      description:
+        route.startsWith("/solutions/") &&
+        !websiteRelease.solutions[
+          route.slice(11) as keyof typeof websiteRelease.solutions
+        ]
+          ? `${module.descriptions[route]} ${locale === "zh" ? "暂未开放。" : "Not available yet."}`
+          : route === "/integrations"
+            ? locale === "zh"
+              ? "浏览 NyxID 集成，区分已上线和即将上线的服务；各项可用状态以页面标记为准。"
+              : "Browse NyxID integrations, including live and coming soon services. Check the status shown for each integration."
+            : (module.descriptions[route] ?? "This page is unavailable."),
       translated: Boolean(page),
       indexable: Boolean(page?.indexable),
     },

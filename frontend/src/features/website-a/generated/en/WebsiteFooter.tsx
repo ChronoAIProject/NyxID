@@ -1,6 +1,7 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
 import { SiteLink } from "../../site-link";
+import { FooterStatus } from "../../optional-features";
 import { useWebsite } from "../../website-context";
 export default function WebsiteFooter() {
   const s = useWebsite();
@@ -110,6 +111,7 @@ export default function WebsiteFooter() {
           <span className="legal-links">
             <SiteLink href={s.siteHref("/terms")}>{"Terms"}</SiteLink>
             <SiteLink href={s.siteHref("/privacy")}>{"Privacy"}</SiteLink>
+            <FooterStatus />
           </span>
         </div>
         {"\n  "}

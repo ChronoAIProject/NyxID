@@ -13,3 +13,5 @@ if (
     "[nyxid-contact] Invalid mailbox configuration; default contact address retained.",
   );
 }
+
+export { websiteRelease, websiteVisibility } from "./release-config";
