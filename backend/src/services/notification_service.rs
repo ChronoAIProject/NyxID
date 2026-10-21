@@ -331,6 +331,28 @@ pub async fn send_mfa_recovery_notification(
     .await
 }
 
+pub async fn send_mfa_disabled_notification(
+    state: &crate::AppState,
+    user_id: &str,
+) -> AppResult<NotificationResult> {
+    let rendered = RenderedConnectionExpiredNotification {
+        title: "MFA disabled".into(),
+        body: "Multi-factor authentication was disabled on your account. If this was unexpected, sign in and secure your account immediately.".into(),
+        data: HashMap::from([("type".into(), "mfa_disabled".into())]),
+    };
+    deliver_best_effort(
+        &state.db,
+        &state.config,
+        &state.http_client,
+        state.fcm_auth.as_deref(),
+        state.apns_auth.as_deref(),
+        user_id,
+        &rendered,
+        "MFA disabled",
+    )
+    .await
+}
+
 /// Deliver metadata-only lifecycle notices through existing configured channels.
 /// The durable in-site timeline remains the authoritative owner notification.
 #[allow(clippy::too_many_arguments)]

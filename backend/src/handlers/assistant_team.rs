@@ -51,6 +51,7 @@ pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
     let user_id =
         Uuid::parse_str(owner).map_err(|_| AppError::NotFound("Conversation not found".into()))?;
     Ok(AuthUser {
+        mfa_assured: false,
         org_agent_access: None,
         assistant_group_id: None,
         assistant_agent_owner_id: None,

@@ -86,6 +86,8 @@ export function useMfaSetup() {
   });
 }
 
+const COOKIE_CHALLENGE_ATTEMPT = "cookie-challenge";
+
 export function useMfaVerify() {
   const queryClient = useQueryClient();
   const clearMfaState = useAuthStore((s) => s.clearMfaState);
@@ -97,8 +99,11 @@ export function useMfaVerify() {
     scope: { id: "mfa-login" },
     retry: false,
     mutationFn: async (data: MfaVerifyRequest): Promise<void> => {
-      if (attempt.current?.token !== data.mfa_token) {
-        attempt.current = { token: data.mfa_token, needsSessionCheck: false };
+      // Social sign-in carries its one-shot challenge in an HttpOnly cookie,
+      // so those attempts share one key instead of a body token.
+      const token = data.mfa_token ?? COOKIE_CHALLENGE_ATTEMPT;
+      if (attempt.current?.token !== token) {
+        attempt.current = { token, needsSessionCheck: false };
       }
       if (!attempt.current.needsSessionCheck) {
         try {
@@ -135,8 +140,8 @@ export function useMfaDisable() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (password: string): Promise<void> => {
-      return api.post<void>("/auth/mfa/disable", { password });
+    mutationFn: async (data: { code: string; password?: string }): Promise<void> => {
+      return api.post<void>("/auth/mfa/disable", data);
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["user"] });

@@ -452,8 +452,8 @@ describe("three-step device approval", () => {
     expect(
       screen.queryByRole("button", { name: "Continue to approval" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Authenticator or recovery code")).toBeVisible();
-    fireEvent.change(screen.getByLabelText("Authenticator or recovery code"), {
+    expect(screen.getByLabelText("Authenticator code")).toBeVisible();
+    fireEvent.change(screen.getByLabelText("Authenticator code"), {
       target: { value: code },
     });
     await click("Verify & continue");

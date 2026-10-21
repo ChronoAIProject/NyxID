@@ -1191,6 +1191,8 @@ mod tests {
 
         let session = crate::models::session::Session {
             purpose: Some(crate::models::session::SessionPurpose::Authenticated),
+            mfa_method: None,
+            mfa_assured: false,
             id: Uuid::new_v4().to_string(),
             user_id: target_id.clone(),
             token_hash: "hash".to_string(),
@@ -1377,6 +1379,8 @@ mod tests {
 
         let session = crate::models::session::Session {
             purpose: Some(crate::models::session::SessionPurpose::Authenticated),
+            mfa_method: None,
+            mfa_assured: false,
             id: Uuid::new_v4().to_string(),
             user_id: target_id.clone(),
             token_hash: "hash".to_string(),
@@ -1556,6 +1560,8 @@ mod tests {
 
         let session = crate::models::session::Session {
             purpose: Some(crate::models::session::SessionPurpose::Authenticated),
+            mfa_method: None,
+            mfa_assured: false,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
             token_hash: "hash".to_string(),

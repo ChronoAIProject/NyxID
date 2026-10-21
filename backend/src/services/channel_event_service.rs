@@ -472,6 +472,7 @@ pub async fn forward_trigger_event(
     let user_id =
         uuid::Uuid::parse_str(owner_user_id).map_err(|_| AppError::TriggerDeliveryUnsupported)?;
     let auth_user = AuthUser {
+        mfa_assured: false,
         org_agent_access: None,
         assistant_group_id: None,
         assistant_agent_owner_id: None,

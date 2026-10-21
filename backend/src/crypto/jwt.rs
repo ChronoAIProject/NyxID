@@ -2182,6 +2182,7 @@ mod tests {
         ]);
         let allowed_service_ids = vec!["svc-1".to_string()];
         let auth_user = crate::mw::auth::AuthUser {
+            mfa_assured: false,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,

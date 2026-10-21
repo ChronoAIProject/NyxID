@@ -49,6 +49,8 @@ test('documented first-factor error becomes a contained challenge; other respons
   assert.ok(challenge instanceof MfaChallengeError);
   assert.ok(!JSON.stringify(challenge).includes('private-challenge'));
   assert.ok(!JSON.stringify(challenge).includes('must not retain raw response'));
+  assert.ok(mfaChallengeFromResponse({ error: 'mfa_required', error_code: 2002, session_token: 'oauth-challenge' }, 400) instanceof MfaChallengeError);
+  assert.equal(mfaChallengeFromResponse(payload, 400), null);
   for (const [body,status] of [[payload,200],[payload,401],[{...payload,error_code:2003},403],
     [{...payload,session_token:'x'.repeat(129)},403],[{...payload,session_token:'wrong token'},403],[null,403]] as const) {
     assert.equal(mfaChallengeFromResponse(body,status),null);

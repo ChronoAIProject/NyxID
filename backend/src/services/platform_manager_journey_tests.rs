@@ -2502,7 +2502,7 @@ async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmati
                 HeaderMap::new(),
                 Json(crate::handlers::mfa::MfaLoginVerifyRequest {
                     code: wrong.into(),
-                    mfa_token: pending.to_string().into(),
+                    mfa_token: Some(pending.to_string().into()),
                     client: Some("token".into()),
                 }),
             )
@@ -2571,7 +2571,7 @@ async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmati
                 HeaderMap::new(),
                 Json(crate::handlers::mfa::MfaLoginVerifyRequest {
                     code: code.into(),
-                    mfa_token: pending.to_string().into(),
+                    mfa_token: Some(pending.to_string().into()),
                     client: Some("token".into()),
                 }),
             )
