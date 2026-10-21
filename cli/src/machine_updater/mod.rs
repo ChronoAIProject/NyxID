@@ -596,6 +596,15 @@ async fn bootstrap_locked(
 }
 
 #[cfg(test)]
+fn private_test_directory() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{
