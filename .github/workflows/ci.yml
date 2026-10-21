@@ -268,6 +268,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
       - run: cargo fmt -p nyxid-permissions --check
       - run: cargo clippy -p nyxid-permissions --all-targets --locked -- -D warnings
       - run: cargo test -p nyxid-permissions --locked
@@ -396,6 +398,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
       - name: Check Clippy with resource samples
         run: python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --all-targets -- -D warnings
 
@@ -434,6 +438,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: backend-billing-smoke
       - name: Billing route coverage smoke
         run: python3 .github/scripts/ci_resources.py billing-smoke cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
@@ -469,6 +474,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: backend-image-inputs
       - name: Build backend image binary
         run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
@@ -568,6 +574,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: cli
       - uses: taiki-e/install-action@v2
         with:
@@ -633,6 +640,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: features-${{ matrix.cache-suffix }}
       - name: Build with --features ${{ matrix.features }}
         run: python3 .github/scripts/ci_resources.py features-${{ matrix.cache-suffix }} cargo build -p nyxid --features ${{ matrix.features }}
@@ -728,6 +736,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: wizard-freshness
       - name: Verify wizard bundle freshness
         run: cargo test -p nyxid-cli --test wizard_bundle_freshness
@@ -844,6 +853,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.base-cache.outputs.cache-hit != 'true'
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: coverage-backend-base
       - uses: taiki-e/install-action@v2
         if: steps.base-cache.outputs.cache-hit != 'true'
@@ -949,6 +959,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: coverage-cli
       - uses: taiki-e/install-action@v2
         with:
