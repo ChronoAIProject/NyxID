@@ -4418,10 +4418,12 @@ async fn execute_resolved_proxy_inner<'a>(
         operation.verb = crate::models::service_approval_config::ApprovalVerb::Read;
     }
 
-    if machine_git && method_str == "POST" && path.ends_with("/git-upload-pack") {
-        // Smart-HTTP fetch uses POST for its negotiation body but cannot
-        // mutate repository refs. Receive-pack remains an ordinary write.
-        operation.verb = crate::models::service_approval_config::ApprovalVerb::Read;
+    if machine_git {
+        operation_descriptor::apply_machine_git_contract(
+            &mut operation,
+            &all_headers,
+            method_override,
+        );
     }
 
     let assistant_ack = all_headers
