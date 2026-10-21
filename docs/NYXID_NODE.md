@@ -921,8 +921,16 @@ browser users. A configured username or kernel version alone is insufficient.
 The browser probe uses a fresh profile and the actual executable, including its
 AppArmor attachment; Ubuntu's user-namespace restriction stays enabled.
 
-Evidence v4 observes live renderer identities, executable, NNP, additional
-seccomp filters and user/PID/network namespaces without DevTools. It also
+Evidence v4 holds the launched package browser with a pidfd and observes live
+sandboxed descendants through kernel PPid ancestry, all UID/GID values, NNP,
+additional seccomp filters, deeper NSpid membership, different UID/GID maps and
+a different namespace-specific net/dev inode. Process names and renderer-like
+arguments never establish ancestry. These are observations, not attestation of
+descendant executables or protection from browser/supervisor/kernel compromise.
+The probe needs neither DevTools nor a tracing capability. A container hiding
+required observations reports `separated_browser_sandbox_unobservable_in_container`
+and `managed_browser_sandbox: false`; use supported native Linux or a separate
+machine container/VM per agent instead of adding capabilities. It also
 positively verifies the secure policy's refusal of remote debugging and absence
 of a listener, and requires `credential_custody: true` from actual dropped-identity
 access checks against protected credential storage. Missing or failed custody

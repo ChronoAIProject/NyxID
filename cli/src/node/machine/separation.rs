@@ -31,6 +31,11 @@ enum Probe {
 }
 
 #[cfg(any(target_os = "linux", test))]
+#[derive(Debug, thiserror::Error)]
+#[error("separated_browser_sandbox_unobservable_in_container")]
+pub(super) struct BrowserSandboxUnobservableInContainer;
+
+#[cfg(any(target_os = "linux", test))]
 async fn run_probes<F, Fut>(mut evidence: Evidence, mut run: F) -> Evidence
 where
     F: FnMut(Probe) -> Fut,
@@ -65,6 +70,13 @@ where
         let succeeded = result.is_ok();
         if let Err(error) = result {
             evidence.probe_timed_out = error.is::<super::process::ProbeTimeout>();
+            if error.is::<BrowserSandboxUnobservableInContainer>() {
+                evidence.browser_sandbox_unobservable_in_container = true;
+                evidence.managed_browser_sandbox = Some(false);
+                eprintln!(
+                    "separation_probe_unavailable reason=separated_browser_sandbox_unobservable_in_container"
+                );
+            }
         }
         match probe {
             Probe::CommandSeccomp => evidence.command_seccomp = Some(succeeded),
@@ -325,6 +337,36 @@ mod tests {
                 evidence.support().reason.as_deref(),
                 Some("separated_probe_timeout")
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn unobservable_container_browser_explicitly_denies_sandbox_and_stops_probes() {
+        for failed in [
+            Probe::BrowserPolicy,
+            Probe::SecureBrowser,
+            Probe::DeveloperBrowser,
+        ] {
+            let mut calls = Vec::new();
+            let evidence = run_probes(prerequisites(), |probe| {
+                calls.push(probe);
+                std::future::ready(if probe == failed {
+                    Err(anyhow::Error::new(super::super::process::ProbeTimeout)
+                        .context(BrowserSandboxUnobservableInContainer))
+                } else {
+                    Ok(())
+                })
+            })
+            .await;
+            assert_eq!(calls.last(), Some(&failed));
+            assert_eq!(evidence.managed_browser_sandbox, Some(false));
+            assert!(evidence.browser_sandbox_unobservable_in_container);
+            assert!(evidence.probe_timed_out);
+            assert_eq!(
+                evidence.support().reason.as_deref(),
+                Some("separated_browser_sandbox_unobservable_in_container")
+            );
+            assert!(!evidence.support().available);
         }
     }
 

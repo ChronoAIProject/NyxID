@@ -33,7 +33,7 @@ for sample in range(args.samples):
     # Never print private browser/OS errors or arbitrary subprocess output.
     # These production labels identify the failed observation before assertions.
     for line in result.stderr.splitlines():
-        if re.fullmatch(r'browser_probe_failure reason=[a-z_]+ errno=(?:[0-9]+|unknown)', line) or re.fullmatch(
+        if line == 'separation_probe_unavailable reason=separated_browser_sandbox_unobservable_in_container' or re.fullmatch(r'browser_probe_failure reason=[a-z_]+ errno=(?:[0-9]+|unknown)', line) or re.fullmatch(
             r'separation_probe mechanism=\w+ elapsed_ms=\d+ outcome=failed', line
         ):
             print(f'probe_failure sample={sample + 1} {line}', flush=True)

@@ -37,6 +37,9 @@ pub struct Evidence {
     pub apparmor_userns_restricted: Option<bool>,
     /// Diagnostic classification of a failed probe; never evidence of support.
     pub probe_timed_out: bool,
+    /// Required browser observations were inaccessible in the container. This
+    /// diagnostic can only deny support, never substitute for a positive probe.
+    pub browser_sandbox_unobservable_in_container: bool,
 }
 
 // v1 inferred pre-exec namespaces; v2 used DevTools-backed DOM diagnostics
@@ -52,6 +55,9 @@ impl Evidence {
         }
         if self.os != "linux" {
             return Some("separated_requires_linux");
+        }
+        if self.browser_sandbox_unobservable_in_container {
+            return Some("separated_browser_sandbox_unobservable_in_container");
         }
         if self.probe_timed_out {
             return Some("separated_probe_timeout");
@@ -128,6 +134,9 @@ pub const SHARED_LEGACY_WARNING: &str = "Shared legacy access gives agent comman
 /// include probe output, browser contents or a node-supplied diagnostic here.
 pub fn unavailable_message(reason: &str) -> &'static str {
     match reason {
+        "separated_browser_sandbox_unobservable_in_container" => {
+            "This container does not expose every kernel observation required to confirm the managed browser sandbox. Separated contexts are unavailable; use a supported native Linux installation or a separate machine container or VM per agent. Do not add tracing capabilities or disable the browser sandbox."
+        }
         "node_custody_unverified" => {
             "Node credential custody could not be verified under every command and browser identity. Protect node tokens, signing secrets and stored credentials with a separate supervisor identity and private storage, then restart the node to repeat the probes. Shared legacy mode retains the owner's OS access."
         }
@@ -398,7 +407,38 @@ mod tests {
             managed_browser_policy: Some(true),
             apparmor_userns_restricted: None,
             probe_timed_out: false,
+            browser_sandbox_unobservable_in_container: false,
         }
+    }
+
+    #[test]
+    fn inaccessible_container_browser_observations_never_claim_support() {
+        for sandbox in [None, Some(false), Some(true)] {
+            let report = Evidence {
+                browser_sandbox_unobservable_in_container: true,
+                managed_browser_sandbox: sandbox,
+                ..confirmed()
+            };
+            let reason = "separated_browser_sandbox_unobservable_in_container";
+            assert_eq!(report.unavailable_reason(), Some(reason));
+            assert!(!report.support().available);
+            assert!(
+                unavailable_message(reason).contains("separate machine container or VM per agent")
+            );
+            for choice in [Choice::Automatic, Choice::RequireSeparated] {
+                assert_eq!(select_new(choice, Some(&report)), Err(reason));
+            }
+            assert_eq!(
+                select_new(Choice::SharedLegacy, Some(&report)),
+                Ok(Mode::SharedLegacy)
+            );
+        }
+        let old = serde_json::to_value(confirmed()).unwrap();
+        let mut missing = old.as_object().unwrap().clone();
+        missing.remove("browser_sandbox_unobservable_in_container");
+        let restored: Evidence = serde_json::from_value(missing.into()).unwrap();
+        assert!(!restored.browser_sandbox_unobservable_in_container);
+        assert!(restored.support().available);
     }
 
     #[test]

@@ -742,6 +742,7 @@ export interface MachineProfile {
     managed_browser_policy?: boolean | null;
     credential_custody?: boolean | null;
     probe_timed_out?: boolean;
+    browser_sandbox_unobservable_in_container?: boolean;
   } | null;
   version: number;
   shell: boolean;
@@ -780,6 +781,8 @@ export function machineSeparationSupport(machine: MachineProfile) {
   if (!evidence) return unavailable("separated_capabilities_not_reported");
   if (evidence.version !== 4) return unavailable("separated_probe_version_unsupported");
   if (evidence.os !== "linux") return unavailable("separated_requires_linux");
+  if (evidence.browser_sandbox_unobservable_in_container === true)
+    return unavailable("separated_browser_sandbox_unobservable_in_container");
   if (evidence.managed_browser_policy === false) return unavailable("separated_browser_policy_not_effective");
   if (evidence.probe_timed_out) return unavailable("separated_probe_timeout");
   if (!Number.isInteger(evidence.landlock_abi) || (evidence.landlock_abi ?? 0) < 6)

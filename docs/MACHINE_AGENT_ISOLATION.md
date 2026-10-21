@@ -128,10 +128,28 @@ storage and rerun the probe before requesting new separated access.
 Every mechanism needs a positive observation; absent fields, unknown versions
 and v1/v2/v3 reports are insufficient for new automatic/required assignments. The
 browser probe executes the real managed binary with a fresh private profile,
-the runtime UID/GID and no-new-privileges. It observes a live renderer descendant
-with the same executable and all four UID/GID values, NNP=1, extra seccomp filters
-relative to its browser parent, nested PID IDs, and distinct user/PID/network
-namespaces. It rechecks the process after observation. The probe uses no DevTools
+the runtime UID/GID and no-new-privileges. A pidfd holds the launched browser's
+identity; its executable must resolve to the recognized package layout. Candidate
+processes must have a kernel-reported PPid chain reaching that exact browser.
+Process names and renderer-like command-line arguments never establish ancestry.
+For a live sandboxed descendant, all four UID/GID values must match the browser
+identity, NNP must be 1, Seccomp must be 2, and the filter count must exceed the
+browser parent's. Its NSpid list must be deeper, both uid_map and gid_map must
+differ from the parent's, and the namespace-specific `/proc/PID/net/dev` inode
+must differ. The generic `/proc/PID/net` directory inode is per-process and is
+not network-namespace evidence. Parent links, start times, process liveness and
+the sandbox observations are rechecked before accepting a result.
+
+These are observations, not attestation: ancestry ties the sample to a trusted
+browser launch, but does not attest each descendant executable or protect against
+a compromised browser, supervisor or kernel. The probe does not read protected
+renderer executable, namespace, memory or descriptor links. It adds no tracing
+capability to the supervisor or a helper. If a container hides any required
+observation, `managed_browser_sandbox` is explicitly false and the report gives
+`separated_browser_sandbox_unobservable_in_container`. Separated contexts are
+unavailable in that container; use supported native Linux or a separate machine
+container/VM per agent. Do not add capabilities or disable the browser sandbox
+to make the test pass. The probe uses no DevTools
 transport and does not infer browser permission from `/bin/true` or a successful
 `unshare` before exec. On Ubuntu,
 AppArmor's unprivileged-user-namespace sysctl is diagnostic only: the executable's
@@ -145,7 +163,8 @@ before selecting a policy layout: packaged Debian Chromium uses
 `/etc/opt/chrome/policies/managed`. Unknown layouts fail closed; setup does not
 create a compatibility alias. The secure identity must explicitly refuse
 `--remote-debugging-port=0`, remain alive, and open no DevTools port or TCP
-listener. Missing or ineffective policy gives
+listener owned by the secure UID in its network namespace's TCP/TCP6 tables.
+Unknown or unreadable tables fail closed. Missing or ineffective policy gives
 `separated_browser_policy_not_effective`; a timed-out observation retains
 `separated_probe_timeout`. Disabling the secure policy is not a probe workaround.
 

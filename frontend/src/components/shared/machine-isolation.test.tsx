@@ -118,6 +118,18 @@ it("gives timeout retry guidance without claiming the host cannot support separa
   expect(screen.queryByText("Separation prerequisites not met")).not.toBeInTheDocument();
 });
 
+it.each([undefined, false, true])("explains inaccessible container observations and never accepts the sandbox boolean (%j)", managed_browser_sandbox => {
+  render(<MachineSeparationSupport machine={{ ...supported, separation_evidence: {
+    ...supported.separation_evidence!, managed_browser_sandbox,
+    browser_sandbox_unobservable_in_container: true, probe_timed_out: true,
+  } }} />);
+  expect(screen.getByText("Separation prerequisites not met")).toBeVisible();
+  expect(screen.getByText(/container does not expose every kernel observation/)).toBeVisible();
+  expect(screen.getByText(/separate machine container or VM per agent/)).toBeVisible();
+  expect(screen.getByText("separated_browser_sandbox_unobservable_in_container")).toBeInTheDocument();
+  expect(screen.queryByText("Separation support confirmed")).not.toBeInTheDocument();
+});
+
 it("requires the current authority protocol and rejects unknown future reasons", () => {
   const view = render(<MachineSeparationSupport machine={{ ...supported, authority_versions: [1] }} />);
   expect(screen.getByText("Separation support unknown")).toBeVisible();

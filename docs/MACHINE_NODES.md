@@ -890,6 +890,12 @@ Measurements and reproduction commands are under
   v4 OS evidence and positively verified `credential_custody` required for
   separated access. Earlier v1/v2/v3 reports, missing custody and unknown
   versions are insufficient for new automatic/required assignments.
+  Browser evidence is bound to the launched package browser through a pidfd and
+  kernel parent links, with UID/GID, map, PID-depth, network and seccomp checks;
+  names/arguments never prove ancestry. These observations are not attestation.
+  Containers hiding required facts explicitly report sandbox=false and
+  `separated_browser_sandbox_unobservable_in_container`: use supported native
+  Linux or a separate machine container/VM per agent, without adding capabilities.
   `node_custody_unverified` directs the owner to repair protected storage and
   rerun the probe. Explicit shared legacy requires the complete warning and
   owner consent. Missing intent or evidence surfaces
