@@ -616,6 +616,17 @@ pub(crate) async fn preflight_files(identities: &[Option<Identity>; 3]) -> bool 
 mod tests {
     use super::*;
 
+    /// Test-local private profile setup; never a substitute for registration.
+    #[cfg(target_os = "linux")]
+    fn mk_private_dir(path: &std::path::Path) {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn own_uid_is_never_reported_as_command_isolated() {
         let directory = tempfile::tempdir().unwrap();
@@ -830,7 +841,7 @@ mod tests {
         let selected = root.join("profiles/selected");
         let sibling = root.join("profiles/sibling");
         for directory in [&selected, &sibling] {
-            super::super::storage::Directory::create_private(directory).unwrap();
+            mk_private_dir(directory);
             let config = NodeConfig::new(
                 "wss://example.test".into(),
                 uuid::Uuid::new_v4().to_string(),

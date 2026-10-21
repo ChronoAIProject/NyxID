@@ -465,6 +465,26 @@ impl NodeConfig {
         Ok(config)
     }
 
+    /// Strict custody read through an already pinned node directory.
+    pub(crate) fn load_in(directory: &super::storage::Directory, path: &Path) -> Result<Self> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| Error::Config("Missing config filename".into()))?;
+        let bytes = directory.read(name, super::storage::MAX_CONFIG_BYTES)?;
+        let content = std::str::from_utf8(&bytes)
+            .map_err(|_| Error::Config("Node configuration is not valid UTF-8".into()))?;
+        let config: Self = toml::from_str(content)
+            .map_err(|_| Error::Config("Node configuration is invalid TOML".into()))?;
+        if let Some(binding) = &config.managed_runtime {
+            super::managed_config::validate_existing_config(&config, binding).map_err(|_| {
+                Error::Config(
+                    "managed runtime configuration violates its sealed capability ceiling".into(),
+                )
+            })?;
+        }
+        Ok(config)
+    }
+
     /// Save config to a TOML file.
     /// M1: Write to a temp file with correct permissions, then rename atomically
     /// to avoid a window where the file has default permissions.

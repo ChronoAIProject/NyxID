@@ -29,6 +29,8 @@ pub mod proxy_upload;
 mod secret_backend;
 #[path = "node/signing.rs"]
 mod signing;
+#[path = "node/storage.rs"]
+pub(crate) mod storage;
 pub mod tls;
 
 pub mod ws_client {
