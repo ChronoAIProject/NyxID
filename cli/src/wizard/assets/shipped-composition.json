@@ -1,14 +1,14 @@
 {
   "schema": "nyxid.shipped-composition.v1",
   "component": "wizard",
-  "source_lock_sha256": "8d1e43db5dbce77bc84da721d8464fb2ee0c2d0125dff4e90a259c2edf590818",
+  "source_lock_sha256": "bb92ea88a8cb430a0872ccc80be2d7c16bfa8c05c7908652e8047fb6a93a8894",
   "graphs": [
     {
       "path": "embedded-rendered-graph",
-      "sha256": "d0dc22281ed775aa389a0af3881a8f2366fb53edf92920ded9d43ffa4f286e17",
+      "sha256": "9208bc9e47a3c322ab9dc2553731a6d518eded0f9d6edbfb306f93bed747937c",
       "schema": "nyxid.rendered-composition.v1",
       "component": "wizard",
-      "lock_sha256": "8d1e43db5dbce77bc84da721d8464fb2ee0c2d0125dff4e90a259c2edf590818",
+      "lock_sha256": "bb92ea88a8cb430a0872ccc80be2d7c16bfa8c05c7908652e8047fb6a93a8894",
       "chunks": [
         {
           "path": "index.html",
@@ -117,7 +117,7 @@
                 "integrity": "sha512-A/IxlMLShx3KjV/HeTcTfaMxdwy690+L/ZADoeaTltLx+CVuzkeVIPuybK3jrRfw7YZnmdKsVVHAlEPIAEUNlA==",
                 "lock_path": "node_modules/@hookform/resolvers"
               },
-              "rendered_length": 922
+              "rendered_length": 906
             },
             {
               "id": "pkg:npm/%40hookform/resolvers@5.2.2/zod/dist/zod.mjs",
@@ -129,7 +129,7 @@
                 "integrity": "sha512-A/IxlMLShx3KjV/HeTcTfaMxdwy690+L/ZADoeaTltLx+CVuzkeVIPuybK3jrRfw7YZnmdKsVVHAlEPIAEUNlA==",
                 "lock_path": "node_modules/@hookform/resolvers"
               },
-              "rendered_length": 2926
+              "rendered_length": 2916
             },
             {
               "id": "pkg:npm/%40radix-ui/number@1.1.1/dist/index.mjs",
@@ -1569,7 +1569,7 @@
                 "integrity": "sha512-8dXPB2GI4dI8jV4MgUDGBeLdGk8ekfqVZ0BdLcrRzocGgG75ltNEmWS+gE7uokKF/0oSUuczNDT+g9hFJ23FkA==",
                 "lock_path": "node_modules/lucide-react"
               },
-              "rendered_length": 229
+              "rendered_length": 227
             },
             {
               "id": "pkg:npm/lucide-react@0.563.0/dist/esm/shared/src/utils/hasA11yProp.js",
@@ -1630,18 +1630,6 @@
                 "lock_path": "node_modules/lucide-react"
               },
               "rendered_length": 231
-            },
-            {
-              "id": "pkg:npm/posthog-js@1.438.12/dist/module.no-external.js",
-              "source_sha256": "629ee2d49500499ab1181869add15878d4da6f18fd3a965b6850dbc8ab01f856",
-              "package": {
-                "name": "posthog-js",
-                "version": "1.438.12",
-                "purl": "pkg:npm/posthog-js@1.438.12",
-                "integrity": "sha512-hjhvrtqbk6pFlbtNEGk0FrWKKFdeXe/WWA/LppN0f+uDoHKR9/SZJOxUHSVCGYbGTJvNRoDjjQvZuTcq4oKSlg==",
-                "lock_path": "node_modules/posthog-js"
-              },
-              "rendered_length": 472467
             },
             {
               "id": "pkg:npm/qrcode@1.5.4/lib/browser.js",
@@ -2505,7 +2493,7 @@
                 "integrity": "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==",
                 "lock_path": "node_modules/zod"
               },
-              "rendered_length": 1206
+              "rendered_length": 1200
             },
             {
               "id": "pkg:npm/zod@4.3.6/v4/core/schemas.js",
@@ -2639,7 +2627,7 @@
             {
               "id": "repo:frontend/src/components/cli-wizard/confirm-panels.tsx",
               "source_sha256": "fe23f0fb4997e161e1dc05cc5dd259f8c83da6ce178825628ef0d78fe18570bd",
-              "rendered_length": 43496
+              "rendered_length": 43494
             },
             {
               "id": "repo:frontend/src/components/cli-wizard/disconnect-banner.tsx",
@@ -2674,7 +2662,7 @@
             {
               "id": "repo:frontend/src/components/cli-wizard/upstream-error-banner.tsx",
               "source_sha256": "7b828ffa9829405b0f3ce41cefb4d0c838550291e0948ba78d04bf41dc9b31d6",
-              "rendered_length": 1819
+              "rendered_length": 1817
             },
             {
               "id": "repo:frontend/src/components/cli-wizard/wizard-footer.tsx",
@@ -2689,7 +2677,7 @@
             {
               "id": "repo:frontend/src/components/platform-icon.tsx",
               "source_sha256": "20b88ade94cbb38c02032cfd646f44a2f07ca010489b28d242b6e60d2b1baf26",
-              "rendered_length": 1521
+              "rendered_length": 1519
             },
             {
               "id": "repo:frontend/src/components/service-accounts/service-account-scope-picker.tsx",
@@ -2699,7 +2687,7 @@
             {
               "id": "repo:frontend/src/components/service-icon.tsx",
               "source_sha256": "2a7ccfc3ffc3af20c8648f520eee77728e3fa62193301106ed03c5683d0ce4fc",
-              "rendered_length": 3097
+              "rendered_length": 3091
             },
             {
               "id": "repo:frontend/src/components/service-icons/_shared.tsx",
@@ -3179,17 +3167,17 @@
             {
               "id": "repo:frontend/src/components/shared/async-option-select.tsx",
               "source_sha256": "8360e832782c8e36944d0ee0be13921b95f950fc022efa48b8cbb8e25d248f98",
-              "rendered_length": 16923
+              "rendered_length": 16911
             },
             {
               "id": "repo:frontend/src/components/shared/copyable-url-callout.tsx",
               "source_sha256": "37b1c0137f67fe43654161ea2b12b1cba305599e9c83bab22472885809bbb89e",
-              "rendered_length": 2254
+              "rendered_length": 2252
             },
             {
               "id": "repo:frontend/src/components/shared/credential-binding-choice.tsx",
               "source_sha256": "c5a2d7527f8bfe0830e1840c04e07b1317bd3e0a247f5577549006d31a11c28f",
-              "rendered_length": 1819
+              "rendered_length": 1817
             },
             {
               "id": "repo:frontend/src/components/shared/not-found-page.tsx",
@@ -3214,32 +3202,32 @@
             {
               "id": "repo:frontend/src/components/shared/upstream-scope-picker.tsx",
               "source_sha256": "f50f6796649f64cd98b52194cf8bf6ea0adc100b13a645eae0e7ad80d6422d2a",
-              "rendered_length": 10392
+              "rendered_length": 10390
             },
             {
               "id": "repo:frontend/src/components/ui/button.tsx",
               "source_sha256": "24e17ddb716fb057ffaee7741d529cb9dcce1fb29576a9747ca2f6909f0c252a",
-              "rendered_length": 2476
+              "rendered_length": 2472
             },
             {
               "id": "repo:frontend/src/components/ui/checkbox.tsx",
               "source_sha256": "74f434c16844f547d5af7331fd74a28b0fbe26e8a3861e5266778350b2288f58",
-              "rendered_length": 796
+              "rendered_length": 792
             },
             {
               "id": "repo:frontend/src/components/ui/form.tsx",
               "source_sha256": "07cb0bf6eaf287c768af084546f0b321e414ba9c4a7bf89b601aeeb5e40575bb",
-              "rendered_length": 3082
+              "rendered_length": 3074
             },
             {
               "id": "repo:frontend/src/components/ui/input.tsx",
               "source_sha256": "0cdac3b75f0abb479792a8810b77d9b3154dc5e7a6e0b6a2a08a1b3d82afedae",
-              "rendered_length": 711
+              "rendered_length": 709
             },
             {
               "id": "repo:frontend/src/components/ui/label.tsx",
               "source_sha256": "c7f9dc35d2854b40e47a2bd3834a935c60990c0738e154b9e32849db38785ccb",
-              "rendered_length": 427
+              "rendered_length": 425
             },
             {
               "id": "repo:frontend/src/components/ui/overlay-layer.tsx",
@@ -3249,27 +3237,27 @@
             {
               "id": "repo:frontend/src/components/ui/popover.tsx",
               "source_sha256": "992b7bdc2d0b3b4a0448a343bcb87d30d6dde245e1ce75d6ad6e8b0269287ef3",
-              "rendered_length": 1106
+              "rendered_length": 1104
             },
             {
               "id": "repo:frontend/src/components/ui/select.tsx",
               "source_sha256": "fc912778f5f174d6212dc5dc7b4c6a8249c3b9bf0f2e7283e9b02c92e800409b",
-              "rendered_length": 4947
+              "rendered_length": 4931
             },
             {
               "id": "repo:frontend/src/components/ui/skeleton.tsx",
               "source_sha256": "8913724bc2d578e429c2adf993f24bd132696e2c561d80d352706a947bc551d2",
-              "rendered_length": 245
+              "rendered_length": 243
             },
             {
               "id": "repo:frontend/src/components/ui/switch.tsx",
               "source_sha256": "3eb7454f1e86337d9ea8149af08b6f84e9862874e76d636b42cfb7307e3fbd42",
-              "rendered_length": 861
+              "rendered_length": 857
             },
             {
               "id": "repo:frontend/src/components/ui/tooltip.tsx",
               "source_sha256": "238905cab688113b35e69a95e0d8fdff1322d81b4cc13ed1a5262d4d674fc9c7",
-              "rendered_length": 1295
+              "rendered_length": 1293
             },
             {
               "id": "repo:frontend/src/hooks/use-keys.ts",
@@ -3303,8 +3291,8 @@
             },
             {
               "id": "repo:frontend/src/lib/api-client.ts",
-              "source_sha256": "3f4289b1f5b101b25521719d9bbdf55933d072b6fd853e4fd485c8ef5d421201",
-              "rendered_length": 3243
+              "source_sha256": "d97d241b8f0ad9e9c32b26a51f541abaa374cbeeccfc56f6dbde37ffc0722d5c",
+              "rendered_length": 3359
             },
             {
               "id": "repo:frontend/src/lib/assistant/identity.ts",
@@ -3338,8 +3326,8 @@
             },
             {
               "id": "repo:frontend/src/lib/telemetry.ts",
-              "source_sha256": "0cc1f911040366005793b42bae557c1e4c8a6b04bc6a430364241f424e21b4b4",
-              "rendered_length": 1245
+              "source_sha256": "7f94dd3c31e24f8f55f7a72be46b0d00c460c5a8aa755bbdef73b394c380f3da",
+              "rendered_length": 1368
             },
             {
               "id": "repo:frontend/src/lib/theme-colors.ts",
@@ -3349,7 +3337,7 @@
             {
               "id": "repo:frontend/src/lib/utils.ts",
               "source_sha256": "ea92cdca9e6a110abfa3974057793e4fa67639727093773bef0e4bbc538e4a6d",
-              "rendered_length": 449
+              "rendered_length": 447
             },
             {
               "id": "repo:frontend/src/lib/zod-csp.ts",
@@ -3423,8 +3411,13 @@
             },
             {
               "id": "repo:frontend/src/stores/auth-store.ts",
-              "source_sha256": "eaf777d5f43df37f1422c348c98ee44d121dbef4d77b1952e177c79dc1fa6166",
-              "rendered_length": 2907
+              "source_sha256": "b237ee74171d3529c808773080d3fe43c419f0e4b30462f1cbd0f81e4ca6e367",
+              "rendered_length": 3141
+            },
+            {
+              "id": "repo:frontend/src/stores/consent-store.ts",
+              "source_sha256": "818e609d6b671c27a22b99be3c786530e01beb96a40102f6f519ba9de6ac6b79",
+              "rendered_length": 2482
             },
             {
               "id": "repo:frontend/src/stores/credits-denial-store.ts",
@@ -3452,15 +3445,15 @@
       "inline_candidates": [
         {
           "kind": "script",
-          "sha256": "5d90189626b5192f2be14ff445fa1b4dc584599b1a9d7509e3ca85e6e29addaf",
-          "size": 1127603,
+          "sha256": "e48c9dba587a6adaf4a9692e426021feb3e211ea29a494675ffa6c7ce754dd2e",
+          "size": 776447,
           "path": "index.html",
           "transform": "pkg:npm/vite-plugin-singlefile@2.3.4"
         },
         {
           "kind": "style",
-          "sha256": "84a0068dd744b50e92bbe92f6da9b714ffa7fcb09df59960648a6be6bf6b3be9",
-          "size": 209942,
+          "sha256": "5b764bc582cd47172f9f04b44d8434d975296f8dee53d94dcf076f338f6e2af0",
+          "size": 210549,
           "path": "index.html",
           "transform": "pkg:npm/vite-plugin-singlefile@2.3.4"
         }
@@ -3824,13 +3817,6 @@
       "lock_path": "node_modules/lucide-react"
     },
     {
-      "name": "posthog-js",
-      "version": "1.438.12",
-      "purl": "pkg:npm/posthog-js@1.438.12",
-      "integrity": "sha512-hjhvrtqbk6pFlbtNEGk0FrWKKFdeXe/WWA/LppN0f+uDoHKR9/SZJOxUHSVCGYbGTJvNRoDjjQvZuTcq4oKSlg==",
-      "lock_path": "node_modules/posthog-js"
-    },
-    {
       "name": "qrcode",
       "version": "1.5.4",
       "purl": "pkg:npm/qrcode@1.5.4",
@@ -3995,8 +3981,8 @@
     },
     {
       "path": "index.html",
-      "size": 1338389,
-      "sha256": "fc91b735927f3a2e9aad9d07df78692322e042b6992ec6bf4f19037a9d36f542"
+      "size": 987840,
+      "sha256": "6e42a996674f070903449f72fb09f035f96ca427d399f5e115a76607df9120ce"
     },
     {
       "path": "nyxid-app-icon.svg",
@@ -4025,14 +4011,14 @@
       "inline": [
         {
           "kind": "script",
-          "sha256": "5d90189626b5192f2be14ff445fa1b4dc584599b1a9d7509e3ca85e6e29addaf",
-          "size": 1127603,
+          "sha256": "e48c9dba587a6adaf4a9692e426021feb3e211ea29a494675ffa6c7ce754dd2e",
+          "size": 776447,
           "transform": "pkg:npm/vite-plugin-singlefile@2.3.4"
         },
         {
           "kind": "style",
-          "sha256": "84a0068dd744b50e92bbe92f6da9b714ffa7fcb09df59960648a6be6bf6b3be9",
-          "size": 209942,
+          "sha256": "5b764bc582cd47172f9f04b44d8434d975296f8dee53d94dcf076f338f6e2af0",
+          "size": 210549,
           "transform": "pkg:npm/vite-plugin-singlefile@2.3.4"
         }
       ],
