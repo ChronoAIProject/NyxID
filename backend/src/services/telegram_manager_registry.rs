@@ -370,7 +370,7 @@ mod tests {
         );
         let saved = additional.manager_values().await.unwrap();
         assert_eq!(saved.get("manager_bot_id"), Some("200"));
-        let mut strict_keys = state.encryption_keys.clone();
+        let mut strict_keys = crate::crypto::aes::EncryptionKeys::from_config(&state.config);
         strict_keys.set_allow_legacy_record_reads(false);
         let mut snapshot = load(&state.db, Some("200")).await.unwrap().unwrap();
         let strict = super::super::platform_credential_service::decrypt_platform_snapshot(
