@@ -106,6 +106,7 @@ it.each([
   ["gateway_not_authenticated", "The channel gateway could not authenticate NyxBot. Try reconnecting. If this continues, contact an administrator."],
   ["gateway_permission_required", "The channel gateway has not authorized NyxBot to manage this connection. An administrator needs to check the gateway configuration."],
   ["gateway_unavailable", "The channel gateway is temporarily unavailable. Try again shortly."],
+  ["setup_interrupted", "This connection changed while it was being set up. Reconnect to try again."],
   ["gateway_provider_not_registered", "The Agent Event Gateway has not registered NyxBot as a provider yet (operator step). Telegram bots cannot use NyxBot until it is."],
   ["gateway_rejected_request", "The channel gateway rejected this connection request. Contact an administrator."],
   ["gateway_conflict", "The channel gateway reported a conflicting connection. Contact an administrator."],

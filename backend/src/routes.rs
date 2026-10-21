@@ -1427,6 +1427,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .patch(handlers::admin::update_broker_settings),
         )
         .route(
+            "/nyxbot-gateway-releases",
+            get(handlers::nyxbot_gateway_releases::list),
+        )
+        .route(
+            "/nyxbot-gateway-releases/{id}/inspect",
+            post(handlers::nyxbot_gateway_releases::inspect),
+        )
+        .route(
+            "/nyxbot-gateway-releases/{id}/resolve",
+            post(handlers::nyxbot_gateway_releases::resolve),
+        )
+        .route(
             "/platform-credentials",
             get(handlers::admin_platform_credentials::list),
         )

@@ -14,6 +14,9 @@ use tokio::sync::Mutex;
 #[path = "nyxbot_transport_tests.rs"]
 mod transport_tests;
 
+#[path = "nyxbot_release_tests.rs"]
+mod release_tests;
+
 #[path = "nyxbot_x_bus_tests.rs"]
 mod x_bus_tests;
 
@@ -187,6 +190,10 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         ),
         gateway_channel_id: None,
         gateway_record_id: None,
+        gateway_setup_release_id: None,
+        continuity_from_channel_id: None,
+        continuity_to_channel_id: None,
+        continuity_restored_at: None,
         gateway_version: None,
         gateway_no_progress: false,
         binding_id: None,
@@ -237,6 +244,30 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
             "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
         }).await.unwrap();
     (row, agent.full_key)
+}
+
+async fn issue_owner_link(state: &AppState, row: &NyxbotChannel) -> LinkInstructions {
+    let code = new_link_code();
+    let issued = Utc::now();
+    crate::services::nyxbot_channel_continuity_service::restore_existing(
+        &state.db,
+        &row.id,
+        &row.user_id,
+        false,
+        &sha256_hex(code.as_bytes()),
+    )
+    .await
+    .unwrap();
+    let row = load_channel(state, &row.user_id, &row.id).await.unwrap();
+    let expires_at = row.link_code_expires_at.unwrap();
+    let ttl = ChronoDuration::hours(LINK_CODE_TTL_HOURS);
+    assert!(expires_at >= issued + ttl - ChronoDuration::milliseconds(1));
+    assert!(expires_at <= Utc::now() + ttl);
+    LinkInstructions {
+        url: link_url(&row, &code),
+        code,
+        expires_at,
+    }
 }
 
 fn bearer(key: &str) -> HeaderMap {
@@ -427,7 +458,7 @@ async fn gateway_turns_admit_once_answer_only_the_verified_owner_and_keep_contex
     assert!(calls.lock().await.is_empty());
     // The owner links their account with the one-time code.
     let row = load_channel(&state, OWNER, &row.id).await.unwrap();
-    let link = refresh_link_code(&state, &row).await.unwrap();
+    let link = issue_owner_link(&state, &row).await;
     assert_eq!(
         link.url.as_deref(),
         Some(format!("https://t.me/helper_bot?start={}", link.code.as_str()).as_str())
@@ -1823,7 +1854,7 @@ async fn owner_messages_taken_by_another_route_are_explained() {
         .await
         .unwrap();
     let row = load_channel(&state, OWNER, &row.id).await.unwrap();
-    refresh_link_code(&state, &row).await.unwrap();
+    issue_owner_link(&state, &row).await;
     let row = load_channel(&state, OWNER, &row.id).await.unwrap();
     let hint = || async {
         status::verification_hint(&state, &load_channel(&state, OWNER, &row.id).await.unwrap())
@@ -1964,7 +1995,7 @@ async fn a_second_bot_for_the_same_app_is_named_with_the_url_to_use() {
     older.insert("app_id", "cli_same_app");
     older.insert("platform_bot_id", "other");
     bots.insert_one(older).await.unwrap();
-    refresh_link_code(&state, &row).await.unwrap();
+    issue_owner_link(&state, &row).await;
     let row = load_channel(&state, OWNER, &row.id).await.unwrap();
     let hint = status::verification_hint(&state, &row)
         .await
@@ -3068,6 +3099,10 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
             agent_key_ciphertext: None,
             gateway_channel_id: None,
             gateway_record_id: None,
+            gateway_setup_release_id: None,
+            continuity_from_channel_id: None,
+            continuity_to_channel_id: None,
+            continuity_restored_at: None,
             gateway_version: None,
             gateway_no_progress: false,
             binding_id: None,
@@ -4057,6 +4092,7 @@ async fn gateway_platforms_follow_their_feature_flags() {
 }
 
 type GatewayCalls = Arc<Mutex<Vec<(String, String, Value)>>>;
+type GatewayRecords = Arc<Mutex<std::collections::HashMap<String, (Value, Zeroizing<String>)>>>;
 
 /// A stand-in Agent Event Gateway. Like the real one it binds its provider
 /// (NyxID's `put_binding`, with the channel's agent key) while creating a
@@ -4070,26 +4106,16 @@ async fn mock_gateway(
         extract::Path,
         http::{HeaderMap, StatusCode},
     };
-    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
     state.config.jwt_issuer = "http://localhost:3001".into();
     let calls: GatewayCalls = Arc::new(Mutex::new(Vec::new()));
-    let version = Arc::new(AtomicI64::new(0));
-    let agent_key: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let remote: GatewayRecords = Arc::new(Mutex::new(HashMap::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let callback = format!("{base}/callbacks/cmaeg1.ch.moved");
-    let bearer = |key: &str| {
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", format!("Bearer {key}").parse().unwrap());
-        headers
-    };
+    let callback_base = base.clone();
     let create = {
-        let (calls, version, agent_key, nyxid) = (
-            calls.clone(),
-            version.clone(),
-            agent_key.clone(),
-            state.clone(),
-        );
+        let (calls, remote, nyxid) = (calls.clone(), remote.clone(), state.clone());
         move |headers: HeaderMap, Json(body): Json<Value>| async move {
             let creator = headers["authorization"]
                 .to_str()
@@ -4098,92 +4124,159 @@ async fn mock_gateway(
                 .unwrap();
             let claims =
                 crate::crypto::jwt::verify_token(&nyxid.jwt_keys, &nyxid.config, creator).unwrap();
+            assert!(crate::services::nyxbot_gateway_service::is_creator_claims(
+                &claims
+            ));
             assert_eq!(claims.sub, body["profile"]["metadata"]["owner"]["subject"]);
-            assert_eq!(claims.delegated, Some(true));
-            assert_eq!(claims.scope, "account:read");
-            assert_eq!(claims.exp - claims.iat, 120);
             calls
                 .lock()
                 .await
                 .push(("POST".into(), "/channels".into(), body.clone()));
-            let key = body["credentials"]["agent_key"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned();
-            let (preparing, _) = provider_channel(&nyxid, &bearer(&key))
-                .await
-                .unwrap_or_else(|_| panic!("pending provider key must authenticate"));
-            assert!(
-                !preparing.gateway_no_progress,
-                "new binding must not inherit quiet proof"
+            let key = Zeroizing::new(
+                body["credentials"]["agent_key"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
             );
-            if preparing.transport == "direct" {
-                assert!(preparing.pending_agent_api_key_id.is_some());
-                assert!(preparing.pending_route_api_key_id.is_some());
-            }
+            let binding = format!(
+                "bnd_{}",
+                Uuid::parse_str(body["record_id"].as_str().unwrap())
+                    .unwrap()
+                    .simple()
+            );
             let bound = put_binding(
-                State(nyxid),
-                Path("binding-moved".into()),
+                State(nyxid.clone()),
+                Path(binding.clone()),
                 bearer(&key),
-                Json(json!({"agent_key": key, "profile": body["profile"]})),
+                Json(json!({"agent_key":key.as_str(),"profile":body["profile"]})),
             )
             .await;
             if bound.status() != StatusCode::OK {
                 return (
                     StatusCode::BAD_GATEWAY,
-                    Json(json!({"code": "provider_rejected"})),
+                    Json(json!({"code":"provider_rejected"})),
                 );
             }
-            *agent_key.lock().await = Some(key);
-            version.store(1, Ordering::SeqCst);
-            (
-                StatusCode::CREATED,
-                Json(json!({"channel_id": "cmaeg1.ch.moved", "version": 1,
-                    "endpoints": {"nyxid_callback_url": callback},
-                    "provider": {"binding_id": "binding-moved"}})),
-            )
+            let channel_id = format!("cmaeg1.ch.{}", body["record_id"].as_str().unwrap());
+            let response = json!({"channel_id":channel_id,"record_id":body["record_id"],"version":1,
+                "endpoints":{"nyxid_callback_url":format!("{callback_base}/callbacks/{channel_id}")},"provider":{"slug":"nyxbot","binding_id":binding},
+                "definition":{"owner":{"kind":"human","subject":claims.sub},"sources":body["sources"],
+                    "reply":body["reply"],"profile":body["profile"]}});
+            remote
+                .lock()
+                .await
+                .insert(channel_id, (response.clone(), key));
+            (StatusCode::CREATED, Json(response))
         }
     };
     let attach = {
-        let (calls, version) = (calls.clone(), version.clone());
+        let (calls, remote) = (calls.clone(), remote.clone());
         move |Path(id): Path<String>, Json(body): Json<Value>| async move {
             let expected = body["expected_version"].as_i64().unwrap_or_default();
-            calls.lock().await.push(("PUT".into(), id, body.clone()));
+            calls
+                .lock()
+                .await
+                .push(("PUT".into(), id.clone(), body.clone()));
             if refuse.load(Ordering::SeqCst) {
-                return (StatusCode::CONFLICT, Json(json!({"code": "conflict"})));
+                return (StatusCode::CONFLICT, Json(json!({"code":"conflict"})));
             }
-            version.store(expected + 1, Ordering::SeqCst);
-            // Return the authored policy as the gateway's source definition.
-            // This keeps the mock faithful to an acknowledged management write;
-            // incomplete echoes intentionally exercise GET reconciliation in the
-            // dedicated management tests.
-            (
-                StatusCode::OK,
-                Json(json!({"version": expected + 1, "definition": body})),
-            )
+            let mut guard = remote.lock().await;
+            let Some((current, _)) = guard.get_mut(&id) else {
+                return (StatusCode::NOT_FOUND, Json(Value::Null));
+            };
+            if current["version"] != expected {
+                return (StatusCode::CONFLICT, Json(json!({"code":"conflict"})));
+            }
+            current["version"] = json!(expected + 1);
+            for field in ["sources", "reply", "profile"] {
+                current["definition"][field] = body[field].clone();
+            }
+            (StatusCode::OK, Json(current.clone()))
         }
     };
     let read = {
-        let (calls, version) = (calls.clone(), version.clone());
+        let (calls, remote) = (calls.clone(), remote.clone());
         move |Path(id): Path<String>| async move {
-            calls.lock().await.push(("GET".into(), id, Value::Null));
-            Json(json!({"version": version.load(Ordering::SeqCst)}))
+            calls
+                .lock()
+                .await
+                .push(("GET".into(), id.clone(), Value::Null));
+            match remote
+                .lock()
+                .await
+                .values()
+                .find(|(row, _)| row["record_id"] == id || row["channel_id"] == id)
+            {
+                Some((row, _)) => (StatusCode::OK, Json(row.clone())),
+                None => (StatusCode::NOT_FOUND, Json(Value::Null)),
+            }
         }
     };
     let delete = {
-        let (calls, nyxid) = (calls.clone(), state.clone());
-        move |Path(id): Path<String>| async move {
-            calls.lock().await.push(("DELETE".into(), id, Value::Null));
-            if let Some(key) = agent_key.lock().await.take() {
-                delete_binding(State(nyxid), Path("binding-moved".into()), bearer(&key)).await;
+        let (calls, remote, nyxid) = (calls.clone(), remote.clone(), state.clone());
+        move |headers: HeaderMap,
+              Path(id): Path<String>,
+              axum::extract::Query(query): axum::extract::Query<
+            std::collections::HashMap<String, String>,
+        >| async move {
+            let raw = headers["authorization"]
+                .to_str()
+                .unwrap()
+                .strip_prefix("Bearer ")
+                .unwrap();
+            let claims =
+                crate::crypto::jwt::verify_token(&nyxid.jwt_keys, &nyxid.config, raw).unwrap();
+            assert!(crate::services::nyxbot_gateway_service::is_creator_claims(
+                &claims
+            ));
+            calls.lock().await.push((
+                "DELETE".into(),
+                id.clone(),
+                json!({"expected_version":query.get("expected_version")}),
+            ));
+            let Some((row, key)) = remote.lock().await.get(&id).cloned() else {
+                return StatusCode::NOT_FOUND;
+            };
+            if row["definition"]["owner"]["subject"] != claims.sub {
+                return StatusCode::NOT_FOUND;
             }
+            if query
+                .get("expected_version")
+                .and_then(|v| v.parse::<i64>().ok())
+                != row["version"].as_i64()
+            {
+                return StatusCode::CONFLICT;
+            }
+            let response = delete_binding(
+                State(nyxid),
+                Path(row["provider"]["binding_id"].as_str().unwrap().into()),
+                bearer(&key),
+            )
+            .await;
+            if !matches!(
+                response.status(),
+                StatusCode::NO_CONTENT | StatusCode::NOT_FOUND
+            ) {
+                return StatusCode::BAD_GATEWAY;
+            }
+            let mut records = remote.lock().await;
+            if records
+                .get(&id)
+                .is_none_or(|(current, _)| current["version"] != row["version"])
+            {
+                return StatusCode::CONFLICT;
+            }
+            records.remove(&id);
             StatusCode::NO_CONTENT
         }
     };
-    let routes = Router::new().route("/channels", post(create)).route(
-        "/channels/{id}",
-        axum::routing::put(attach).get(read).delete(delete),
-    );
+    let routes = Router::new()
+        .route("/channels", post(create))
+        .route("/channel-records/{id}", axum::routing::get(read.clone()))
+        .route(
+            "/channels/{id}",
+            axum::routing::put(attach).get(read).delete(delete),
+        );
     let server = tokio::spawn(async move {
         axum::serve(listener, routes).await.unwrap();
     });
@@ -4421,8 +4514,20 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
     assert_eq!(after.transport, "gateway");
     assert_eq!(after.route_id.as_deref(), Some(route_id.as_str()));
     assert_ne!(after.route_api_key_id, before.route_api_key_id);
-    assert_eq!(after.gateway_channel_id.as_deref(), Some("cmaeg1.ch.moved"));
-    assert_eq!(after.binding_id.as_deref(), Some("binding-moved"));
+    assert_eq!(
+        after.gateway_channel_id,
+        after
+            .gateway_record_id
+            .as_ref()
+            .map(|id| format!("cmaeg1.ch.{id}"))
+    );
+    assert_eq!(
+        after.binding_id,
+        after
+            .gateway_record_id
+            .as_ref()
+            .map(|id| format!("bnd_{}", Uuid::parse_str(id).unwrap().simple()))
+    );
     assert!(after.agent_api_key_id.is_some() && after.agent_key_ciphertext.is_some());
     assert!(after.gateway_fallback_at.is_none());
     assert_eq!(after.owner_sender_ids, vec!["ou_alice".to_owned()]);
@@ -4448,7 +4553,10 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
         route_key
             .callback_url
             .as_deref()
-            .is_some_and(|url| url.ends_with("/callbacks/cmaeg1.ch.moved"))
+            .is_some_and(|url| url.ends_with(&format!(
+                "/callbacks/{}",
+                after.gateway_channel_id.as_deref().unwrap()
+            )))
     );
     assert!(
         !key_service::get_api_key(&state.db, OWNER, &before.route_api_key_id)
@@ -6057,17 +6165,24 @@ async fn gateway_connect_refuses_missing_identity_and_attach_version() {
         .insert_one(service)
         .await
         .unwrap();
-    let (row, key) = channel(&state, "gateway").await;
-    let bot = crate::services::channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
-        .await
-        .unwrap();
     for response in [
         json!({}),
-        json!({"channel_id":"", "version":1,"endpoints":{"nyxid_callback_url":"https://example.com"}}),
-        json!({"channel_id":"remote", "version":0,"endpoints":{"nyxid_callback_url":"https://example.com"}}),
-        json!({"channel_id":"remote", "version":1,"endpoints":{"nyxid_callback_url":""}}),
+        json!({"channel_id":"","version":1}),
+        json!({"channel_id":"remote","version":0}),
+        json!({"channel_id":"remote","version":1,"endpoints":{"nyxid_callback_url":""}}),
     ] {
         server.reset().await;
+        let (mut row, key) = channel(&state, "gateway").await;
+        row.status = "pending".into();
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .replace_one(doc! {"_id":&row.id}, &row)
+            .await
+            .unwrap();
+        let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+            .await
+            .unwrap();
         Mock::given(method("POST"))
             .and(path("/channels"))
             .respond_with(ResponseTemplate::new(201).set_body_json(response))
@@ -6079,37 +6194,67 @@ async fn gateway_connect_refuses_missing_identity_and_attach_version() {
                 .unwrap_err(),
             "gateway_invalid_response"
         );
+        let ids = releases::retire_connection(
+            &state,
+            &row,
+            ReleaseReason::SetupFailed,
+            "failed",
+            Some("gateway_invalid_response"),
+        )
+        .await
+        .unwrap();
+        assert!(!releases::try_inline(&state, &ids).await);
         assert!(
             server
                 .received_requests()
                 .await
                 .unwrap()
                 .iter()
-                .all(|request| request.method.as_str() != "DELETE")
+                .all(|request| request.method != "DELETE")
         );
     }
+    server.reset().await;
+    let (mut row, key) = channel(&state, "gateway").await;
+    row.status = "pending".into();
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
     state
         .db
         .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
         .delete_many(doc! {"channel_bot_id":&row.channel_bot_id})
         .await
         .unwrap();
-    server.reset().await;
-    Mock::given(method("POST"))
-        .and(path("/channels"))
-        .respond_with(
-            ResponseTemplate::new(201).set_body_json(json!({"channel_id":"remote","version":1,
-            "endpoints":{"nyxid_callback_url":format!("{}/callback",server.uri())}})),
-        )
-        .mount(&server)
-        .await;
+    let base = server.uri();
+    let owner = row.user_id.clone();
+    let captured = Arc::new(std::sync::Mutex::new(Value::Null));
+    let saved = captured.clone();
+    Mock::given(method("POST")).and(path("/channels")).respond_with(move |request:&wiremock::Request| {
+        let body:Value=serde_json::from_slice(&request.body).unwrap();
+        let record=body["record_id"].as_str().unwrap();let binding=format!("bnd_{}",Uuid::parse_str(record).unwrap().simple());
+        let response=json!({"channel_id":"cmaeg1.ch.remote","record_id":record,"version":1,"provider":{"slug":"nyxbot","binding_id":binding},
+            "endpoints":{"nyxid_callback_url":format!("{base}/callback")},"definition":{"owner":{"kind":"human","subject":owner},"sources":body["sources"]}});
+        *saved.lock().unwrap()=response.clone();ResponseTemplate::new(201).set_body_json(response)
+    }).mount(&server).await;
     Mock::given(method("PUT"))
-        .and(path("/channels/remote"))
+        .and(path("/channels/cmaeg1.ch.remote"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .respond_with(move |_: &wiremock::Request| {
+            ResponseTemplate::new(200).set_body_json(captured.lock().unwrap().clone())
+        })
+        .mount(&server)
+        .await;
     Mock::given(method("DELETE"))
-        .and(path("/channels/remote"))
+        .and(path("/channels/cmaeg1.ch.remote"))
         .and(query_param("expected_version", "1"))
         .respond_with(ResponseTemplate::new(204))
         .expect(1)
@@ -6121,6 +6266,16 @@ async fn gateway_connect_refuses_missing_identity_and_attach_version() {
             .unwrap_err(),
         "gateway_invalid_response"
     );
+    let ids = releases::retire_connection(
+        &state,
+        &row,
+        ReleaseReason::SetupFailed,
+        "failed",
+        Some("gateway_invalid_response"),
+    )
+    .await
+    .unwrap();
+    assert!(releases::try_inline(&state, &ids).await);
     server.verify().await;
     assert_eq!(
         state

@@ -759,7 +759,10 @@ TUF and attestation code under read-only/cap-drop/no-new-privileges restrictions
 
 NyxBot's actor-scoped creator grant is restricted to the registered confidential
 gateway caller; its server-only creator bearer is separate from provider credentials.
-Preserve the contract in `docs/CHANNEL_EVENT_GATEWAY.md`.
+Preserve the contract in `docs/CHANNEL_EVENT_GATEWAY.md`. Gateway retirements
+retain exact cleanup authority before local references change; activation commits
+continuity and provisional adoption atomically. This is lifecycle cleanup only,
+with no delivery retry.
 
 NyxBot owner settings include an enforced `access_mode` (`nyxmode`, `autopilot`,
 or `ask_every_time`) and optional specialist override. The backend acknowledgement
