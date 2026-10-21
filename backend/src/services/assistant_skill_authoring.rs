@@ -71,12 +71,14 @@ fn attempt_id(chat: &ChatAuthority) -> AppResult<(String, &str)> {
 
 async fn record_format_rejection(db: &Database, chat: &ChatAuthority) -> AppResult<i32> {
     let (id, turn_id) = attempt_id(chat)?;
-    let row = db
+    let collection = db
         .collection::<crate::models::assistant_skill_draft_attempt::AssistantSkillDraftAttempt>(
             crate::models::assistant_skill_draft_attempt::COLLECTION_NAME,
-        )
+        );
+    let filter = doc! {"_id": &id, "user_id": &chat.user_id};
+    let row = match collection
         .find_one_and_update(
-            doc! {"_id": &id, "user_id": &chat.user_id},
+            filter.clone(),
             doc! {"$inc":{"rejections":1}, "$setOnInsert":{
                 "user_id":&chat.user_id, "conversation_id":&chat.conversation_id,
                 "turn_id":turn_id, "created_at":bson::DateTime::now()
@@ -84,7 +86,35 @@ async fn record_format_rejection(db: &Database, chat: &ChatAuthority) -> AppResu
         )
         .upsert(true)
         .return_document(mongodb::options::ReturnDocument::After)
-        .await?;
+        .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            let is_id_insert_race = matches!(
+                error.kind.as_ref(),
+                mongodb::error::ErrorKind::Command(command) if command.code == 11000
+            ) && error
+                .server_response()
+                .and_then(|response| response.to_document().ok())
+                .is_some_and(|response| {
+                    response.get_document("keyPattern") == Ok(&doc! {"_id": 1})
+                        && response.get_document("keyValue") == Ok(&doc! {"_id": &id})
+                });
+            if !is_id_insert_race {
+                return Err(error.into());
+            }
+            // The failed insert applied no increment. Retry once against the
+            // same owner, without inserting or changing the winning row's owner.
+            Some(
+                collection
+                    .find_one_and_update(filter, doc! {"$inc": {"rejections": 1}})
+                    .upsert(false)
+                    .return_document(mongodb::options::ReturnDocument::After)
+                    .await?
+                    .ok_or(error)?,
+            )
+        }
+    };
     Ok(row.map(|value| value.rejections).unwrap_or(1))
 }
 
