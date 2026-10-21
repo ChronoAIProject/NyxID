@@ -494,6 +494,28 @@ pub(crate) struct Cleanup {
     pub recovery_pending: bool,
 }
 
+/// Metadata-only reconciliation result. Live references are retained normally;
+/// active attempts and explicit recovery remain debt rather than being forgotten.
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct CleanupReport {
+    pub retired: usize,
+    pub retained: usize,
+    pub active_attempts: usize,
+    pub recovery_attempts: usize,
+}
+impl CleanupReport {
+    pub(crate) fn deferred(&self) -> bool {
+        self.active_attempts != 0 || self.recovery_attempts != 0
+    }
+
+    fn include(&mut self, cleanup: Cleanup) {
+        self.retired += cleanup.retired;
+        self.retained += cleanup.retained;
+        self.active_attempts += usize::from(cleanup.active);
+        self.recovery_attempts += usize::from(cleanup.recovery_pending);
+    }
+}
+
 /// Validate the complete authoritative reference graph before authorizing any
 /// cleanup effect, including references owned by other attempts. A syntactic
 /// reference alone cannot establish liveness, field binding or ownership.
@@ -677,10 +699,10 @@ pub(crate) fn collect_all_in(
     directory: &Directory,
     path: &Path,
     store: &impl ObjectStore,
-) -> Result<()> {
+) -> Result<CleanupReport> {
     let _writer = directory.writer_lock()?;
     directory.require_idle()?;
-    collect_migration_in(directory, path, store)
+    collect_migration_report_in(directory, path, store)
 }
 
 /// Only the migration journal authorizes cleanup while ordinary GC is fenced.
@@ -689,7 +711,16 @@ pub(crate) fn collect_migration_in(
     path: &Path,
     store: &impl ObjectStore,
 ) -> Result<()> {
+    collect_migration_report_in(directory, path, store).map(|_| ())
+}
+
+fn collect_migration_report_in(
+    directory: &Directory,
+    path: &Path,
+    store: &impl ObjectStore,
+) -> Result<CleanupReport> {
     let config_name = path.file_name().ok_or_else(invalid)?;
+    let mut report = CleanupReport::default();
     let mut owners = Vec::new();
     for name in directory.names()? {
         let Some(name) = name.to_str() else {
@@ -706,6 +737,7 @@ pub(crate) fn collect_migration_in(
             return Err(invalid());
         }
         let Some(_lease) = directory.try_existing_lease(OsStr::new(&lease_name(id)))? else {
+            report.active_attempts += 1;
             continue;
         };
         let journal = Journal::read(directory, id)?;
@@ -721,10 +753,16 @@ pub(crate) fn collect_migration_in(
         // retaining all original inactive lease inodes throughout the pass.
         let authority = cleanup_authority(directory, config_name, store)?;
         for (id, _lease) in owners {
-            collect_locked(directory, config_name, id, store, &authority)?;
+            report.include(collect_locked(
+                directory,
+                config_name,
+                id,
+                store,
+                &authority,
+            )?);
         }
     }
-    Ok(())
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -750,6 +788,7 @@ mod tests {
         owner: String,
         objects: Mutex<BTreeMap<ObjectRef, Zeroizing<String>>>,
         fail_put: AtomicBool,
+        fail_delete: AtomicBool,
         bad_readback: AtomicBool,
         puts: AtomicUsize,
         deletes: AtomicUsize,
@@ -761,6 +800,7 @@ mod tests {
                 owner: "node".into(),
                 objects: Mutex::new(BTreeMap::new()),
                 fail_put: AtomicBool::new(false),
+                fail_delete: AtomicBool::new(false),
                 bad_readback: AtomicBool::new(false),
                 puts: AtomicUsize::new(0),
                 deletes: AtomicUsize::new(0),
@@ -810,6 +850,9 @@ mod tests {
         }
         fn delete(&self, reference: ObjectRef) -> Result<()> {
             self.deletes.fetch_add(1, Ordering::SeqCst);
+            if self.fail_delete.load(Ordering::SeqCst) {
+                return Err(Error::Keychain("injected deletion failure".into()));
+            }
             self.objects.lock().unwrap().remove(&reference);
             Ok(())
         }
@@ -844,6 +887,96 @@ mod tests {
     }
     fn reference(encoded: &str) -> ObjectRef {
         ObjectRef::parse(encoded).unwrap().unwrap()
+    }
+
+    #[test]
+    fn reconciliation_reports_active_and_recovery_debt_without_deleting_it() {
+        let (dir, path, config, store) = fixture();
+        let active = begin(
+            &path,
+            config.publication.snapshot(),
+            "node",
+            Purpose::Ordinary,
+        )
+        .unwrap();
+        let active_ref = reference(
+            &active
+                .stage(SecretField::SigningSecret, "synthetic-active", &store)
+                .unwrap(),
+        );
+        let recovery = begin(
+            &path,
+            config.publication.snapshot(),
+            "node",
+            Purpose::ReturnedRotationRecovery,
+        )
+        .unwrap();
+        let recovery_ref = reference(
+            &recovery
+                .stage(SecretField::SigningSecret, "synthetic-recovery", &store)
+                .unwrap(),
+        );
+        drop(recovery);
+        let directory = Directory::open(dir.path()).unwrap();
+        let report = collect_all_in(&directory, &path, &store).unwrap();
+        assert_eq!(report.active_attempts, 1);
+        assert_eq!(report.recovery_attempts, 1);
+        assert_eq!(report.retired, 0);
+        assert!(report.deferred());
+        assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
+        drop(active);
+        let report = collect_all_in(&directory, &path, &store).unwrap();
+        assert_eq!(report.active_attempts, 0);
+        assert_eq!(report.recovery_attempts, 1);
+        assert_eq!(report.retired, 1);
+        assert!(store.get(active_ref).unwrap().is_none());
+        assert!(store.get(recovery_ref).unwrap().is_some());
+    }
+
+    #[test]
+    fn failed_retirement_keeps_ready_journal_for_fresh_authoritative_collection() {
+        let (dir, path, config, store) = fixture();
+        let attempt = begin(
+            &path,
+            config.publication.snapshot(),
+            "node",
+            Purpose::Ordinary,
+        )
+        .unwrap();
+        let orphan = reference(
+            &attempt
+                .stage(SecretField::SigningSecret, "synthetic-orphan", &store)
+                .unwrap(),
+        );
+        let id = attempt.id().unwrap();
+        drop(attempt);
+        let directory = Directory::open(dir.path()).unwrap();
+        store.fail_delete.store(true, Ordering::SeqCst);
+        assert!(collect_all_in(&directory, &path, &store).is_err());
+        assert!(store.get(orphan).unwrap().is_some());
+        assert!(
+            Journal::read(&directory, id)
+                .unwrap()
+                .objects
+                .iter()
+                .all(|object| object.phase == Phase::Ready)
+        );
+        drop(directory);
+        // Reopen the durable journal with fresh directory/authority checks.
+        let directory = Directory::open(dir.path()).unwrap();
+        store.fail_delete.store(false, Ordering::SeqCst);
+        let report = collect_all_in(&directory, &path, &store).unwrap();
+        assert_eq!(report.retired, 1);
+        assert_eq!(report.retained, 1);
+        assert!(!report.deferred());
+        assert!(store.get(orphan).unwrap().is_none());
+        assert!(!dir.path().join(journal_name(id)).exists());
+        assert!(
+            store
+                .get(reference(&config.node.auth_token_encrypted))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

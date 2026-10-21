@@ -9,7 +9,9 @@ use super::keychain::KeychainBackend;
 #[cfg(test)]
 use super::keychain::KeychainVault;
 use super::secret_fields::SecretField;
+pub use super::secret_operation::PublicationOutcome;
 use super::secret_operation::SecretOperation;
+pub use super::secret_transaction::CleanupReport;
 use zeroize::Zeroizing;
 
 /// A pinned, read-only observation. Mutation requires a separate guarded
@@ -159,6 +161,46 @@ impl SecretBackend {
         }
     }
 
+    /// Publication status is separate from an earlier credential store. Even
+    /// outer errors must be treated conservatively once that store succeeded.
+    pub fn publish_outcome(&self, config: &NodeConfig, path: &Path) -> Result<PublicationOutcome> {
+        match self {
+            Self::Writer(writer) => writer.operation.publish_outcome(config, path),
+            _ => Err(guarded_write_required()),
+        }
+    }
+
+    pub(crate) fn publish_with_intent_outcome(
+        &self,
+        config: &NodeConfig,
+        path: &Path,
+        intent: impl FnOnce(&super::storage::Directory, &[u8]) -> Result<()>,
+    ) -> Result<PublicationOutcome> {
+        match self {
+            Self::Writer(writer) => writer
+                .operation
+                .publish_with_intent_outcome(config, path, intent),
+            _ => Err(guarded_write_required()),
+        }
+    }
+
+    /// Resume only idempotent retirement after a known successful publication.
+    pub fn resume_finalize(&self) -> Result<PublicationOutcome> {
+        match self {
+            Self::Writer(writer) => writer.operation.resume_finalize(),
+            _ => Err(guarded_write_required()),
+        }
+    }
+
+    /// Startup/reconnect uses a fresh reader and the existing ownership journals.
+    /// Counts expose retained recovery/active attempts without secret identifiers.
+    pub fn reconcile_retirement(&self) -> Result<CleanupReport> {
+        match self {
+            Self::Observed(reader) => reader.operation.reconcile_retirement(),
+            _ => Err(guarded_write_required()),
+        }
+    }
+
     pub(crate) fn oauth_custody(
         &self,
     ) -> Result<(
@@ -182,10 +224,8 @@ impl SecretBackend {
         path: &Path,
         intent: impl FnOnce(&super::storage::Directory, &[u8]) -> Result<()>,
     ) -> Result<()> {
-        match self {
-            Self::Writer(writer) => writer.operation.publish_with_intent(config, path, intent),
-            _ => Err(guarded_write_required()),
-        }
+        self.publish_with_intent_outcome(config, path, intent)?
+            .into_result()
     }
 
     pub(crate) fn store_field(&self, field: SecretField, value: &str) -> Result<Option<String>> {

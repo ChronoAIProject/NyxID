@@ -10,11 +10,54 @@ use super::error::{Error, Result};
 use super::keychain::KeychainBackend;
 use super::secret_fields::{self, SecretField};
 use super::secret_snapshot::SecretSnapshot;
-use super::secret_transaction::{self, Attempt};
+use super::secret_transaction::{self, Attempt, CleanupReport, ObjectStore};
 use super::storage::Directory;
 
 fn invalid() -> Error {
     Error::Config("Node secret operation requires its original authoritative configuration; reload before retrying".into())
+}
+
+/// The publication phase is independent of credential storage. In particular,
+/// Unpublished never proves that a caller's preceding store had no effect.
+#[must_use]
+pub enum PublicationOutcome {
+    Unpublished(Error),
+    PublicationUncertain(Error),
+    /// An error leaves durable debt; a successful report can instead describe
+    /// active leases or explicit recovery that this pass correctly retained.
+    PublishedCleanupPending(Result<CleanupReport>),
+    Complete(CleanupReport),
+}
+impl std::fmt::Debug for PublicationOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unpublished(_) => f.write_str("Unpublished([REDACTED])"),
+            Self::PublicationUncertain(_) => f.write_str("PublicationUncertain([REDACTED])"),
+            Self::PublishedCleanupPending(_) => f.write_str("PublishedCleanupPending"),
+            Self::Complete(report) => f.debug_tuple("Complete").field(report).finish(),
+        }
+    }
+}
+impl PublicationOutcome {
+    /// Preserve the legacy API: successful GC passes that defer active/recovery
+    /// owners were already accepted. Typed consumers must inspect the outcome
+    /// to distinguish that retained debt from complete retirement.
+    pub(crate) fn into_result(self) -> Result<()> {
+        match self {
+            Self::Unpublished(error) | Self::PublicationUncertain(error) => Err(error),
+            Self::PublishedCleanupPending(result) => result.map(|_| ()),
+            Self::Complete(_) => Ok(()),
+        }
+    }
+}
+
+#[derive(Default, PartialEq, Eq)]
+enum PublicationState {
+    #[default]
+    Open,
+    Unpublished,
+    Uncertain,
+    Published,
 }
 
 #[derive(Default)]
@@ -22,7 +65,7 @@ struct State {
     attempt: Option<Attempt>,
     prepared: bool,
     failed: bool,
-    published: bool,
+    publication: PublicationState,
 }
 
 pub(crate) struct SecretOperation {
@@ -224,7 +267,7 @@ impl SecretOperation {
     pub(crate) fn prepare(&self, config: &mut NodeConfig) -> Result<()> {
         let mut state = self.state.lock().map_err(|_| invalid())?;
         if state.failed
-            || state.published
+            || state.publication != PublicationState::Open
             || config.publication.snapshot() != self.baseline.publication.snapshot()
             || config.node.id != self.baseline.node.id
             || config.storage_backend != self.baseline.storage_backend
@@ -294,7 +337,7 @@ impl SecretOperation {
 
     pub(crate) fn store(&self, field: SecretField, value: &str) -> Result<String> {
         let mut state = self.state.lock().map_err(|_| invalid())?;
-        if state.failed || state.published || !state.prepared {
+        if state.failed || state.publication != PublicationState::Open || !state.prepared {
             return Err(invalid());
         }
         let result = (|| match &self.file {
@@ -460,9 +503,37 @@ impl SecretOperation {
         path: &Path,
         intent: impl FnOnce(&Directory, &[u8]) -> Result<()>,
     ) -> Result<()> {
+        self.publish_with_intent_outcome(config, path, intent)?
+            .into_result()
+    }
+
+    pub(crate) fn publish_outcome(
+        &self,
+        config: &NodeConfig,
+        path: &Path,
+    ) -> Result<PublicationOutcome> {
+        self.publish_with_intent_outcome(config, path, |_, _| Ok(()))
+    }
+
+    pub(crate) fn publish_with_intent_outcome(
+        &self,
+        config: &NodeConfig,
+        path: &Path,
+        intent: impl FnOnce(&Directory, &[u8]) -> Result<()>,
+    ) -> Result<PublicationOutcome> {
+        self.publish_using_store(config, path, intent, &self.keychain)
+    }
+
+    fn publish_using_store(
+        &self,
+        config: &NodeConfig,
+        path: &Path,
+        intent: impl FnOnce(&Directory, &[u8]) -> Result<()>,
+        store: &impl ObjectStore,
+    ) -> Result<PublicationOutcome> {
         let mut state = self.state.lock().map_err(|_| invalid())?;
         if state.failed
-            || state.published
+            || state.publication != PublicationState::Open
             || !state.prepared
             || path != self.path
             || config.publication.snapshot() != self.baseline.publication.snapshot()
@@ -471,6 +542,9 @@ impl SecretOperation {
         {
             return Err(invalid());
         }
+        // This operation owns one publication attempt, including definite
+        // failure. A caller must observe afresh rather than repeat its intent.
+        state.publication = PublicationState::Unpublished;
         // Every required file value must decrypt; every keychain slot must be
         // a typed reference/explicit absence. No partial staging is publishable.
         let result = config.save_with_secret_intent_in(
@@ -491,39 +565,109 @@ impl SecretOperation {
                         }
                     }
                     None => {
-                        secret_transaction::read_ready_references(
-                            directory,
-                            path,
-                            next,
-                            &self.keychain,
-                        )?;
+                        secret_transaction::read_ready_references(directory, path, next, store)?;
                     }
                 }
                 Ok(())
             },
             intent,
         );
-        // Retain the attempt on every error, including installed/uncertain.
-        // No rollback or key-service deletion follows an ambiguous publication.
-        if result.is_ok() || matches!(result, Err(Error::StorageDurabilityUncertain(_))) {
-            state.published = true;
+        match result {
+            Ok(()) => {
+                state.publication = PublicationState::Published;
+                drop(state);
+                self.finalize_using_store(store, 1)
+            }
+            Err(error @ Error::StorageDurabilityUncertain(_)) => {
+                // Keep the attempt lease. Neither retry nor error conversion
+                // may authorize retirement or pretend this was committed.
+                state.publication = PublicationState::Uncertain;
+                Ok(PublicationOutcome::PublicationUncertain(error))
+            }
+            Err(error) => Ok(PublicationOutcome::Unpublished(error)),
         }
-        if result.is_ok() {
-            let attempt_id = state.attempt.as_ref().map(Attempt::id).transpose()?;
-            drop(state.attempt.take());
-            drop(state);
-            let cleanup = (|| {
-                if let Some(id) = attempt_id {
-                    secret_transaction::collect_one_in(&self.directory, path, id, &self.keychain)?;
-                }
-                secret_transaction::collect_all_in(&self.directory, path, &self.keychain)
-            })();
-            cleanup.map_err(|_| Error::Config(
-                "Node configuration was saved; old secret cleanup is incomplete and will retry on the next update".into()
-            ))?;
-        }
-        result
     }
+
+    /// At most two cleanup passes. This never decrypts/stores credentials,
+    /// invokes publication intent, or retries configuration publication.
+    pub(crate) fn resume_finalize(&self) -> Result<PublicationOutcome> {
+        self.finalize_using_store(&self.keychain, 2)
+    }
+
+    fn finalize_using_store(
+        &self,
+        store: &impl ObjectStore,
+        passes: usize,
+    ) -> Result<PublicationOutcome> {
+        let mut state = self.state.lock().map_err(|_| invalid())?;
+        match state.publication {
+            PublicationState::Uncertain => {
+                return Ok(PublicationOutcome::PublicationUncertain(
+                    Error::StorageDurabilityUncertain(std::io::Error::other(
+                        "Publication requires a fresh authoritative observation",
+                    )),
+                ));
+            }
+            PublicationState::Published => {}
+            PublicationState::Open | PublicationState::Unpublished => return Err(invalid()),
+        }
+        // Only a confirmed publication releases its own lease for collection.
+        // The journal remains durable on every failed/deferred cleanup pass.
+        let attempt_id = match state.attempt.as_ref().map(Attempt::id).transpose() {
+            Ok(id) => id,
+            Err(_) => {
+                return Ok(PublicationOutcome::PublishedCleanupPending(Err(
+                    cleanup_pending(),
+                )));
+            }
+        };
+        drop(state.attempt.take());
+        let mut retired = if let Some(id) = attempt_id {
+            match secret_transaction::collect_one_in(&self.directory, &self.path, id, store) {
+                Ok(cleanup) => cleanup.retired,
+                Err(_) => {
+                    return Ok(PublicationOutcome::PublishedCleanupPending(Err(
+                        cleanup_pending(),
+                    )));
+                }
+            }
+        } else {
+            0
+        };
+        let mut last = Err(cleanup_pending());
+        for _ in 0..passes.min(2) {
+            last = secret_transaction::collect_all_in(&self.directory, &self.path, store)
+                .map(|mut report| {
+                    retired += report.retired;
+                    report.retired = retired;
+                    report
+                })
+                .map_err(|_| cleanup_pending());
+            if let Ok(report) = &last
+                && !report.deferred()
+            {
+                return Ok(PublicationOutcome::Complete(last?));
+            }
+        }
+        Ok(PublicationOutcome::PublishedCleanupPending(last))
+    }
+
+    /// A fresh reader may reconcile durable journals after restart. The
+    /// collector obtains current authority and resolves parent-sync uncertainty
+    /// before any delete; this does not confirm an earlier publication outcome.
+    pub(crate) fn reconcile_retirement(&self) -> Result<CleanupReport> {
+        let state = self.state.lock().map_err(|_| invalid())?;
+        if state.prepared || state.publication != PublicationState::Open {
+            return Err(invalid());
+        }
+        secret_transaction::collect_all_in(&self.directory, &self.path, &self.keychain)
+    }
+}
+
+fn cleanup_pending() -> Error {
+    Error::Config(
+        "Node configuration was saved; old secret cleanup is incomplete and will retry on the next update".into(),
+    )
 }
 
 #[cfg(test)]
@@ -558,6 +702,336 @@ mod tests {
             slug: slug.into(),
             part: CredentialPart::Header,
         }
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RetirementFault {
+        store: KeychainBackend,
+        failures: AtomicUsize,
+        deletes: AtomicUsize,
+    }
+    impl ObjectStore for RetirementFault {
+        fn owner_id(&self) -> &str {
+            self.store.owner_id()
+        }
+        fn get(
+            &self,
+            reference: secret_transaction::ObjectRef,
+        ) -> Result<Option<Zeroizing<String>>> {
+            ObjectStore::get(&self.store, reference)
+        }
+        fn put(&self, _: secret_transaction::ObjectRef, _: &str) -> Result<()> {
+            panic!("Finalization must not repeat a secret store")
+        }
+        fn delete(&self, reference: secret_transaction::ObjectRef) -> Result<()> {
+            self.deletes.fetch_add(1, Ordering::SeqCst);
+            if self
+                .failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(Error::Keychain("injected retirement failure".into()));
+            }
+            ObjectStore::delete(&self.store, reference)
+        }
+    }
+
+    fn pending_fixture() -> (
+        tempfile::TempDir,
+        PathBuf,
+        NodeConfig,
+        KeychainBackend,
+        secret_transaction::ObjectRef,
+    ) {
+        use super::super::config::PendingCryptoKeyConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = NodeConfig::new(
+            "wss://example.invalid".into(),
+            "node".into(),
+            "keychain".into(),
+        );
+        config.pending_crypto_keys.insert(
+            "pending".into(),
+            PendingCryptoKeyConfig {
+                version: "v1".into(),
+                service_slug: "service".into(),
+                injection_method: "header".into(),
+                field_name: "Authorization".into(),
+                target_url: None,
+                expires_at: "2026-01-01T00:00:00Z".into(),
+                public_key: "synthetic-public-key".into(),
+                private_key_encrypted: None,
+            },
+        );
+        let store = KeychainBackend::new_mock("node");
+        let registration = SecretOperation::registration(&config, &path, store.clone()).unwrap();
+        registration.prepare(&mut config).unwrap();
+        config.node.auth_token_encrypted = registration
+            .store(SecretField::AuthToken, "synthetic-auth")
+            .unwrap();
+        let pending = SecretField::PendingPrivate {
+            pending_id: "pending".into(),
+        };
+        let reference = registration
+            .store(pending.clone(), "synthetic-private-key")
+            .unwrap();
+        pending
+            .replace(&mut config, Some(reference.clone()))
+            .unwrap();
+        registration.publish(&config, &path).unwrap();
+        drop(registration);
+        let config = NodeConfig::load(&path).unwrap();
+        (
+            dir,
+            path,
+            config,
+            store,
+            secret_transaction::ObjectRef::parse(&reference)
+                .unwrap()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn typed_publication_and_bounded_finalize_preserve_one_store_and_one_publication() {
+        let (_dir, path, mut config, store, pending) = pending_fixture();
+        let operation = SecretOperation::open(&config, &path, store.clone()).unwrap();
+        operation.prepare(&mut config).unwrap();
+        config.credentials.insert(
+            "service".into(),
+            CredentialConfig::new_header("Authorization".into(), None, None),
+        );
+        // Exactly one credential store occurs before publication. The injected
+        // ObjectStore panics if any finalize pass tries to stage another value.
+        let encoded = operation
+            .store(header("service"), "synthetic-delivered")
+            .unwrap();
+        header("service")
+            .replace(&mut config, Some(encoded))
+            .unwrap();
+        config.pending_crypto_keys.remove("pending");
+        let faults = RetirementFault {
+            store: store.clone(),
+            failures: AtomicUsize::new(1),
+            deletes: AtomicUsize::new(0),
+        };
+        let publications = AtomicUsize::new(0);
+        let outcome = operation
+            .publish_using_store(
+                &config,
+                &path,
+                |_, _| {
+                    publications.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                &faults,
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            PublicationOutcome::PublishedCleanupPending(Err(_))
+        ));
+        assert!(ObjectStore::get(&store, pending).unwrap().is_some());
+        let published = std::fs::read(&path).unwrap();
+        assert!(
+            !NodeConfig::load(&path)
+                .unwrap()
+                .pending_crypto_keys
+                .contains_key("pending")
+        );
+        assert!(matches!(
+            operation.finalize_using_store(&faults, 2).unwrap(),
+            PublicationOutcome::Complete(_)
+        ));
+        assert!(ObjectStore::get(&store, pending).unwrap().is_none());
+        assert_eq!(faults.deletes.load(Ordering::SeqCst), 2);
+        assert_eq!(publications.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), published);
+        assert!(
+            operation
+                .store(header("service"), "synthetic-repeat")
+                .is_err()
+        );
+        assert!(
+            operation
+                .publish_with_intent_outcome(&config, &path, |_, _| {
+                    publications.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(publications.load(Ordering::SeqCst), 1);
+        let current = NodeConfig::load(&path).unwrap();
+        assert_eq!(
+            operation
+                .load(&current, &header("service"))
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "synthetic-delivered"
+        );
+    }
+
+    #[test]
+    fn published_retirement_debt_survives_a_fresh_reader_without_republishing() {
+        let (_dir, path, mut config, store, pending) = pending_fixture();
+        let operation = SecretOperation::open(&config, &path, store.clone()).unwrap();
+        operation.prepare(&mut config).unwrap();
+        config.pending_crypto_keys.remove("pending");
+        let faults = RetirementFault {
+            store: store.clone(),
+            failures: AtomicUsize::new(3),
+            deletes: AtomicUsize::new(0),
+        };
+        assert!(matches!(
+            operation
+                .publish_using_store(&config, &path, |_, _| Ok(()), &faults)
+                .unwrap(),
+            PublicationOutcome::PublishedCleanupPending(Err(_))
+        ));
+        // Both retry passes fail. Durable ownership still retains the usable key.
+        assert!(matches!(
+            operation.finalize_using_store(&faults, 2).unwrap(),
+            PublicationOutcome::PublishedCleanupPending(Err(_))
+        ));
+        assert_eq!(faults.deletes.load(Ordering::SeqCst), 3);
+        assert!(ObjectStore::get(&store, pending).unwrap().is_some());
+        let published = std::fs::read(&path).unwrap();
+        drop(operation);
+        let current = NodeConfig::load(&path).unwrap();
+        let restarted = SecretOperation::open(&current, &path, store.clone()).unwrap();
+        let report = restarted.reconcile_retirement().unwrap();
+        assert_eq!(report.retired, 1);
+        assert!(!report.deferred());
+        assert!(ObjectStore::get(&store, pending).unwrap().is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), published);
+        assert_eq!(
+            restarted
+                .load(&current, &SecretField::AuthToken)
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "synthetic-auth"
+        );
+    }
+
+    #[test]
+    fn uncertain_publication_retains_lease_and_never_authorizes_finalize() {
+        for installed in [false, true] {
+            let (_dir, path, mut config, store, pending) = pending_fixture();
+            let operation = SecretOperation::open(&config, &path, store.clone()).unwrap();
+            operation.prepare(&mut config).unwrap();
+            config.pending_crypto_keys.remove("pending");
+            let before = std::fs::read(&path).unwrap();
+            // Exercise the operation boundary both before and after installation.
+            // The latter installs the exact prepared bytes under the real writer
+            // lock, then injects the durability-uncertain return. Storage's own
+            // sync-fault control separately checks its observation update.
+            let outcome = operation
+                .publish_with_intent_outcome(&config, &path, |directory, next| {
+                    if installed {
+                        directory.publish(path.file_name().unwrap(), next, true)?;
+                    }
+                    Err(Error::StorageDurabilityUncertain(
+                        std::io::Error::from_raw_os_error(libc::EIO),
+                    ))
+                })
+                .unwrap();
+            assert!(matches!(
+                &outcome,
+                PublicationOutcome::PublicationUncertain(_)
+            ));
+            assert!(outcome.into_result().is_err());
+            let faults = RetirementFault {
+                store: store.clone(),
+                failures: AtomicUsize::new(0),
+                deletes: AtomicUsize::new(0),
+            };
+            assert!(matches!(
+                operation.finalize_using_store(&faults, 2).unwrap(),
+                PublicationOutcome::PublicationUncertain(_)
+            ));
+            assert_eq!(faults.deletes.load(Ordering::SeqCst), 0);
+            assert!(operation.state.lock().unwrap().attempt.is_some());
+            assert!(operation.publish_outcome(&config, &path).is_err());
+            assert!(operation.reconcile_retirement().is_err());
+            assert_eq!(std::fs::read(&path).unwrap() != before, installed);
+            assert!(ObjectStore::get(&store, pending).unwrap().is_some());
+            // Only a separate fresh authoritative pass may sync the installed
+            // projection and retire its removed key; the uncertain lease remains.
+            let directory = Directory::open(path.parent().unwrap()).unwrap();
+            let report = secret_transaction::collect_all_in(&directory, &path, &store).unwrap();
+            assert_eq!(report.active_attempts, 1);
+            assert!(report.deferred());
+            assert_eq!(report.retired, usize::from(installed));
+            assert_eq!(
+                ObjectStore::get(&store, pending).unwrap().is_none(),
+                installed
+            );
+        }
+    }
+
+    #[test]
+    fn unpublished_intent_failure_consumes_only_that_publication_attempt() {
+        let (_dir, path, mut config, store) = fixture();
+        let operation = SecretOperation::open(&config, &path, store).unwrap();
+        operation.prepare(&mut config).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let publications = AtomicUsize::new(0);
+        let outcome = operation
+            .publish_with_intent_outcome(&config, &path, |_, _| {
+                publications.fetch_add(1, Ordering::SeqCst);
+                Err(Error::Config("synthetic-intent-failure".into()))
+            })
+            .unwrap();
+        assert!(matches!(outcome, PublicationOutcome::Unpublished(_)));
+        assert!(
+            operation
+                .publish_with_intent_outcome(&config, &path, |_, _| {
+                    publications.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(operation.resume_finalize().is_err());
+        assert_eq!(publications.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn typed_deferred_active_ownership_is_reported_without_changing_legacy_success() {
+        let (_dir, path, config, store, _) = pending_fixture();
+        let active = SecretOperation::open(&config, &path, store.clone()).unwrap();
+        active.prepare(&mut config.clone()).unwrap();
+        let operation = SecretOperation::open(&config, &path, store).unwrap();
+        let mut next = config.clone();
+        operation.prepare(&mut next).unwrap();
+        let outcome = operation.publish_outcome(&next, &path).unwrap();
+        let PublicationOutcome::PublishedCleanupPending(Ok(report)) = &outcome else {
+            panic!("Active ownership must remain explicit: {outcome:?}");
+        };
+        assert_eq!(report.active_attempts, 1);
+        outcome.into_result().unwrap();
+        drop(active);
+        assert!(matches!(
+            operation.resume_finalize().unwrap(),
+            PublicationOutcome::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn typed_outcome_debug_never_exposes_failure_material() {
+        let outcome =
+            PublicationOutcome::Unpublished(Error::Config("synthetic-secret-and-reference".into()));
+        assert!(!format!("{outcome:?}").contains("synthetic-secret-and-reference"));
+        let outcome = PublicationOutcome::PublishedCleanupPending(Err(Error::Config(
+            "synthetic-secret-and-reference".into(),
+        )));
+        assert!(!format!("{outcome:?}").contains("synthetic-secret-and-reference"));
     }
 
     #[test]
