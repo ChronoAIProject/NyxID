@@ -70,14 +70,17 @@ export function AdminUsagePage() {
     );
   return (
     <>
-      <AssistantFeedbackPanel />
       <LiveAnalytics
-      tab={tab}
-      preloadSearch={normalizeAdminUsageSearch(search)}
-      onTabChange={(next) =>
-        void navigate({ to: "/admin/usage", search: { ...search, tab: next } })
-      }
+        tab={tab}
+        preloadSearch={normalizeAdminUsageSearch(search)}
+        onTabChange={(next) =>
+          void navigate({
+            to: "/admin/usage",
+            search: { ...search, tab: next },
+          })
+        }
       />
+      <AssistantFeedbackPanel />
     </>
   );
 }
@@ -213,6 +216,24 @@ export function AnalyticsWorkspace({
           </div>
         }
       />
+      <fieldset
+        disabled={Boolean(workspace.pendingRecovery)}
+        className="min-w-0 space-y-2"
+        aria-label="Usage filters"
+      >
+        <FilterBar
+          filters={view.filters}
+          sample={options}
+          onChange={(filters) =>
+            setConfig({ ...config, draft: { ...view, filters } })
+          }
+        />
+        <p className="text-11 text-muted-foreground">
+          Applies to every usage total, chart, and list below. Users select who
+          made requests; billing accounts select the person or organization that
+          paid.
+        </p>
+      </fieldset>
       {import.meta.env.DEV &&
         import.meta.env.VITE_USAGE_SEEDED === "true" &&
         !sample && (
@@ -364,9 +385,7 @@ export function AnalyticsWorkspace({
                 </PopoverTrigger>
                 <PopoverContent align="end" className="w-80 space-y-4 p-4">
                   <div>
-                    <h3 className="text-13 font-semibold">
-                      Your saved views
-                    </h3>
+                    <h3 className="text-13 font-semibold">Your saved views</h3>
                     <p className="mt-1 text-11 text-muted-foreground">
                       Private to your account. Exploring never overwrites a
                       named view.
@@ -509,15 +528,6 @@ export function AnalyticsWorkspace({
           disabled={Boolean(workspace.pendingRecovery)}
           className="min-w-0"
         >
-          <div className="mt-5">
-            <FilterBar
-              filters={view.filters}
-              sample={options}
-              onChange={(filters) =>
-                setConfig({ ...config, draft: { ...view, filters } })
-              }
-            />
-          </div>
           <TabsContent value="dashboard" className="mt-6">
             <AnalyticsCanvas
               view={view}

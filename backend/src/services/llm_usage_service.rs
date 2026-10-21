@@ -4,6 +4,19 @@ use serde::Serialize;
 
 use crate::services::audit_service;
 
+/// Record only the bounded model identifier, never request content. This is the
+/// requested model (possibly a gateway alias), not an inferred upstream route.
+pub fn request_model(body: Option<&[u8]>) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct ModelRequest {
+        model: String,
+    }
+    let request: ModelRequest = serde_json::from_slice(body?).ok()?;
+    let model = request.model.trim();
+    (!model.is_empty() && model.len() <= 256 && !model.chars().any(char::is_control))
+        .then(|| model.to_owned())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageAggregationMode {
     Snapshot,
@@ -859,6 +872,27 @@ mod tests {
         extract_reported_usage, extract_reported_usage_from_sse_event,
         force_stream_options_include_usage, token_quantity_or_estimate,
     };
+
+    #[test]
+    fn request_model_keeps_only_bounded_model_identifiers() {
+        assert_eq!(
+            super::request_model(Some(
+                br#"{"model":"gpt-6-luna","messages":[{"content":"private"}]}"#
+            )),
+            Some("gpt-6-luna".into())
+        );
+        for body in [
+            r#"{}"#.to_owned(),
+            r#"{"model":42}"#.into(),
+            r#"{"model":""}"#.into(),
+            r#"{"model":"bad\nmodel"}"#.into(),
+            "not json".into(),
+            serde_json::json!({"model": "x".repeat(257)}).to_string(),
+        ] {
+            assert!(super::request_model(Some(body.as_bytes())).is_none());
+        }
+        assert_eq!(super::request_model(None), None);
+    }
 
     #[test]
     fn pool_native_usage_preserves_cr_only_and_split_utf8_frames() {

@@ -725,15 +725,20 @@ async fn retired_rate_still_prices_historical_usage() {
 
 #[tokio::test]
 async fn org_platform_key_request_charges_personal_wallet_and_personal_rollout() {
-    Box::pin(org_credential_request(true)).await;
+    Box::pin(org_credential_request(true, false)).await;
 }
 
 #[tokio::test]
 async fn org_byok_request_keeps_org_wallet_and_org_rollout() {
-    Box::pin(org_credential_request(false)).await;
+    Box::pin(org_credential_request(false, false)).await;
 }
 
-async fn org_credential_request(platform_key: bool) {
+#[tokio::test]
+async fn org_platform_key_stream_preserves_requested_model() {
+    Box::pin(org_credential_request(true, true)).await;
+}
+
+async fn org_credential_request(platform_key: bool, streaming: bool) {
     use crate::models::downstream_service::{PlatformKeyAudience, PlatformKeyConfig};
     use crate::models::org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgMembership, OrgRole};
     use crate::services::feature_flag_service as flags;
@@ -867,9 +872,20 @@ async fn org_credential_request(platform_key: bool) {
     let app = private.with_state(state.clone());
     let request = route_request(
         Method::POST,
-        &format!("/api/v1/proxy/s/{}/chat/completions", catalog.slug),
+        &format!(
+            "/api/v1/proxy/s/{}/{}",
+            catalog.slug,
+            if streaming {
+                "model-usage-stream"
+            } else {
+                "chat/completions"
+            }
+        ),
         &token,
-        Body::from(r#"{"model":"test-model","messages":[]}"#),
+        Body::from(
+            serde_json::json!({"model": "test-model", "messages": [], "stream": streaming})
+                .to_string(),
+        ),
     );
     call_mounted_route(&app, request).await;
     assert_route_settled(&db, &catalog.slug, BillingMetric::Tokens).await;
@@ -881,6 +897,7 @@ async fn org_credential_request(platform_key: bool) {
     };
     assert_eq!(&row.billing_owner_id, payer);
     assert_eq!(row.actor_user_id, actor);
+    assert_eq!(row.model.as_deref(), Some("test-model"));
     assert_eq!(
         row.credential_class,
         if platform_key {

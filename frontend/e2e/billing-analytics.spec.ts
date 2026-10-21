@@ -55,7 +55,7 @@ test("all three analytics approaches are interactive and saved views survive rel
     page.getByRole("img", { name: /Service mix: bar chart/ }),
   ).toBeVisible();
   await page
-    .getByRole("button", { name: "Filter billing accounts", exact: true })
+    .getByRole("button", { name: "Filter users / organizations", exact: true })
     .click();
   await page
     .getByRole("button", { name: "Platform Engineering", exact: true })
@@ -64,7 +64,7 @@ test("all three analytics approaches are interactive and saved views survive rel
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(
     page.getByRole("button", {
-      name: "Remove Billing accounts filter",
+      name: "Remove Users / organizations filter",
       exact: true,
     }),
   ).toBeVisible();
@@ -88,7 +88,7 @@ test("all three analytics approaches are interactive and saved views survive rel
   ).toContainText("Last 30 days");
   await expect(
     page.getByRole("button", {
-      name: "Remove Billing accounts filter",
+      name: "Remove Users / organizations filter",
       exact: true,
     }),
   ).toBeVisible();

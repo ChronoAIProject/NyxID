@@ -1772,6 +1772,13 @@ async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
                 .into_response();
         }
 
+        if path == "/model-usage-stream" {
+            return (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n",
+            ).into_response();
+        }
+
         if path.contains("stream") {
             return (
                 [(axum::http::header::CONTENT_TYPE, "text/event-stream")],

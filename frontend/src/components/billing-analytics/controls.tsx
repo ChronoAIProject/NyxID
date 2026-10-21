@@ -40,7 +40,7 @@ const FILTER_FIELDS: DataTableFilterField<FilterKind>[] = [
   },
   {
     key: "owners",
-    label: "Billing accounts",
+    label: "Users / organizations",
     value_type: "enum",
     operator: "includes",
     multiple: true,
@@ -48,7 +48,7 @@ const FILTER_FIELDS: DataTableFilterField<FilterKind>[] = [
   },
   {
     key: "actors",
-    label: "Acting users",
+    label: "Users",
     value_type: "enum",
     operator: "includes",
     multiple: true,
@@ -77,6 +77,13 @@ function AnalyticsFilterPicker({
   return (
     <FilterPicker
       label={label}
+      description={
+        kind === "actors"
+          ? "People who made the requests, regardless of who paid."
+          : kind === "owners"
+            ? "Billing accounts: the person or organization that paid. Platform-key usage is billed to the acting person."
+            : undefined
+      }
       values={values}
       onChange={onChange}
       open={open}
@@ -130,7 +137,7 @@ export function FilterBar({
       : null;
   return (
     <FilterCard
-      pickers={(["services", "owners", "actors"] as const).map((kind) => (
+      pickers={(["actors", "owners", "services"] as const).map((kind) => (
         <AnalyticsFilterPicker
           kind={kind}
           key={`${kind}:${openKind === kind}:${filters[kind].join(",")}`}

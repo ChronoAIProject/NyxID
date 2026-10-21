@@ -4662,6 +4662,9 @@ async fn execute_resolved_proxy_inner(
     let body = force_stream_usage_for_service(&target.service.slug, path, body);
     let durable_authorization_body = body.clone().unwrap_or_default();
     let request_body_len = body.as_ref().map(|b| b.len() as i64).unwrap_or(0);
+    let usage_model = should_capture_llm_usage(&target.service, platform_metric)
+        .then(|| llm_usage_service::request_model(body.as_deref()))
+        .flatten();
 
     // === Delegated Credentials ===
     // Delegation resolves a legacy `UserProviderToken` and injects it as a
@@ -5298,7 +5301,7 @@ async fn execute_resolved_proxy_inner(
                                 user_id: user_id_str.clone(),
                                 provider_slug: None,
                                 service_id: Some(service_id.to_owned()),
-                                model: None,
+                                model: usage_model.clone(),
                                 path: path.to_owned(),
                                 api_key_id: auth_user.api_key_id.clone(),
                                 api_key_name: auth_user.api_key_name.clone(),
@@ -5355,7 +5358,7 @@ async fn execute_resolved_proxy_inner(
                                 metered.clone(),
                                 llm_platform_usage(usage.as_ref(), request_len + response_len),
                                 None,
-                                None,
+                                usage_model.clone(),
                             )
                             .await;
                             let status = StatusCode::from_u16(node_response.status)
@@ -5462,6 +5465,7 @@ async fn execute_resolved_proxy_inner(
                             let stream_metered = metered.clone();
                             let request_len = request_body_len;
                             let usage_path = path.to_string();
+                            let stream_model = usage_model.clone();
                             let capture_usage = should_capture_llm_usage(&target.service, platform_metric);
 
                             // Convert the mpsc receiver into a streaming body.
@@ -5525,7 +5529,7 @@ async fn execute_resolved_proxy_inner(
                                     stream_metered,
                                     llm_platform_usage(usage.as_ref(), request_len + response_len),
                                     None,
-                                    None,
+                                    stream_model,
                                 )
                                 .await;
                             };
@@ -6215,7 +6219,7 @@ async fn execute_resolved_proxy_inner(
             user_id: user_id_str.clone(),
             provider_slug: None,
             service_id: Some(service_id.to_string()),
-            model: None,
+            model: usage_model.clone(),
             path: path.to_string(),
             api_key_id: auth_user.api_key_id.clone(),
             api_key_name: auth_user.api_key_name.clone(),
@@ -6555,7 +6559,7 @@ async fn execute_resolved_proxy_inner(
                     }
                 }
                 let mut reported_usage = None;
-                let mut model = None;
+                let mut model = usage_model.clone();
                 if let Some(ctx) = stream_usage_context
                     && let Some(buf) = captured
                     && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&buf)
@@ -6625,7 +6629,7 @@ async fn execute_resolved_proxy_inner(
         }
 
         let mut reported_usage = None;
-        let mut model = None;
+        let mut model = usage_model.clone();
         if let Some(nonstream_usage_context) = usage_context
             && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response_body)
             && let Some(usage) = llm_usage_service::extract_reported_usage_for_path(

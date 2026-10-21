@@ -11,6 +11,9 @@ fn config() -> WorkspaceConfig {
 #[test]
 fn workspace_rejects_invalid_queries_and_duplicate_panels() {
     assert!(validate(&config()).is_ok());
+    let mut models = config();
+    models.draft.panels[0].breakdown = "model".into();
+    assert!(validate(&models).is_ok());
     let mut invalid = config();
     invalid.draft.filters.period = "custom".into();
     assert!(validate(&invalid).is_err());

@@ -291,6 +291,26 @@ Compact headlines compute their displayed digits with integer arithmetic. Chart
 geometry may use Number projections; money labels retain exact decimals. CLI
 output prefers exact amounts, including top-up verification arithmetic.
 
+### Usage dashboard filters and models
+
+The admin Usage page keeps its shared filters directly below the heading. Users
+select request actors; Users / organizations selects billing owners. Service and
+UTC time filters apply to summary totals, all charts, and the List tab. Platform
+keys are billed to the acting person, so filtering an organization as billing
+owner does not mean filtering all activity by its members. Assistant reply
+feedback remains a separate section with its own filters.
+
+Analytics supports `breakdown=model` using the existing meter and rollup model
+dimension. Each chart exposes a Group by selector; new workspaces start with a
+Tokens by model panel. Select Chrono LLM as the service to inspect its models.
+Generic inference proxy requests now retain the bounded JSON request `model`
+identifier for direct, node, and pool settlement, including streaming responses.
+This is a requested model or gateway alias, not proof of an underlying provider,
+fallback, or resolved model revision. Those details need an upstream reporting
+contract. Existing records without a model remain Unattributed; no historical
+model identities are inferred or backfilled. Provider input/output/cache token
+counts keep their existing accounting semantics.
+
 ## Deviations
 
 - Decimal128 cannot represent the full i128 picocredit range; the accepted range

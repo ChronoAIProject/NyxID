@@ -394,7 +394,12 @@ impl Completion {
                 });
             // Await real settlement, not just the deferred-intent spawn: the
             // backup may need these exact same wallet/grant/allowance funds.
-            Box::pin(self.billing.settle(&self.metered, platform, resale, None)).await?;
+            let model = self
+                .observability
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.model.clone());
+            Box::pin(self.billing.settle(&self.metered, platform, resale, model)).await?;
         } else {
             Box::pin(crate::services::billing::pool_attempt::finish(
                 &self.db,
@@ -970,6 +975,16 @@ mod tests {
     async fn pool_reported_sse_usage_survives_cancellation_before_settlement_acknowledgment() {
         let (db, mut completion, finalization) = completion_fixture("pool_cancel_settlement").await;
         let request_id = completion.context.request_id.clone();
+        completion.observability.usage = Some(llm_usage_service::UsageAuditContext {
+            db: db.clone(),
+            user_id: completion.auth.user_id.to_string(),
+            provider_slug: None,
+            service_id: None,
+            model: Some("pool-model".into()),
+            path: "chat/completions".into(),
+            api_key_id: None,
+            api_key_name: None,
+        });
         completion.observe(b"data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n");
         {
             let finish = completion.finish_inner(PoolCompletionCause::Complete);
@@ -994,6 +1009,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.quantity, Some(3));
+        assert_eq!(row.model.as_deref(), Some("pool-model"));
         assert_eq!(row.status, UsageStatus::Finalized);
         assert_eq!(
             row.pool_attempt.unwrap().outcome,

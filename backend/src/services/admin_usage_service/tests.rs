@@ -2760,3 +2760,93 @@ async fn operation_usage_is_reported_per_service_before_and_after_folding() {
         );
     }
 }
+
+#[tokio::test]
+async fn analytics_models_preserve_unattributed_usage_and_shared_filters_after_folding() {
+    use super::analytics::{AnalyticsQuery, get_analytics};
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+    let db = connect_test_database("usage_models").await.unwrap();
+    let now = hour(Utc::now());
+    let actor = uuid::Uuid::new_v4().to_string();
+    let owner = uuid::Uuid::new_v4().to_string();
+    for (model, tokens, age, person, service) in [
+        (Some("model-a"), 100, 2, actor.as_str(), "chrono-llm-public"),
+        (Some("model-b"), 60, 3, actor.as_str(), "chrono-llm-public"),
+        (None, 20, 4, actor.as_str(), "chrono-llm-public"),
+        (Some("model-a"), 999, 2, owner.as_str(), "chrono-llm-public"),
+        (Some("model-a"), 999, 2, actor.as_str(), "deepseek"),
+        (
+            Some("model-a"),
+            999,
+            30,
+            actor.as_str(),
+            "chrono-llm-public",
+        ),
+    ] {
+        let mut row = meter(person, &owner, service, tokens);
+        row.insert("model", model);
+        row.insert(
+            "created_at",
+            bson::DateTime::from_chrono(now - chrono::Duration::hours(age)),
+        );
+        row.insert(
+            "token_breakdown",
+            doc! { "prompt_tokens": tokens, "completion_tokens": 0_i64 },
+        );
+        insert(&db, row).await;
+    }
+    for folded in [false, true] {
+        if folded {
+            fold_once(&db, now).await.unwrap();
+        }
+        let result = get_analytics(
+            &db,
+            AnalyticsQuery {
+                from: Some((now - chrono::Duration::hours(24)).to_rfc3339()),
+                to: Some(now.to_rfc3339()),
+                actors: Some(actor.clone()),
+                owners: Some(owner.clone()),
+                services: Some("chrono-llm-public".into()),
+                measure: Some("total_tokens".into()),
+                breakdown: Some("model".into()),
+                ..Default::default()
+            }
+            .validate(now)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.total, Some(180));
+        assert_eq!(result.totals.requests, 3);
+        assert_eq!(
+            result
+                .slices
+                .iter()
+                .map(|s| (s.label.as_str(), s.value))
+                .collect::<Vec<_>>(),
+            vec![
+                ("model-a", Some(100)),
+                ("model-b", Some(60)),
+                ("Unattributed", Some(20))
+            ]
+        );
+        assert_eq!(
+            result
+                .series
+                .iter()
+                .map(|s| s.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["model-a", "model-b", "Unattributed"]
+        );
+        assert_eq!(
+            result
+                .series
+                .iter()
+                .flat_map(|s| &s.points)
+                .map(|p| p.value.unwrap())
+                .sum::<i64>(),
+            180
+        );
+    }
+    db.drop().await.unwrap();
+}
