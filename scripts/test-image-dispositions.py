@@ -87,6 +87,15 @@ class Dispositions(unittest.TestCase):
         self.vuln['FixedVersion']='2.0'; self.item['finding_sha256']=policy.finding_digest(self.vuln);self.write()
         with self.assertRaisesRegex(ValueError,'available fix'):self.apply()
 
+    def test_changed_advisory_reports_exact_identity_and_digests_without_allowing_it(self):
+        self.vuln['Title'] = 'new advisory title'
+        with self.assertRaises(ValueError) as raised:
+            self.apply()
+        message = str(raised.exception)
+        for value in ('CVE-2099-1234', 'machine-node-only', 'amd64', 'linux-libc-dev',
+                      self.item['finding_sha256'], policy.finding_digest(self.vuln)):
+            self.assertIn(value, message)
+
     def test_newer_security_archive_candidate_prevents_matching_or_renewal(self):
         with patch.object(policy,'security_candidate',return_value=dict(version='2.0',source_version='2.0')):
             with self.assertRaisesRegex(ValueError,'candidate'):self.apply()

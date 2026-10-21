@@ -571,3 +571,28 @@
 - All 273 preserved identities and reproduction files are recorded in
   ~/Library/Caches/nyxid-targets/w7-apt-followup/delta-report.md and adjacent
   node-rootfs*.json evidence. No application source or package version changed.
+
+## W7 PR #1976 follow-up — exact image advisory drift diagnostics
+
+- Inspect the machine-node-only amd64 scan artifact from run 39579517074 and
+  recover the original approved report from run 39412744887. The original
+  matches all 309 finding digests. The new report changes 43 existing advisory
+  payloads: references (42), vendor severity (24), CVSS (21), title (20).
+  Descriptions, Ubuntu severity, installed source/version, status and absence
+  of FixedVersion remain identical. Expanded titles name the same operations
+  already bound in affected_api and the unchanged descriptions.
+- Rebind only those 43 reviewed existing hashes across eight component/arch
+  mappings (344 lines). The exact header payload, security candidate, named
+  operation, original issue date and November 19 expiry remain bound. Every
+  old/new semantic field and line/hash is retained in the follow-up delta report;
+  no field is excluded from finding_digest to accommodate changing advisory data.
+- Include component, architecture, CVE, package/version, fixed version and both
+  digests in the gate error. A regression confirms changed content still fails
+  and reports the exact identity.
+- The current report also has 77 additional linux-libc-dev findings (74 HIGH,
+  3 CRITICAL), with no FixedVersion. These are reported separately for PM review
+  and remain blocking; no new disposition is included in this commit. Their
+  named kernel operations and full advisory bytes are retained in
+  w7-apt-followup/machine-node-only-amd64/new-blocking-findings.json and the
+  delta report. The other machine image failures in this hosted run are Ubuntu
+  HTTP 503 acquisition failures; MCP and updater both architectures passed.

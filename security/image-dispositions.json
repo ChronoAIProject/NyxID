@@ -105,7 +105,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "786d3f7cdc7f9ae7f33137b03d55a53e8e563fbff796b42166be9f41bdf0ae5d"
+      "finding_sha256": "73d9207d3125137c7ffc36444d2911fa22a511f41d48a34a9dd2a52bfed9e099"
     },
     {
       "cve": "CVE-2024-44964",
@@ -375,7 +375,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2036bf16247b40f65cdb77b0a63790aaa5dc0ddf3cbf3a698dd034eec837b0b5"
+      "finding_sha256": "b49cdd5d312171dcdc63352fa41190915f84f27a6c6a8a3eb8fc94120165d2c5"
     },
     {
       "cve": "CVE-2025-40025",
@@ -411,7 +411,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2f15a237fdbdb57027f8d187759af3dd02bf45911fe6f722c9ab9e59e05eea5c"
+      "finding_sha256": "9c03c0a988c627f359c32a2711ae6208564b5a8767c86ec1b2f9a7bdb556f13e"
     },
     {
       "cve": "CVE-2025-40074",
@@ -483,7 +483,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "97e2283a1c15c02d3306ef74cfc32b380ec144793efff762738f559a5d079fb9"
+      "finding_sha256": "386043f9f56a3891164d2df2b33f7de06d8eac18b27d1a513d08fab457738b0d"
     },
     {
       "cve": "CVE-2025-40168",
@@ -501,7 +501,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "92ec65aac0374943a36955eea1795f04be2f02d78ed027cf07037c0e4de7d195"
+      "finding_sha256": "90f21db1df6ae874dcf11af1ac728105512e0b81e3920781c50842c9b69087a0"
     },
     {
       "cve": "CVE-2025-40170",
@@ -519,7 +519,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "cb33a6ee72e01e46ccc1fee1896fc0f3046c2cc34aedee788cd65995155faf33"
+      "finding_sha256": "84d01281c8c057db78d2d40997c7373faa884ff8396833ad2804fddea7198061"
     },
     {
       "cve": "CVE-2025-40190",
@@ -681,7 +681,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c49026b0205904880399ea59bf291f26a19a7f122844c3d04daef89a589e09bb"
+      "finding_sha256": "e461212b27dc7fbf36c1ee264cd92d88daca52d755ec0afc6e7d04b994621850"
     },
     {
       "cve": "CVE-2025-71073",
@@ -951,7 +951,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "ad23e5318f05c5140e8fc7ebf77718c1030c32ef0b347def39f981a5a201f0e6"
+      "finding_sha256": "0fa82309595979273aeb40b6debca6ae9dba98fa9589257715af37c44d40c843"
     },
     {
       "cve": "CVE-2026-43009",
@@ -1131,7 +1131,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "f84057b8449d5fabd3efb006c351d89a658b03e9ea88774c2562b5c1f7d36eb5"
+      "finding_sha256": "6d93d5301bb803b69bb2dee3ed04c8c6d5965c24da2eee6978e9a3894389e4a6"
     },
     {
       "cve": "CVE-2026-46330",
@@ -1185,7 +1185,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "24ef00cc0f8aecd38538715661e149572b96407a440c75c1206d03cb51f709ac"
+      "finding_sha256": "ba091a3800770d71f0f153afd033c4192d0afebe8de8bb47859a81002a5ce245"
     },
     {
       "cve": "CVE-2026-53024",
@@ -1257,7 +1257,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c1a3e609ed4b04217dabe92285ca5e8c69b93065ffbda353f8ebaa5cce239fc0"
+      "finding_sha256": "27b63d62dd42e2e5fafe1751bf9f4dbfd0230743fa0e341d0eb97e571a741521"
     },
     {
       "cve": "CVE-2026-53377",
@@ -1347,7 +1347,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "98e127b30e3fb04b64502d8fdbd4e45298177931359456a248a6bd5de8a8a0fd"
+      "finding_sha256": "6dd185dbb7c59075742201c3989c662002c719175a34496ac3fc518cfcc05256"
     },
     {
       "cve": "CVE-2026-64036",
@@ -1545,7 +1545,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dd15a9aca1f2ec8c50da2a58628ed52c540f44a36c8997b2a248e6d7865b5f41"
+      "finding_sha256": "81f56575216f5e155012cc1f1aeaf6d7e48addda077f6e96db7def662316c8c5"
     },
     {
       "cve": "CVE-2026-68323",
@@ -1617,7 +1617,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8a3e1cb2b76ecaefe33bdbd39a7b88cca18ab493563ccfd3268ae7723772e87e"
+      "finding_sha256": "9c6ec48b03ac568d36492cf7c328234d10afe868feb0a58bbd5a4c5b71ed0710"
     },
     {
       "cve": "CVE-2026-68426",
@@ -1635,7 +1635,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "5c3f661d314695dfd02c9a1f24a6059ea7046833069e7346ddcb81906a91296b"
+      "finding_sha256": "8a152a1d243e4f181f3f86eef2bfae86b2b64043923db9eafe6637a8c54c4bab"
     },
     {
       "cve": "CVE-2026-68447",
@@ -2517,7 +2517,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "535c2c8d518ff1abcbb71679d82e96376389aa2578112582475c86aed27b6dfc"
+      "finding_sha256": "9fe56c4aa84cc664bed343577636b6e4334d5bd02fc75cb6f6f4d74d515c7fb2"
     },
     {
       "cve": "CVE-2026-74752",
@@ -2535,7 +2535,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "587f9bd191f1c1fbbdee20240c9c8059da5143cfac563de27d6976de0962483d"
+      "finding_sha256": "608e2785a683b29ce7f1927b246824606544f6428071cf8cf625cf9ea5830e57"
     },
     {
       "cve": "CVE-2026-80551",
@@ -2787,7 +2787,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "00beb61d4004ff2452a52bec1199abbe475fe3a49f59a36f58f41f4f36704eb4"
+      "finding_sha256": "5519b3d3b72c33721f8c0bfdafea020e2dcd59568efece64c907f45000c36278"
     },
     {
       "cve": "CVE-2026-80716",
@@ -3129,7 +3129,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dfc37efdef4439951e4ec1125ea24f5ed6d3b7ac14a94e3e13d0fd5535d93491"
+      "finding_sha256": "25407204957ea7755eac519f359af599a3e5eb57ae8a9b7c046a40e249741724"
     },
     {
       "cve": "CVE-2026-89528",
@@ -3165,7 +3165,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "78beb16da1a00110c22dab99e0530db1ae39e455a4345412ff728854c2457f84"
+      "finding_sha256": "a6c0f145a680f18a00d883701526206b98ad3d23082c9bcf6b1578a2d7137520"
     },
     {
       "cve": "CVE-2026-89531",
@@ -3327,7 +3327,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "12a86b8f17e216583ef7b2cb5906881be6c58912873dc872c52114fd97d0e44e"
+      "finding_sha256": "516044f785ba3f2da5a54458485fdc46b296b697444af711f28a7bc28b8917b9"
     },
     {
       "cve": "CVE-2026-89633",
@@ -3705,7 +3705,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "d2794a2317711c76c77a87ec0613e2835b383792cbf74fdac55319137133068d"
+      "finding_sha256": "59d19dce12de9e668e327575f6de7b1455b16720a6a56b668874663ca5a9249f"
     },
     {
       "cve": "CVE-2026-90092",
@@ -3939,7 +3939,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "634c91ae0f1f297d521afb494fc46e220d9251e790833831462a4455e78e79fa"
+      "finding_sha256": "f27f9ac718b212d5b79647610114252f7bc4a89d1b448a717e5c327063c7cbe0"
     },
     {
       "cve": "CVE-2026-90169",
@@ -3957,7 +3957,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "b2b700c9f215e8be1758a825d6f884adcaef7da60281fd2f34eef950c38630e7"
+      "finding_sha256": "c70bd3b07ae66b691a35f16be0ca4addf916242cc06b1cb878ef66811d7851ea"
     },
     {
       "cve": "CVE-2026-90199",
@@ -4227,7 +4227,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a4d33657056bb07e7ca092eeae7c8029bdbebce5ba5ee898906ee6157fba1d31"
+      "finding_sha256": "cc88f932919d5b683409c63f63c67334716367872d51f1a96d4f9b0a5a3dd274"
     },
     {
       "cve": "CVE-2026-90380",
@@ -4245,7 +4245,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "352b42490a74d565c1735b9ed8f3aae3ca589fa0b8b345e780e046b7bdd66c30"
+      "finding_sha256": "b2e84a64e9fc0acda20170ae941d42fa676a82457f1ca2df701b728e13657192"
     },
     {
       "cve": "CVE-2026-90392",
@@ -4263,7 +4263,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "fdeb3cf866699d8adf7c65e5bbfff524b2fe6a43d8cb7440360b1c9e8e895723"
+      "finding_sha256": "052cf66e1368d7a31bffc30f2626a5138897acd9453cd4629798752dd4453ead"
     },
     {
       "cve": "CVE-2026-90398",
@@ -4281,7 +4281,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9b29ee239ec444ab76166bb9ccc6ab349ab46a198de3bc97b716af1c6842e1cd"
+      "finding_sha256": "a4d86bdd3f2cad6aefee185b2706363279fcb8f1f5c6ce260c02c0a76ae21e37"
     },
     {
       "cve": "CVE-2026-90417",
@@ -4299,7 +4299,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8b85c317ea3d6b28874b2adafa5ab9be2637ad30f3e095a172343fa17708ebe3"
+      "finding_sha256": "d65d98b19517978edd1022bc5dec21ff00a9c5318d2e062b6ac8bab2cf673ef6"
     },
     {
       "cve": "CVE-2026-92499",
@@ -4317,7 +4317,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a59743499000878dffcbd0f5764d8f1502f01b721d9f0a8ff0b66a7da0d10e14"
+      "finding_sha256": "80546996ede1a84bc40b399247263041f7cdb971ca515d53bcc8aa6373914bea"
     },
     {
       "cve": "CVE-2026-92507",
@@ -4335,7 +4335,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "42996ff1b1ef53974be3906e3f7f82579195ecedb5b4c396ce3677aecab4f6f8"
+      "finding_sha256": "eccfa4d0e0ac22d92505abd86f642d682b0a52a4a673e845c50fb032ac9bf0f1"
     },
     {
       "cve": "CVE-2026-92509",
@@ -4353,7 +4353,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "1bf564681d6661570ce5417e8001c6a65690d9d278fef1d0741f01b2051d2f88"
+      "finding_sha256": "1dcb05c0a8149faee87736afa5634c6c159615c068c504039975862e31e1c2bf"
     },
     {
       "cve": "CVE-2026-92510",
@@ -4371,7 +4371,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "e5feaefbf2dab19bdb511e4a7ead910c46ef546a354819cef995706a0c0f9b15"
+      "finding_sha256": "6d733691f0f7b95ce9abd1774f54a1e5695b7918598295d8bbd7c2ba1c89e72f"
     },
     {
       "cve": "CVE-2026-92511",
@@ -4389,7 +4389,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dae13dc7aa8da6ea816f8c0be8c798222bcb72b4f8ab1656d65a467c1f833759"
+      "finding_sha256": "03631f872a2f6f3e9339c8f042b02c54ed11d06535d6de916da0702dff1a72ec"
     },
     {
       "cve": "CVE-2026-92512",
@@ -4407,7 +4407,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9e789fd2633294b5d636407ceb25e19c41bcd771f5d48a997672775f0e02dfcf"
+      "finding_sha256": "adee1abbc14cdd9219f348a59e299c62d220d771a016c749e75da53cb0942fca"
     },
     {
       "cve": "CVE-2026-93105",
@@ -4425,7 +4425,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "4cf3738328fda29b062419021ae50abafcf2ff5698caa11dda053bd713c60115"
+      "finding_sha256": "19500582c5d406ed2750f872989698df9d63ce95a64bbfff69f2bfe2b1cbf66a"
     },
     {
       "cve": "CVE-2026-93125",
@@ -4479,7 +4479,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "790d531758056fd5f66d7188e79d61005d5d74e4b09b8b201226a3e63fb6f2ea"
+      "finding_sha256": "afdd2fe7aff985affd103976111b11f1b81cf6797819c45f03d57a7a9887871f"
     },
     {
       "cve": "CVE-2026-93154",
@@ -4497,7 +4497,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "978cf7b73ee04991549a44dc989eb9cc1dbd690aa4fa05c22f839ba34d223826"
+      "finding_sha256": "e0823b54348bedcdd9c62377fdb67c71071b7a38e3043a7a94a06775259e45ab"
     },
     {
       "cve": "CVE-2026-93175",
@@ -4515,7 +4515,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "41119e17d98c10e073e80501df66734157df0907947e643bd5d4198d42393b26"
+      "finding_sha256": "0ee583e8eb4aec2964b6c736dd5bbfb62dccb4b1a4ddab1800fa301e44226beb"
     },
     {
       "cve": "CVE-2026-93176",
@@ -4533,7 +4533,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2d2f01be4422612b7f7ad7b558494367559d305e284724c49d503f2fa8a97bba"
+      "finding_sha256": "90ab7e98646e8e7eb867b4461b54a476d39c9225dd2ccfc950f493b0a77a3beb"
     },
     {
       "cve": "CVE-2026-93192",
@@ -4605,7 +4605,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "44a555c1cec22e48ce95eec469beccf4c3034881cfa23fca277f36f4a9f90ee5"
+      "finding_sha256": "b8b91bda40c239469e8bc040c80c68675aa4af7500c7573d43bf5247770ab9ad"
     },
     {
       "cve": "CVE-2026-93221",
@@ -4749,7 +4749,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "7902f7057bdf55fac1c4158c319707f02902ef886594a795b413dd27aa7ffe76"
+      "finding_sha256": "2646075b7160a52f40a42d2c822c64ac947c82ab255ee8ac7224963461ec89cb"
     },
     {
       "cve": "CVE-2026-93824",
@@ -5361,7 +5361,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c505dc08b441bb4bcc060af1651c3844cca08807055b9b1fea03c94992e9aa2f"
+      "finding_sha256": "09686f144d5911948ad35510d08f50ef54783d2f908a8ce921fd34158b3a0c09"
     },
     {
       "cve": "CVE-2026-98171",
@@ -5667,7 +5667,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "786d3f7cdc7f9ae7f33137b03d55a53e8e563fbff796b42166be9f41bdf0ae5d"
+      "finding_sha256": "73d9207d3125137c7ffc36444d2911fa22a511f41d48a34a9dd2a52bfed9e099"
     },
     {
       "cve": "CVE-2024-44964",
@@ -5937,7 +5937,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2036bf16247b40f65cdb77b0a63790aaa5dc0ddf3cbf3a698dd034eec837b0b5"
+      "finding_sha256": "b49cdd5d312171dcdc63352fa41190915f84f27a6c6a8a3eb8fc94120165d2c5"
     },
     {
       "cve": "CVE-2025-40025",
@@ -5973,7 +5973,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2f15a237fdbdb57027f8d187759af3dd02bf45911fe6f722c9ab9e59e05eea5c"
+      "finding_sha256": "9c03c0a988c627f359c32a2711ae6208564b5a8767c86ec1b2f9a7bdb556f13e"
     },
     {
       "cve": "CVE-2025-40074",
@@ -6045,7 +6045,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "97e2283a1c15c02d3306ef74cfc32b380ec144793efff762738f559a5d079fb9"
+      "finding_sha256": "386043f9f56a3891164d2df2b33f7de06d8eac18b27d1a513d08fab457738b0d"
     },
     {
       "cve": "CVE-2025-40168",
@@ -6063,7 +6063,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "92ec65aac0374943a36955eea1795f04be2f02d78ed027cf07037c0e4de7d195"
+      "finding_sha256": "90f21db1df6ae874dcf11af1ac728105512e0b81e3920781c50842c9b69087a0"
     },
     {
       "cve": "CVE-2025-40170",
@@ -6081,7 +6081,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "cb33a6ee72e01e46ccc1fee1896fc0f3046c2cc34aedee788cd65995155faf33"
+      "finding_sha256": "84d01281c8c057db78d2d40997c7373faa884ff8396833ad2804fddea7198061"
     },
     {
       "cve": "CVE-2025-40190",
@@ -6243,7 +6243,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c49026b0205904880399ea59bf291f26a19a7f122844c3d04daef89a589e09bb"
+      "finding_sha256": "e461212b27dc7fbf36c1ee264cd92d88daca52d755ec0afc6e7d04b994621850"
     },
     {
       "cve": "CVE-2025-71073",
@@ -6513,7 +6513,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "ad23e5318f05c5140e8fc7ebf77718c1030c32ef0b347def39f981a5a201f0e6"
+      "finding_sha256": "0fa82309595979273aeb40b6debca6ae9dba98fa9589257715af37c44d40c843"
     },
     {
       "cve": "CVE-2026-43009",
@@ -6693,7 +6693,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "f84057b8449d5fabd3efb006c351d89a658b03e9ea88774c2562b5c1f7d36eb5"
+      "finding_sha256": "6d93d5301bb803b69bb2dee3ed04c8c6d5965c24da2eee6978e9a3894389e4a6"
     },
     {
       "cve": "CVE-2026-46330",
@@ -6747,7 +6747,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "24ef00cc0f8aecd38538715661e149572b96407a440c75c1206d03cb51f709ac"
+      "finding_sha256": "ba091a3800770d71f0f153afd033c4192d0afebe8de8bb47859a81002a5ce245"
     },
     {
       "cve": "CVE-2026-53024",
@@ -6819,7 +6819,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c1a3e609ed4b04217dabe92285ca5e8c69b93065ffbda353f8ebaa5cce239fc0"
+      "finding_sha256": "27b63d62dd42e2e5fafe1751bf9f4dbfd0230743fa0e341d0eb97e571a741521"
     },
     {
       "cve": "CVE-2026-53377",
@@ -6909,7 +6909,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "98e127b30e3fb04b64502d8fdbd4e45298177931359456a248a6bd5de8a8a0fd"
+      "finding_sha256": "6dd185dbb7c59075742201c3989c662002c719175a34496ac3fc518cfcc05256"
     },
     {
       "cve": "CVE-2026-64036",
@@ -7107,7 +7107,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dd15a9aca1f2ec8c50da2a58628ed52c540f44a36c8997b2a248e6d7865b5f41"
+      "finding_sha256": "81f56575216f5e155012cc1f1aeaf6d7e48addda077f6e96db7def662316c8c5"
     },
     {
       "cve": "CVE-2026-68323",
@@ -7179,7 +7179,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8a3e1cb2b76ecaefe33bdbd39a7b88cca18ab493563ccfd3268ae7723772e87e"
+      "finding_sha256": "9c6ec48b03ac568d36492cf7c328234d10afe868feb0a58bbd5a4c5b71ed0710"
     },
     {
       "cve": "CVE-2026-68426",
@@ -7197,7 +7197,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "5c3f661d314695dfd02c9a1f24a6059ea7046833069e7346ddcb81906a91296b"
+      "finding_sha256": "8a152a1d243e4f181f3f86eef2bfae86b2b64043923db9eafe6637a8c54c4bab"
     },
     {
       "cve": "CVE-2026-68447",
@@ -8079,7 +8079,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "535c2c8d518ff1abcbb71679d82e96376389aa2578112582475c86aed27b6dfc"
+      "finding_sha256": "9fe56c4aa84cc664bed343577636b6e4334d5bd02fc75cb6f6f4d74d515c7fb2"
     },
     {
       "cve": "CVE-2026-74752",
@@ -8097,7 +8097,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "587f9bd191f1c1fbbdee20240c9c8059da5143cfac563de27d6976de0962483d"
+      "finding_sha256": "608e2785a683b29ce7f1927b246824606544f6428071cf8cf625cf9ea5830e57"
     },
     {
       "cve": "CVE-2026-80551",
@@ -8349,7 +8349,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "00beb61d4004ff2452a52bec1199abbe475fe3a49f59a36f58f41f4f36704eb4"
+      "finding_sha256": "5519b3d3b72c33721f8c0bfdafea020e2dcd59568efece64c907f45000c36278"
     },
     {
       "cve": "CVE-2026-80716",
@@ -8691,7 +8691,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dfc37efdef4439951e4ec1125ea24f5ed6d3b7ac14a94e3e13d0fd5535d93491"
+      "finding_sha256": "25407204957ea7755eac519f359af599a3e5eb57ae8a9b7c046a40e249741724"
     },
     {
       "cve": "CVE-2026-89528",
@@ -8727,7 +8727,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "78beb16da1a00110c22dab99e0530db1ae39e455a4345412ff728854c2457f84"
+      "finding_sha256": "a6c0f145a680f18a00d883701526206b98ad3d23082c9bcf6b1578a2d7137520"
     },
     {
       "cve": "CVE-2026-89531",
@@ -8889,7 +8889,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "12a86b8f17e216583ef7b2cb5906881be6c58912873dc872c52114fd97d0e44e"
+      "finding_sha256": "516044f785ba3f2da5a54458485fdc46b296b697444af711f28a7bc28b8917b9"
     },
     {
       "cve": "CVE-2026-89633",
@@ -9267,7 +9267,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "d2794a2317711c76c77a87ec0613e2835b383792cbf74fdac55319137133068d"
+      "finding_sha256": "59d19dce12de9e668e327575f6de7b1455b16720a6a56b668874663ca5a9249f"
     },
     {
       "cve": "CVE-2026-90092",
@@ -9501,7 +9501,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "634c91ae0f1f297d521afb494fc46e220d9251e790833831462a4455e78e79fa"
+      "finding_sha256": "f27f9ac718b212d5b79647610114252f7bc4a89d1b448a717e5c327063c7cbe0"
     },
     {
       "cve": "CVE-2026-90169",
@@ -9519,7 +9519,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "b2b700c9f215e8be1758a825d6f884adcaef7da60281fd2f34eef950c38630e7"
+      "finding_sha256": "c70bd3b07ae66b691a35f16be0ca4addf916242cc06b1cb878ef66811d7851ea"
     },
     {
       "cve": "CVE-2026-90199",
@@ -9789,7 +9789,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a4d33657056bb07e7ca092eeae7c8029bdbebce5ba5ee898906ee6157fba1d31"
+      "finding_sha256": "cc88f932919d5b683409c63f63c67334716367872d51f1a96d4f9b0a5a3dd274"
     },
     {
       "cve": "CVE-2026-90380",
@@ -9807,7 +9807,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "352b42490a74d565c1735b9ed8f3aae3ca589fa0b8b345e780e046b7bdd66c30"
+      "finding_sha256": "b2e84a64e9fc0acda20170ae941d42fa676a82457f1ca2df701b728e13657192"
     },
     {
       "cve": "CVE-2026-90392",
@@ -9825,7 +9825,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "fdeb3cf866699d8adf7c65e5bbfff524b2fe6a43d8cb7440360b1c9e8e895723"
+      "finding_sha256": "052cf66e1368d7a31bffc30f2626a5138897acd9453cd4629798752dd4453ead"
     },
     {
       "cve": "CVE-2026-90398",
@@ -9843,7 +9843,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9b29ee239ec444ab76166bb9ccc6ab349ab46a198de3bc97b716af1c6842e1cd"
+      "finding_sha256": "a4d86bdd3f2cad6aefee185b2706363279fcb8f1f5c6ce260c02c0a76ae21e37"
     },
     {
       "cve": "CVE-2026-90417",
@@ -9861,7 +9861,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8b85c317ea3d6b28874b2adafa5ab9be2637ad30f3e095a172343fa17708ebe3"
+      "finding_sha256": "d65d98b19517978edd1022bc5dec21ff00a9c5318d2e062b6ac8bab2cf673ef6"
     },
     {
       "cve": "CVE-2026-92499",
@@ -9879,7 +9879,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a59743499000878dffcbd0f5764d8f1502f01b721d9f0a8ff0b66a7da0d10e14"
+      "finding_sha256": "80546996ede1a84bc40b399247263041f7cdb971ca515d53bcc8aa6373914bea"
     },
     {
       "cve": "CVE-2026-92507",
@@ -9897,7 +9897,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "42996ff1b1ef53974be3906e3f7f82579195ecedb5b4c396ce3677aecab4f6f8"
+      "finding_sha256": "eccfa4d0e0ac22d92505abd86f642d682b0a52a4a673e845c50fb032ac9bf0f1"
     },
     {
       "cve": "CVE-2026-92509",
@@ -9915,7 +9915,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "1bf564681d6661570ce5417e8001c6a65690d9d278fef1d0741f01b2051d2f88"
+      "finding_sha256": "1dcb05c0a8149faee87736afa5634c6c159615c068c504039975862e31e1c2bf"
     },
     {
       "cve": "CVE-2026-92510",
@@ -9933,7 +9933,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "e5feaefbf2dab19bdb511e4a7ead910c46ef546a354819cef995706a0c0f9b15"
+      "finding_sha256": "6d733691f0f7b95ce9abd1774f54a1e5695b7918598295d8bbd7c2ba1c89e72f"
     },
     {
       "cve": "CVE-2026-92511",
@@ -9951,7 +9951,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dae13dc7aa8da6ea816f8c0be8c798222bcb72b4f8ab1656d65a467c1f833759"
+      "finding_sha256": "03631f872a2f6f3e9339c8f042b02c54ed11d06535d6de916da0702dff1a72ec"
     },
     {
       "cve": "CVE-2026-92512",
@@ -9969,7 +9969,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9e789fd2633294b5d636407ceb25e19c41bcd771f5d48a997672775f0e02dfcf"
+      "finding_sha256": "adee1abbc14cdd9219f348a59e299c62d220d771a016c749e75da53cb0942fca"
     },
     {
       "cve": "CVE-2026-93105",
@@ -9987,7 +9987,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "4cf3738328fda29b062419021ae50abafcf2ff5698caa11dda053bd713c60115"
+      "finding_sha256": "19500582c5d406ed2750f872989698df9d63ce95a64bbfff69f2bfe2b1cbf66a"
     },
     {
       "cve": "CVE-2026-93125",
@@ -10041,7 +10041,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "790d531758056fd5f66d7188e79d61005d5d74e4b09b8b201226a3e63fb6f2ea"
+      "finding_sha256": "afdd2fe7aff985affd103976111b11f1b81cf6797819c45f03d57a7a9887871f"
     },
     {
       "cve": "CVE-2026-93154",
@@ -10059,7 +10059,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "978cf7b73ee04991549a44dc989eb9cc1dbd690aa4fa05c22f839ba34d223826"
+      "finding_sha256": "e0823b54348bedcdd9c62377fdb67c71071b7a38e3043a7a94a06775259e45ab"
     },
     {
       "cve": "CVE-2026-93175",
@@ -10077,7 +10077,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "41119e17d98c10e073e80501df66734157df0907947e643bd5d4198d42393b26"
+      "finding_sha256": "0ee583e8eb4aec2964b6c736dd5bbfb62dccb4b1a4ddab1800fa301e44226beb"
     },
     {
       "cve": "CVE-2026-93176",
@@ -10095,7 +10095,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2d2f01be4422612b7f7ad7b558494367559d305e284724c49d503f2fa8a97bba"
+      "finding_sha256": "90ab7e98646e8e7eb867b4461b54a476d39c9225dd2ccfc950f493b0a77a3beb"
     },
     {
       "cve": "CVE-2026-93192",
@@ -10167,7 +10167,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "44a555c1cec22e48ce95eec469beccf4c3034881cfa23fca277f36f4a9f90ee5"
+      "finding_sha256": "b8b91bda40c239469e8bc040c80c68675aa4af7500c7573d43bf5247770ab9ad"
     },
     {
       "cve": "CVE-2026-93221",
@@ -10311,7 +10311,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "7902f7057bdf55fac1c4158c319707f02902ef886594a795b413dd27aa7ffe76"
+      "finding_sha256": "2646075b7160a52f40a42d2c822c64ac947c82ab255ee8ac7224963461ec89cb"
     },
     {
       "cve": "CVE-2026-93824",
@@ -10923,7 +10923,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c505dc08b441bb4bcc060af1651c3844cca08807055b9b1fea03c94992e9aa2f"
+      "finding_sha256": "09686f144d5911948ad35510d08f50ef54783d2f908a8ce921fd34158b3a0c09"
     },
     {
       "cve": "CVE-2026-98171",
@@ -11229,7 +11229,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "786d3f7cdc7f9ae7f33137b03d55a53e8e563fbff796b42166be9f41bdf0ae5d"
+      "finding_sha256": "73d9207d3125137c7ffc36444d2911fa22a511f41d48a34a9dd2a52bfed9e099"
     },
     {
       "cve": "CVE-2024-44964",
@@ -11499,7 +11499,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2036bf16247b40f65cdb77b0a63790aaa5dc0ddf3cbf3a698dd034eec837b0b5"
+      "finding_sha256": "b49cdd5d312171dcdc63352fa41190915f84f27a6c6a8a3eb8fc94120165d2c5"
     },
     {
       "cve": "CVE-2025-40025",
@@ -11535,7 +11535,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2f15a237fdbdb57027f8d187759af3dd02bf45911fe6f722c9ab9e59e05eea5c"
+      "finding_sha256": "9c03c0a988c627f359c32a2711ae6208564b5a8767c86ec1b2f9a7bdb556f13e"
     },
     {
       "cve": "CVE-2025-40074",
@@ -11607,7 +11607,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "97e2283a1c15c02d3306ef74cfc32b380ec144793efff762738f559a5d079fb9"
+      "finding_sha256": "386043f9f56a3891164d2df2b33f7de06d8eac18b27d1a513d08fab457738b0d"
     },
     {
       "cve": "CVE-2025-40168",
@@ -11625,7 +11625,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "92ec65aac0374943a36955eea1795f04be2f02d78ed027cf07037c0e4de7d195"
+      "finding_sha256": "90f21db1df6ae874dcf11af1ac728105512e0b81e3920781c50842c9b69087a0"
     },
     {
       "cve": "CVE-2025-40170",
@@ -11643,7 +11643,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "cb33a6ee72e01e46ccc1fee1896fc0f3046c2cc34aedee788cd65995155faf33"
+      "finding_sha256": "84d01281c8c057db78d2d40997c7373faa884ff8396833ad2804fddea7198061"
     },
     {
       "cve": "CVE-2025-40190",
@@ -11805,7 +11805,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c49026b0205904880399ea59bf291f26a19a7f122844c3d04daef89a589e09bb"
+      "finding_sha256": "e461212b27dc7fbf36c1ee264cd92d88daca52d755ec0afc6e7d04b994621850"
     },
     {
       "cve": "CVE-2025-71073",
@@ -12075,7 +12075,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "ad23e5318f05c5140e8fc7ebf77718c1030c32ef0b347def39f981a5a201f0e6"
+      "finding_sha256": "0fa82309595979273aeb40b6debca6ae9dba98fa9589257715af37c44d40c843"
     },
     {
       "cve": "CVE-2026-43009",
@@ -12255,7 +12255,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "f84057b8449d5fabd3efb006c351d89a658b03e9ea88774c2562b5c1f7d36eb5"
+      "finding_sha256": "6d93d5301bb803b69bb2dee3ed04c8c6d5965c24da2eee6978e9a3894389e4a6"
     },
     {
       "cve": "CVE-2026-46330",
@@ -12309,7 +12309,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "24ef00cc0f8aecd38538715661e149572b96407a440c75c1206d03cb51f709ac"
+      "finding_sha256": "ba091a3800770d71f0f153afd033c4192d0afebe8de8bb47859a81002a5ce245"
     },
     {
       "cve": "CVE-2026-53024",
@@ -12381,7 +12381,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c1a3e609ed4b04217dabe92285ca5e8c69b93065ffbda353f8ebaa5cce239fc0"
+      "finding_sha256": "27b63d62dd42e2e5fafe1751bf9f4dbfd0230743fa0e341d0eb97e571a741521"
     },
     {
       "cve": "CVE-2026-53377",
@@ -12471,7 +12471,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "98e127b30e3fb04b64502d8fdbd4e45298177931359456a248a6bd5de8a8a0fd"
+      "finding_sha256": "6dd185dbb7c59075742201c3989c662002c719175a34496ac3fc518cfcc05256"
     },
     {
       "cve": "CVE-2026-64036",
@@ -12669,7 +12669,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dd15a9aca1f2ec8c50da2a58628ed52c540f44a36c8997b2a248e6d7865b5f41"
+      "finding_sha256": "81f56575216f5e155012cc1f1aeaf6d7e48addda077f6e96db7def662316c8c5"
     },
     {
       "cve": "CVE-2026-68323",
@@ -12741,7 +12741,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8a3e1cb2b76ecaefe33bdbd39a7b88cca18ab493563ccfd3268ae7723772e87e"
+      "finding_sha256": "9c6ec48b03ac568d36492cf7c328234d10afe868feb0a58bbd5a4c5b71ed0710"
     },
     {
       "cve": "CVE-2026-68426",
@@ -12759,7 +12759,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "5c3f661d314695dfd02c9a1f24a6059ea7046833069e7346ddcb81906a91296b"
+      "finding_sha256": "8a152a1d243e4f181f3f86eef2bfae86b2b64043923db9eafe6637a8c54c4bab"
     },
     {
       "cve": "CVE-2026-68447",
@@ -13641,7 +13641,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "535c2c8d518ff1abcbb71679d82e96376389aa2578112582475c86aed27b6dfc"
+      "finding_sha256": "9fe56c4aa84cc664bed343577636b6e4334d5bd02fc75cb6f6f4d74d515c7fb2"
     },
     {
       "cve": "CVE-2026-74752",
@@ -13659,7 +13659,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "587f9bd191f1c1fbbdee20240c9c8059da5143cfac563de27d6976de0962483d"
+      "finding_sha256": "608e2785a683b29ce7f1927b246824606544f6428071cf8cf625cf9ea5830e57"
     },
     {
       "cve": "CVE-2026-80551",
@@ -13911,7 +13911,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "00beb61d4004ff2452a52bec1199abbe475fe3a49f59a36f58f41f4f36704eb4"
+      "finding_sha256": "5519b3d3b72c33721f8c0bfdafea020e2dcd59568efece64c907f45000c36278"
     },
     {
       "cve": "CVE-2026-80716",
@@ -14253,7 +14253,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dfc37efdef4439951e4ec1125ea24f5ed6d3b7ac14a94e3e13d0fd5535d93491"
+      "finding_sha256": "25407204957ea7755eac519f359af599a3e5eb57ae8a9b7c046a40e249741724"
     },
     {
       "cve": "CVE-2026-89528",
@@ -14289,7 +14289,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "78beb16da1a00110c22dab99e0530db1ae39e455a4345412ff728854c2457f84"
+      "finding_sha256": "a6c0f145a680f18a00d883701526206b98ad3d23082c9bcf6b1578a2d7137520"
     },
     {
       "cve": "CVE-2026-89531",
@@ -14451,7 +14451,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "12a86b8f17e216583ef7b2cb5906881be6c58912873dc872c52114fd97d0e44e"
+      "finding_sha256": "516044f785ba3f2da5a54458485fdc46b296b697444af711f28a7bc28b8917b9"
     },
     {
       "cve": "CVE-2026-89633",
@@ -14829,7 +14829,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "d2794a2317711c76c77a87ec0613e2835b383792cbf74fdac55319137133068d"
+      "finding_sha256": "59d19dce12de9e668e327575f6de7b1455b16720a6a56b668874663ca5a9249f"
     },
     {
       "cve": "CVE-2026-90092",
@@ -15063,7 +15063,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "634c91ae0f1f297d521afb494fc46e220d9251e790833831462a4455e78e79fa"
+      "finding_sha256": "f27f9ac718b212d5b79647610114252f7bc4a89d1b448a717e5c327063c7cbe0"
     },
     {
       "cve": "CVE-2026-90169",
@@ -15081,7 +15081,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "b2b700c9f215e8be1758a825d6f884adcaef7da60281fd2f34eef950c38630e7"
+      "finding_sha256": "c70bd3b07ae66b691a35f16be0ca4addf916242cc06b1cb878ef66811d7851ea"
     },
     {
       "cve": "CVE-2026-90199",
@@ -15351,7 +15351,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a4d33657056bb07e7ca092eeae7c8029bdbebce5ba5ee898906ee6157fba1d31"
+      "finding_sha256": "cc88f932919d5b683409c63f63c67334716367872d51f1a96d4f9b0a5a3dd274"
     },
     {
       "cve": "CVE-2026-90380",
@@ -15369,7 +15369,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "352b42490a74d565c1735b9ed8f3aae3ca589fa0b8b345e780e046b7bdd66c30"
+      "finding_sha256": "b2e84a64e9fc0acda20170ae941d42fa676a82457f1ca2df701b728e13657192"
     },
     {
       "cve": "CVE-2026-90392",
@@ -15387,7 +15387,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "fdeb3cf866699d8adf7c65e5bbfff524b2fe6a43d8cb7440360b1c9e8e895723"
+      "finding_sha256": "052cf66e1368d7a31bffc30f2626a5138897acd9453cd4629798752dd4453ead"
     },
     {
       "cve": "CVE-2026-90398",
@@ -15405,7 +15405,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9b29ee239ec444ab76166bb9ccc6ab349ab46a198de3bc97b716af1c6842e1cd"
+      "finding_sha256": "a4d86bdd3f2cad6aefee185b2706363279fcb8f1f5c6ce260c02c0a76ae21e37"
     },
     {
       "cve": "CVE-2026-90417",
@@ -15423,7 +15423,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8b85c317ea3d6b28874b2adafa5ab9be2637ad30f3e095a172343fa17708ebe3"
+      "finding_sha256": "d65d98b19517978edd1022bc5dec21ff00a9c5318d2e062b6ac8bab2cf673ef6"
     },
     {
       "cve": "CVE-2026-92499",
@@ -15441,7 +15441,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a59743499000878dffcbd0f5764d8f1502f01b721d9f0a8ff0b66a7da0d10e14"
+      "finding_sha256": "80546996ede1a84bc40b399247263041f7cdb971ca515d53bcc8aa6373914bea"
     },
     {
       "cve": "CVE-2026-92507",
@@ -15459,7 +15459,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "42996ff1b1ef53974be3906e3f7f82579195ecedb5b4c396ce3677aecab4f6f8"
+      "finding_sha256": "eccfa4d0e0ac22d92505abd86f642d682b0a52a4a673e845c50fb032ac9bf0f1"
     },
     {
       "cve": "CVE-2026-92509",
@@ -15477,7 +15477,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "1bf564681d6661570ce5417e8001c6a65690d9d278fef1d0741f01b2051d2f88"
+      "finding_sha256": "1dcb05c0a8149faee87736afa5634c6c159615c068c504039975862e31e1c2bf"
     },
     {
       "cve": "CVE-2026-92510",
@@ -15495,7 +15495,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "e5feaefbf2dab19bdb511e4a7ead910c46ef546a354819cef995706a0c0f9b15"
+      "finding_sha256": "6d733691f0f7b95ce9abd1774f54a1e5695b7918598295d8bbd7c2ba1c89e72f"
     },
     {
       "cve": "CVE-2026-92511",
@@ -15513,7 +15513,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dae13dc7aa8da6ea816f8c0be8c798222bcb72b4f8ab1656d65a467c1f833759"
+      "finding_sha256": "03631f872a2f6f3e9339c8f042b02c54ed11d06535d6de916da0702dff1a72ec"
     },
     {
       "cve": "CVE-2026-92512",
@@ -15531,7 +15531,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9e789fd2633294b5d636407ceb25e19c41bcd771f5d48a997672775f0e02dfcf"
+      "finding_sha256": "adee1abbc14cdd9219f348a59e299c62d220d771a016c749e75da53cb0942fca"
     },
     {
       "cve": "CVE-2026-93105",
@@ -15549,7 +15549,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "4cf3738328fda29b062419021ae50abafcf2ff5698caa11dda053bd713c60115"
+      "finding_sha256": "19500582c5d406ed2750f872989698df9d63ce95a64bbfff69f2bfe2b1cbf66a"
     },
     {
       "cve": "CVE-2026-93125",
@@ -15603,7 +15603,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "790d531758056fd5f66d7188e79d61005d5d74e4b09b8b201226a3e63fb6f2ea"
+      "finding_sha256": "afdd2fe7aff985affd103976111b11f1b81cf6797819c45f03d57a7a9887871f"
     },
     {
       "cve": "CVE-2026-93154",
@@ -15621,7 +15621,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "978cf7b73ee04991549a44dc989eb9cc1dbd690aa4fa05c22f839ba34d223826"
+      "finding_sha256": "e0823b54348bedcdd9c62377fdb67c71071b7a38e3043a7a94a06775259e45ab"
     },
     {
       "cve": "CVE-2026-93175",
@@ -15639,7 +15639,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "41119e17d98c10e073e80501df66734157df0907947e643bd5d4198d42393b26"
+      "finding_sha256": "0ee583e8eb4aec2964b6c736dd5bbfb62dccb4b1a4ddab1800fa301e44226beb"
     },
     {
       "cve": "CVE-2026-93176",
@@ -15657,7 +15657,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2d2f01be4422612b7f7ad7b558494367559d305e284724c49d503f2fa8a97bba"
+      "finding_sha256": "90ab7e98646e8e7eb867b4461b54a476d39c9225dd2ccfc950f493b0a77a3beb"
     },
     {
       "cve": "CVE-2026-93192",
@@ -15729,7 +15729,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "44a555c1cec22e48ce95eec469beccf4c3034881cfa23fca277f36f4a9f90ee5"
+      "finding_sha256": "b8b91bda40c239469e8bc040c80c68675aa4af7500c7573d43bf5247770ab9ad"
     },
     {
       "cve": "CVE-2026-93221",
@@ -15873,7 +15873,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "7902f7057bdf55fac1c4158c319707f02902ef886594a795b413dd27aa7ffe76"
+      "finding_sha256": "2646075b7160a52f40a42d2c822c64ac947c82ab255ee8ac7224963461ec89cb"
     },
     {
       "cve": "CVE-2026-93824",
@@ -16485,7 +16485,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c505dc08b441bb4bcc060af1651c3844cca08807055b9b1fea03c94992e9aa2f"
+      "finding_sha256": "09686f144d5911948ad35510d08f50ef54783d2f908a8ce921fd34158b3a0c09"
     },
     {
       "cve": "CVE-2026-98171",
@@ -16791,7 +16791,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "786d3f7cdc7f9ae7f33137b03d55a53e8e563fbff796b42166be9f41bdf0ae5d"
+      "finding_sha256": "73d9207d3125137c7ffc36444d2911fa22a511f41d48a34a9dd2a52bfed9e099"
     },
     {
       "cve": "CVE-2024-44964",
@@ -17061,7 +17061,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2036bf16247b40f65cdb77b0a63790aaa5dc0ddf3cbf3a698dd034eec837b0b5"
+      "finding_sha256": "b49cdd5d312171dcdc63352fa41190915f84f27a6c6a8a3eb8fc94120165d2c5"
     },
     {
       "cve": "CVE-2025-40025",
@@ -17097,7 +17097,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2f15a237fdbdb57027f8d187759af3dd02bf45911fe6f722c9ab9e59e05eea5c"
+      "finding_sha256": "9c03c0a988c627f359c32a2711ae6208564b5a8767c86ec1b2f9a7bdb556f13e"
     },
     {
       "cve": "CVE-2025-40074",
@@ -17169,7 +17169,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "97e2283a1c15c02d3306ef74cfc32b380ec144793efff762738f559a5d079fb9"
+      "finding_sha256": "386043f9f56a3891164d2df2b33f7de06d8eac18b27d1a513d08fab457738b0d"
     },
     {
       "cve": "CVE-2025-40168",
@@ -17187,7 +17187,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "92ec65aac0374943a36955eea1795f04be2f02d78ed027cf07037c0e4de7d195"
+      "finding_sha256": "90f21db1df6ae874dcf11af1ac728105512e0b81e3920781c50842c9b69087a0"
     },
     {
       "cve": "CVE-2025-40170",
@@ -17205,7 +17205,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "cb33a6ee72e01e46ccc1fee1896fc0f3046c2cc34aedee788cd65995155faf33"
+      "finding_sha256": "84d01281c8c057db78d2d40997c7373faa884ff8396833ad2804fddea7198061"
     },
     {
       "cve": "CVE-2025-40190",
@@ -17367,7 +17367,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c49026b0205904880399ea59bf291f26a19a7f122844c3d04daef89a589e09bb"
+      "finding_sha256": "e461212b27dc7fbf36c1ee264cd92d88daca52d755ec0afc6e7d04b994621850"
     },
     {
       "cve": "CVE-2025-71073",
@@ -17637,7 +17637,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "ad23e5318f05c5140e8fc7ebf77718c1030c32ef0b347def39f981a5a201f0e6"
+      "finding_sha256": "0fa82309595979273aeb40b6debca6ae9dba98fa9589257715af37c44d40c843"
     },
     {
       "cve": "CVE-2026-43009",
@@ -17817,7 +17817,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "f84057b8449d5fabd3efb006c351d89a658b03e9ea88774c2562b5c1f7d36eb5"
+      "finding_sha256": "6d93d5301bb803b69bb2dee3ed04c8c6d5965c24da2eee6978e9a3894389e4a6"
     },
     {
       "cve": "CVE-2026-46330",
@@ -17871,7 +17871,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "24ef00cc0f8aecd38538715661e149572b96407a440c75c1206d03cb51f709ac"
+      "finding_sha256": "ba091a3800770d71f0f153afd033c4192d0afebe8de8bb47859a81002a5ce245"
     },
     {
       "cve": "CVE-2026-53024",
@@ -17943,7 +17943,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c1a3e609ed4b04217dabe92285ca5e8c69b93065ffbda353f8ebaa5cce239fc0"
+      "finding_sha256": "27b63d62dd42e2e5fafe1751bf9f4dbfd0230743fa0e341d0eb97e571a741521"
     },
     {
       "cve": "CVE-2026-53377",
@@ -18033,7 +18033,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "98e127b30e3fb04b64502d8fdbd4e45298177931359456a248a6bd5de8a8a0fd"
+      "finding_sha256": "6dd185dbb7c59075742201c3989c662002c719175a34496ac3fc518cfcc05256"
     },
     {
       "cve": "CVE-2026-64036",
@@ -18231,7 +18231,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dd15a9aca1f2ec8c50da2a58628ed52c540f44a36c8997b2a248e6d7865b5f41"
+      "finding_sha256": "81f56575216f5e155012cc1f1aeaf6d7e48addda077f6e96db7def662316c8c5"
     },
     {
       "cve": "CVE-2026-68323",
@@ -18303,7 +18303,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8a3e1cb2b76ecaefe33bdbd39a7b88cca18ab493563ccfd3268ae7723772e87e"
+      "finding_sha256": "9c6ec48b03ac568d36492cf7c328234d10afe868feb0a58bbd5a4c5b71ed0710"
     },
     {
       "cve": "CVE-2026-68426",
@@ -18321,7 +18321,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "5c3f661d314695dfd02c9a1f24a6059ea7046833069e7346ddcb81906a91296b"
+      "finding_sha256": "8a152a1d243e4f181f3f86eef2bfae86b2b64043923db9eafe6637a8c54c4bab"
     },
     {
       "cve": "CVE-2026-68447",
@@ -19203,7 +19203,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "535c2c8d518ff1abcbb71679d82e96376389aa2578112582475c86aed27b6dfc"
+      "finding_sha256": "9fe56c4aa84cc664bed343577636b6e4334d5bd02fc75cb6f6f4d74d515c7fb2"
     },
     {
       "cve": "CVE-2026-74752",
@@ -19221,7 +19221,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "587f9bd191f1c1fbbdee20240c9c8059da5143cfac563de27d6976de0962483d"
+      "finding_sha256": "608e2785a683b29ce7f1927b246824606544f6428071cf8cf625cf9ea5830e57"
     },
     {
       "cve": "CVE-2026-80551",
@@ -19473,7 +19473,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "00beb61d4004ff2452a52bec1199abbe475fe3a49f59a36f58f41f4f36704eb4"
+      "finding_sha256": "5519b3d3b72c33721f8c0bfdafea020e2dcd59568efece64c907f45000c36278"
     },
     {
       "cve": "CVE-2026-80716",
@@ -19815,7 +19815,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dfc37efdef4439951e4ec1125ea24f5ed6d3b7ac14a94e3e13d0fd5535d93491"
+      "finding_sha256": "25407204957ea7755eac519f359af599a3e5eb57ae8a9b7c046a40e249741724"
     },
     {
       "cve": "CVE-2026-89528",
@@ -19851,7 +19851,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "78beb16da1a00110c22dab99e0530db1ae39e455a4345412ff728854c2457f84"
+      "finding_sha256": "a6c0f145a680f18a00d883701526206b98ad3d23082c9bcf6b1578a2d7137520"
     },
     {
       "cve": "CVE-2026-89531",
@@ -20013,7 +20013,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "12a86b8f17e216583ef7b2cb5906881be6c58912873dc872c52114fd97d0e44e"
+      "finding_sha256": "516044f785ba3f2da5a54458485fdc46b296b697444af711f28a7bc28b8917b9"
     },
     {
       "cve": "CVE-2026-89633",
@@ -20391,7 +20391,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "d2794a2317711c76c77a87ec0613e2835b383792cbf74fdac55319137133068d"
+      "finding_sha256": "59d19dce12de9e668e327575f6de7b1455b16720a6a56b668874663ca5a9249f"
     },
     {
       "cve": "CVE-2026-90092",
@@ -20625,7 +20625,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "634c91ae0f1f297d521afb494fc46e220d9251e790833831462a4455e78e79fa"
+      "finding_sha256": "f27f9ac718b212d5b79647610114252f7bc4a89d1b448a717e5c327063c7cbe0"
     },
     {
       "cve": "CVE-2026-90169",
@@ -20643,7 +20643,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "b2b700c9f215e8be1758a825d6f884adcaef7da60281fd2f34eef950c38630e7"
+      "finding_sha256": "c70bd3b07ae66b691a35f16be0ca4addf916242cc06b1cb878ef66811d7851ea"
     },
     {
       "cve": "CVE-2026-90199",
@@ -20913,7 +20913,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a4d33657056bb07e7ca092eeae7c8029bdbebce5ba5ee898906ee6157fba1d31"
+      "finding_sha256": "cc88f932919d5b683409c63f63c67334716367872d51f1a96d4f9b0a5a3dd274"
     },
     {
       "cve": "CVE-2026-90380",
@@ -20931,7 +20931,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "352b42490a74d565c1735b9ed8f3aae3ca589fa0b8b345e780e046b7bdd66c30"
+      "finding_sha256": "b2e84a64e9fc0acda20170ae941d42fa676a82457f1ca2df701b728e13657192"
     },
     {
       "cve": "CVE-2026-90392",
@@ -20949,7 +20949,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "fdeb3cf866699d8adf7c65e5bbfff524b2fe6a43d8cb7440360b1c9e8e895723"
+      "finding_sha256": "052cf66e1368d7a31bffc30f2626a5138897acd9453cd4629798752dd4453ead"
     },
     {
       "cve": "CVE-2026-90398",
@@ -20967,7 +20967,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9b29ee239ec444ab76166bb9ccc6ab349ab46a198de3bc97b716af1c6842e1cd"
+      "finding_sha256": "a4d86bdd3f2cad6aefee185b2706363279fcb8f1f5c6ce260c02c0a76ae21e37"
     },
     {
       "cve": "CVE-2026-90417",
@@ -20985,7 +20985,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8b85c317ea3d6b28874b2adafa5ab9be2637ad30f3e095a172343fa17708ebe3"
+      "finding_sha256": "d65d98b19517978edd1022bc5dec21ff00a9c5318d2e062b6ac8bab2cf673ef6"
     },
     {
       "cve": "CVE-2026-92499",
@@ -21003,7 +21003,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a59743499000878dffcbd0f5764d8f1502f01b721d9f0a8ff0b66a7da0d10e14"
+      "finding_sha256": "80546996ede1a84bc40b399247263041f7cdb971ca515d53bcc8aa6373914bea"
     },
     {
       "cve": "CVE-2026-92507",
@@ -21021,7 +21021,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "42996ff1b1ef53974be3906e3f7f82579195ecedb5b4c396ce3677aecab4f6f8"
+      "finding_sha256": "eccfa4d0e0ac22d92505abd86f642d682b0a52a4a673e845c50fb032ac9bf0f1"
     },
     {
       "cve": "CVE-2026-92509",
@@ -21039,7 +21039,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "1bf564681d6661570ce5417e8001c6a65690d9d278fef1d0741f01b2051d2f88"
+      "finding_sha256": "1dcb05c0a8149faee87736afa5634c6c159615c068c504039975862e31e1c2bf"
     },
     {
       "cve": "CVE-2026-92510",
@@ -21057,7 +21057,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "e5feaefbf2dab19bdb511e4a7ead910c46ef546a354819cef995706a0c0f9b15"
+      "finding_sha256": "6d733691f0f7b95ce9abd1774f54a1e5695b7918598295d8bbd7c2ba1c89e72f"
     },
     {
       "cve": "CVE-2026-92511",
@@ -21075,7 +21075,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dae13dc7aa8da6ea816f8c0be8c798222bcb72b4f8ab1656d65a467c1f833759"
+      "finding_sha256": "03631f872a2f6f3e9339c8f042b02c54ed11d06535d6de916da0702dff1a72ec"
     },
     {
       "cve": "CVE-2026-92512",
@@ -21093,7 +21093,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9e789fd2633294b5d636407ceb25e19c41bcd771f5d48a997672775f0e02dfcf"
+      "finding_sha256": "adee1abbc14cdd9219f348a59e299c62d220d771a016c749e75da53cb0942fca"
     },
     {
       "cve": "CVE-2026-93105",
@@ -21111,7 +21111,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "4cf3738328fda29b062419021ae50abafcf2ff5698caa11dda053bd713c60115"
+      "finding_sha256": "19500582c5d406ed2750f872989698df9d63ce95a64bbfff69f2bfe2b1cbf66a"
     },
     {
       "cve": "CVE-2026-93125",
@@ -21165,7 +21165,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "790d531758056fd5f66d7188e79d61005d5d74e4b09b8b201226a3e63fb6f2ea"
+      "finding_sha256": "afdd2fe7aff985affd103976111b11f1b81cf6797819c45f03d57a7a9887871f"
     },
     {
       "cve": "CVE-2026-93154",
@@ -21183,7 +21183,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "978cf7b73ee04991549a44dc989eb9cc1dbd690aa4fa05c22f839ba34d223826"
+      "finding_sha256": "e0823b54348bedcdd9c62377fdb67c71071b7a38e3043a7a94a06775259e45ab"
     },
     {
       "cve": "CVE-2026-93175",
@@ -21201,7 +21201,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "41119e17d98c10e073e80501df66734157df0907947e643bd5d4198d42393b26"
+      "finding_sha256": "0ee583e8eb4aec2964b6c736dd5bbfb62dccb4b1a4ddab1800fa301e44226beb"
     },
     {
       "cve": "CVE-2026-93176",
@@ -21219,7 +21219,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2d2f01be4422612b7f7ad7b558494367559d305e284724c49d503f2fa8a97bba"
+      "finding_sha256": "90ab7e98646e8e7eb867b4461b54a476d39c9225dd2ccfc950f493b0a77a3beb"
     },
     {
       "cve": "CVE-2026-93192",
@@ -21291,7 +21291,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "44a555c1cec22e48ce95eec469beccf4c3034881cfa23fca277f36f4a9f90ee5"
+      "finding_sha256": "b8b91bda40c239469e8bc040c80c68675aa4af7500c7573d43bf5247770ab9ad"
     },
     {
       "cve": "CVE-2026-93221",
@@ -21435,7 +21435,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "7902f7057bdf55fac1c4158c319707f02902ef886594a795b413dd27aa7ffe76"
+      "finding_sha256": "2646075b7160a52f40a42d2c822c64ac947c82ab255ee8ac7224963461ec89cb"
     },
     {
       "cve": "CVE-2026-93824",
@@ -22047,7 +22047,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c505dc08b441bb4bcc060af1651c3844cca08807055b9b1fea03c94992e9aa2f"
+      "finding_sha256": "09686f144d5911948ad35510d08f50ef54783d2f908a8ce921fd34158b3a0c09"
     },
     {
       "cve": "CVE-2026-98171",
@@ -22353,7 +22353,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "786d3f7cdc7f9ae7f33137b03d55a53e8e563fbff796b42166be9f41bdf0ae5d"
+      "finding_sha256": "73d9207d3125137c7ffc36444d2911fa22a511f41d48a34a9dd2a52bfed9e099"
     },
     {
       "cve": "CVE-2024-44964",
@@ -22623,7 +22623,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2036bf16247b40f65cdb77b0a63790aaa5dc0ddf3cbf3a698dd034eec837b0b5"
+      "finding_sha256": "b49cdd5d312171dcdc63352fa41190915f84f27a6c6a8a3eb8fc94120165d2c5"
     },
     {
       "cve": "CVE-2025-40025",
@@ -22659,7 +22659,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2f15a237fdbdb57027f8d187759af3dd02bf45911fe6f722c9ab9e59e05eea5c"
+      "finding_sha256": "9c03c0a988c627f359c32a2711ae6208564b5a8767c86ec1b2f9a7bdb556f13e"
     },
     {
       "cve": "CVE-2025-40074",
@@ -22731,7 +22731,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "97e2283a1c15c02d3306ef74cfc32b380ec144793efff762738f559a5d079fb9"
+      "finding_sha256": "386043f9f56a3891164d2df2b33f7de06d8eac18b27d1a513d08fab457738b0d"
     },
     {
       "cve": "CVE-2025-40168",
@@ -22749,7 +22749,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "92ec65aac0374943a36955eea1795f04be2f02d78ed027cf07037c0e4de7d195"
+      "finding_sha256": "90f21db1df6ae874dcf11af1ac728105512e0b81e3920781c50842c9b69087a0"
     },
     {
       "cve": "CVE-2025-40170",
@@ -22767,7 +22767,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "cb33a6ee72e01e46ccc1fee1896fc0f3046c2cc34aedee788cd65995155faf33"
+      "finding_sha256": "84d01281c8c057db78d2d40997c7373faa884ff8396833ad2804fddea7198061"
     },
     {
       "cve": "CVE-2025-40190",
@@ -22929,7 +22929,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c49026b0205904880399ea59bf291f26a19a7f122844c3d04daef89a589e09bb"
+      "finding_sha256": "e461212b27dc7fbf36c1ee264cd92d88daca52d755ec0afc6e7d04b994621850"
     },
     {
       "cve": "CVE-2025-71073",
@@ -23199,7 +23199,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "ad23e5318f05c5140e8fc7ebf77718c1030c32ef0b347def39f981a5a201f0e6"
+      "finding_sha256": "0fa82309595979273aeb40b6debca6ae9dba98fa9589257715af37c44d40c843"
     },
     {
       "cve": "CVE-2026-43009",
@@ -23379,7 +23379,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "f84057b8449d5fabd3efb006c351d89a658b03e9ea88774c2562b5c1f7d36eb5"
+      "finding_sha256": "6d93d5301bb803b69bb2dee3ed04c8c6d5965c24da2eee6978e9a3894389e4a6"
     },
     {
       "cve": "CVE-2026-46330",
@@ -23433,7 +23433,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "24ef00cc0f8aecd38538715661e149572b96407a440c75c1206d03cb51f709ac"
+      "finding_sha256": "ba091a3800770d71f0f153afd033c4192d0afebe8de8bb47859a81002a5ce245"
     },
     {
       "cve": "CVE-2026-53024",
@@ -23505,7 +23505,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c1a3e609ed4b04217dabe92285ca5e8c69b93065ffbda353f8ebaa5cce239fc0"
+      "finding_sha256": "27b63d62dd42e2e5fafe1751bf9f4dbfd0230743fa0e341d0eb97e571a741521"
     },
     {
       "cve": "CVE-2026-53377",
@@ -23595,7 +23595,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "98e127b30e3fb04b64502d8fdbd4e45298177931359456a248a6bd5de8a8a0fd"
+      "finding_sha256": "6dd185dbb7c59075742201c3989c662002c719175a34496ac3fc518cfcc05256"
     },
     {
       "cve": "CVE-2026-64036",
@@ -23793,7 +23793,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dd15a9aca1f2ec8c50da2a58628ed52c540f44a36c8997b2a248e6d7865b5f41"
+      "finding_sha256": "81f56575216f5e155012cc1f1aeaf6d7e48addda077f6e96db7def662316c8c5"
     },
     {
       "cve": "CVE-2026-68323",
@@ -23865,7 +23865,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8a3e1cb2b76ecaefe33bdbd39a7b88cca18ab493563ccfd3268ae7723772e87e"
+      "finding_sha256": "9c6ec48b03ac568d36492cf7c328234d10afe868feb0a58bbd5a4c5b71ed0710"
     },
     {
       "cve": "CVE-2026-68426",
@@ -23883,7 +23883,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "5c3f661d314695dfd02c9a1f24a6059ea7046833069e7346ddcb81906a91296b"
+      "finding_sha256": "8a152a1d243e4f181f3f86eef2bfae86b2b64043923db9eafe6637a8c54c4bab"
     },
     {
       "cve": "CVE-2026-68447",
@@ -24765,7 +24765,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "535c2c8d518ff1abcbb71679d82e96376389aa2578112582475c86aed27b6dfc"
+      "finding_sha256": "9fe56c4aa84cc664bed343577636b6e4334d5bd02fc75cb6f6f4d74d515c7fb2"
     },
     {
       "cve": "CVE-2026-74752",
@@ -24783,7 +24783,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "587f9bd191f1c1fbbdee20240c9c8059da5143cfac563de27d6976de0962483d"
+      "finding_sha256": "608e2785a683b29ce7f1927b246824606544f6428071cf8cf625cf9ea5830e57"
     },
     {
       "cve": "CVE-2026-80551",
@@ -25035,7 +25035,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "00beb61d4004ff2452a52bec1199abbe475fe3a49f59a36f58f41f4f36704eb4"
+      "finding_sha256": "5519b3d3b72c33721f8c0bfdafea020e2dcd59568efece64c907f45000c36278"
     },
     {
       "cve": "CVE-2026-80716",
@@ -25377,7 +25377,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dfc37efdef4439951e4ec1125ea24f5ed6d3b7ac14a94e3e13d0fd5535d93491"
+      "finding_sha256": "25407204957ea7755eac519f359af599a3e5eb57ae8a9b7c046a40e249741724"
     },
     {
       "cve": "CVE-2026-89528",
@@ -25413,7 +25413,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "78beb16da1a00110c22dab99e0530db1ae39e455a4345412ff728854c2457f84"
+      "finding_sha256": "a6c0f145a680f18a00d883701526206b98ad3d23082c9bcf6b1578a2d7137520"
     },
     {
       "cve": "CVE-2026-89531",
@@ -25575,7 +25575,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "12a86b8f17e216583ef7b2cb5906881be6c58912873dc872c52114fd97d0e44e"
+      "finding_sha256": "516044f785ba3f2da5a54458485fdc46b296b697444af711f28a7bc28b8917b9"
     },
     {
       "cve": "CVE-2026-89633",
@@ -25953,7 +25953,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "d2794a2317711c76c77a87ec0613e2835b383792cbf74fdac55319137133068d"
+      "finding_sha256": "59d19dce12de9e668e327575f6de7b1455b16720a6a56b668874663ca5a9249f"
     },
     {
       "cve": "CVE-2026-90092",
@@ -26187,7 +26187,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "634c91ae0f1f297d521afb494fc46e220d9251e790833831462a4455e78e79fa"
+      "finding_sha256": "f27f9ac718b212d5b79647610114252f7bc4a89d1b448a717e5c327063c7cbe0"
     },
     {
       "cve": "CVE-2026-90169",
@@ -26205,7 +26205,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "b2b700c9f215e8be1758a825d6f884adcaef7da60281fd2f34eef950c38630e7"
+      "finding_sha256": "c70bd3b07ae66b691a35f16be0ca4addf916242cc06b1cb878ef66811d7851ea"
     },
     {
       "cve": "CVE-2026-90199",
@@ -26475,7 +26475,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a4d33657056bb07e7ca092eeae7c8029bdbebce5ba5ee898906ee6157fba1d31"
+      "finding_sha256": "cc88f932919d5b683409c63f63c67334716367872d51f1a96d4f9b0a5a3dd274"
     },
     {
       "cve": "CVE-2026-90380",
@@ -26493,7 +26493,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "352b42490a74d565c1735b9ed8f3aae3ca589fa0b8b345e780e046b7bdd66c30"
+      "finding_sha256": "b2e84a64e9fc0acda20170ae941d42fa676a82457f1ca2df701b728e13657192"
     },
     {
       "cve": "CVE-2026-90392",
@@ -26511,7 +26511,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "fdeb3cf866699d8adf7c65e5bbfff524b2fe6a43d8cb7440360b1c9e8e895723"
+      "finding_sha256": "052cf66e1368d7a31bffc30f2626a5138897acd9453cd4629798752dd4453ead"
     },
     {
       "cve": "CVE-2026-90398",
@@ -26529,7 +26529,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9b29ee239ec444ab76166bb9ccc6ab349ab46a198de3bc97b716af1c6842e1cd"
+      "finding_sha256": "a4d86bdd3f2cad6aefee185b2706363279fcb8f1f5c6ce260c02c0a76ae21e37"
     },
     {
       "cve": "CVE-2026-90417",
@@ -26547,7 +26547,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8b85c317ea3d6b28874b2adafa5ab9be2637ad30f3e095a172343fa17708ebe3"
+      "finding_sha256": "d65d98b19517978edd1022bc5dec21ff00a9c5318d2e062b6ac8bab2cf673ef6"
     },
     {
       "cve": "CVE-2026-92499",
@@ -26565,7 +26565,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a59743499000878dffcbd0f5764d8f1502f01b721d9f0a8ff0b66a7da0d10e14"
+      "finding_sha256": "80546996ede1a84bc40b399247263041f7cdb971ca515d53bcc8aa6373914bea"
     },
     {
       "cve": "CVE-2026-92507",
@@ -26583,7 +26583,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "42996ff1b1ef53974be3906e3f7f82579195ecedb5b4c396ce3677aecab4f6f8"
+      "finding_sha256": "eccfa4d0e0ac22d92505abd86f642d682b0a52a4a673e845c50fb032ac9bf0f1"
     },
     {
       "cve": "CVE-2026-92509",
@@ -26601,7 +26601,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "1bf564681d6661570ce5417e8001c6a65690d9d278fef1d0741f01b2051d2f88"
+      "finding_sha256": "1dcb05c0a8149faee87736afa5634c6c159615c068c504039975862e31e1c2bf"
     },
     {
       "cve": "CVE-2026-92510",
@@ -26619,7 +26619,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "e5feaefbf2dab19bdb511e4a7ead910c46ef546a354819cef995706a0c0f9b15"
+      "finding_sha256": "6d733691f0f7b95ce9abd1774f54a1e5695b7918598295d8bbd7c2ba1c89e72f"
     },
     {
       "cve": "CVE-2026-92511",
@@ -26637,7 +26637,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dae13dc7aa8da6ea816f8c0be8c798222bcb72b4f8ab1656d65a467c1f833759"
+      "finding_sha256": "03631f872a2f6f3e9339c8f042b02c54ed11d06535d6de916da0702dff1a72ec"
     },
     {
       "cve": "CVE-2026-92512",
@@ -26655,7 +26655,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9e789fd2633294b5d636407ceb25e19c41bcd771f5d48a997672775f0e02dfcf"
+      "finding_sha256": "adee1abbc14cdd9219f348a59e299c62d220d771a016c749e75da53cb0942fca"
     },
     {
       "cve": "CVE-2026-93105",
@@ -26673,7 +26673,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "4cf3738328fda29b062419021ae50abafcf2ff5698caa11dda053bd713c60115"
+      "finding_sha256": "19500582c5d406ed2750f872989698df9d63ce95a64bbfff69f2bfe2b1cbf66a"
     },
     {
       "cve": "CVE-2026-93125",
@@ -26727,7 +26727,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "790d531758056fd5f66d7188e79d61005d5d74e4b09b8b201226a3e63fb6f2ea"
+      "finding_sha256": "afdd2fe7aff985affd103976111b11f1b81cf6797819c45f03d57a7a9887871f"
     },
     {
       "cve": "CVE-2026-93154",
@@ -26745,7 +26745,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "978cf7b73ee04991549a44dc989eb9cc1dbd690aa4fa05c22f839ba34d223826"
+      "finding_sha256": "e0823b54348bedcdd9c62377fdb67c71071b7a38e3043a7a94a06775259e45ab"
     },
     {
       "cve": "CVE-2026-93175",
@@ -26763,7 +26763,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "41119e17d98c10e073e80501df66734157df0907947e643bd5d4198d42393b26"
+      "finding_sha256": "0ee583e8eb4aec2964b6c736dd5bbfb62dccb4b1a4ddab1800fa301e44226beb"
     },
     {
       "cve": "CVE-2026-93176",
@@ -26781,7 +26781,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2d2f01be4422612b7f7ad7b558494367559d305e284724c49d503f2fa8a97bba"
+      "finding_sha256": "90ab7e98646e8e7eb867b4461b54a476d39c9225dd2ccfc950f493b0a77a3beb"
     },
     {
       "cve": "CVE-2026-93192",
@@ -26853,7 +26853,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "44a555c1cec22e48ce95eec469beccf4c3034881cfa23fca277f36f4a9f90ee5"
+      "finding_sha256": "b8b91bda40c239469e8bc040c80c68675aa4af7500c7573d43bf5247770ab9ad"
     },
     {
       "cve": "CVE-2026-93221",
@@ -26997,7 +26997,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "7902f7057bdf55fac1c4158c319707f02902ef886594a795b413dd27aa7ffe76"
+      "finding_sha256": "2646075b7160a52f40a42d2c822c64ac947c82ab255ee8ac7224963461ec89cb"
     },
     {
       "cve": "CVE-2026-93824",
@@ -27609,7 +27609,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c505dc08b441bb4bcc060af1651c3844cca08807055b9b1fea03c94992e9aa2f"
+      "finding_sha256": "09686f144d5911948ad35510d08f50ef54783d2f908a8ce921fd34158b3a0c09"
     },
     {
       "cve": "CVE-2026-98171",
@@ -27915,7 +27915,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "786d3f7cdc7f9ae7f33137b03d55a53e8e563fbff796b42166be9f41bdf0ae5d"
+      "finding_sha256": "73d9207d3125137c7ffc36444d2911fa22a511f41d48a34a9dd2a52bfed9e099"
     },
     {
       "cve": "CVE-2024-44964",
@@ -28185,7 +28185,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2036bf16247b40f65cdb77b0a63790aaa5dc0ddf3cbf3a698dd034eec837b0b5"
+      "finding_sha256": "b49cdd5d312171dcdc63352fa41190915f84f27a6c6a8a3eb8fc94120165d2c5"
     },
     {
       "cve": "CVE-2025-40025",
@@ -28221,7 +28221,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2f15a237fdbdb57027f8d187759af3dd02bf45911fe6f722c9ab9e59e05eea5c"
+      "finding_sha256": "9c03c0a988c627f359c32a2711ae6208564b5a8767c86ec1b2f9a7bdb556f13e"
     },
     {
       "cve": "CVE-2025-40074",
@@ -28293,7 +28293,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "97e2283a1c15c02d3306ef74cfc32b380ec144793efff762738f559a5d079fb9"
+      "finding_sha256": "386043f9f56a3891164d2df2b33f7de06d8eac18b27d1a513d08fab457738b0d"
     },
     {
       "cve": "CVE-2025-40168",
@@ -28311,7 +28311,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "92ec65aac0374943a36955eea1795f04be2f02d78ed027cf07037c0e4de7d195"
+      "finding_sha256": "90f21db1df6ae874dcf11af1ac728105512e0b81e3920781c50842c9b69087a0"
     },
     {
       "cve": "CVE-2025-40170",
@@ -28329,7 +28329,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "cb33a6ee72e01e46ccc1fee1896fc0f3046c2cc34aedee788cd65995155faf33"
+      "finding_sha256": "84d01281c8c057db78d2d40997c7373faa884ff8396833ad2804fddea7198061"
     },
     {
       "cve": "CVE-2025-40190",
@@ -28491,7 +28491,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c49026b0205904880399ea59bf291f26a19a7f122844c3d04daef89a589e09bb"
+      "finding_sha256": "e461212b27dc7fbf36c1ee264cd92d88daca52d755ec0afc6e7d04b994621850"
     },
     {
       "cve": "CVE-2025-71073",
@@ -28761,7 +28761,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "ad23e5318f05c5140e8fc7ebf77718c1030c32ef0b347def39f981a5a201f0e6"
+      "finding_sha256": "0fa82309595979273aeb40b6debca6ae9dba98fa9589257715af37c44d40c843"
     },
     {
       "cve": "CVE-2026-43009",
@@ -28941,7 +28941,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "f84057b8449d5fabd3efb006c351d89a658b03e9ea88774c2562b5c1f7d36eb5"
+      "finding_sha256": "6d93d5301bb803b69bb2dee3ed04c8c6d5965c24da2eee6978e9a3894389e4a6"
     },
     {
       "cve": "CVE-2026-46330",
@@ -28995,7 +28995,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "24ef00cc0f8aecd38538715661e149572b96407a440c75c1206d03cb51f709ac"
+      "finding_sha256": "ba091a3800770d71f0f153afd033c4192d0afebe8de8bb47859a81002a5ce245"
     },
     {
       "cve": "CVE-2026-53024",
@@ -29067,7 +29067,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c1a3e609ed4b04217dabe92285ca5e8c69b93065ffbda353f8ebaa5cce239fc0"
+      "finding_sha256": "27b63d62dd42e2e5fafe1751bf9f4dbfd0230743fa0e341d0eb97e571a741521"
     },
     {
       "cve": "CVE-2026-53377",
@@ -29157,7 +29157,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "98e127b30e3fb04b64502d8fdbd4e45298177931359456a248a6bd5de8a8a0fd"
+      "finding_sha256": "6dd185dbb7c59075742201c3989c662002c719175a34496ac3fc518cfcc05256"
     },
     {
       "cve": "CVE-2026-64036",
@@ -29355,7 +29355,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dd15a9aca1f2ec8c50da2a58628ed52c540f44a36c8997b2a248e6d7865b5f41"
+      "finding_sha256": "81f56575216f5e155012cc1f1aeaf6d7e48addda077f6e96db7def662316c8c5"
     },
     {
       "cve": "CVE-2026-68323",
@@ -29427,7 +29427,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8a3e1cb2b76ecaefe33bdbd39a7b88cca18ab493563ccfd3268ae7723772e87e"
+      "finding_sha256": "9c6ec48b03ac568d36492cf7c328234d10afe868feb0a58bbd5a4c5b71ed0710"
     },
     {
       "cve": "CVE-2026-68426",
@@ -29445,7 +29445,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "5c3f661d314695dfd02c9a1f24a6059ea7046833069e7346ddcb81906a91296b"
+      "finding_sha256": "8a152a1d243e4f181f3f86eef2bfae86b2b64043923db9eafe6637a8c54c4bab"
     },
     {
       "cve": "CVE-2026-68447",
@@ -30327,7 +30327,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "535c2c8d518ff1abcbb71679d82e96376389aa2578112582475c86aed27b6dfc"
+      "finding_sha256": "9fe56c4aa84cc664bed343577636b6e4334d5bd02fc75cb6f6f4d74d515c7fb2"
     },
     {
       "cve": "CVE-2026-74752",
@@ -30345,7 +30345,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "587f9bd191f1c1fbbdee20240c9c8059da5143cfac563de27d6976de0962483d"
+      "finding_sha256": "608e2785a683b29ce7f1927b246824606544f6428071cf8cf625cf9ea5830e57"
     },
     {
       "cve": "CVE-2026-80551",
@@ -30597,7 +30597,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "00beb61d4004ff2452a52bec1199abbe475fe3a49f59a36f58f41f4f36704eb4"
+      "finding_sha256": "5519b3d3b72c33721f8c0bfdafea020e2dcd59568efece64c907f45000c36278"
     },
     {
       "cve": "CVE-2026-80716",
@@ -30939,7 +30939,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dfc37efdef4439951e4ec1125ea24f5ed6d3b7ac14a94e3e13d0fd5535d93491"
+      "finding_sha256": "25407204957ea7755eac519f359af599a3e5eb57ae8a9b7c046a40e249741724"
     },
     {
       "cve": "CVE-2026-89528",
@@ -30975,7 +30975,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "78beb16da1a00110c22dab99e0530db1ae39e455a4345412ff728854c2457f84"
+      "finding_sha256": "a6c0f145a680f18a00d883701526206b98ad3d23082c9bcf6b1578a2d7137520"
     },
     {
       "cve": "CVE-2026-89531",
@@ -31137,7 +31137,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "12a86b8f17e216583ef7b2cb5906881be6c58912873dc872c52114fd97d0e44e"
+      "finding_sha256": "516044f785ba3f2da5a54458485fdc46b296b697444af711f28a7bc28b8917b9"
     },
     {
       "cve": "CVE-2026-89633",
@@ -31515,7 +31515,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "d2794a2317711c76c77a87ec0613e2835b383792cbf74fdac55319137133068d"
+      "finding_sha256": "59d19dce12de9e668e327575f6de7b1455b16720a6a56b668874663ca5a9249f"
     },
     {
       "cve": "CVE-2026-90092",
@@ -31749,7 +31749,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "634c91ae0f1f297d521afb494fc46e220d9251e790833831462a4455e78e79fa"
+      "finding_sha256": "f27f9ac718b212d5b79647610114252f7bc4a89d1b448a717e5c327063c7cbe0"
     },
     {
       "cve": "CVE-2026-90169",
@@ -31767,7 +31767,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "b2b700c9f215e8be1758a825d6f884adcaef7da60281fd2f34eef950c38630e7"
+      "finding_sha256": "c70bd3b07ae66b691a35f16be0ca4addf916242cc06b1cb878ef66811d7851ea"
     },
     {
       "cve": "CVE-2026-90199",
@@ -32037,7 +32037,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a4d33657056bb07e7ca092eeae7c8029bdbebce5ba5ee898906ee6157fba1d31"
+      "finding_sha256": "cc88f932919d5b683409c63f63c67334716367872d51f1a96d4f9b0a5a3dd274"
     },
     {
       "cve": "CVE-2026-90380",
@@ -32055,7 +32055,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "352b42490a74d565c1735b9ed8f3aae3ca589fa0b8b345e780e046b7bdd66c30"
+      "finding_sha256": "b2e84a64e9fc0acda20170ae941d42fa676a82457f1ca2df701b728e13657192"
     },
     {
       "cve": "CVE-2026-90392",
@@ -32073,7 +32073,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "fdeb3cf866699d8adf7c65e5bbfff524b2fe6a43d8cb7440360b1c9e8e895723"
+      "finding_sha256": "052cf66e1368d7a31bffc30f2626a5138897acd9453cd4629798752dd4453ead"
     },
     {
       "cve": "CVE-2026-90398",
@@ -32091,7 +32091,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9b29ee239ec444ab76166bb9ccc6ab349ab46a198de3bc97b716af1c6842e1cd"
+      "finding_sha256": "a4d86bdd3f2cad6aefee185b2706363279fcb8f1f5c6ce260c02c0a76ae21e37"
     },
     {
       "cve": "CVE-2026-90417",
@@ -32109,7 +32109,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8b85c317ea3d6b28874b2adafa5ab9be2637ad30f3e095a172343fa17708ebe3"
+      "finding_sha256": "d65d98b19517978edd1022bc5dec21ff00a9c5318d2e062b6ac8bab2cf673ef6"
     },
     {
       "cve": "CVE-2026-92499",
@@ -32127,7 +32127,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a59743499000878dffcbd0f5764d8f1502f01b721d9f0a8ff0b66a7da0d10e14"
+      "finding_sha256": "80546996ede1a84bc40b399247263041f7cdb971ca515d53bcc8aa6373914bea"
     },
     {
       "cve": "CVE-2026-92507",
@@ -32145,7 +32145,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "42996ff1b1ef53974be3906e3f7f82579195ecedb5b4c396ce3677aecab4f6f8"
+      "finding_sha256": "eccfa4d0e0ac22d92505abd86f642d682b0a52a4a673e845c50fb032ac9bf0f1"
     },
     {
       "cve": "CVE-2026-92509",
@@ -32163,7 +32163,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "1bf564681d6661570ce5417e8001c6a65690d9d278fef1d0741f01b2051d2f88"
+      "finding_sha256": "1dcb05c0a8149faee87736afa5634c6c159615c068c504039975862e31e1c2bf"
     },
     {
       "cve": "CVE-2026-92510",
@@ -32181,7 +32181,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "e5feaefbf2dab19bdb511e4a7ead910c46ef546a354819cef995706a0c0f9b15"
+      "finding_sha256": "6d733691f0f7b95ce9abd1774f54a1e5695b7918598295d8bbd7c2ba1c89e72f"
     },
     {
       "cve": "CVE-2026-92511",
@@ -32199,7 +32199,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dae13dc7aa8da6ea816f8c0be8c798222bcb72b4f8ab1656d65a467c1f833759"
+      "finding_sha256": "03631f872a2f6f3e9339c8f042b02c54ed11d06535d6de916da0702dff1a72ec"
     },
     {
       "cve": "CVE-2026-92512",
@@ -32217,7 +32217,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9e789fd2633294b5d636407ceb25e19c41bcd771f5d48a997672775f0e02dfcf"
+      "finding_sha256": "adee1abbc14cdd9219f348a59e299c62d220d771a016c749e75da53cb0942fca"
     },
     {
       "cve": "CVE-2026-93105",
@@ -32235,7 +32235,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "4cf3738328fda29b062419021ae50abafcf2ff5698caa11dda053bd713c60115"
+      "finding_sha256": "19500582c5d406ed2750f872989698df9d63ce95a64bbfff69f2bfe2b1cbf66a"
     },
     {
       "cve": "CVE-2026-93125",
@@ -32289,7 +32289,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "790d531758056fd5f66d7188e79d61005d5d74e4b09b8b201226a3e63fb6f2ea"
+      "finding_sha256": "afdd2fe7aff985affd103976111b11f1b81cf6797819c45f03d57a7a9887871f"
     },
     {
       "cve": "CVE-2026-93154",
@@ -32307,7 +32307,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "978cf7b73ee04991549a44dc989eb9cc1dbd690aa4fa05c22f839ba34d223826"
+      "finding_sha256": "e0823b54348bedcdd9c62377fdb67c71071b7a38e3043a7a94a06775259e45ab"
     },
     {
       "cve": "CVE-2026-93175",
@@ -32325,7 +32325,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "41119e17d98c10e073e80501df66734157df0907947e643bd5d4198d42393b26"
+      "finding_sha256": "0ee583e8eb4aec2964b6c736dd5bbfb62dccb4b1a4ddab1800fa301e44226beb"
     },
     {
       "cve": "CVE-2026-93176",
@@ -32343,7 +32343,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2d2f01be4422612b7f7ad7b558494367559d305e284724c49d503f2fa8a97bba"
+      "finding_sha256": "90ab7e98646e8e7eb867b4461b54a476d39c9225dd2ccfc950f493b0a77a3beb"
     },
     {
       "cve": "CVE-2026-93192",
@@ -32415,7 +32415,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "44a555c1cec22e48ce95eec469beccf4c3034881cfa23fca277f36f4a9f90ee5"
+      "finding_sha256": "b8b91bda40c239469e8bc040c80c68675aa4af7500c7573d43bf5247770ab9ad"
     },
     {
       "cve": "CVE-2026-93221",
@@ -32559,7 +32559,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "7902f7057bdf55fac1c4158c319707f02902ef886594a795b413dd27aa7ffe76"
+      "finding_sha256": "2646075b7160a52f40a42d2c822c64ac947c82ab255ee8ac7224963461ec89cb"
     },
     {
       "cve": "CVE-2026-93824",
@@ -33171,7 +33171,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c505dc08b441bb4bcc060af1651c3844cca08807055b9b1fea03c94992e9aa2f"
+      "finding_sha256": "09686f144d5911948ad35510d08f50ef54783d2f908a8ce921fd34158b3a0c09"
     },
     {
       "cve": "CVE-2026-98171",
@@ -33477,7 +33477,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "786d3f7cdc7f9ae7f33137b03d55a53e8e563fbff796b42166be9f41bdf0ae5d"
+      "finding_sha256": "73d9207d3125137c7ffc36444d2911fa22a511f41d48a34a9dd2a52bfed9e099"
     },
     {
       "cve": "CVE-2024-44964",
@@ -33747,7 +33747,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2036bf16247b40f65cdb77b0a63790aaa5dc0ddf3cbf3a698dd034eec837b0b5"
+      "finding_sha256": "b49cdd5d312171dcdc63352fa41190915f84f27a6c6a8a3eb8fc94120165d2c5"
     },
     {
       "cve": "CVE-2025-40025",
@@ -33783,7 +33783,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2f15a237fdbdb57027f8d187759af3dd02bf45911fe6f722c9ab9e59e05eea5c"
+      "finding_sha256": "9c03c0a988c627f359c32a2711ae6208564b5a8767c86ec1b2f9a7bdb556f13e"
     },
     {
       "cve": "CVE-2025-40074",
@@ -33855,7 +33855,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "97e2283a1c15c02d3306ef74cfc32b380ec144793efff762738f559a5d079fb9"
+      "finding_sha256": "386043f9f56a3891164d2df2b33f7de06d8eac18b27d1a513d08fab457738b0d"
     },
     {
       "cve": "CVE-2025-40168",
@@ -33873,7 +33873,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "92ec65aac0374943a36955eea1795f04be2f02d78ed027cf07037c0e4de7d195"
+      "finding_sha256": "90f21db1df6ae874dcf11af1ac728105512e0b81e3920781c50842c9b69087a0"
     },
     {
       "cve": "CVE-2025-40170",
@@ -33891,7 +33891,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "cb33a6ee72e01e46ccc1fee1896fc0f3046c2cc34aedee788cd65995155faf33"
+      "finding_sha256": "84d01281c8c057db78d2d40997c7373faa884ff8396833ad2804fddea7198061"
     },
     {
       "cve": "CVE-2025-40190",
@@ -34053,7 +34053,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c49026b0205904880399ea59bf291f26a19a7f122844c3d04daef89a589e09bb"
+      "finding_sha256": "e461212b27dc7fbf36c1ee264cd92d88daca52d755ec0afc6e7d04b994621850"
     },
     {
       "cve": "CVE-2025-71073",
@@ -34323,7 +34323,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "ad23e5318f05c5140e8fc7ebf77718c1030c32ef0b347def39f981a5a201f0e6"
+      "finding_sha256": "0fa82309595979273aeb40b6debca6ae9dba98fa9589257715af37c44d40c843"
     },
     {
       "cve": "CVE-2026-43009",
@@ -34503,7 +34503,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "f84057b8449d5fabd3efb006c351d89a658b03e9ea88774c2562b5c1f7d36eb5"
+      "finding_sha256": "6d93d5301bb803b69bb2dee3ed04c8c6d5965c24da2eee6978e9a3894389e4a6"
     },
     {
       "cve": "CVE-2026-46330",
@@ -34557,7 +34557,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "24ef00cc0f8aecd38538715661e149572b96407a440c75c1206d03cb51f709ac"
+      "finding_sha256": "ba091a3800770d71f0f153afd033c4192d0afebe8de8bb47859a81002a5ce245"
     },
     {
       "cve": "CVE-2026-53024",
@@ -34629,7 +34629,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c1a3e609ed4b04217dabe92285ca5e8c69b93065ffbda353f8ebaa5cce239fc0"
+      "finding_sha256": "27b63d62dd42e2e5fafe1751bf9f4dbfd0230743fa0e341d0eb97e571a741521"
     },
     {
       "cve": "CVE-2026-53377",
@@ -34719,7 +34719,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "98e127b30e3fb04b64502d8fdbd4e45298177931359456a248a6bd5de8a8a0fd"
+      "finding_sha256": "6dd185dbb7c59075742201c3989c662002c719175a34496ac3fc518cfcc05256"
     },
     {
       "cve": "CVE-2026-64036",
@@ -34917,7 +34917,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dd15a9aca1f2ec8c50da2a58628ed52c540f44a36c8997b2a248e6d7865b5f41"
+      "finding_sha256": "81f56575216f5e155012cc1f1aeaf6d7e48addda077f6e96db7def662316c8c5"
     },
     {
       "cve": "CVE-2026-68323",
@@ -34989,7 +34989,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8a3e1cb2b76ecaefe33bdbd39a7b88cca18ab493563ccfd3268ae7723772e87e"
+      "finding_sha256": "9c6ec48b03ac568d36492cf7c328234d10afe868feb0a58bbd5a4c5b71ed0710"
     },
     {
       "cve": "CVE-2026-68426",
@@ -35007,7 +35007,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "5c3f661d314695dfd02c9a1f24a6059ea7046833069e7346ddcb81906a91296b"
+      "finding_sha256": "8a152a1d243e4f181f3f86eef2bfae86b2b64043923db9eafe6637a8c54c4bab"
     },
     {
       "cve": "CVE-2026-68447",
@@ -35889,7 +35889,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "535c2c8d518ff1abcbb71679d82e96376389aa2578112582475c86aed27b6dfc"
+      "finding_sha256": "9fe56c4aa84cc664bed343577636b6e4334d5bd02fc75cb6f6f4d74d515c7fb2"
     },
     {
       "cve": "CVE-2026-74752",
@@ -35907,7 +35907,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "587f9bd191f1c1fbbdee20240c9c8059da5143cfac563de27d6976de0962483d"
+      "finding_sha256": "608e2785a683b29ce7f1927b246824606544f6428071cf8cf625cf9ea5830e57"
     },
     {
       "cve": "CVE-2026-80551",
@@ -36159,7 +36159,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "00beb61d4004ff2452a52bec1199abbe475fe3a49f59a36f58f41f4f36704eb4"
+      "finding_sha256": "5519b3d3b72c33721f8c0bfdafea020e2dcd59568efece64c907f45000c36278"
     },
     {
       "cve": "CVE-2026-80716",
@@ -36501,7 +36501,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dfc37efdef4439951e4ec1125ea24f5ed6d3b7ac14a94e3e13d0fd5535d93491"
+      "finding_sha256": "25407204957ea7755eac519f359af599a3e5eb57ae8a9b7c046a40e249741724"
     },
     {
       "cve": "CVE-2026-89528",
@@ -36537,7 +36537,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "78beb16da1a00110c22dab99e0530db1ae39e455a4345412ff728854c2457f84"
+      "finding_sha256": "a6c0f145a680f18a00d883701526206b98ad3d23082c9bcf6b1578a2d7137520"
     },
     {
       "cve": "CVE-2026-89531",
@@ -36699,7 +36699,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "12a86b8f17e216583ef7b2cb5906881be6c58912873dc872c52114fd97d0e44e"
+      "finding_sha256": "516044f785ba3f2da5a54458485fdc46b296b697444af711f28a7bc28b8917b9"
     },
     {
       "cve": "CVE-2026-89633",
@@ -37077,7 +37077,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "d2794a2317711c76c77a87ec0613e2835b383792cbf74fdac55319137133068d"
+      "finding_sha256": "59d19dce12de9e668e327575f6de7b1455b16720a6a56b668874663ca5a9249f"
     },
     {
       "cve": "CVE-2026-90092",
@@ -37311,7 +37311,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "634c91ae0f1f297d521afb494fc46e220d9251e790833831462a4455e78e79fa"
+      "finding_sha256": "f27f9ac718b212d5b79647610114252f7bc4a89d1b448a717e5c327063c7cbe0"
     },
     {
       "cve": "CVE-2026-90169",
@@ -37329,7 +37329,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "b2b700c9f215e8be1758a825d6f884adcaef7da60281fd2f34eef950c38630e7"
+      "finding_sha256": "c70bd3b07ae66b691a35f16be0ca4addf916242cc06b1cb878ef66811d7851ea"
     },
     {
       "cve": "CVE-2026-90199",
@@ -37599,7 +37599,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a4d33657056bb07e7ca092eeae7c8029bdbebce5ba5ee898906ee6157fba1d31"
+      "finding_sha256": "cc88f932919d5b683409c63f63c67334716367872d51f1a96d4f9b0a5a3dd274"
     },
     {
       "cve": "CVE-2026-90380",
@@ -37617,7 +37617,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "352b42490a74d565c1735b9ed8f3aae3ca589fa0b8b345e780e046b7bdd66c30"
+      "finding_sha256": "b2e84a64e9fc0acda20170ae941d42fa676a82457f1ca2df701b728e13657192"
     },
     {
       "cve": "CVE-2026-90392",
@@ -37635,7 +37635,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "fdeb3cf866699d8adf7c65e5bbfff524b2fe6a43d8cb7440360b1c9e8e895723"
+      "finding_sha256": "052cf66e1368d7a31bffc30f2626a5138897acd9453cd4629798752dd4453ead"
     },
     {
       "cve": "CVE-2026-90398",
@@ -37653,7 +37653,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9b29ee239ec444ab76166bb9ccc6ab349ab46a198de3bc97b716af1c6842e1cd"
+      "finding_sha256": "a4d86bdd3f2cad6aefee185b2706363279fcb8f1f5c6ce260c02c0a76ae21e37"
     },
     {
       "cve": "CVE-2026-90417",
@@ -37671,7 +37671,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8b85c317ea3d6b28874b2adafa5ab9be2637ad30f3e095a172343fa17708ebe3"
+      "finding_sha256": "d65d98b19517978edd1022bc5dec21ff00a9c5318d2e062b6ac8bab2cf673ef6"
     },
     {
       "cve": "CVE-2026-92499",
@@ -37689,7 +37689,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a59743499000878dffcbd0f5764d8f1502f01b721d9f0a8ff0b66a7da0d10e14"
+      "finding_sha256": "80546996ede1a84bc40b399247263041f7cdb971ca515d53bcc8aa6373914bea"
     },
     {
       "cve": "CVE-2026-92507",
@@ -37707,7 +37707,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "42996ff1b1ef53974be3906e3f7f82579195ecedb5b4c396ce3677aecab4f6f8"
+      "finding_sha256": "eccfa4d0e0ac22d92505abd86f642d682b0a52a4a673e845c50fb032ac9bf0f1"
     },
     {
       "cve": "CVE-2026-92509",
@@ -37725,7 +37725,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "1bf564681d6661570ce5417e8001c6a65690d9d278fef1d0741f01b2051d2f88"
+      "finding_sha256": "1dcb05c0a8149faee87736afa5634c6c159615c068c504039975862e31e1c2bf"
     },
     {
       "cve": "CVE-2026-92510",
@@ -37743,7 +37743,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "e5feaefbf2dab19bdb511e4a7ead910c46ef546a354819cef995706a0c0f9b15"
+      "finding_sha256": "6d733691f0f7b95ce9abd1774f54a1e5695b7918598295d8bbd7c2ba1c89e72f"
     },
     {
       "cve": "CVE-2026-92511",
@@ -37761,7 +37761,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dae13dc7aa8da6ea816f8c0be8c798222bcb72b4f8ab1656d65a467c1f833759"
+      "finding_sha256": "03631f872a2f6f3e9339c8f042b02c54ed11d06535d6de916da0702dff1a72ec"
     },
     {
       "cve": "CVE-2026-92512",
@@ -37779,7 +37779,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9e789fd2633294b5d636407ceb25e19c41bcd771f5d48a997672775f0e02dfcf"
+      "finding_sha256": "adee1abbc14cdd9219f348a59e299c62d220d771a016c749e75da53cb0942fca"
     },
     {
       "cve": "CVE-2026-93105",
@@ -37797,7 +37797,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "4cf3738328fda29b062419021ae50abafcf2ff5698caa11dda053bd713c60115"
+      "finding_sha256": "19500582c5d406ed2750f872989698df9d63ce95a64bbfff69f2bfe2b1cbf66a"
     },
     {
       "cve": "CVE-2026-93125",
@@ -37851,7 +37851,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "790d531758056fd5f66d7188e79d61005d5d74e4b09b8b201226a3e63fb6f2ea"
+      "finding_sha256": "afdd2fe7aff985affd103976111b11f1b81cf6797819c45f03d57a7a9887871f"
     },
     {
       "cve": "CVE-2026-93154",
@@ -37869,7 +37869,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "978cf7b73ee04991549a44dc989eb9cc1dbd690aa4fa05c22f839ba34d223826"
+      "finding_sha256": "e0823b54348bedcdd9c62377fdb67c71071b7a38e3043a7a94a06775259e45ab"
     },
     {
       "cve": "CVE-2026-93175",
@@ -37887,7 +37887,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "41119e17d98c10e073e80501df66734157df0907947e643bd5d4198d42393b26"
+      "finding_sha256": "0ee583e8eb4aec2964b6c736dd5bbfb62dccb4b1a4ddab1800fa301e44226beb"
     },
     {
       "cve": "CVE-2026-93176",
@@ -37905,7 +37905,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2d2f01be4422612b7f7ad7b558494367559d305e284724c49d503f2fa8a97bba"
+      "finding_sha256": "90ab7e98646e8e7eb867b4461b54a476d39c9225dd2ccfc950f493b0a77a3beb"
     },
     {
       "cve": "CVE-2026-93192",
@@ -37977,7 +37977,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "44a555c1cec22e48ce95eec469beccf4c3034881cfa23fca277f36f4a9f90ee5"
+      "finding_sha256": "b8b91bda40c239469e8bc040c80c68675aa4af7500c7573d43bf5247770ab9ad"
     },
     {
       "cve": "CVE-2026-93221",
@@ -38121,7 +38121,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "7902f7057bdf55fac1c4158c319707f02902ef886594a795b413dd27aa7ffe76"
+      "finding_sha256": "2646075b7160a52f40a42d2c822c64ac947c82ab255ee8ac7224963461ec89cb"
     },
     {
       "cve": "CVE-2026-93824",
@@ -38733,7 +38733,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c505dc08b441bb4bcc060af1651c3844cca08807055b9b1fea03c94992e9aa2f"
+      "finding_sha256": "09686f144d5911948ad35510d08f50ef54783d2f908a8ce921fd34158b3a0c09"
     },
     {
       "cve": "CVE-2026-98171",
@@ -39039,7 +39039,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "786d3f7cdc7f9ae7f33137b03d55a53e8e563fbff796b42166be9f41bdf0ae5d"
+      "finding_sha256": "73d9207d3125137c7ffc36444d2911fa22a511f41d48a34a9dd2a52bfed9e099"
     },
     {
       "cve": "CVE-2024-44964",
@@ -39309,7 +39309,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2036bf16247b40f65cdb77b0a63790aaa5dc0ddf3cbf3a698dd034eec837b0b5"
+      "finding_sha256": "b49cdd5d312171dcdc63352fa41190915f84f27a6c6a8a3eb8fc94120165d2c5"
     },
     {
       "cve": "CVE-2025-40025",
@@ -39345,7 +39345,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2f15a237fdbdb57027f8d187759af3dd02bf45911fe6f722c9ab9e59e05eea5c"
+      "finding_sha256": "9c03c0a988c627f359c32a2711ae6208564b5a8767c86ec1b2f9a7bdb556f13e"
     },
     {
       "cve": "CVE-2025-40074",
@@ -39417,7 +39417,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "97e2283a1c15c02d3306ef74cfc32b380ec144793efff762738f559a5d079fb9"
+      "finding_sha256": "386043f9f56a3891164d2df2b33f7de06d8eac18b27d1a513d08fab457738b0d"
     },
     {
       "cve": "CVE-2025-40168",
@@ -39435,7 +39435,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "92ec65aac0374943a36955eea1795f04be2f02d78ed027cf07037c0e4de7d195"
+      "finding_sha256": "90f21db1df6ae874dcf11af1ac728105512e0b81e3920781c50842c9b69087a0"
     },
     {
       "cve": "CVE-2025-40170",
@@ -39453,7 +39453,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "cb33a6ee72e01e46ccc1fee1896fc0f3046c2cc34aedee788cd65995155faf33"
+      "finding_sha256": "84d01281c8c057db78d2d40997c7373faa884ff8396833ad2804fddea7198061"
     },
     {
       "cve": "CVE-2025-40190",
@@ -39615,7 +39615,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c49026b0205904880399ea59bf291f26a19a7f122844c3d04daef89a589e09bb"
+      "finding_sha256": "e461212b27dc7fbf36c1ee264cd92d88daca52d755ec0afc6e7d04b994621850"
     },
     {
       "cve": "CVE-2025-71073",
@@ -39885,7 +39885,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "ad23e5318f05c5140e8fc7ebf77718c1030c32ef0b347def39f981a5a201f0e6"
+      "finding_sha256": "0fa82309595979273aeb40b6debca6ae9dba98fa9589257715af37c44d40c843"
     },
     {
       "cve": "CVE-2026-43009",
@@ -40065,7 +40065,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "f84057b8449d5fabd3efb006c351d89a658b03e9ea88774c2562b5c1f7d36eb5"
+      "finding_sha256": "6d93d5301bb803b69bb2dee3ed04c8c6d5965c24da2eee6978e9a3894389e4a6"
     },
     {
       "cve": "CVE-2026-46330",
@@ -40119,7 +40119,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "24ef00cc0f8aecd38538715661e149572b96407a440c75c1206d03cb51f709ac"
+      "finding_sha256": "ba091a3800770d71f0f153afd033c4192d0afebe8de8bb47859a81002a5ce245"
     },
     {
       "cve": "CVE-2026-53024",
@@ -40191,7 +40191,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c1a3e609ed4b04217dabe92285ca5e8c69b93065ffbda353f8ebaa5cce239fc0"
+      "finding_sha256": "27b63d62dd42e2e5fafe1751bf9f4dbfd0230743fa0e341d0eb97e571a741521"
     },
     {
       "cve": "CVE-2026-53377",
@@ -40281,7 +40281,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "98e127b30e3fb04b64502d8fdbd4e45298177931359456a248a6bd5de8a8a0fd"
+      "finding_sha256": "6dd185dbb7c59075742201c3989c662002c719175a34496ac3fc518cfcc05256"
     },
     {
       "cve": "CVE-2026-64036",
@@ -40479,7 +40479,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dd15a9aca1f2ec8c50da2a58628ed52c540f44a36c8997b2a248e6d7865b5f41"
+      "finding_sha256": "81f56575216f5e155012cc1f1aeaf6d7e48addda077f6e96db7def662316c8c5"
     },
     {
       "cve": "CVE-2026-68323",
@@ -40551,7 +40551,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8a3e1cb2b76ecaefe33bdbd39a7b88cca18ab493563ccfd3268ae7723772e87e"
+      "finding_sha256": "9c6ec48b03ac568d36492cf7c328234d10afe868feb0a58bbd5a4c5b71ed0710"
     },
     {
       "cve": "CVE-2026-68426",
@@ -40569,7 +40569,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "5c3f661d314695dfd02c9a1f24a6059ea7046833069e7346ddcb81906a91296b"
+      "finding_sha256": "8a152a1d243e4f181f3f86eef2bfae86b2b64043923db9eafe6637a8c54c4bab"
     },
     {
       "cve": "CVE-2026-68447",
@@ -41451,7 +41451,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "535c2c8d518ff1abcbb71679d82e96376389aa2578112582475c86aed27b6dfc"
+      "finding_sha256": "9fe56c4aa84cc664bed343577636b6e4334d5bd02fc75cb6f6f4d74d515c7fb2"
     },
     {
       "cve": "CVE-2026-74752",
@@ -41469,7 +41469,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "587f9bd191f1c1fbbdee20240c9c8059da5143cfac563de27d6976de0962483d"
+      "finding_sha256": "608e2785a683b29ce7f1927b246824606544f6428071cf8cf625cf9ea5830e57"
     },
     {
       "cve": "CVE-2026-80551",
@@ -41721,7 +41721,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "00beb61d4004ff2452a52bec1199abbe475fe3a49f59a36f58f41f4f36704eb4"
+      "finding_sha256": "5519b3d3b72c33721f8c0bfdafea020e2dcd59568efece64c907f45000c36278"
     },
     {
       "cve": "CVE-2026-80716",
@@ -42063,7 +42063,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dfc37efdef4439951e4ec1125ea24f5ed6d3b7ac14a94e3e13d0fd5535d93491"
+      "finding_sha256": "25407204957ea7755eac519f359af599a3e5eb57ae8a9b7c046a40e249741724"
     },
     {
       "cve": "CVE-2026-89528",
@@ -42099,7 +42099,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "78beb16da1a00110c22dab99e0530db1ae39e455a4345412ff728854c2457f84"
+      "finding_sha256": "a6c0f145a680f18a00d883701526206b98ad3d23082c9bcf6b1578a2d7137520"
     },
     {
       "cve": "CVE-2026-89531",
@@ -42261,7 +42261,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "12a86b8f17e216583ef7b2cb5906881be6c58912873dc872c52114fd97d0e44e"
+      "finding_sha256": "516044f785ba3f2da5a54458485fdc46b296b697444af711f28a7bc28b8917b9"
     },
     {
       "cve": "CVE-2026-89633",
@@ -42639,7 +42639,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "d2794a2317711c76c77a87ec0613e2835b383792cbf74fdac55319137133068d"
+      "finding_sha256": "59d19dce12de9e668e327575f6de7b1455b16720a6a56b668874663ca5a9249f"
     },
     {
       "cve": "CVE-2026-90092",
@@ -42873,7 +42873,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "634c91ae0f1f297d521afb494fc46e220d9251e790833831462a4455e78e79fa"
+      "finding_sha256": "f27f9ac718b212d5b79647610114252f7bc4a89d1b448a717e5c327063c7cbe0"
     },
     {
       "cve": "CVE-2026-90169",
@@ -42891,7 +42891,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "b2b700c9f215e8be1758a825d6f884adcaef7da60281fd2f34eef950c38630e7"
+      "finding_sha256": "c70bd3b07ae66b691a35f16be0ca4addf916242cc06b1cb878ef66811d7851ea"
     },
     {
       "cve": "CVE-2026-90199",
@@ -43161,7 +43161,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a4d33657056bb07e7ca092eeae7c8029bdbebce5ba5ee898906ee6157fba1d31"
+      "finding_sha256": "cc88f932919d5b683409c63f63c67334716367872d51f1a96d4f9b0a5a3dd274"
     },
     {
       "cve": "CVE-2026-90380",
@@ -43179,7 +43179,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "352b42490a74d565c1735b9ed8f3aae3ca589fa0b8b345e780e046b7bdd66c30"
+      "finding_sha256": "b2e84a64e9fc0acda20170ae941d42fa676a82457f1ca2df701b728e13657192"
     },
     {
       "cve": "CVE-2026-90392",
@@ -43197,7 +43197,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "fdeb3cf866699d8adf7c65e5bbfff524b2fe6a43d8cb7440360b1c9e8e895723"
+      "finding_sha256": "052cf66e1368d7a31bffc30f2626a5138897acd9453cd4629798752dd4453ead"
     },
     {
       "cve": "CVE-2026-90398",
@@ -43215,7 +43215,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9b29ee239ec444ab76166bb9ccc6ab349ab46a198de3bc97b716af1c6842e1cd"
+      "finding_sha256": "a4d86bdd3f2cad6aefee185b2706363279fcb8f1f5c6ce260c02c0a76ae21e37"
     },
     {
       "cve": "CVE-2026-90417",
@@ -43233,7 +43233,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "8b85c317ea3d6b28874b2adafa5ab9be2637ad30f3e095a172343fa17708ebe3"
+      "finding_sha256": "d65d98b19517978edd1022bc5dec21ff00a9c5318d2e062b6ac8bab2cf673ef6"
     },
     {
       "cve": "CVE-2026-92499",
@@ -43251,7 +43251,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "a59743499000878dffcbd0f5764d8f1502f01b721d9f0a8ff0b66a7da0d10e14"
+      "finding_sha256": "80546996ede1a84bc40b399247263041f7cdb971ca515d53bcc8aa6373914bea"
     },
     {
       "cve": "CVE-2026-92507",
@@ -43269,7 +43269,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "42996ff1b1ef53974be3906e3f7f82579195ecedb5b4c396ce3677aecab4f6f8"
+      "finding_sha256": "eccfa4d0e0ac22d92505abd86f642d682b0a52a4a673e845c50fb032ac9bf0f1"
     },
     {
       "cve": "CVE-2026-92509",
@@ -43287,7 +43287,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "1bf564681d6661570ce5417e8001c6a65690d9d278fef1d0741f01b2051d2f88"
+      "finding_sha256": "1dcb05c0a8149faee87736afa5634c6c159615c068c504039975862e31e1c2bf"
     },
     {
       "cve": "CVE-2026-92510",
@@ -43305,7 +43305,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "e5feaefbf2dab19bdb511e4a7ead910c46ef546a354819cef995706a0c0f9b15"
+      "finding_sha256": "6d733691f0f7b95ce9abd1774f54a1e5695b7918598295d8bbd7c2ba1c89e72f"
     },
     {
       "cve": "CVE-2026-92511",
@@ -43323,7 +43323,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "dae13dc7aa8da6ea816f8c0be8c798222bcb72b4f8ab1656d65a467c1f833759"
+      "finding_sha256": "03631f872a2f6f3e9339c8f042b02c54ed11d06535d6de916da0702dff1a72ec"
     },
     {
       "cve": "CVE-2026-92512",
@@ -43341,7 +43341,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "9e789fd2633294b5d636407ceb25e19c41bcd771f5d48a997672775f0e02dfcf"
+      "finding_sha256": "adee1abbc14cdd9219f348a59e299c62d220d771a016c749e75da53cb0942fca"
     },
     {
       "cve": "CVE-2026-93105",
@@ -43359,7 +43359,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "4cf3738328fda29b062419021ae50abafcf2ff5698caa11dda053bd713c60115"
+      "finding_sha256": "19500582c5d406ed2750f872989698df9d63ce95a64bbfff69f2bfe2b1cbf66a"
     },
     {
       "cve": "CVE-2026-93125",
@@ -43413,7 +43413,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "790d531758056fd5f66d7188e79d61005d5d74e4b09b8b201226a3e63fb6f2ea"
+      "finding_sha256": "afdd2fe7aff985affd103976111b11f1b81cf6797819c45f03d57a7a9887871f"
     },
     {
       "cve": "CVE-2026-93154",
@@ -43431,7 +43431,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "978cf7b73ee04991549a44dc989eb9cc1dbd690aa4fa05c22f839ba34d223826"
+      "finding_sha256": "e0823b54348bedcdd9c62377fdb67c71071b7a38e3043a7a94a06775259e45ab"
     },
     {
       "cve": "CVE-2026-93175",
@@ -43449,7 +43449,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "41119e17d98c10e073e80501df66734157df0907947e643bd5d4198d42393b26"
+      "finding_sha256": "0ee583e8eb4aec2964b6c736dd5bbfb62dccb4b1a4ddab1800fa301e44226beb"
     },
     {
       "cve": "CVE-2026-93176",
@@ -43467,7 +43467,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "2d2f01be4422612b7f7ad7b558494367559d305e284724c49d503f2fa8a97bba"
+      "finding_sha256": "90ab7e98646e8e7eb867b4461b54a476d39c9225dd2ccfc950f493b0a77a3beb"
     },
     {
       "cve": "CVE-2026-93192",
@@ -43539,7 +43539,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "44a555c1cec22e48ce95eec469beccf4c3034881cfa23fca277f36f4a9f90ee5"
+      "finding_sha256": "b8b91bda40c239469e8bc040c80c68675aa4af7500c7573d43bf5247770ab9ad"
     },
     {
       "cve": "CVE-2026-93221",
@@ -43683,7 +43683,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "7902f7057bdf55fac1c4158c319707f02902ef886594a795b413dd27aa7ffe76"
+      "finding_sha256": "2646075b7160a52f40a42d2c822c64ac947c82ab255ee8ac7224963461ec89cb"
     },
     {
       "cve": "CVE-2026-93824",
@@ -44295,7 +44295,7 @@
       "negative_test": "linux-uapi-package-has-no-code-v1",
       "content_sha256": "3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5",
       "catalog_sha256": "85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b",
-      "finding_sha256": "c505dc08b441bb4bcc060af1651c3844cca08807055b9b1fea03c94992e9aa2f"
+      "finding_sha256": "09686f144d5911948ad35510d08f50ef54783d2f908a8ce921fd34158b3a0c09"
     },
     {
       "cve": "CVE-2026-98171",

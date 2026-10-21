@@ -187,7 +187,12 @@ def apply(report, findings, image_id, component, platform, evidence, *, root=ROO
                 if result.get('Class') != 'os-pkgs' or pkg.get('Arch') != arch or \
                         pkg.get('SrcName') != item['source_package'] or source_version != item['source_version'] or \
                         vulnerability.get('FixedVersion') or finding_digest(vulnerability) != item['finding_sha256']:
-                    raise ValueError('source, available fix or exact reviewed finding content changed')
+                    raise ValueError('source, available fix or exact reviewed finding content changed: ' +
+                        json.dumps(dict(component=component, architecture=arch, cve=item['cve'],
+                            package=item['binary_package'], version=item['version'],
+                            fixed_version=vulnerability.get('FixedVersion'),
+                            expected_finding_sha256=item['finding_sha256'],
+                            actual_finding_sha256=finding_digest(vulnerability)), sort_keys=True))
                 # The only supported case proves zero executable code in the
                 # package, so no linked/reachable/network-input CRITICAL code
                 # can qualify. No other package/kind can take this branch.
