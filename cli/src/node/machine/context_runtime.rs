@@ -655,7 +655,10 @@ mod tests {
                         Ok(())
                     });
                 }
-                assert!(command.status().unwrap().success(), "UID {uid}");
+                assert!(
+                    command.status().unwrap().success(),
+                    "fixture identity command failed"
+                );
             }
         }
         let link = root.path().join("substitute");

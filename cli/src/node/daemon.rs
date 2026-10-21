@@ -1358,8 +1358,8 @@ mod tests {
     #[test]
     fn launchd_target_combines_domain_and_profile_label() {
         let target = launchd_target_for(Some("prod")).expect("launchd target");
-        assert!(target.starts_with("gui/"), "{target}");
-        assert!(target.ends_with("/dev.nyxid.node.prod"), "{target}");
+        assert!(target.starts_with("gui/"));
+        assert!(target.ends_with("/dev.nyxid.node.prod"));
     }
 }
 
