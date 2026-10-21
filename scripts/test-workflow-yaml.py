@@ -16,6 +16,14 @@ spec.loader.exec_module(workflow_permissions)
 
 
 class WorkflowYaml(unittest.TestCase):
+    def test_pr_path_filter_retains_only_its_required_read_scope(self):
+        workflow = {'permissions': {'contents': 'read'}, 'jobs': {'changes': {
+            'steps': [{'uses': 'dorny/paths-filter@' + 'a' * 40}]}}}
+        self.assertEqual(workflow_permissions.validate_permission_scopes(workflow),
+                         ['changes: paths-filter requires pull-requests: read for PR file lists'])
+        workflow['jobs']['changes']['permissions'] = {'contents': 'read', 'pull-requests': 'read'}
+        self.assertEqual(workflow_permissions.validate_permission_scopes(workflow), [])
+
     def test_job_without_explicit_permissions_is_rejected(self):
         workflow = {'jobs': {'added-job': {'runs-on': 'ubuntu-latest', 'steps': []}}}
         self.assertEqual(workflow_permissions.validate_permission_scopes(workflow),

@@ -432,6 +432,9 @@
   archive handoff, reports and fail-closed aggregate. Add explicit read-only
   permissions to build/partition and no permissions to the aggregate; make
   repository-default permission inheritance a local checker failure.
+  Preserve pull-requests:read only for Detect Changes, which needs PR file lists;
+  its reusable caller grants the same read scope. A regression checks this
+  action-specific requirement as well as nested caller permission ceilings.
 - Require --locked for every workflow Cargo compile command, including main's
   billing smoke test. Keep the caller's cache target in dependency verification.
   The release helper test now asserts the exact signed-snapshot request set

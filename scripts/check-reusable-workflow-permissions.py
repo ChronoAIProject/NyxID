@@ -39,6 +39,11 @@ def validate_permission_scopes(workflow):
         grant = permissions(job.get('permissions'), name)
         if grant is None and workflow_grant is None:
             failures.append(f'{name}: missing explicit permissions at job or workflow level')
+        effective = grant if grant is not None else (workflow_grant or {})
+        if any(step.get('uses', '').startswith('dorny/paths-filter@') and
+               step.get('with', {}).get('token') != '' for step in job.get('steps', [])) and \
+                effective.get('pull-requests', 0) < LEVELS['read']:
+            failures.append(f'{name}: paths-filter requires pull-requests: read for PR file lists')
     return failures
 
 
