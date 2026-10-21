@@ -82,6 +82,27 @@ The probe reports source/output bytes, returned/omitted counts and extraction
 time. This measures parsing and retrieval; it is not a model completion or
 production latency benchmark.
 
+### Specialist configuration and reuse
+
+This capability adds no persisted specialist setting or source-binding editor.
+It applies to any assistant chat's verified Notion block read. `result_query`
+is a per-call option; its response scope and output bounds are shared runtime
+behaviour. Restaurant names, outlet aliases, page IDs, database IDs and answers
+do not belong in the retrieval implementation.
+
+Use the existing specialist configuration: linked-service grants select the
+authorized connection, Role describes the task and starting sources, and
+attached skills hold repeatable procedures and source guides. Source identifiers
+in that configuration are guidance, not a page-level access restriction. Skills
+do not grant service access, and guest turns omit attached skills; a channel
+bot's guest-facing source routing must therefore remain available without a
+private skill. The existing agent model setting controls new specialist threads
+unless the owner explicitly chooses a model for the thread.
+
+A structured Knowledge sources editor, persistent retrieval index, scheduled
+refresh and per-agent retrieval policy would be additional features. None is
+introduced by compact evidence presentation.
+
 ## Request flow
 
 1. NyxBot calls the ordinary connected-source read. Its existing grants,
