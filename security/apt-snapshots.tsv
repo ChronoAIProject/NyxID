@@ -5,9 +5,9 @@ ubuntu	focal	focal-security	main,universe	https://snapshot.ubuntu.com/ubuntu/202
 ubuntu	noble	noble	main,universe	https://snapshot.ubuntu.com/ubuntu/20261020T000000Z	cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0
 ubuntu	noble	noble-updates	main,universe	https://snapshot.ubuntu.com/ubuntu/20261020T000000Z	52bb7e89f40f411a401f8b1954098b5775a7d0d497dec182f323f4bc009612d0
 ubuntu	noble	noble-security	main,universe	https://snapshot.ubuntu.com/ubuntu/20261020T000000Z	7f81a77abbf23458062d0bc98e868e00b4392de0c78d339e58f548e8ff64245b
-debian	bookworm	bookworm	main	https://snapshot.debian.org/archive/debian/20261020T000000Z	77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa
-debian	bookworm	bookworm-updates	main	https://snapshot.debian.org/archive/debian/20261020T000000Z	fb5ccff7febeb90f812ca9aa7d8348acac1eeb53791e1c2c68661717b12fdd4c
-debian	bookworm	bookworm-security	main	https://snapshot.debian.org/archive/debian-security/20261020T000000Z	debdb23d9224f88d20a26b1f9876ece2f3112edc94f37f1618bac2fe41f4408f
-debian	trixie	trixie	main	https://snapshot.debian.org/archive/debian/20261021T000000Z	0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675
-debian	trixie	trixie-updates	main	https://snapshot.debian.org/archive/debian/20261021T000000Z	1b01d660dc2b0c97a5045bfa37bb8857623a533549323b749930ac800b5b0847
-debian	trixie	trixie-security	main	https://snapshot.debian.org/archive/debian-security/20261021T000000Z	0caa1ca5caed3dd9ac5e5b14ca25db487b86e2cab3e36a17140a337e5fa6c93e
+debian	bookworm	bookworm	main	https://snapshot.debian.org/archive/debian/20261019T104852Z	77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa
+debian	bookworm	bookworm-updates	main	https://snapshot.debian.org/archive/debian/20261019T104852Z	3b1a71107812063c17338cdbb5df8c479299632134c729d18c29c8d6139456b7
+debian	bookworm	bookworm-security	main	https://snapshot.debian.org/archive/debian-security/20261019T110620Z	debdb23d9224f88d20a26b1f9876ece2f3112edc94f37f1618bac2fe41f4408f
+debian	trixie	trixie	main	https://snapshot.debian.org/archive/debian/20261019T104852Z	0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675
+debian	trixie	trixie-updates	main	https://snapshot.debian.org/archive/debian/20261019T104852Z	1ff5b5841ba7a91e3e4c1f43a5a0886d0a5987f1ab03c5fa3a04dbca0c6e7edf
+debian	trixie	trixie-security	main	https://snapshot.debian.org/archive/debian-security/20261019T110620Z	a2adb375ee0ba03cf8b9c707ba780ddf37cd6d91b069c36fcd28e07466cfae5f

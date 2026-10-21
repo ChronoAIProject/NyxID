@@ -489,7 +489,12 @@ from the checksum-pinned upstream gh 2.102.0 archives for each architecture,
 rather than Ubuntu's vulnerable gh 2.45.0. Renovate covers that version pin;
 changed release archive hashes require review. The Glama runtime now contains only its static musl executable in
 `scratch`; no distro packages or shell ship. Its embedded Rust dependency
-inventory, source identity, final-image scan and subject-bound SBOM stay required. The catalog uses October 20 snapshots for focal/noble/bookworm and
-October 21 for trixie after a reproducible signed-byte mismatch in the older
-trixie-updates pin. Changes are accepted only after native APT replay and
+inventory, source identity, final-image scan and subject-bound SBOM stay required.
+The catalog retains October 20 point-in-time IDs for focal/noble. Bookworm and
+trixie use exact listed runs `debian/20261019T104852Z` and
+`debian-security/20261019T110620Z`, selected through the settled-run resolver
+after the rounded trixie aliases returned different validly signed metadata.
+All signed package-index SHA-256 entries match the preceding Debian pins;
+the Ubuntu metadata and approved header-package payloads are unchanged.
+Changes are accepted only after native APT replay and
 final-image scans in PR CI; local catalog validation is not Linux replay.

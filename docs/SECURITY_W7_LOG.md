@@ -697,3 +697,52 @@
   authenticated indexes/packages, tamper injections and existing timeouts remain
   mandatory. Raw research and command evidence are under
   ~/Library/Caches/nyxid-targets/w7-apt-followup/settled/.
+
+## W7 PR #1976 follow-up — exact Debian pins and catalog bindings
+
+- Generate the complete twelve-suite candidate through refresh-apt-catalog.py
+  with --before 20261019T120000Z. Independently fetch all candidate InRelease
+  files and authenticate their signatures with the distro keyrings extracted
+  from the pinned Debian/Ubuntu base images. All 29 current/candidate/recovered
+  release files verify; verified-signatures.json retains exact commands,
+  keyring hashes and signer fingerprints.
+- Promote all six Debian rows: base/updates use debian/20261019T104852Z and
+  security uses debian-security/20261019T110620Z. Bookworm's matching local
+  bytes did not make its unlisted midnight aliases exact; correct that exposure
+  with the same tooling. All six promoted releases have identical authenticated
+  SHA-256 package-index entries to their preceding pins (including both native
+  architectures), recorded in promoted-index-deltas.json.
+- Check every existing focal/noble URL: all six hashes match and signatures
+  verify. Ubuntu documents arbitrary point-in-time IDs, with no Debian import-run
+  listing semantics; preserve all six existing Ubuntu rows exactly. Future
+  candidates use the settled cutoff. No new Ubuntu candidate is promoted.
+- Rebind the whole-catalog SHA-256 in exactly 3,088 existing image dispositions
+  from 85a0bcfab1bc0fef8773888ab79431bac927433c89f1e3b0eabb82b51c62432b
+  to faee48ce103b1d5f616ca0a897be212cba6863872cd0b7383913d5a9fc1bda95.
+  The approved Ubuntu security metadata/payloads are unchanged. Verify every
+  record differs only in catalog_sha256 and passes the real strict loader;
+  retain every owner, exact finding/content hash, source/version, named absent
+  kernel API, linux-uapi-package-has-no-code-v1 and exclusive 2026-11-19 expiry.
+  No exception, RSA pin or new vulnerability disposition is introduced.
+- Reviewable old/new file:line deltas for all six catalog rows and 3,088 policy
+  bindings are in ~/Library/Caches/nyxid-targets/w7-apt-followup/settled/delta-report.md.
+  investigation.md explains the alias evidence and provenance; results.jsonl
+  and command-results.md retain the exact gate commands, exits and log paths.
+- Native arm64 APT replay passes all nine success/tamper cases for each of
+  trixie, bookworm and noble (27 cases). The real _apt sandbox regression also
+  passes. Focal's full replay fails on an upstream HTTP 503 index response; a
+  fresh full retry fails on an upstream HTTP 503 libdbus-1-dev archive response.
+  The harness correctly keeps those acquisition failures blocking. All focal
+  signed metadata hashes/signatures still match. No catalog or test change is
+  made for the Ubuntu transport outage.
+- Local amd64 emulation remains insufficient: trixie's sqv crashes under QEMU
+  even on an offline --version invocation, without any metadata. Bookworm's
+  baseline succeeds, then QEMU crashes after the correct wrong-digest rejection.
+  Preserve those failed gates and the standalone reproducer in qemu-notes.md;
+  native amd64 acceptance remains hosted CI. No application build or full
+  backend/CLI suite was run.
+- Portable gates pass, including 52 GitHub helper tests, 40 build-catalog and
+  publication tests, 27 APT policy tests, 20 workflow tests, 24 build-input
+  tests, 16 image-disposition tests and 15 image-vulnerability tests, plus
+  packaging, scanner, signing, SBOM workflow and secret-policy suites. Build
+  input/freshness checks, YAML/permission checks and pinned actionlint pass.
