@@ -27,7 +27,16 @@ http
       return;
     }
     if (req.url === "/api/v1/public/config") {
-      res.end("{}");
+      // Real auth pages consume this typed contract; no live providers or
+      // telemetry are enabled by this isolated invitation-wiring fixture.
+      res.end(JSON.stringify({
+        mcp_url: "http://127.0.0.1:4188/mcp",
+        node_ws_url: "ws://127.0.0.1:4188/api/v1/nodes/ws",
+        version: "ci-fixture",
+        social_providers: [],
+        invite_code_required: true,
+        email_auth_enabled: true,
+      }));
       return;
     }
     res.end(JSON.stringify({ fixture: true, url: req.url }));
