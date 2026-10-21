@@ -198,6 +198,31 @@ pub fn derive_verb_from_method(method: &str) -> ApprovalVerb {
     }
 }
 
+/// Only the opaque smart-HTTP fetch protocol can demote a machine Git POST.
+/// Structured bodies must retain their ordinary write/override classification.
+pub fn apply_machine_git_contract(
+    descriptor: &mut OperationDescriptor,
+    headers: &axum::http::HeaderMap,
+    method_override: bool,
+) {
+    let mut content_types = headers.get_all(axum::http::header::CONTENT_TYPE).iter();
+    let upload_pack = content_types
+        .next()
+        .is_some_and(|value| value.as_bytes() == b"application/x-git-upload-pack-request")
+        && content_types.next().is_none();
+    if !method_override
+        && upload_pack
+        && descriptor.verb != ApprovalVerb::Destructive
+        && descriptor.method.as_deref() == Some("POST")
+        && descriptor
+            .resource
+            .as_deref()
+            .is_some_and(|path| path.ends_with("/git-upload-pack"))
+    {
+        descriptor.verb = ApprovalVerb::Read;
+    }
+}
+
 fn build_http_like_descriptor(
     protocol: Protocol,
     method: &str,
@@ -310,6 +335,111 @@ fn truncate_summary(summary: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_git_classification_requires_upload_pack_without_overrides() {
+        use axum::http::{HeaderMap, HeaderValue, header::CONTENT_TYPE};
+        let classify = |content_type: Option<&str>,
+                        header: Option<&str>,
+                        query: Option<&str>,
+                        body: &[u8],
+                        path: &str| {
+            let mut headers = HeaderMap::new();
+            if let Some(value) = content_type {
+                headers.insert(CONTENT_TYPE, HeaderValue::from_str(value).unwrap());
+            }
+            if let Some(name) = header {
+                headers.insert(
+                    axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    HeaderValue::from_static("DELETE"),
+                );
+            }
+            let method_override = crate::services::mcp_service::http_carries_method_override(
+                "POST", &headers, query, body,
+            );
+            let mut operation = build_http_descriptor("POST", path, Some(body));
+            apply_operation_effects(
+                &mut operation,
+                crate::services::mcp_service::operation_effects(
+                    &reqwest::Method::POST,
+                    Default::default(),
+                ),
+                method_override,
+            );
+            apply_machine_git_contract(&mut operation, &headers, method_override);
+            operation.verb
+        };
+        let git = Some("application/x-git-upload-pack-request");
+        let path = "/owner/repo.git/git-upload-pack";
+        assert_eq!(classify(git, None, None, b"0000", path), ApprovalVerb::Read);
+        for header in [
+            "x-http-method-override",
+            "x-method-override",
+            "x-method",
+            "x_http_method_override",
+        ] {
+            assert_eq!(
+                classify(git, Some(header), None, b"0000", path),
+                ApprovalVerb::Write
+            );
+        }
+        for query in [
+            "_method=DELETE",
+            "%5fHttpMethod=DELETE",
+            "method=DELETE",
+            "x-http-method-override=DELETE",
+        ] {
+            assert_eq!(
+                classify(git, None, Some(query), b"0000", path),
+                ApprovalVerb::Write
+            );
+        }
+        for (content_type, body) in [
+            ("application/json", br#"{"_method":"DELETE"}"#.as_slice()),
+            (
+                "application/x-www-form-urlencoded",
+                b"_method=DELETE".as_slice(),
+            ),
+            ("application/json", b"{}".as_slice()),
+            ("text/plain", b"_method=DELETE".as_slice()),
+        ] {
+            assert_eq!(
+                classify(Some(content_type), None, None, body, path),
+                ApprovalVerb::Write
+            );
+        }
+        for content_type in [
+            None,
+            Some("application/octet-stream"),
+            Some("application/x-git-upload-pack-request; charset=utf-8"),
+        ] {
+            assert_eq!(
+                classify(content_type, None, None, b"0000", path),
+                ApprovalVerb::Write
+            );
+        }
+        assert_eq!(
+            classify(git, None, None, b"0000", "/owner/repo.git/git-receive-pack"),
+            ApprovalVerb::Write
+        );
+        let mut headers = HeaderMap::new();
+        headers.append(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/x-git-upload-pack-request"),
+        );
+        headers.append(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let mut operation = build_http_descriptor("POST", path, None);
+        apply_machine_git_contract(&mut operation, &headers, false);
+        assert_eq!(operation.verb, ApprovalVerb::Write);
+        headers.remove(CONTENT_TYPE);
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/x-git-upload-pack-request"),
+        );
+        operation.verb = ApprovalVerb::Destructive;
+        apply_machine_git_contract(&mut operation, &headers, false);
+        assert_eq!(operation.verb, ApprovalVerb::Destructive);
+    }
 
     #[test]
     fn llm_method_overrides_never_retain_read_approval_classification() {

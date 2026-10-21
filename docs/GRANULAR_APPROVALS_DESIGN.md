@@ -38,6 +38,10 @@ Method overrides in headers, query parameters or request fields remain writes,
 including overrides attached to GET/HEAD/OPTIONS on the LLM gateway. An already
 destructive operation retains its destructive classification.
 
+Machine Git fetch POSTs qualify as reads only with a single exact
+`application/x-git-upload-pack-request` content type and no method overrides.
+JSON/form Git bodies retain bounded override inspection; receive-pack is a write.
+
 The verb default applies only after explicit per-service/granular and org policy
 resolution. Explicit true still gates reads, explicit false allows writes, Deny
 still wins over Session bypass, and guests are refused whenever approval would
