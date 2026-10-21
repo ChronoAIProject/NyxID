@@ -945,7 +945,7 @@ async fn telegram_personal_link_saved_reply_web_history_and_unlink_journey() {
             ReplyContent::Text(body.clone())
         )
     );
-    assert!(a.is_ok() && b.is_ok());
+    assert!(a.is_ok() && b.is_ok(), "delivery results: {a:?}, {b:?}");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if j.sends().await.iter().any(|s| {
