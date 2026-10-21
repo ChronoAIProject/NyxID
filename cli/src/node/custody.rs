@@ -830,6 +830,7 @@ mod tests {
         let selected = root.join("profiles/selected");
         let sibling = root.join("profiles/sibling");
         for directory in [&selected, &sibling] {
+            super::super::storage::Directory::create_private(directory).unwrap();
             let config = NodeConfig::new(
                 "wss://example.test".into(),
                 uuid::Uuid::new_v4().to_string(),
