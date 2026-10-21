@@ -3962,6 +3962,118 @@ async fn upstream_cancelled_image_round_keeps_completed_text() {
     state.db.drop().await.unwrap();
 }
 
+#[tokio::test]
+async fn http_turns_inherit_specialist_model_and_preserve_explicit_and_existing_choices() {
+    use crate::services::assistant_team_service as team;
+
+    async fn send(state: &AppState, body: Value) -> AssistantConversation {
+        let mut request = turn_request(None);
+        *request.body_mut() = Body::from(body.to_string());
+        let response = turns(State(state.clone()), test_auth_user(OWNER), request)
+            .await
+            .unwrap();
+        let stream = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let events: Vec<Value> = std::str::from_utf8(&stream)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect();
+        let status = events
+            .iter()
+            .find(|event| event["event"] == "turn.status")
+            .unwrap();
+        let completed = events
+            .iter()
+            .find(|event| event["event"] == "turn.completed")
+            .unwrap();
+        assert_eq!(completed["status"], "completed", "{completed}");
+        let row = engine::get(
+            &state.db,
+            OWNER,
+            status["conversation_id"].as_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(row.active_turn.is_none());
+        row
+    }
+
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let (specialist, _) = team::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        team::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "faq".into(),
+            description: "Answers restaurant questions".into(),
+            display_name: None,
+            persona: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &specialist.id},
+            doc! {"$set": {"model": "nyxagent/channel"}},
+        )
+        .await
+        .unwrap();
+
+    let default = send(&state, json!({"text": "hello"})).await;
+    assert_eq!(default.model, engine::DEFAULT_MODEL);
+    let inherited = send(
+        &state,
+        json!({"text": "opening hours?", "agent_id": specialist.id}),
+    )
+    .await;
+    assert_eq!(inherited.agent_id.as_deref(), Some(specialist.id.as_str()));
+    assert_eq!(inherited.model, "nyxagent/channel");
+    let explicit = send(
+        &state,
+        json!({"text": "research", "agent_id": specialist.id, "model": "nyxagent/research"}),
+    )
+    .await;
+    assert_eq!(explicit.model, "nyxagent/research");
+    let continued = send(
+        &state,
+        json!({"text": "continue", "conversation_id": explicit.id}),
+    )
+    .await;
+    assert_eq!(continued.id, explicit.id);
+    assert_eq!(continued.model, "nyxagent/research");
+    let models: Vec<String> = calls
+        .lock()
+        .await
+        .iter()
+        .filter_map(|call| call.body["model"].as_str())
+        .filter(|model| model.starts_with("nyxagent/"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        models,
+        [
+            engine::DEFAULT_MODEL,
+            "nyxagent/channel",
+            "nyxagent/research",
+            "nyxagent/research"
+        ]
+    );
+    server.abort();
+}
+
 /// The model selector validates against NyxAgent's live list, refuses busy
 /// threads, resets the context on a real change and audits who changed it.
 #[tokio::test]
