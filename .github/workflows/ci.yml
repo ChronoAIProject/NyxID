@@ -798,7 +798,8 @@ jobs:
     name: Coverage (Backend)
     needs: changes
     # Publish exact-commit baselines on rollup tips and full publish gates.
-    if: inputs.force-all || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rollup-')) || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    # Compare every PR into a rollup with that baseline, including docs-only PRs.
+    if: inputs.force-all || startsWith(github.base_ref, 'rollup-') || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rollup-')) || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     uses: ./.github/workflows/backend-tests.yml
     with:
       coverage: true
@@ -813,7 +814,7 @@ jobs:
       contents: read
       actions: read
     needs: changes
-    if: github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
+    if: github.event_name == 'pull_request' && (startsWith(github.base_ref, 'rollup-') || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     continue-on-error: true
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -878,7 +879,7 @@ jobs:
   coverage-backend-summary:
     name: Coverage (Backend Summary)
     needs: [changes, coverage-backend, coverage-backend-base]
-    if: always() && github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
+    if: always() && github.event_name == 'pull_request' && (startsWith(github.base_ref, 'rollup-') || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
