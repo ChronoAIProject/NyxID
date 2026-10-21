@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use futures::TryStreamExt;
 use mongodb::bson::doc;
 use reqwest::Client;
 use url::form_urlencoded;
@@ -2742,7 +2743,8 @@ fn is_public_internal_master_credential_service(service: &DownstreamService) -> 
 
 fn is_auto_provisionable_catalog_service(
     service: &DownstreamService,
-    has_provider_requirement: bool,
+    has_any_provider_requirement: bool,
+    has_required_provider_requirement: bool,
 ) -> bool {
     if super::retired_service_service::is_retired(service) {
         return false;
@@ -2752,10 +2754,10 @@ fn is_auto_provisionable_catalog_service(
         && !service.requires_user_credential
         && (service.service_category == "connection" || service.service_category == "internal")
         && service.service_type == "http"
-        && !has_provider_requirement;
+        && !has_required_provider_requirement;
 
     is_truly_no_auth
-        || (!has_provider_requirement && is_public_internal_master_credential_service(service))
+        || (!has_any_provider_requirement && is_public_internal_master_credential_service(service))
 }
 
 fn auto_provision_auth_snapshot(service: &DownstreamService) -> (&str, &str) {
@@ -2821,11 +2823,19 @@ pub(crate) async fn verify_auto_provision_eligibility(
         return super::platform_key_service::require(db, &ds, effective_owner_id).await;
     }
 
-    let spr_count = db
+    // Deserialize all rows before checking required flags. Missing or malformed
+    // policy must fail closed, matching provisioning and reconciliation.
+    let requirements: Vec<ServiceProviderRequirement> = db
         .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
-        .count_documents(doc! { "service_id": catalog_id })
+        .find(doc! { "service_id": catalog_id })
+        .await?
+        .try_collect()
         .await?;
-    if !is_auto_provisionable_catalog_service(&ds, spr_count > 0) {
+    if !is_auto_provisionable_catalog_service(
+        &ds,
+        !requirements.is_empty(),
+        requirements.iter().any(|r| r.required),
+    ) {
         return Err(AppError::NotFound(
             "Service is no longer available".to_string(),
         ));

@@ -3045,6 +3045,61 @@ pub async fn get_active_token(
         .await?
         .ok_or_else(|| AppError::NotFound("No active token found for this provider".to_string()))?;
 
+    materialize_active_provider_token(db, encryption_keys, user_id, provider_id, token, notifier)
+        .await
+}
+
+/// Materialize only the legacy token lineage captured by an exact approval's
+/// read-only optional-provider snapshot. Refresh may change token bytes, but
+/// replacement/revocation must never substitute another authorization.
+pub(crate) async fn get_active_token_at_revision(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    expected: &UserProviderToken,
+    notifier: Option<&ConnectionExpiryNotifier>,
+) -> AppResult<DecryptedProviderToken> {
+    let current = load_provider_token(db, &expected.id).await?;
+    let same_authority = |token: &UserProviderToken| {
+        token.user_id == expected.user_id
+            && token.provider_config_id == expected.provider_config_id
+            && token.state_version == expected.state_version
+            && token.token_type == expected.token_type
+            && matches!(token.status.as_str(), "active" | "expired")
+            && token.api_key_encrypted.is_some() == expected.api_key_encrypted.is_some()
+            && token.access_token_encrypted.is_some() == expected.access_token_encrypted.is_some()
+    };
+    if !same_authority(&current) {
+        return Err(AppError::Conflict(
+            "Optional provider credential changed".into(),
+        ));
+    }
+    let result = materialize_active_provider_token(
+        db,
+        encryption_keys,
+        &expected.user_id,
+        &expected.provider_config_id,
+        current,
+        notifier,
+    )
+    .await;
+    // Lazy refresh can await the provider and observe a concurrent replacement.
+    // Check the pinned lineage again before releasing any plaintext credential.
+    if !same_authority(&load_provider_token(db, &expected.id).await?) {
+        return Err(AppError::Conflict(
+            "Optional provider credential changed".into(),
+        ));
+    }
+    result
+}
+
+async fn materialize_active_provider_token(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    provider_id: &str,
+    token: UserProviderToken,
+    notifier: Option<&ConnectionExpiryNotifier>,
+) -> AppResult<DecryptedProviderToken> {
     // Update last_used_at
     let now = Utc::now();
     db.collection::<UserProviderToken>(COLLECTION_NAME)

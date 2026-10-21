@@ -872,6 +872,7 @@ async fn run_billing_route_coverage_smoke() {
                         .to_string(),
                     digest: execution_authority_digest,
                 }),
+                optional_provider_authority_digest: None,
                 redemption: None,
             }),
             created_at: now,

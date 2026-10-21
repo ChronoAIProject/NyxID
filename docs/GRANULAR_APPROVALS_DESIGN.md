@@ -402,6 +402,32 @@ fence.
 `ws_frame_injections` is not projected because it is unreachable from the HTTP
 exact-approval execution path.
 
+### Optional-provider authority on automatic no-auth connections
+
+Exact approvals separately persist `optional_provider_authority_digest` for the
+automatic no-auth optional-inheritance path. Its contract is
+`nyxid-exact-optional-provider-authority.v1`; the real execution-authority v1/v2
+projections and their rolling compatibility remain unchanged.
+
+The canonical metadata projection binds owner, connection and catalog identity,
+requirements in deterministic order, their scopes, normalized injection policy,
+provider slug/active state, and selectable legacy token identity,
+`state_version`, type and material presence. No credential bytes or secret-derived
+hashes enter this projection. Token absence is bound, so adding a token or changing
+optional policy cannot silently expand a pending approval's authority.
+
+Create and observe use a metadata-only snapshot: no decryption, refresh or
+`last_used_at` updates. After the shared read-only gates pass, redemption materializes
+the captured policy using the pinned token ID and lineage, then rechecks live
+eligibility and authority after any refresh. It compares the materialized
+resolution's authority before effects and passes the frozen delegated vector to
+MCP execution without resolving optional credentials again.
+
+User credential replacement advances `UserProviderToken.state_version`; normal
+OAuth refresh within the same lineage does not. Historical approvals lacking the
+additive fence cannot authorize new optional inheritance. Routes with no optional
+provider authority retain the existing v1/v2 compatibility behavior.
+
 ### Shared live evaluator
 
 Observe and redeem do not maintain independent catalog, generation, policy, or

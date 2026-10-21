@@ -353,7 +353,8 @@ fn is_public_internal_master_credential_service(service: &DownstreamService) -> 
 
 fn is_auto_provisionable_catalog_service(
     service: &DownstreamService,
-    has_provider_requirement: bool,
+    has_any_provider_requirement: bool,
+    has_required_provider_requirement: bool,
 ) -> bool {
     if super::retired_service_service::is_retired(service) {
         return false;
@@ -363,12 +364,12 @@ fn is_auto_provisionable_catalog_service(
         && !service.requires_user_credential
         && (service.service_category == "connection" || service.service_category == "internal")
         && service.service_type == "http"
-        && !has_provider_requirement;
+        && !has_required_provider_requirement;
 
     (service.platform_key.is_none() && is_truly_no_auth)
         || (service.platform_key.is_some()
             && super::platform_key_service::has_platform_key(service))
-        || (!has_provider_requirement && is_public_internal_master_credential_service(service))
+        || (!has_any_provider_requirement && is_public_internal_master_credential_service(service))
 }
 
 fn auto_provision_auth_snapshot(service: &DownstreamService) -> (&str, &str) {
@@ -1856,10 +1857,11 @@ async fn cleanup_auto_provision_endpoint(db: &mongodb::Database, user_id: &str, 
 ///
 /// Eligible platform-managed services are:
 /// - Truly no-auth services: `auth_method == "none"` on the DownstreamService
-///   AND no `ServiceProviderRequirement` exists.
+///   AND no required `ServiceProviderRequirement` exists.
 /// - Public internal services with a catalog master credential:
 ///   `visibility == "public"`, `service_category == "internal"`,
 ///   `auth_method != "none"`, and no per-user credential requirement.
+///   Legacy rows without `platform_key` also require no `ServiceProviderRequirement`.
 ///
 /// Visibility rules:
 /// - Public eligible services: auto-provision for all users.
@@ -1926,7 +1928,7 @@ async fn auto_provision_owner_services(
 
     // Reconcile first: delete any previously auto-provisioned services whose
     // catalog entry is no longer eligible (deleted, deactivated, changed auth
-    // method, gained an SPR, went private without consent, etc). This is
+    // method, gained a blocking SPR, went private without consent, etc). This is
     // fully independent of the provisioning pipeline below.
     reconcile_stale_auto_provisions(db, user_id, grants, providers).await;
 
@@ -1963,7 +1965,8 @@ async fn auto_provision_owner_services(
         return Ok(());
     }
 
-    // Load SPRs to exclude services that use master credentials
+    // No-auth connections are blocked only by required SPRs; implicit legacy
+    // master-credential connections retain their any-SPR blocker.
     let candidate_ids: Vec<&str> = candidates.iter().map(|s| s.id.as_str()).collect();
     let sprs: Vec<ServiceProviderRequirement> = db
         .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
@@ -1971,12 +1974,23 @@ async fn auto_provision_owner_services(
         .await?
         .try_collect()
         .await?;
-    let has_spr: std::collections::HashSet<&str> =
+    let has_any_spr: std::collections::HashSet<&str> =
         sprs.iter().map(|r| r.service_id.as_str()).collect();
+    let has_required_spr: std::collections::HashSet<&str> = sprs
+        .iter()
+        .filter(|r| r.required)
+        .map(|r| r.service_id.as_str())
+        .collect();
 
     let provisionable_services: Vec<&DownstreamService> = candidates
         .iter()
-        .filter(|s| is_auto_provisionable_catalog_service(s, has_spr.contains(s.id.as_str())))
+        .filter(|s| {
+            is_auto_provisionable_catalog_service(
+                s,
+                has_any_spr.contains(s.id.as_str()),
+                has_required_spr.contains(s.id.as_str()),
+            )
+        })
         .collect();
 
     if provisionable_services.is_empty() {
@@ -2240,8 +2254,8 @@ pub async fn load_valid_app_consents(
 /// A service is stale if its catalog entry:
 /// - No longer exists or is inactive
 /// - No longer satisfies the auto-provision predicate (auth_method changed,
-///   gained an SPR for a no-auth row, changed to SSH, changed category, now
-///   requires user credential, etc.)
+///   gained a required SPR for a no-auth row or any SPR for a legacy master row,
+///   changed to SSH, changed category, now requires user credential, etc.)
 /// - Is now private without `developer_app_ids`
 /// - Is now private with `developer_app_ids` but the user has no valid consent
 async fn reconcile_stale_auto_provisions(
@@ -2308,8 +2322,8 @@ async fn reconcile_stale_auto_provisions(
         };
 
     // Load SPRs for the catalog entries to check the auto-provision predicate.
-    let spr_set: std::collections::HashSet<String> = if catalog_ids.is_empty() {
-        std::collections::HashSet::new()
+    let sprs: Vec<ServiceProviderRequirement> = if catalog_ids.is_empty() {
+        Vec::new()
     } else {
         match db
             .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
@@ -2320,7 +2334,7 @@ async fn reconcile_stale_auto_provisions(
                 .try_collect::<Vec<ServiceProviderRequirement>>()
                 .await
             {
-                Ok(sprs) => sprs.into_iter().map(|r| r.service_id).collect(),
+                Ok(sprs) => sprs,
                 Err(e) => {
                     tracing::warn!(error = %e, "reconcile: failed to load SPRs");
                     return;
@@ -2332,6 +2346,13 @@ async fn reconcile_stale_auto_provisions(
             }
         }
     };
+    let has_any_spr: std::collections::HashSet<&str> =
+        sprs.iter().map(|r| r.service_id.as_str()).collect();
+    let has_required_spr: std::collections::HashSet<&str> = sprs
+        .iter()
+        .filter(|r| r.required)
+        .map(|r| r.service_id.as_str())
+        .collect();
 
     // Collect all developer_app_ids from private catalog entries to load consents
     let all_app_ids: Vec<&str> = catalog_map
@@ -2387,7 +2408,11 @@ async fn reconcile_stale_auto_provisions(
                     if ds.platform_key.is_some() {
                         return !platform_valid.contains(ds.id.as_str());
                     }
-                    if !is_auto_provisionable_catalog_service(ds, spr_set.contains(&ds.id)) {
+                    if !is_auto_provisionable_catalog_service(
+                        ds,
+                        has_any_spr.contains(ds.id.as_str()),
+                        has_required_spr.contains(ds.id.as_str()),
+                    ) {
                         return true; // catalog changed -- stale
                     }
 
@@ -4722,6 +4747,10 @@ async fn enrich_view_with_oauth_client_id(
 
 #[cfg(test)]
 mod tests {
+    mod optional_provider_tests {
+        include!("unified_key_service_optional_provider_tests.rs");
+    }
+
     #[tokio::test]
     async fn tools_hide_only_platform_bindings_and_preserve_byok_inventory() {
         let db = crate::test_utils::connect_test_database("tool_key_inventory")

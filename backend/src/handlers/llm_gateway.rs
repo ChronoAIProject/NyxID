@@ -497,7 +497,7 @@ pub async fn llm_proxy_request(
                     .org_routing
                     .as_ref()
                     .map(|routing| routing.org_user_id.clone())
-                    .unwrap_or_else(|| user_id_str.clone());
+                    .unwrap_or_else(|| auth_user.proxy_resolution_user_id());
                 (
                     resolution.target,
                     true,
@@ -688,11 +688,8 @@ pub async fn llm_proxy_request(
         .await
         .inspect_err(|error| request_audit.admission_error(error))?;
 
-    // Resolve credentials for injection. The new UserService path bakes the
-    // credential into `target` (via auth_method / credential), so we only need
-    // to synthesize a bearer DelegatedCredential for the openai-codex HTTP
-    // transport branch. The legacy path still goes through
-    // `resolve_delegated_credentials` to fetch `UserProviderToken` records.
+    // Preserve selected credentials and Codex bearer synthesis. The shared
+    // helper admits optional legacy tokens only for automatic no-auth routes.
     let delegated = if resolved_via_user_service {
         // New path: target already carries the credential. For openai-codex,
         // which reads the token via `extract_bearer_token`, synthesize a
@@ -704,6 +701,20 @@ pub async fn llm_proxy_request(
                 injection_key: "Authorization".to_string(),
                 credential: target.credential.clone(),
             }]
+        } else if let Some(user_service_id) = operation_user_service_id.as_deref() {
+            delegation_service::resolve_optional_auto_provision_credentials(
+                &state.db,
+                &state.encryption_keys,
+                proxy_service::delegated_credential_owner(
+                    &user_id_str,
+                    owner_for_approval.as_deref(),
+                ),
+                user_service_id,
+                &service_id,
+                &target,
+                Some(&state.connection_expiry_notifier),
+            )
+            .await?
         } else {
             Vec::new()
         }
@@ -1210,7 +1221,7 @@ async fn gateway_provider_request(
                         .org_routing
                         .as_ref()
                         .map(|r| r.org_user_id.clone())
-                        .unwrap_or_else(|| user_id_str.clone()),
+                        .unwrap_or_else(|| auth_user.proxy_resolution_user_id()),
                 );
                 let pool_metadata = resolution.pool_selection.as_ref().map(|selection| {
                     serde_json::json!({
@@ -1428,11 +1439,8 @@ async fn gateway_provider_request(
         .await
         .inspect_err(|error| request_audit.admission_error(error))?;
 
-    // Resolve delegated credentials. When the target came from the new
-    // UserService path, the credential is already baked into `target`; we only
-    // synthesize a bearer DelegatedCredential for the openai-codex branch,
-    // which reads the token via `extract_bearer_token`. The legacy path still
-    // fetches `UserProviderToken` records via `resolve_delegated_credentials`.
+    // Match the provider route: selected credentials stay on their existing
+    // path; automatic no-auth routes can add optional legacy provider tokens.
     let delegated = if resolved_via_user_service {
         if provider_slug == "openai-codex" && target.auth_method == "bearer" {
             vec![delegation_service::DelegatedCredential {
@@ -1441,6 +1449,20 @@ async fn gateway_provider_request(
                 injection_key: "Authorization".to_string(),
                 credential: target.credential.clone(),
             }]
+        } else if let Some(user_service_id) = billing_ctx.user_service_id.as_deref() {
+            delegation_service::resolve_optional_auto_provision_credentials(
+                &state.db,
+                &state.encryption_keys,
+                proxy_service::delegated_credential_owner(
+                    &user_id_str,
+                    effective_owner_for_approval.as_deref(),
+                ),
+                user_service_id,
+                &service_id,
+                &target,
+                Some(&state.connection_expiry_notifier),
+            )
+            .await?
         } else {
             Vec::new()
         }
@@ -1728,8 +1750,12 @@ async fn resolve_provider_slug_for_caller(
     primary: &str,
 ) -> AppResult<String> {
     let Some(chat) = auth.assistant_chat.as_deref() else {
-        return resolve_provider_slug_with_fallback(&state.db, &auth.user_id.to_string(), primary)
-            .await;
+        return resolve_provider_slug_with_fallback(
+            &state.db,
+            &auth.proxy_resolution_user_id(),
+            primary,
+        )
+        .await;
     };
     let selection = state
         .db

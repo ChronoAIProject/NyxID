@@ -328,6 +328,7 @@ pub async fn create_request(
             projection_version: execution_authority::CONTRACT_VERSION.to_string(),
             digest: execution_authority.digest,
         }),
+        optional_provider_authority_digest: execution_authority.optional_provider_authority_digest,
         redemption: None,
     };
     let mut operation = approval_service::ApprovalRequestOperation::from_descriptor(
@@ -599,6 +600,7 @@ pub async fn redeem_request(
             has_cred_for_fallback,
             billing_context_builder,
             execution.resolution.catalog_service_slug.as_deref(),
+            Some(execution.delegated_credentials),
         ))
         .await;
 
@@ -890,6 +892,8 @@ struct ResolvedExecution {
     configured_fallback_node_ids: Vec<String>,
     digest: String,
     legacy_digest: String,
+    optional_provider_authority_digest: Option<String>,
+    delegated_credentials: Vec<super::delegation_service::DelegatedCredential>,
 }
 
 #[derive(Clone, Copy)]
@@ -1019,6 +1023,35 @@ async fn resolve_execution_authority(
         &resolution.target.service.id,
     )
     .await?;
+    let mut optional_provider_authority_digest = None;
+    let mut delegated_credentials = Vec::new();
+    if resolution.node_id.is_none()
+        && let mcp_service::McpToolSource::UserManaged {
+            catalog_service_id: Some(catalog_service_id),
+            ..
+        } = &operation.service().source
+    {
+        let snapshot = super::delegation_service::read_optional_auto_provision_snapshot(
+            &state.db,
+            effective_owner,
+            user_service_id,
+            catalog_service_id,
+            &resolution.target,
+        )
+        .await?;
+        if matches!(mode, ExecutionResolutionMode::MaterializeForExecution) {
+            delegated_credentials =
+                super::delegation_service::materialize_optional_auto_provision_snapshot(
+                    &state.db,
+                    &state.encryption_keys,
+                    &resolution.target,
+                    &snapshot,
+                    Some(&state.connection_expiry_notifier),
+                )
+                .await?;
+        }
+        optional_provider_authority_digest = snapshot.digest;
+    }
     let projection = execution_authority::build_projection(
         &resolution,
         override_identity.as_ref(),
@@ -1034,6 +1067,8 @@ async fn resolve_execution_authority(
         configured_fallback_node_ids,
         digest,
         legacy_digest,
+        optional_provider_authority_digest,
+        delegated_credentials,
     })
 }
 
@@ -1080,6 +1115,13 @@ fn evaluate_authority(
     binding: &ExactServiceApprovalBinding,
     live: ResolvedExecution,
 ) -> ExecutionAuthorityEvaluation {
+    if binding.optional_provider_authority_digest != live.optional_provider_authority_digest {
+        return execution_authority_terminal(
+            ExactServiceApprovalState::Drifted,
+            ExactServiceRedemptionStatus::Drifted,
+            "execution_authority_drift",
+        );
+    }
     match execution_authority_digest_decision(binding, &live.digest, &live.legacy_digest) {
         ExecutionAuthorityDigestDecision::Matched => {
             ExecutionAuthorityEvaluation::Matched(Box::new(live))
@@ -1876,6 +1918,9 @@ fn safe_execution_failure_code(error: &AppError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    mod optional_provider_tests {
+        include!("exact_service_approval_optional_provider_tests.rs");
+    }
     use std::collections::HashMap;
     use std::sync::{
         Arc,
@@ -2029,6 +2074,7 @@ mod tests {
             arguments: input.arguments,
             execution_authority_digest: None,
             execution_authority_binding: None,
+            optional_provider_authority_digest: None,
             redemption: None,
         }
     }

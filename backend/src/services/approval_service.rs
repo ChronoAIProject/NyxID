@@ -2311,6 +2311,7 @@ mod tests {
             arguments: serde_json::json!({}),
             execution_authority_digest: None,
             execution_authority_binding: None,
+            optional_provider_authority_digest: None,
             redemption: None,
         };
 

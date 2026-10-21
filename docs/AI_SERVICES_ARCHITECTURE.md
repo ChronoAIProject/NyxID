@@ -556,6 +556,31 @@ tombstones rather than reviving deleted endpoints or changing a user's binding.
 Inactive automatic rows are reconciled away to release their unique
 `(source, source_id)` before recreation.
 
+### Automatic no-auth connections and optional providers
+
+When a listing is allowed to provision, active HTTP catalog services with
+`auth_method = "none"`, no required user credential, and category `connection`
+or `internal` may auto-connect under the existing visibility and consent rules.
+Optional `ServiceProviderRequirement` (SPR) rows do not block these connections;
+any required SPR does. Repeated listing and adding optional SPRs preserve an
+eligible automatic `UserService` and `UserEndpoint`, including their IDs.
+
+Making an SPR required immediately makes the held automatic route ineligible
+at execution. The next provisioning/reconciliation pass removes its automatic
+row and orphan endpoint without recreating them. Making it optional again can
+provision a new pair of IDs. Missing or malformed requirement policy fails closed.
+The implicit legacy public/internal master-credential fallback still blocks on
+**any** SPR; explicit catalog `platform_key` eligibility and grants are unchanged.
+
+REST, MCP, both LLM gateway routes, and utility inference share a narrow optional
+inheritance path for automatic, no-auth, credentialless connections. It verifies
+the persisted row and binds its authorized effective owner, catalog, endpoint,
+and resolved destination before selecting that owner's legacy `UserProviderToken`.
+An absent token permits execution without its optional injection. It never picks
+an arbitrary modern `UserApiKey` by provider or uses the billing payer as owner.
+Explicit credentials, manual connections, node-managed or platform-bound routes,
+and explicit multi-account connection/target selection keep their existing paths.
+
 ### Known gaps
 
 1. Creating a service on a disabled row's slug is accepted, then re-enabling the

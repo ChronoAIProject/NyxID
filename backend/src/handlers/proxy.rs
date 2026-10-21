@@ -4734,29 +4734,32 @@ async fn execute_resolved_proxy_inner<'a>(
     let durable_authorization_body = body.clone().unwrap_or_default();
     let request_body_len = body.as_ref().map(|b| b.len() as i64).unwrap_or(0);
 
-    // === Delegated Credentials ===
-    // Delegation resolves a legacy `UserProviderToken` and injects it as a
-    // header / bearer / query / path credential. That flow belongs to the
-    // pre-streamlined-services world where the user "connected" a provider
-    // separately from choosing a service. The new-path `UserService` carries
-    // its own `UserApiKey` credential plus an `auth_method` snapshot, so the
-    // proxy already injects the right credential directly from
-    // `target.credential` -- calling delegation on top would either
-    // double-inject (if both paths hold credentials) or hard-fail with
-    // "Provider ... connection required" for users who only set up their
-    // credential via AI Services (no UserProviderToken ever created).
-    //
-    // Skip delegation entirely when the target came from the new path.
-    // For node-routed legacy services the node agent injects credentials
-    // locally, so a missing server-side provider token is not fatal.
-    let delegated = if resolved_user_service_id.is_some() {
-        Vec::new()
+    // Explicit connections carry their own credential in the resolved target.
+    // Only automatic no-auth connections may add optional legacy provider tokens.
+    // Node routes retain local credential injection.
+    let proxy_resolution_user_id = auth_user.proxy_resolution_user_id();
+    let delegated_owner = proxy_service::delegated_credential_owner(
+        &proxy_resolution_user_id,
+        effective_owner_for_approval.as_deref(),
+    );
+    let delegated = if let Some(user_service_id) = resolved_user_service_id.as_deref() {
+        if node_route.is_none() {
+            Box::pin(
+                delegation_service::resolve_optional_auto_provision_credentials(
+                    &state.db,
+                    &state.encryption_keys,
+                    delegated_owner,
+                    user_service_id,
+                    service_id,
+                    &target,
+                    Some(&state.connection_expiry_notifier),
+                ),
+            )
+            .await?
+        } else {
+            Vec::new()
+        }
     } else {
-        let proxy_resolution_user_id = auth_user.proxy_resolution_user_id();
-        let delegated_owner = proxy_service::delegated_credential_owner(
-            &proxy_resolution_user_id,
-            effective_owner_for_approval.as_deref(),
-        );
         match Box::pin(delegation_service::resolve_delegated_credentials(
             &state.db,
             &state.encryption_keys,
