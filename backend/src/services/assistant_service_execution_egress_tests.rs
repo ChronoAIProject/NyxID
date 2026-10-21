@@ -224,9 +224,19 @@ async fn actual_http_consent_ignores_correlation_drift_but_binds_account_and_ide
         .unwrap();
     let card: Value = serde_json::from_slice(&bytes).unwrap();
     let ack = card["acknowledgement_id"].as_str().unwrap();
-    acks::decide(&f.state.db, &f.owner, &f.row.id, ack, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        ack,
+        true,
+    )
+    .await
+    .unwrap();
     for (account, idempotency) in [("account-b", "action-1"), ("account-a", "action-2")] {
         let refused = send(&f, Some(ack), account, idempotency, next_trace).await;
         assert_eq!(refused.status(), 409);

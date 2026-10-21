@@ -1172,9 +1172,19 @@ async fn machine_declared_services_are_bound_to_job_card_and_audit() {
         .unwrap()
         .unwrap();
     assert!(row.summary.contains("declared services: declared-service"));
-    acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        id,
+        true,
+    )
+    .await
+    .unwrap();
     args["acknowledgement_id"] = json!(id);
     let result = call(&f.state, &f.chat, "nyx__machine_exec", args)
         .await

@@ -164,9 +164,19 @@ async fn assistant_pool_approval_pins_member_across_requests_and_balance_ticks()
         .await
         .unwrap();
     let chat = f.auth.assistant_chat.as_ref().unwrap();
-    acks::decide(&f.state.db, &chat.user_id, &chat.conversation_id, id, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: chat.user_id.clone(),
+        },
+        &chat.user_id,
+        &chat.conversation_id,
+        id,
+        true,
+    )
+    .await
+    .unwrap();
     let response = request(&f, Some(id)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     to_bytes(response.into_body(), 4096).await.unwrap();
@@ -210,6 +220,10 @@ async fn assistant_pool_approved_predispatch_outage_proposes_and_pins_new_member
     let chat = f.auth.assistant_chat.as_ref().unwrap();
     acks::decide(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: chat.user_id.clone(),
+        },
         &chat.user_id,
         &chat.conversation_id,
         first_ack,
@@ -249,6 +263,10 @@ async fn assistant_pool_approved_predispatch_outage_proposes_and_pins_new_member
     assert!(f.second.requests.lock().await.is_empty());
     acks::decide(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: chat.user_id.clone(),
+        },
         &chat.user_id,
         &chat.conversation_id,
         second_ack,

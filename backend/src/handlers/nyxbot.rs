@@ -2942,12 +2942,23 @@ async fn thread_conversation(
 async fn reply_decision(
     state: &AppState,
     row: &NyxbotChannel,
+    chat: &NyxbotThread,
+    sender: &Sender<'_>,
     conversation_id: &str,
     text: &str,
 ) -> AppResult<Option<(bool, bool)>> {
+    let authority =
+        crate::services::assistant_platform_reply_decision::OwnerReplyAuthority::verified_sender(
+            row,
+            chat,
+            sender.kind,
+            sender.owner_eligible,
+            sender.id,
+        )?;
     let Some(decided) = crate::services::assistant_platform_reply_decision::decide_owner_reply(
         &state.db,
-        &row.user_id,
+        &state.audit_runtime,
+        &authority,
         conversation_id,
         text,
     )
@@ -3070,7 +3081,7 @@ async fn start_chat_turn(
     // Nobody else can.
     let mut answered = None;
     if exists && !guest {
-        match reply_decision(state, row, &conversation_id, text).await {
+        match reply_decision(state, row, chat, sender, &conversation_id, text).await {
             Ok(Some((_, true))) => {
                 return Ok(Inbound::Reply(
                     "Decision saved. The automation will continue in its thread.".into(),

@@ -595,6 +595,10 @@ async fn involved_work_keeps_denied_notice_to_the_exact_assigning_thread_and_rou
     );
     let decided = acks::decide_as(
         db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         None,
         &card.id,
@@ -677,25 +681,61 @@ async fn nyxbot_decides_only_cards_raised_for_it_while_the_owner_decides_every_c
     alone.routing = Some(CardRouting::NotInvolved);
     cards.insert_one(&alone).await.unwrap();
     for id in [&legacy.id, &alone.id] {
-        let error = acks::decide_as(db, &f.owner, None, id, true, acks::Decider::Nyxbot, None)
-            .await
-            .unwrap_err();
+        let error = acks::decide_as(
+            db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            None,
+            id,
+            true,
+            acks::Decider::Nyxbot,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(error.is_forbidden(), "{id}: {error}");
         let row = cards.find_one(doc! {"_id": id}).await.unwrap().unwrap();
         assert_eq!(row.status, "pending");
     }
     // The owner keeps authority over legacy and not-involved cards.
-    let decided = acks::decide(db, &f.owner, &f.row.id, &legacy.id, true)
-        .await
-        .unwrap();
+    let decided = acks::decide(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &legacy.id,
+        true,
+    )
+    .await
+    .unwrap();
     assert_eq!(decided.status, "allowed");
-    let decided = acks::decide(db, &f.owner, &f.row.id, &alone.id, false)
-        .await
-        .unwrap();
+    let decided = acks::decide(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &alone.id,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(decided.status, "denied");
     // The assigned card is NyxBot's to decide.
     let decided = acks::decide_as(
         db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         None,
         &card.id,
@@ -790,6 +830,10 @@ async fn group_work_with_nyxbot_routes_to_its_home_and_rechecks_membership() {
         .unwrap();
     let error = acks::decide_as(
         db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         None,
         &card.id,
@@ -806,9 +850,19 @@ async fn group_work_with_nyxbot_routes_to_its_home_and_rechecks_membership() {
             .unwrap(),
         None
     );
-    let decided = acks::decide(db, &f.owner, &f.row.id, &card.id, true)
-        .await
-        .unwrap();
+    let decided = acks::decide(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &card.id,
+        true,
+    )
+    .await
+    .unwrap();
     assert_eq!(decided.status, "allowed");
     // An org group never counts as a group NyxBot is in.
     let org_group = personal_group(db, &f.owner, &[&nyxbot.id]).await;
@@ -856,9 +910,19 @@ async fn allowed_skill_shortcut_applies_only_within_the_same_routing() {
             report_to: f.nyxbot_thread.clone()
         })
     );
-    acks::decide(db, &f.owner, &f.row.id, &id, true)
-        .await
-        .unwrap();
+    acks::decide(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &id,
+        true,
+    )
+    .await
+    .unwrap();
     let (again, error) = request(f.chat.clone()).await;
     assert!(!error, "{again}");
     assert_eq!(again["status"], "allowed_pending_attachment");
@@ -1070,9 +1134,19 @@ async fn admission_filters_ineligible_skill_events_and_terminalizes_their_outbox
         .unwrap();
         assert!(error, "{value}");
         let id = value["acknowledgement_id"].as_str().unwrap().to_owned();
-        acks::decide(db, &f.owner, &f.row.id, &id, true)
-            .await
-            .unwrap();
+        acks::decide(
+            db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            &f.row.id,
+            &id,
+            true,
+        )
+        .await
+        .unwrap();
         ids.push(id);
     }
     let [assigned, alone, legacy, stripped, group_gone, group_live] = ids.as_slice() else {
@@ -1198,9 +1272,19 @@ async fn skill_notification_delivery_follows_the_cards_routing() {
         .update_one(doc! {"_id": &stripped}, doc! {"$unset": {"routing": ""}})
         .await
         .unwrap();
-    let card = acks::decide(db, &f.owner, &f.row.id, &stripped, true)
-        .await
-        .unwrap();
+    let card = acks::decide(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &stripped,
+        true,
+    )
+    .await
+    .unwrap();
     crate::handlers::assistant_team::permission_decided(&f.state, &f.owner, &card).await;
     let row = cards
         .find_one(doc! {"_id": &stripped})
@@ -1233,9 +1317,19 @@ async fn skill_notification_delivery_follows_the_cards_routing() {
     // An assigned card reaches the exact assigning thread, and its decision
     // continuation keeps reporting there.
     let assigned = request("assigned").await;
-    let card = acks::decide(db, &f.owner, &f.row.id, &assigned, true)
-        .await
-        .unwrap();
+    let card = acks::decide(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &assigned,
+        true,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         card.routing,
         Some(CardRouting::Assigned {
@@ -1370,9 +1464,19 @@ async fn routed_request_notice_is_fenced_to_the_live_turn_and_the_cards_routing(
         .await
         .unwrap();
     // A card decided meanwhile needs no notice.
-    acks::decide(db, &f.owner, &f.row.id, &second_card.id, false)
-        .await
-        .unwrap();
+    acks::decide(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &second_card.id,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         acks::notify_nyxbot_request(db, &f.chat, &second_card, event())
             .await

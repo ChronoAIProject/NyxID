@@ -2420,38 +2420,50 @@ pub fn parse_reply(text: &str) -> Option<(bool, Option<String>)> {
 /// applies only when exactly one card was raised since `since` (the owner's
 /// previous message), so an answer to another question never confirms a
 /// stale card.
+struct ReplyChange<'a> {
+    db: &'a Database,
+    audit: DecisionAudit<'a>,
+    owner: &'a str,
+    conversation_ids: &'a [String],
+    text: &'a str,
+    since: Option<DateTime<Utc>>,
+}
+
+// Keeps selection in the same snapshot as the selected card's live fences,
+// mutation, durable continuations and admitted typed event. There is no I/O
+// outside Mongo in this callback, and no event material in the reply context.
 pub async fn decide_reply(
     db: &Database,
+    runtime: &super::audit_runtime::AuditRuntime,
+    principal: &crate::models::audit_outbox::AuditPrincipal,
     owner: &str,
     conversation_ids: &[String],
     text: &str,
     since: Option<DateTime<Utc>>,
 ) -> AppResult<Option<AssistantAcknowledgement>> {
-    let Some((allow, code)) = parse_reply(text) else {
-        return Ok(None);
-    };
-    if conversation_ids.is_empty() {
+    if parse_reply(text).is_none() || conversation_ids.is_empty() {
         return Ok(None);
     }
-    let now = Utc::now();
-    let pending: Vec<AssistantAcknowledgement> = db
-        .collection::<AssistantAcknowledgement>(ACKS)
-        .find(
-            doc! {"user_id": owner, "conversation_id": {"$in": conversation_ids},
-            "kind": "action", "status": "pending", "decider": "user",
-            "authored_skill": bson::Bson::Null,
-            "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
-        )
-        .await?
-        .try_collect()
-        .await?;
-    let chosen = choose_reply(pending, code.as_deref(), since);
-    let Some(ack) = chosen else {
-        return Ok(None);
+    let change = ReplyChange {
+        db,
+        audit: DecisionAudit::caller(runtime, principal),
+        owner,
+        conversation_ids,
+        text,
+        since,
     };
-    decide(db, owner, &ack.conversation_id, &ack.id, allow)
-        .await
-        .map(Some)
+    super::audit_runtime::transaction::run(db, &change, |session, change| {
+        Box::pin(decide_reply_in_session(
+            change.db,
+            session,
+            &change.audit,
+            change.owner,
+            change.conversation_ids,
+            change.text,
+            change.since,
+        ))
+    })
+    .await
 }
 
 fn choose_reply(
@@ -2499,6 +2511,7 @@ pub(crate) async fn select_reply_in_session(
 pub(crate) async fn decide_reply_in_session(
     db: &Database,
     session: &mut ClientSession,
+    audit: &DecisionAudit<'_>,
     owner: &str,
     conversation_ids: &[String],
     text: &str,
@@ -2512,6 +2525,7 @@ pub(crate) async fn decide_reply_in_session(
     decide_in_session(
         db,
         session,
+        audit,
         owner,
         Some(&ack.conversation_id),
         &ack.id,
@@ -2706,9 +2720,228 @@ pub enum Decider {
     NyxbotOwnerConfirmed,
 }
 
+// The owner creates this once outside its complete transaction retry callback.
+pub(crate) struct DecisionAudit<'a> {
+    runtime: &'a super::audit_runtime::AuditRuntime,
+    principal: &'a crate::models::audit_outbox::AuditPrincipal,
+    operation_id: uuid::Uuid,
+    event_id: uuid::Uuid,
+    owner_channel: bool,
+}
+
+impl<'a> DecisionAudit<'a> {
+    pub(crate) fn caller(
+        runtime: &'a super::audit_runtime::AuditRuntime,
+        principal: &'a crate::models::audit_outbox::AuditPrincipal,
+    ) -> Self {
+        Self {
+            runtime,
+            principal,
+            operation_id: uuid::Uuid::new_v4(),
+            event_id: uuid::Uuid::new_v4(),
+            owner_channel: false,
+        }
+    }
+
+    // Caller must carry the authenticated exact bot/chat/sender binding and
+    // recheck it in the business session before invoking a decision helper.
+    // This constructor records that admitted route; it grants no authority.
+    pub(crate) fn owner_channel(
+        runtime: &'a super::audit_runtime::AuditRuntime,
+        principal: &'a crate::models::audit_outbox::AuditPrincipal,
+    ) -> crate::errors::AppResult<Self> {
+        if !matches!(
+            principal,
+            crate::models::audit_outbox::AuditPrincipal::Person { .. }
+        ) {
+            return Err(crate::errors::AppError::Forbidden(
+                "Channel decisions require a verified human owner".into(),
+            ));
+        }
+        Ok(Self {
+            owner_channel: true,
+            ..Self::caller(runtime, principal)
+        })
+    }
+
+    // The actor is distinct from the affected domain owner, but it must
+    // match the acting user whose private card/thread this call fences.
+    fn require_actor(&self, user: &str) -> crate::errors::AppResult<()> {
+        use crate::models::audit_outbox::AuditPrincipal;
+        let matches = match self.principal {
+            AuditPrincipal::Person { id } => id == user,
+            AuditPrincipal::ApiKey { owner_id, .. } => owner_id == user,
+            _ => false,
+        };
+        if !matches {
+            return Err(crate::errors::AppError::Forbidden(
+                "Acknowledgement caller identity changed".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn approver_kind(
+        &self,
+        decider: Decider,
+    ) -> crate::errors::AppResult<crate::models::audit_outbox::AcknowledgementApproverKind> {
+        use crate::models::audit_outbox::{AcknowledgementApproverKind as Kind, AuditPrincipal};
+        if !matches!(
+            self.principal,
+            AuditPrincipal::Person { .. } | AuditPrincipal::ApiKey { .. }
+        ) {
+            return Err(crate::errors::AppError::Forbidden(
+                "Acknowledgement decisions require a verified caller".into(),
+            ));
+        }
+        if decider != Decider::User {
+            return Ok(Kind::Nyxbot);
+        }
+        match self.principal {
+            AuditPrincipal::Person { .. } if self.owner_channel => Ok(Kind::OwnerChannel),
+            AuditPrincipal::Person { .. } => Ok(Kind::Owner),
+            AuditPrincipal::ApiKey { .. } if !self.owner_channel => Ok(Kind::ApiKey),
+            _ => Err(crate::errors::AppError::Forbidden(
+                "Acknowledgement decisions require a verified caller".into(),
+            )),
+        }
+    }
+
+    // Admit the complete bundle in the business snapshot before its writes.
+    // This reserves no counts: it covers the retained direct voice projection,
+    // while typed enqueue also rechecks admission in that same session.
+    async fn require_capacity_in_session(
+        &self,
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+        allow: bool,
+        voice: bool,
+    ) -> crate::errors::AppResult<()> {
+        use super::audit_runtime::policy::AuditTier;
+        let tier = if allow {
+            AuditTier::Standard
+        } else {
+            AuditTier::Narrowing
+        };
+        let reservations = 1 + u64::from(voice);
+        self.runtime
+            .require_new_in_session(db, session, tier, reservations)
+            .await
+    }
+
+    // The domain caller supplies the owner resolved from its loaded target.
+    // This projects a committed decision; it does not authenticate or authorize.
+    async fn enqueue_decided_in_session(
+        &self,
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+        row: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
+        owner: crate::models::audit_outbox::AuditOwner,
+        decider: Decider,
+    ) -> crate::errors::AppResult<()> {
+        use super::audit_outbox_service::{self, AuditEvent};
+        use super::audit_runtime::policy::AuditTier;
+        use crate::models::audit_outbox::{AcknowledgementDecision, AuditDetail, AuditStage};
+        let (decision, tier) = match row.status.as_str() {
+            "allowed" => (AcknowledgementDecision::Allow, AuditTier::Standard),
+            "denied" => (AcknowledgementDecision::Deny, AuditTier::Narrowing),
+            _ => {
+                return Err(crate::errors::AppError::Conflict(
+                    "Acknowledgement has no committed decision".into(),
+                ));
+            }
+        };
+        let event = AuditEvent {
+            operation_id: self.operation_id.to_string(),
+            stage: AuditStage::Committed,
+            principal: self.principal.clone(),
+            owner,
+            action: "assistant_acknowledgement_decided",
+            target_id: Some(row.id.clone()),
+        }
+        .with_detail(AuditDetail::AcknowledgementDecision {
+            decision,
+            card_kind: decision_card_kind(row)?,
+            approver_kind: self.approver_kind(decider)?,
+        });
+        audit_outbox_service::enqueue_admitted_in_session(
+            db,
+            session,
+            self.runtime,
+            tier,
+            &self.event_id,
+            &event,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// The decision target owns this record; principal remains the verified caller.
+async fn decision_owner_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    target: &AssistantConversation,
+) -> AppResult<crate::models::audit_outbox::AuditOwner> {
+    use crate::models::{assistant_agent::AssistantAgent, audit_outbox::AuditOwner, user::User};
+    let owner_id = match target.agent_id.as_deref() {
+        Some(id) => {
+            db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+                .find_one(doc! {"_id":id})
+                .session(&mut *session)
+                .await?
+                .ok_or_else(not_found)?
+                .user_id
+        }
+        None => target.user_id.clone(),
+    };
+    if target
+        .agent_owner_id
+        .as_deref()
+        .is_some_and(|bound| bound != owner_id)
+    {
+        return Err(AppError::Conflict(
+            "Acknowledgement target ownership changed".into(),
+        ));
+    }
+    let owner = db
+        .collection::<User>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id":&owner_id})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(not_found)?;
+    Ok(if owner.user_type.is_org() {
+        AuditOwner::Org { id: owner.id }
+    } else {
+        AuditOwner::Person { id: owner.id }
+    })
+}
+
+fn decision_card_kind(
+    row: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
+) -> crate::errors::AppResult<crate::models::audit_outbox::AcknowledgementCardKind> {
+    use crate::models::audit_outbox::AcknowledgementCardKind as Kind;
+    Ok(match row.kind.as_str() {
+        "action" => Kind::Action,
+        "service" => Kind::Service,
+        "account" => Kind::Account,
+        "operations" => Kind::Operations,
+        "skills" => Kind::Skills,
+        "machine" => Kind::Machine,
+        "saved_login" => Kind::SavedLogin,
+        _ => {
+            return Err(crate::errors::AppError::Conflict(
+                "Unsupported acknowledgement kind".into(),
+            ));
+        }
+    })
+}
+
 /// Decide a card as the owner from its own conversation.
 pub async fn decide(
     db: &Database,
+    runtime: &super::audit_runtime::AuditRuntime,
+    principal: &crate::models::audit_outbox::AuditPrincipal,
     user: &str,
     conversation: &str,
     id: &str,
@@ -2716,6 +2949,8 @@ pub async fn decide(
 ) -> AppResult<AssistantAcknowledgement> {
     Box::pin(decide_as(
         db,
+        runtime,
+        principal,
         user,
         Some(conversation),
         id,
@@ -2729,8 +2964,11 @@ pub async fn decide(
 /// Decide a card. The owner decides from the card's conversation; the owner's
 /// NyxBot decides only NyxBot-routed specialist requests. A specialist grant is
 /// also written to the agent's durable grants so every thread keeps it.
+#[allow(clippy::too_many_arguments)]
 pub async fn decide_as(
     db: &Database,
+    runtime: &super::audit_runtime::AuditRuntime,
+    principal: &crate::models::audit_outbox::AuditPrincipal,
     user: &str,
     conversation: Option<&str>,
     id: &str,
@@ -2738,7 +2976,19 @@ pub async fn decide_as(
     decider: Decider,
     reason: Option<&str>,
 ) -> AppResult<AssistantAcknowledgement> {
-    decide_with_voice(db, user, conversation, id, allow, decider, reason, None).await
+    decide_with_voice(
+        db,
+        runtime,
+        principal,
+        user,
+        conversation,
+        id,
+        allow,
+        decider,
+        reason,
+        None,
+    )
+    .await
 }
 
 /// The decision and its durable continuation effects join the caller's
@@ -2748,6 +2998,7 @@ pub async fn decide_as(
 pub(crate) async fn decide_in_session(
     db: &Database,
     session: &mut ClientSession,
+    audit: &DecisionAudit<'_>,
     user: &str,
     conversation: Option<&str>,
     id: &str,
@@ -2855,6 +3106,12 @@ pub(crate) async fn decide_in_session(
     if by_nyxbot && access.as_ref().is_some_and(|a| !a.can_maintain()) {
         return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
     }
+    let owner = decision_owner_in_session(db, session, &target).await?;
+    audit.require_actor(user)?;
+    audit.approver_kind(decider)?;
+    audit
+        .require_capacity_in_session(db, session, allow, voice.is_some())
+        .await?;
     let subagent = target.role == AgentRole::Subagent;
     let now = Utc::now();
     if row.kind == "service" {
@@ -3047,12 +3304,29 @@ pub(crate) async fn decide_in_session(
                 "session_id":voice.session.id,"acknowledgement_id":row.id,"request_id":row.voice_request_id,
                 "continuation_receipt_id":row.continuation_receipt_id})).await?;
     }
+    audit
+        .enqueue_decided_in_session(db, session, &row, owner, decider)
+        .await?;
     Ok(row)
+}
+
+struct DecisionChange<'a> {
+    db: &'a Database,
+    audit: DecisionAudit<'a>,
+    user: &'a str,
+    conversation: Option<&'a str>,
+    id: &'a str,
+    allow: bool,
+    decider: Decider,
+    reason: Option<&'a str>,
+    voice: Option<super::voice::confirmation::DecisionFence>,
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn decide_with_voice(
     db: &Database,
+    runtime: &super::audit_runtime::AuditRuntime,
+    principal: &crate::models::audit_outbox::AuditPrincipal,
     user: &str,
     conversation: Option<&str>,
     id: &str,
@@ -3061,35 +3335,32 @@ pub(crate) async fn decide_with_voice(
     reason: Option<&str>,
     voice: Option<super::voice::confirmation::DecisionFence>,
 ) -> AppResult<AssistantAcknowledgement> {
-    let db = db.clone();
-    let user = user.to_owned();
-    let conversation = conversation.map(str::to_owned);
-    let id = id.to_owned();
-    let reason = reason.map(|reason| super::assistant_nyxagent::excerpt(reason, 300));
-    let mut session = db.client().start_session().await?;
-    let row = session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let operation = Box::pin(async {
-                decide_in_session(
-                    &db,
-                    session,
-                    &user,
-                    conversation.as_deref(),
-                    &id,
-                    allow,
-                    decider,
-                    reason.as_deref(),
-                    voice.as_ref(),
-                )
-                .await
-            })
-            .await;
-            mutations::transaction_result(operation)
-        })
-        .await
-        .map_err(mutations::map_transaction_error)?;
-    Ok(row)
+    let change = DecisionChange {
+        db,
+        audit: DecisionAudit::caller(runtime, principal),
+        user,
+        conversation,
+        id,
+        allow,
+        decider,
+        reason,
+        voice,
+    };
+    super::audit_runtime::transaction::run(db, &change, |session, change| {
+        Box::pin(decide_in_session(
+            change.db,
+            session,
+            &change.audit,
+            change.user,
+            change.conversation,
+            change.id,
+            change.allow,
+            change.decider,
+            change.reason,
+            change.voice.as_ref(),
+        ))
+    })
+    .await
 }
 
 #[path = "assistant_skill_notifications.rs"]
@@ -3155,43 +3426,6 @@ pub(crate) async fn consume_action_in_session(
     Ok(result.modified_count == 1)
 }
 
-/// Who decided a card: the owner's NyxBot (deciding a specialist's routed
-/// request), the owner in person, or an API key acting for the owner.
-fn approver_kind(
-    row: &AssistantAcknowledgement,
-    actor: &audit_service::AuditActor,
-) -> &'static str {
-    if row.decided_by.as_deref() == Some("orchestrator") {
-        "nyxbot"
-    } else if actor.api_key_id.is_some() {
-        "api_key"
-    } else {
-        "owner"
-    }
-}
-
-pub async fn audit_decision(
-    db: &Database,
-    actor: &audit_service::AuditActor,
-    row: &AssistantAcknowledgement,
-) {
-    let _ = audit_service::log_actor_event(
-        db.clone(),
-        actor,
-        "assistant_acknowledgement_decided",
-        Some(json!({
-            "conversation_id": row.conversation_id, "kind": row.kind,
-            "service_id": row.service_id, "tool_name": row.tool_name,
-            "decision": if row.status == "allowed" {"allow"} else {"deny"},
-            "requester_agent_id": row.requester_agent_id,
-            "approver_user_id": actor.user_id,
-            "approver_api_key_id": actor.api_key_id,
-            "approver_kind": approver_kind(row, actor),
-        })),
-    )
-    .await;
-}
-
 /// Confirm exact changing actions initiated by untrusted webhook data. Native
 /// tools use their closed inventory; service callers use catalog/HTTP semantics.
 pub fn webhook_confirmation_required(
@@ -3250,3 +3484,7 @@ mod reply_selection_tests {
         assert!(choose_reply(vec![stale], None, Some(now)).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "assistant_acknowledgement_audit_tests.rs"]
+mod decision_audit_tests;

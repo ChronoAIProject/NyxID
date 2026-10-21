@@ -195,9 +195,19 @@ async fn actual_job_launch_detached_gateway_and_revocation_preserve_personal_pla
                     .unwrap()
                     .contains("organization connection")
             );
-            acks::decide(&f.state.db, &f.owner, &f.row.id, ack, true)
-                .await
-                .unwrap();
+            acks::decide(
+                &f.state.db,
+                &f.state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: f.owner.clone(),
+                },
+                &f.owner,
+                &f.row.id,
+                ack,
+                true,
+            )
+            .await
+            .unwrap();
             arguments["acknowledgement_id"] = json!(ack);
             result = Box::pin(crate::handlers::machine_tools::call(
                 &f.state,

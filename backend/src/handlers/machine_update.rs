@@ -767,9 +767,19 @@ mod tests {
                 .contains("different granted native machine")
         );
         let id = card["acknowledgement_id"].as_str().unwrap();
-        acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
-            .await
-            .unwrap();
+        acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            &f.row.id,
+            id,
+            true,
+        )
+        .await
+        .unwrap();
         let (result, error) = tool(
             &f.state,
             &f.chat,
@@ -1042,9 +1052,19 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(card.kind, "action");
-        acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
-            .await
-            .unwrap();
+        acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            &f.row.id,
+            id,
+            true,
+        )
+        .await
+        .unwrap();
         let (result, error) = tool(
             &f.state,
             &f.chat,
@@ -1268,9 +1288,19 @@ mod tests {
         );
         assert!(seen.try_recv().is_err());
         let id = card["acknowledgement_id"].as_str().unwrap();
-        acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
-            .await
-            .unwrap();
+        acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            &f.row.id,
+            id,
+            true,
+        )
+        .await
+        .unwrap();
         let mut approved = args;
         approved["acknowledgement_id"] = json!(id);
         let (result, _) = tool(&f.state, &f.chat, &approved).await.unwrap();

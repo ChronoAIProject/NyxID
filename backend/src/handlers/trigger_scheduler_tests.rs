@@ -1241,7 +1241,15 @@ async fn confirmation_waits_and_resumes(kind: &str) {
     };
     let decided_at = std::time::Instant::now();
     let resumed = crate::services::assistant_acknowledgement_service::decide(
-        &state.db, OWNER, &thread.id, &ack_id, true,
+        &state.db,
+        &state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: OWNER.to_owned(),
+        },
+        OWNER,
+        &thread.id,
+        &ack_id,
+        true,
     )
     .await
     .unwrap();

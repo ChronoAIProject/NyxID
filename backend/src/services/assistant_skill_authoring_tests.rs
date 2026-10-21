@@ -1365,10 +1365,19 @@ async fn expired_confirmation_renews_the_same_operation_and_restores_write_retry
         let f = fixture("authoring_expired_confirmation_renewal").await;
         let (row, card) = make(&f, input(&f.chat.agent_id)).await;
         if allow_first {
-            let allowed =
-                acks::decide(&f.state.db, &f.owner, &card.conversation_id, &card.id, true)
-                    .await
-                    .unwrap();
+            let allowed = acks::decide(
+                &f.state.db,
+                &f.state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: f.owner.clone(),
+                },
+                &f.owner,
+                &card.conversation_id,
+                &card.id,
+                true,
+            )
+            .await
+            .unwrap();
             assert_eq!(allowed.status, "allowed");
         }
         let original = row.publication.as_ref().unwrap();
@@ -1718,6 +1727,10 @@ async fn authored_draft_is_encrypted_deduplicated_and_card_shows_complete_packag
     assert!(
         acks::decide_reply(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone()
+            },
             &f.owner,
             std::slice::from_ref(&f.row.id),
             &format!("yes {}", acks::confirm_code(&card.id)),
@@ -3453,9 +3466,19 @@ async fn verified_checkpoint_survives_pin_failure_without_republishing() {
     let (row, card) = make(&f, input(&f.chat.agent_id)).await;
     let id = Uuid::new_v4().to_string();
     mount_publication(&f, &server, &row, &id, "POST").await;
-    let allowed = acks::decide(&f.state.db, &f.owner, &card.conversation_id, &card.id, true)
-        .await
-        .unwrap();
+    let allowed = acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &card.conversation_id,
+        &card.id,
+        true,
+    )
+    .await
+    .unwrap();
     let p = row.publication.as_ref().unwrap();
     let binding = publication::binding(&row, p, p.skills_revision);
     let inner = crate::handlers::agent_skills::Reader {
@@ -3785,9 +3808,19 @@ async fn card_preview(
 async fn allowed_card_binding_refusal_keeps_substantive_failure_and_audits_clicked_card() {
     let f = fixture("authoring_allowed_binding_refusal").await;
     let (row, card) = make(&f, input(&f.chat.agent_id)).await;
-    let allowed = acks::decide(&f.state.db, &f.owner, &card.conversation_id, &card.id, true)
-        .await
-        .unwrap();
+    let allowed = acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &card.conversation_id,
+        &card.id,
+        true,
+    )
+    .await
+    .unwrap();
     let proposals = f
         .state
         .db
@@ -4022,9 +4055,19 @@ async fn base_change_during_an_attempt_is_recorded_before_dispatch() {
         .expect(0)
         .mount(&server)
         .await;
-    let allowed = acks::decide(&f.state.db, &f.owner, &card.conversation_id, &card.id, true)
-        .await
-        .unwrap();
+    let allowed = acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &card.conversation_id,
+        &card.id,
+        true,
+    )
+    .await
+    .unwrap();
     let p = row.publication.as_ref().unwrap();
     let binding = publication::binding(&row, p, p.skills_revision);
     let reader = BaseSwapReader {
@@ -4523,9 +4566,19 @@ async fn nyxid_side_failure_after_base_verify_is_refused_not_registry_unavailabl
         .expect(0)
         .mount(&server)
         .await;
-    let allowed = acks::decide(&f.state.db, &f.owner, &card.conversation_id, &card.id, true)
-        .await
-        .unwrap();
+    let allowed = acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &card.conversation_id,
+        &card.id,
+        true,
+    )
+    .await
+    .unwrap();
     let p = row.publication.as_ref().unwrap();
     let reader = RevisionBumpReader {
         inner: crate::handlers::agent_skills::Reader {
@@ -4630,9 +4683,19 @@ async fn verified_version_is_not_attached_after_a_base_change_and_check_stops() 
         publication_bytes(&f, &row).await,
     )
     .await;
-    let allowed = acks::decide(&f.state.db, &f.owner, &card.conversation_id, &card.id, true)
-        .await
-        .unwrap();
+    let allowed = acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &card.conversation_id,
+        &card.id,
+        true,
+    )
+    .await
+    .unwrap();
     let reader = BaseSwapOnVerify {
         inner: crate::handlers::agent_skills::Reader {
             state: &f.state,
@@ -5046,9 +5109,19 @@ async fn allowed_unstarted_drafts_join_the_original_publication_without_another_
     let (proposal, card) = make(&f, input(&f.chat.agent_id)).await;
     let reservation = claims::reserve(&f.state, &f.chat, &proposal).await.unwrap();
     let other = another_authoring_chat(&f).await;
-    let allowed = acks::decide(&f.state.db, &f.owner, &card.conversation_id, &card.id, true)
-        .await
-        .unwrap();
+    let allowed = acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &card.conversation_id,
+        &card.id,
+        true,
+    )
+    .await
+    .unwrap();
     assert_eq!(allowed.status, "allowed");
     let (first, second) = tokio::join!(draft_in_chat(&f, &f.chat), draft_in_chat(&f, &other));
     for result in [first.unwrap(), second.unwrap()] {

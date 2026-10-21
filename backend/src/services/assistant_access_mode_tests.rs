@@ -54,9 +54,19 @@ async fn account(
 
 async fn allow(f: &Fixture, refusal: &Value) -> String {
     let id = refusal["acknowledgement_id"].as_str().unwrap().to_owned();
-    acks::decide(&f.state.db, &f.owner, &f.row.id, &id, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &id,
+        true,
+    )
+    .await
+    .unwrap();
     id
 }
 

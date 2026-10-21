@@ -1260,6 +1260,10 @@ async fn org_agent_maintainer_requests_keep_cards_and_sync_every_member_key() {
     );
     let decided = Box::pin(acks::decide_as(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.admin.clone(),
+        },
         &f.admin,
         None,
         &card.id,
@@ -1350,6 +1354,10 @@ async fn org_agent_maintainer_requests_keep_cards_and_sync_every_member_key() {
     assert!(
         Box::pin(acks::decide_as(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.admin.clone()
+            },
             &f.admin,
             None,
             &skills.id,
@@ -1410,6 +1418,10 @@ async fn org_agent_member_keeps_maintenance_cards_but_revocation_blocks_new_and_
     assert_eq!(card.decider, "orchestrator");
     let decided = Box::pin(acks::decide_as(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.member.clone(),
+        },
         &f.member,
         None,
         &card.id,
@@ -1433,6 +1445,10 @@ async fn org_agent_member_keeps_maintenance_cards_but_revocation_blocks_new_and_
     assert!(
         Box::pin(acks::decide_as(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.member.clone()
+            },
             &f.member,
             None,
             &account.id,
@@ -1480,6 +1496,10 @@ async fn org_agent_member_keeps_maintenance_cards_but_revocation_blocks_new_and_
     assert_eq!(
         Box::pin(acks::decide_as(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.member.clone()
+            },
             &f.member,
             Some(&thread.id),
             &action.id,
@@ -1578,6 +1598,10 @@ async fn org_agent_member_keeps_maintenance_cards_but_revocation_blocks_new_and_
         assert!(
             Box::pin(acks::decide_as(
                 &f.state.db,
+                &f.state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: f.member.clone()
+                },
                 &f.member,
                 None,
                 &legacy.id,
@@ -2017,13 +2041,33 @@ async fn org_agent_nyxbot_widening_card_belongs_to_requesting_member() {
     assert!(args["selection"]["contract_digest"].is_string());
     let id = card["acknowledgement_id"].as_str().unwrap();
     assert!(
-        acks::decide(&f.state.db, &f.admin, &home.id, id, true)
-            .await
-            .is_err()
-    );
-    acks::decide(&f.state.db, &f.member, &home.id, id, true)
+        acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.admin.clone()
+            },
+            &f.admin,
+            &home.id,
+            id,
+            true
+        )
         .await
-        .unwrap();
+        .is_err()
+    );
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.member.clone(),
+        },
+        &f.member,
+        &home.id,
+        id,
+        true,
+    )
+    .await
+    .unwrap();
     let mut without_digest = original;
     without_digest["acknowledgement_id"] = json!(id);
     let (_, error) = Box::pin(crate::handlers::assistant_team::execute_tool(
@@ -2164,13 +2208,33 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
     assert_eq!(card["decider"], "user");
     let ack = card["acknowledgement_id"].as_str().unwrap();
     assert!(
-        acks::decide(&f.state.db, &f.admin, &home.id, ack, true)
-            .await
-            .is_err()
-    );
-    acks::decide(&f.state.db, &f.member, &home.id, ack, true)
+        acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.admin.clone()
+            },
+            &f.admin,
+            &home.id,
+            ack,
+            true
+        )
         .await
-        .unwrap();
+        .is_err()
+    );
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.member.clone(),
+        },
+        &f.member,
+        &home.id,
+        ack,
+        true,
+    )
+    .await
+    .unwrap();
     args["acknowledgement_id"] = json!(ack);
     let (_, error) = Box::pin(crate::handlers::assistant_team::execute_tool(
         &f.state,
@@ -2382,6 +2446,10 @@ async fn voice_confirmation_refuses_revoked_org_access_without_a_continuation() 
         assert!(
             Box::pin(acks::decide_as(
                 db,
+                &f.state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: f.member.clone()
+                },
                 &f.member,
                 Some(&thread.id),
                 &card.id,

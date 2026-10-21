@@ -411,6 +411,10 @@ fn check_mcp_allow(f: Fixture) -> futures::future::BoxFuture<'static, ()> {
         }));
         acks::decide(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             &f.row.id,
             refusal["acknowledgement_id"].as_str().unwrap(),
@@ -429,6 +433,10 @@ fn check_mcp_allow(f: Fixture) -> futures::future::BoxFuture<'static, ()> {
             .unwrap();
         acks::decide(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             &f.row.id,
             refused["acknowledgement_id"].as_str().unwrap(),
@@ -571,6 +579,10 @@ async fn chat_mcp_native_account_and_action_refusals_are_tool_results() {
     assert_eq!(refusal["kind"], "account");
     acks::decide(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         &f.row.id,
         refusal["acknowledgement_id"].as_str().unwrap(),
@@ -882,9 +894,19 @@ async fn subagents_request_platform_services_and_execute_after_allow() {
                 .await
                 .unwrap();
             assert!(String::from_utf8_lossy(&bytes).contains("access_request_denied"));
-            acks::decide(&f.state.db, &f.owner, &f.row.id, &ids[0], true)
-                .await
-                .unwrap();
+            acks::decide(
+                &f.state.db,
+                &f.state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: f.owner.clone(),
+                },
+                &f.owner,
+                &f.row.id,
+                &ids[0],
+                true,
+            )
+            .await
+            .unwrap();
             let auth = authenticate(&f).await;
             assert_eq!(
                 chat_access(&auth, &{
@@ -991,6 +1013,10 @@ async fn ask_service_consent_allows_its_node_route_without_a_second_grant() {
     assert!(rx.try_recv().is_err());
     acks::decide(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         &f.row.id,
         refusal["acknowledgement_id"].as_str().unwrap(),
@@ -1278,6 +1304,10 @@ async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachmen
     .await;
     acks::decide(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         &f.row.id,
         refusal["acknowledgement_id"].as_str().unwrap(),
@@ -1593,6 +1623,10 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
     .await;
     acks::decide(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         &f.row.id,
         ask["acknowledgement_id"].as_str().unwrap(),
@@ -2177,9 +2211,19 @@ async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects(
         .await
         .is_ok()
     );
-    acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        id,
+        true,
+    )
+    .await
+    .unwrap();
     let mut approved = args.clone();
     approved["acknowledgement_id"] = json!(id);
     assert_eq!(webhook_execution_arguments(&auth, &approved), args);
@@ -2642,9 +2686,19 @@ async fn assistant_operation_scopes_auto_requires_exact_one_use_owner_card() {
         .unwrap();
     assert!(key.assistant_operation_scopes.contains_key(&id));
     let ack = card["acknowledgement_id"].as_str().unwrap();
-    acks::decide(&f.state.db, &f.owner, &f.nyxbot_thread, ack, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.nyxbot_thread,
+        ack,
+        true,
+    )
+    .await
+    .unwrap();
     // The card binds the compiled contract: the retry sends retry_arguments.
     assert!(card["retry_arguments"]["selection"]["contract_digest"].is_string());
     let mut stale = args;
@@ -3030,6 +3084,10 @@ async fn assistant_operation_scopes_specialist_request_cannot_silently_widen() {
     assert!(
         acks::decide_as(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone()
+            },
             &f.owner,
             None,
             ack,
@@ -3236,9 +3294,19 @@ async fn specialist_machine_update_dispatch_auto_preserves_one_owner_card() {
                 .len(),
             1
         );
-        acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
-            .await
-            .unwrap();
+        acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            &f.row.id,
+            id,
+            true,
+        )
+        .await
+        .unwrap();
         let finished = result(
             invoke(json!({"machine":node.id,"acknowledgement_id":id})).await,
             false,
@@ -3332,9 +3400,19 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
     assert_eq!(card["kind"], "action");
     assert_eq!(card["decider"], "user");
     let ack = card["acknowledgement_id"].as_str().unwrap();
-    acks::decide(&f.state.db, &f.owner, &f.nyxbot_thread, ack, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.nyxbot_thread,
+        ack,
+        true,
+    )
+    .await
+    .unwrap();
     let mut confirmed = args.clone();
     confirmed["acknowledgement_id"] = json!(ack);
     let mut tampered = confirmed.clone();
@@ -3501,6 +3579,10 @@ async fn assistant_skills_specialist_permission_is_advisory_and_agent_scoped() {
     let ack = request["acknowledgement_id"].as_str().unwrap();
     acks::decide_as(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         None,
         ack,
@@ -3717,6 +3799,10 @@ fn prepare_preference_discovery(
             .unwrap();
             acks::decide(
                 &f.state.db,
+                &f.state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: f.owner.clone(),
+                },
                 &f.owner,
                 &f.row.id,
                 ask["acknowledgement_id"].as_str().unwrap(),

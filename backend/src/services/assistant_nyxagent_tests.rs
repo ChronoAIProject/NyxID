@@ -3601,9 +3601,17 @@ async fn voice_queue_claims_one_message_and_preserves_initiating_identity() {
     );
     assert_eq!(pending.pending_acknowledgement_ids, vec![card.id.clone()]);
     // Click and a future authoritative voice decision share this transaction.
+    let runtime = &state.audit_runtime;
+    let principal =
+        crate::services::token_service::audit_principal(&crate::test_utils::test_auth_user(&user))
+            .unwrap();
     let (click, voice_decision) = tokio::join!(
-        Box::pin(acks::decide(&db, &user, &first.id, &card.id, true)),
-        Box::pin(acks::decide(&db, &user, &first.id, &card.id, false))
+        Box::pin(acks::decide(
+            &db, runtime, &principal, &user, &first.id, &card.id, true
+        )),
+        Box::pin(acks::decide(
+            &db, runtime, &principal, &user, &first.id, &card.id, false
+        ))
     );
     assert_ne!(click.is_ok(), voice_decision.is_ok());
     let decision = click.or(voice_decision).unwrap();
@@ -3627,9 +3635,17 @@ async fn voice_queue_claims_one_message_and_preserves_initiating_identity() {
         1
     );
     assert!(
-        Box::pin(acks::decide(&db, &user, &first.id, &card.id, true))
-            .await
-            .is_err()
+        Box::pin(acks::decide(
+            &db,
+            &state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person { id: user.clone() },
+            &user,
+            &first.id,
+            &card.id,
+            true
+        ))
+        .await
+        .is_err()
     );
     voice::cancel(&db, &user, &first.id, &b.id).await.unwrap();
     assert!(

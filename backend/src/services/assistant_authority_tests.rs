@@ -49,6 +49,10 @@ impl Fixture {
             .unwrap();
         acks::decide(
             &self.state.db,
+            &self.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: self.owner.clone(),
+            },
             &self.owner,
             &self.row.id,
             refusal["acknowledgement_id"].as_str().unwrap(),
@@ -407,16 +411,30 @@ async fn acknowledgement_service_allow_is_atomic_scoped_and_versions_the_key() {
         (&f.owner, "nyxa-00000000000000000000000000000000"),
     ] {
         assert!(matches!(
-            acks::decide(db, user, conversation, id, true).await,
+            acks::decide(
+                db,
+                &f.state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: user.to_owned()
+                },
+                user,
+                conversation,
+                id,
+                true
+            )
+            .await,
             Err(crate::errors::AppError::NotFound(_))
         ));
     }
     let before = key_service::get_api_key(db, &f.owner, &f.chat.api_key_id)
         .await
         .unwrap();
+    let runtime = &f.state.audit_runtime;
+    let principal =
+        crate::services::token_service::audit_principal(&test_auth_user(&f.owner)).unwrap();
     let (allow, deny) = tokio::join!(
-        acks::decide(db, &f.owner, &f.row.id, id, true),
-        acks::decide(db, &f.owner, &f.row.id, id, true),
+        acks::decide(db, runtime, &principal, &f.owner, &f.row.id, id, true),
+        acks::decide(db, runtime, &principal, &f.owner, &f.row.id, id, true),
     );
     assert_eq!(usize::from(allow.is_ok()) + usize::from(deny.is_ok()), 1);
     let key = key_service::get_api_key(db, &f.owner, &f.chat.api_key_id)
@@ -479,7 +497,18 @@ async fn service_decisions_reject_platform_missing_disabled_and_other_owner_ids(
         .unwrap();
         for allow in [true, false] {
             assert!(matches!(
-                acks::decide(db, &f.owner, &f.row.id, &row.id, allow).await,
+                acks::decide(
+                    db,
+                    &f.state.audit_runtime,
+                    &crate::models::audit_outbox::AuditPrincipal::Person {
+                        id: f.owner.clone()
+                    },
+                    &f.owner,
+                    &f.row.id,
+                    &row.id,
+                    allow
+                )
+                .await,
                 Err(crate::errors::AppError::NotFound(_))
             ));
         }
@@ -508,9 +537,19 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
         .unwrap()
         .unwrap();
     let id = request["acknowledgement_id"].as_str().unwrap();
-    acks::decide(db, &f.owner, &f.row.id, id, false)
-        .await
-        .unwrap();
+    acks::decide(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        id,
+        false,
+    )
+    .await
+    .unwrap();
     // Even past its former pending deadline, denial is sticky for this user turn.
     db.collection::<AssistantAcknowledgement>(ACKS)
         .update_one(
@@ -666,7 +705,18 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
         .await
         .unwrap();
     assert!(matches!(
-        acks::decide(db, &f.owner, &f.row.id, next, true).await,
+        acks::decide(
+            db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone()
+            },
+            &f.owner,
+            &f.row.id,
+            next,
+            true
+        )
+        .await,
         Err(crate::errors::AppError::Conflict(_))
     ));
     let history = acks::history(db, &f.owner, &f.row.id).await.unwrap();
@@ -701,9 +751,19 @@ async fn action_acknowledgements_bind_arguments_key_conversation_and_are_single_
             .await
             .unwrap()
     );
-    let allowed = acks::decide(db, &f.owner, &f.row.id, &row.id, true)
-        .await
-        .unwrap();
+    let allowed = acks::decide(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &row.id,
+        true,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         (allowed.expires_at - allowed.decided_at.unwrap()).num_seconds(),
         acks::ACTION_SECONDS
@@ -779,9 +839,19 @@ async fn action_acknowledgements_bind_arguments_key_conversation_and_are_single_
     )
     .await
     .unwrap();
-    acks::decide(db, &f.owner, &f.row.id, &row.id, true)
-        .await
-        .unwrap();
+    acks::decide(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &row.id,
+        true,
+    )
+    .await
+    .unwrap();
     db.collection::<AssistantAcknowledgement>(ACKS).update_one(doc! {"_id": &row.id},
         doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
     assert!(
@@ -820,9 +890,19 @@ async fn rotation_invalidates_acknowledgements_and_keeps_durable_subagent_grants
     )
     .await
     .unwrap();
-    acks::decide(db, &f.owner, &f.row.id, &row.id, true)
-        .await
-        .unwrap();
+    acks::decide(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &row.id,
+        true,
+    )
+    .await
+    .unwrap();
     let rotated =
         key_service::rotate_api_key(db, &f.state.encryption_keys, &f.owner, &f.chat.api_key_id)
             .await
@@ -1074,9 +1154,19 @@ async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_own
             .as_deref()
             .is_some_and(|text| text.contains("Please manage my account"))
     );
-    acks::decide(&f.state.db, &f.owner, &f.row.id, &requests[0].id, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &requests[0].id,
+        true,
+    )
+    .await
+    .unwrap();
     let agent = super::assistant_team_service::agent(&f.state.db, &f.owner, &f.chat.agent_id)
         .await
         .unwrap();
@@ -1160,9 +1250,19 @@ async fn call(f: &Fixture, name: &str, mut args: Value) -> Value {
     let mut result = f.tools().execute(&f.auth, &name, &args).await;
     if result.value["error"] == "acknowledgement_required" && result.value["kind"] == "action" {
         let id = result.value["acknowledgement_id"].as_str().unwrap();
-        acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
-            .await
-            .unwrap();
+        acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            &f.row.id,
+            id,
+            true,
+        )
+        .await
+        .unwrap();
         args["acknowledgement_id"] = json!(id);
         result = f.tools().execute(&f.auth, &name, &args).await;
     }

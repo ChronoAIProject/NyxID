@@ -2000,8 +2000,16 @@ async fn dispatch_permission_decisions(
             {
                 return Ok((refusal, true));
             }
+            // ChatAuthority retains the key and acting owner admitted at
+            // authentication. The deciding NyxBot stays that key principal.
+            let principal = crate::models::audit_outbox::AuditPrincipal::ApiKey {
+                id: chat.api_key_id.clone(),
+                owner_id: chat.user_id.clone(),
+            };
             let row = match Box::pin(acks::decide_as(
                 db,
+                &state.audit_runtime,
+                &principal,
                 owner,
                 None,
                 request_id,
@@ -2036,18 +2044,6 @@ async fn dispatch_permission_decisions(
                 }
                 Err(error) => return Err(error),
             };
-            acks::audit_decision(
-                db,
-                &crate::services::audit_service::AuditActor {
-                    user_id: owner.into(),
-                    ip_address: None,
-                    user_agent: None,
-                    api_key_id: Some(chat.api_key_id.clone()),
-                    api_key_name: None,
-                },
-                &row,
-            )
-            .await;
             if let Some(auto) = gate.auto_allowed() {
                 acks::record_auto_allowed(
                     db,

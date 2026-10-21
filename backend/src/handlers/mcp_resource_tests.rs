@@ -520,9 +520,19 @@ async fn org_resource_journey(
     let initial = policy(&source);
     assert_eq!(initial["error"], "acknowledgement_required", "{initial}");
     let initial_ack = initial["acknowledgement_id"].as_str().unwrap();
-    acks::decide(&f.state.db, &f.owner, &f.row.id, initial_ack, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        initial_ack,
+        true,
+    )
+    .await
+    .unwrap();
     let auth = next_resource_turn(&f, Some(initial_ack)).await;
     let source = call(
         &f.state,
@@ -583,9 +593,19 @@ async fn org_resource_journey(
         crate::models::assistant_resource::ResourceOutput::Attach
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    acks::decide(&f.state.db, &f.owner, &f.row.id, ack, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        ack,
+        true,
+    )
+    .await
+    .unwrap();
     let wrong_intent = call(
         &f.state,
         &auth,
@@ -620,9 +640,19 @@ async fn org_resource_journey(
     let refusal = policy(&refused);
     assert_eq!(refusal["error"], "acknowledgement_required", "{refusal}");
     let next_ack = refusal["acknowledgement_id"].as_str().unwrap();
-    acks::decide(&f.state.db, &f.owner, &f.row.id, next_ack, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        next_ack,
+        true,
+    )
+    .await
+    .unwrap();
     let unrelated = next_resource_turn(&f, None).await;
     let denied = call(
         &f.state,
@@ -898,9 +928,19 @@ async fn resource_explicit_org_card_remains_authority_bound_in_full_access() {
         let refusal = policy(&refused);
         assert_eq!(refusal["error"], "acknowledgement_required", "{refusal}");
         let ack = refusal["acknowledgement_id"].as_str().unwrap();
-        acks::decide(&f.state.db, &f.owner, &f.row.id, ack, true)
-            .await
-            .unwrap();
+        acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            &f.row.id,
+            ack,
+            true,
+        )
+        .await
+        .unwrap();
         settings::update(
             &f.state.db,
             &f.state.audit_runtime,

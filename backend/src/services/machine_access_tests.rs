@@ -613,6 +613,10 @@ async fn machine_access_native_widening_requires_owner_card() {
     let id = result["acknowledgement_id"].as_str().unwrap();
     super::assistant_acknowledgement_service::decide(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         &f.chat.conversation_id,
         id,
@@ -1579,6 +1583,10 @@ async fn machine_access_separated_requires_support_flag_card_and_keeps_mode_with
     let id = card["acknowledgement_id"].as_str().unwrap();
     super::assistant_acknowledgement_service::decide(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         &f.chat.conversation_id,
         id,
@@ -3630,9 +3638,19 @@ async fn machine_access_old_node_requires_human_legacy_card_and_full_warning() {
             .assignments
             .contains_key(&node.id)
     );
-    let allowed = acks::decide(&f.state.db, &f.owner, conversation, id, true)
-        .await
-        .unwrap();
+    let allowed = acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        conversation,
+        id,
+        true,
+    )
+    .await
+    .unwrap();
     apply_human_context_action(
         &f.state,
         &f.owner,
@@ -3750,9 +3768,19 @@ async fn machine_access_legacy_opt_out_requires_human_card_and_preserves_limits(
             .unwrap(),
         before
     );
-    let card = acks::decide(&f.state.db, &f.owner, conversation, id, true)
-        .await
-        .unwrap();
+    let card = acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        conversation,
+        id,
+        true,
+    )
+    .await
+    .unwrap();
     assert!(
         card.summary
             .contains(nyxid_machine::context::SHARED_LEGACY_WARNING)

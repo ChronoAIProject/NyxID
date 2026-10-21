@@ -451,12 +451,33 @@ async fn org_group_cards_leave_revocation_and_queue_drop() {
     .await
     .unwrap();
     assert!(matches!(
-        acks::decide(&f.state.db, &f.admin, &row.id, &card.id, true).await,
+        acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.admin.clone()
+            },
+            &f.admin,
+            &row.id,
+            &card.id,
+            true
+        )
+        .await,
         Err(AppError::NotFound(_))
     ));
-    acks::decide(&f.state.db, &f.member, &row.id, &card.id, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.member.clone(),
+        },
+        &f.member,
+        &row.id,
+        &card.id,
+        true,
+    )
+    .await
+    .unwrap();
     let card = acks::request(
         &f.state.db,
         &chat,
@@ -509,13 +530,27 @@ async fn org_group_cards_leave_revocation_and_queue_drop() {
             .is_err()
     );
     assert!(
-        acks::decide(&f.state.db, &f.member, &row.id, &card.id, true)
-            .await
-            .is_err()
+        acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.member.clone()
+            },
+            &f.member,
+            &row.id,
+            &card.id,
+            true
+        )
+        .await
+        .is_err()
     );
     assert!(
         acks::decide_as(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.member.clone()
+            },
             &f.member,
             None,
             &card.id,

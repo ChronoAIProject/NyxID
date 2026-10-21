@@ -1641,6 +1641,10 @@ async fn grants_decisions_and_destroy_reach_every_live_thread_key() {
     // requesting one, and leaves unrelated requests pending.
     acks::decide_as(
         &state.db,
+        &state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: OWNER.to_owned(),
+        },
         OWNER,
         None,
         &slack_request.id,
@@ -2384,9 +2388,19 @@ async fn skill_allow_routes_attachment_to_nyxbot_and_deduplicates_requests() {
             .unwrap()
             .is_none()
         );
-        let card = acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
-            .await
-            .unwrap();
+        let card = acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            &f.row.id,
+            id,
+            true,
+        )
+        .await
+        .unwrap();
         // Simulate a retry whose preflight ran before the decision. Calling
         // the transaction directly must still reuse the allowed card.
         let (raced, created) = acks::request_tracked(
@@ -2548,6 +2562,10 @@ async fn skill_allow_routes_attachment_to_nyxbot_and_deduplicates_requests() {
         assert_ne!(later["acknowledgement_id"], id);
         let denied = acks::decide(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             &f.row.id,
             later["acknowledgement_id"].as_str().unwrap(),
@@ -2585,9 +2603,19 @@ async fn skill_allow_outbox_recovers_eviction_and_consumes_once() {
         )
         .await
         .unwrap();
-    let card = acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
-        .await
-        .unwrap();
+    let card = acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        id,
+        true,
+    )
+    .await
+    .unwrap();
     let (a, b) = tokio::join!(
         deliver_skill_notification(&f.state, &card),
         deliver_skill_notification(&f.state, &card)
@@ -2724,6 +2752,10 @@ async fn skill_allow_outbox_rotates_past_parked_requests() {
             .unwrap();
     let card = acks::decide(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         &f.row.id,
         result["acknowledgement_id"].as_str().unwrap(),
@@ -2805,6 +2837,10 @@ async fn skill_outbox_authority_defer_restores_sticky_target_and_fences_stale_fa
     .unwrap();
     let card = acks::decide(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         &f.row.id,
         result["acknowledgement_id"].as_str().unwrap(),
@@ -2968,6 +3004,10 @@ async fn skill_outbox_deferred_prefix_does_not_starve_due_work_and_deleted_targe
     .unwrap();
     let card = acks::decide(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         &f.row.id,
         result["acknowledgement_id"].as_str().unwrap(),
@@ -3075,6 +3115,10 @@ async fn skill_outbox_rechecks_revoked_org_source_and_retains_decision_until_res
     .unwrap();
     let card = acks::decide(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.admin.clone(),
+        },
         &f.admin,
         &source.id,
         result["acknowledgement_id"].as_str().unwrap(),
@@ -3241,6 +3285,10 @@ async fn team_tools_follow_the_access_mode_and_one_card_runs_once() {
     assert!(!error, "{listed}");
     acks::decide(
         &state.db,
+        &state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: OWNER.to_owned(),
+        },
         OWNER,
         &chat.conversation_id,
         card["acknowledgement_id"].as_str().unwrap(),
@@ -3343,23 +3391,40 @@ async fn access_request_decision_and_grant_audits_name_requester_and_approver() 
     )
     .await;
     assert!(!error, "{value}");
-    let decided = data(
-        logs.find_one(doc! {"event_type": "assistant_acknowledgement_decided"})
-            .await
-            .unwrap()
-            .expect("decision audit"),
+    let decided = state
+        .db
+        .collection::<crate::models::audit_outbox::PendingAuditEvent>(
+            crate::models::audit_outbox::PENDING_COLLECTION_NAME,
+        )
+        .find_one(doc! {"event.action":"assistant_acknowledgement_decided"})
+        .await
+        .unwrap()
+        .expect("durable decision audit");
+    assert_eq!(
+        decided.event.target_id.as_deref(),
+        Some(request.id.as_str())
     );
     assert_eq!(
-        decided.get_str("requester_agent_id").unwrap(),
-        specialist.agent_id
+        decided.event.principal,
+        crate::models::audit_outbox::AuditPrincipal::ApiKey {
+            id: chat.api_key_id.clone(),
+            owner_id: chat.user_id.clone(),
+        }
     );
-    assert_eq!(decided.get_str("approver_kind").unwrap(), "nyxbot");
     assert_eq!(
-        decided.get_str("approver_api_key_id").unwrap(),
-        chat.api_key_id
+        decided.event.owner,
+        crate::models::audit_outbox::AuditOwner::Person { id: OWNER.into() }
     );
-    assert_eq!(decided.get_str("service_id").unwrap(), github);
-    assert_eq!(decided.get_str("decision").unwrap(), "allow");
+    assert_eq!(
+        decided.event.detail,
+        Some(
+            crate::models::audit_outbox::AuditDetail::AcknowledgementDecision {
+                decision: crate::models::audit_outbox::AcknowledgementDecision::Allow,
+                card_kind: crate::models::audit_outbox::AcknowledgementCardKind::Service,
+                approver_kind: crate::models::audit_outbox::AcknowledgementApproverKind::Nyxbot,
+            }
+        )
+    );
     // NyxBot's direct grant and the owner's own grant name their approver.
     let (value, error) = execute_tool(
         &state,
@@ -3532,6 +3597,10 @@ async fn nyxbot_model_change_follows_the_access_mode() {
     assert!(!error);
     acks::decide(
         &state.db,
+        &state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: OWNER.to_owned(),
+        },
         OWNER,
         &chat.conversation_id,
         card["acknowledgement_id"].as_str().unwrap(),
@@ -3692,9 +3761,19 @@ async fn skill_outbox_sweep_and_enqueue_enforce_cutover_eligibility() {
         .update_one(doc! {"_id": &stripped}, doc! {"$unset": {"routing": ""}})
         .await
         .unwrap();
-    acks::decide(&f.state.db, &f.owner, &f.row.id, &stripped, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &stripped,
+        true,
+    )
+    .await
+    .unwrap();
     assert!(
         acks::skill_notifications::pending(&f.state.db)
             .await
@@ -3726,9 +3805,19 @@ async fn skill_outbox_sweep_and_enqueue_enforce_cutover_eligibility() {
     // Enqueue: the handler authorized a destination from its snapshot, but
     // the card's routing changed before the transaction ran.
     let raced = request("raced").await;
-    let card = acks::decide(&f.state.db, &f.owner, &f.row.id, &raced, true)
-        .await
-        .unwrap();
+    let card = acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &raced,
+        true,
+    )
+    .await
+    .unwrap();
     let attempt = acks::skill_notifications::attempt(&f.state.db, &card)
         .await
         .unwrap()
@@ -3767,9 +3856,19 @@ async fn skill_outbox_sweep_and_enqueue_enforce_cutover_eligibility() {
     assert_eq!(nyxbot_has(raced.clone()).await, 0);
     // Immediate delivery of an assigned card, then sweep replay: one event.
     let assigned = request("assigned").await;
-    let card = acks::decide(&f.state.db, &f.owner, &f.row.id, &assigned, true)
-        .await
-        .unwrap();
+    let card = acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &assigned,
+        true,
+    )
+    .await
+    .unwrap();
     deliver_skill_notification(&f.state, &card).await.unwrap();
     deliver_pending_skill_notifications(&f.state).await.unwrap();
     assert_eq!(nyxbot_has(assigned.clone()).await, 1);

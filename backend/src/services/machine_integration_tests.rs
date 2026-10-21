@@ -249,6 +249,10 @@ async fn machine_specialist_permission_is_explicit_durable_and_revocable() {
     );
     acks::decide_as(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         None,
         id,
@@ -315,9 +319,19 @@ async fn machine_confirmation_is_bound_to_parameters_and_consumed_once() {
         .unwrap();
     let id = card["acknowledgement_id"].as_str().unwrap();
     assert!(requests.try_recv().is_err());
-    acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        id,
+        true,
+    )
+    .await
+    .unwrap();
     let mut changed = args.clone();
     changed["acknowledgement_id"] = json!(id);
     changed["content"] = json!("different");
@@ -430,6 +444,10 @@ async fn machine_saved_login_specialist_grants_confirmation_and_live_org_access(
     assert_eq!(card.get_str("decider").unwrap(), "orchestrator");
     acks::decide_as(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         None,
         id,
@@ -458,6 +476,10 @@ async fn machine_saved_login_specialist_grants_confirmation_and_live_org_access(
     assert!(
         acks::decide_as(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone()
+            },
             &f.owner,
             None,
             confirmation,
@@ -469,9 +491,19 @@ async fn machine_saved_login_specialist_grants_confirmation_and_live_org_access(
         .is_err(),
         "only the human may confirm secret use"
     );
-    acks::decide(&f.state.db, &f.owner, &f.row.id, confirmation, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        confirmation,
+        true,
+    )
+    .await
+    .unwrap();
     let mut approved = args.clone();
     approved["acknowledgement_id"] = json!(confirmation);
     let filled = call(&f.state, &live, "nyx__machine_fill_login", approved)
@@ -1440,6 +1472,10 @@ async fn machine_setup_tools_and_owner_cards_never_contain_registration_credenti
     assert!(
         acks::decide_as(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone()
+            },
             &f.owner,
             None,
             id,

@@ -116,9 +116,19 @@ async fn machine_webhook_changes_share_one_exact_card_with_machine_confirmation(
         assert!(history[0].trigger_run_id.is_some());
         assert!(history[0].summary.contains("declared services"));
         assert_eq!(history[0].decider, "user");
-        acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
-            .await
-            .unwrap();
+        acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            &f.row.id,
+            id,
+            true,
+        )
+        .await
+        .unwrap();
         let mut approved = args;
         approved["acknowledgement_id"] = json!(id);
         let mut changed = approved.clone();
@@ -618,6 +628,10 @@ async fn ask_every_time_cards_machine_changes_once() {
     assert_eq!(confirmation.reason, "access_mode");
     acks::decide(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         &f.row.id,
         card["acknowledgement_id"].as_str().unwrap(),

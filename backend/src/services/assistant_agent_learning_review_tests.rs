@@ -2441,11 +2441,37 @@ async fn http_approve_decides_audits_and_publishes_only_the_learning_card() {
             .status,
         "used"
     );
-    let audit = audits.find_one(decided.clone()).await.unwrap().unwrap();
-    let data = audit.get_document("event_data").unwrap();
-    assert_eq!(data.get_str("decision").unwrap(), "allow");
-    assert_eq!(data.get_str("tool_name").unwrap(), TOOL);
-    assert_eq!(audits.count_documents(decided).await.unwrap(), 1);
+    let pending = fixture
+        .state
+        .db
+        .collection::<crate::models::audit_outbox::PendingAuditEvent>(
+            crate::models::audit_outbox::PENDING_COLLECTION_NAME,
+        );
+    let filter = doc! {"event.action":"assistant_acknowledgement_decided"};
+    let event = pending
+        .find_one(filter.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .event;
+    assert_eq!(event.target_id.as_deref(), Some(card_id.as_str()));
+    assert_eq!(
+        event.principal,
+        crate::models::audit_outbox::AuditPrincipal::Person {
+            id: fixture.owner.clone()
+        }
+    );
+    assert_eq!(
+        event.detail,
+        Some(
+            crate::models::audit_outbox::AuditDetail::AcknowledgementDecision {
+                decision: crate::models::audit_outbox::AcknowledgementDecision::Allow,
+                card_kind: crate::models::audit_outbox::AcknowledgementCardKind::Action,
+                approver_kind: crate::models::audit_outbox::AcknowledgementApproverKind::Owner,
+            }
+        )
+    );
+    assert_eq!(pending.count_documents(filter).await.unwrap(), 1);
     for other in [&service_card, &authored_card] {
         assert_eq!(
             cards

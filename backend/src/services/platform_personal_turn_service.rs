@@ -769,7 +769,15 @@ impl contract::PersonalTurnProducer for PersonalTurns {
         conversation_id: &str,
         command: contract::OriginalManagerCommand,
     ) -> AppResult<contract::PlatformDecisionOutcome> {
-        let mut session = db.client().start_session().await?;
+        let principal = crate::models::audit_outbox::AuditPrincipal::Person {
+            id: admitted.authority.user_id.clone(),
+        };
+        // The callee rechecks the exact admitted sender/entry/bot and live
+        // binding before applying any decision in this owning transaction.
+        let audit = super::assistant_acknowledgement_service::DecisionAudit::owner_channel(
+            &self.state.audit_runtime,
+            &principal,
+        )?;
         let context = (
             db.clone(),
             self.identity.clone(),
@@ -777,14 +785,27 @@ impl contract::PersonalTurnProducer for PersonalTurns {
             admitted.clone(),
             conversation_id.to_owned(),
             command,
+            audit,
         );
-        session.start_transaction().and_run(context,
-            |session,(db,identity,ingress,admitted,conversation_id,command)|Box::pin(async move {
-                let result=super::assistant_platform_reply_decision::decide_personal_reply_in_session(
-                    db,session,identity.as_ref(),ingress.as_ref(),admitted,conversation_id,command).await;
-                transactions::transaction_result(result)
-            }),
-        ).await.map_err(transactions::map_transaction_error)
+        super::audit_runtime::transaction::run(
+            db,
+            &context,
+            |session, (db, identity, ingress, admitted, conversation_id, command, audit)| {
+                Box::pin(
+                    super::assistant_platform_reply_decision::decide_personal_reply_in_session(
+                        db,
+                        session,
+                        audit,
+                        identity.as_ref(),
+                        ingress.as_ref(),
+                        admitted,
+                        conversation_id,
+                        command,
+                    ),
+                )
+            },
+        )
+        .await
     }
 }
 

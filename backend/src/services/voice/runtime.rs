@@ -916,8 +916,15 @@ async fn decide_confirmation(
     if readback.generation != call.generation {
         return Err(AppError::Conflict("Voice generation changed".into()));
     }
+    // Admission persisted the authenticated first-party human speaker.
+    // fence_decision rechecks this exact live call and generation in-session.
+    let principal = crate::models::audit_outbox::AuditPrincipal::Person {
+        id: call.user_id.clone(),
+    };
     let decision = super::super::assistant_acknowledgement_service::decide_with_voice(
         &state.db,
+        &state.audit_runtime,
+        &principal,
         &call.user_id,
         None,
         &readback.card_id,

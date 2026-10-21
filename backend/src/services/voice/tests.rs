@@ -831,10 +831,24 @@ async fn click_vs_voice_commits_exactly_one_continuation_and_audit_is_ids_only()
         let (state, thread, call) = setup("voice_click_race").await;
         let db = &state.db;
         let card = pending_card(&state, &thread, &call).await;
+        let runtime = &state.audit_runtime;
+        let principal =
+            crate::services::token_service::audit_principal(&test_auth_user(&call.user_id))
+                .unwrap();
         let (a, b) = tokio::join!(
-            Box::pin(acks::decide(db, &call.user_id, &thread.id, &card.id, true)),
+            Box::pin(acks::decide(
+                db,
+                runtime,
+                &principal,
+                &call.user_id,
+                &thread.id,
+                &card.id,
+                true
+            )),
             Box::pin(acks::decide_with_voice(
                 db,
+                runtime,
+                &principal,
                 &call.user_id,
                 Some(&thread.id),
                 &card.id,
@@ -913,6 +927,10 @@ async fn voice_decision_refuses_lost_org_access() {
         assert!(
             Box::pin(acks::decide_with_voice(
                 &f.state.db,
+                &f.state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: f.admin.clone()
+                },
                 &f.admin,
                 Some(&thread.id),
                 &card.id,
@@ -1248,4 +1266,105 @@ async fn voice_start_diagnostics_audit_every_stage_once_with_ids_and_codes_only(
         }
         db.drop().await.unwrap();
     }).await;
+}
+
+#[tokio::test]
+async fn w8_acknowledgement_voice_reserves_both_decision_events_before_mutation() {
+    use crate::{
+        models::audit_outbox::{PENDING_COLLECTION_NAME, PendingAuditEvent},
+        services::{
+            assistant_acknowledgement_service as acks,
+            audit_runtime::{AuditRuntime, policy::AdmissionLimits},
+        },
+    };
+    for slots in [1_u64, 2] {
+        let (mut state, thread, call) = setup(&format!("w8_ack_voice_bundle_{slots}")).await;
+        let card = pending_card(&state, &thread, &call).await;
+        let before = state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .find_one(doc! {"_id":&card.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let limits = AdmissionLimits::default();
+        let count = (limits.standard.pending_count - slots) as i64;
+        let head = crate::services::audit_state_service::load(&state.db)
+            .await
+            .unwrap();
+        state.db.collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+            .update_one(doc! {"singleton":true},doc! {"$set":{"pending_count":count,"next_order":head.next_order.max(count),"oldest_pending_at":bson::DateTime::now()}}).await.unwrap();
+        state.audit_runtime = std::sync::Arc::new(AuditRuntime::new(limits, true));
+        let principal =
+            crate::services::token_service::audit_principal(&test_auth_user(&call.user_id))
+                .unwrap();
+        let result = acks::decide_with_voice(
+            &state.db,
+            &state.audit_runtime,
+            &principal,
+            &call.user_id,
+            Some(&thread.id),
+            &card.id,
+            true,
+            acks::Decider::User,
+            None,
+            Some(decision_fence(&state, &call, &card)),
+        )
+        .await;
+        let events = state
+            .db
+            .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME);
+        let filter =
+            doc! {"event.action":"assistant_acknowledgement_decided","event.target_id":&card.id};
+        let direct = state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+        if slots == 1 {
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::errors::AppError::AuditAdmissionClosed { .. })
+                ),
+                "{result:?}"
+            );
+            assert_eq!(
+                state
+                    .db
+                    .collection::<bson::Document>(
+                        crate::models::assistant_acknowledgement::COLLECTION_NAME
+                    )
+                    .find_one(doc! {"_id":&card.id})
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                before
+            );
+            assert_eq!(events.count_documents(filter).await.unwrap(), 0);
+            assert_eq!(
+                direct
+                    .count_documents(doc! {"event_type":"assistant_confirmation_decided"})
+                    .await
+                    .unwrap(),
+                0
+            );
+        } else {
+            assert_eq!(result.unwrap().status, "allowed");
+            assert_eq!(events.count_documents(filter).await.unwrap(), 1);
+            assert_eq!(
+                direct
+                    .count_documents(doc! {"event_type":"assistant_confirmation_decided"})
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                crate::services::audit_state_service::load(&state.db)
+                    .await
+                    .unwrap()
+                    .pending_count,
+                AdmissionLimits::default().standard.pending_count as i64
+            );
+        }
+        crate::test_utils::teardown_test_database(&state.db).await;
+    }
 }

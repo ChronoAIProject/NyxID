@@ -237,7 +237,16 @@ impl InspectOwnerEgress {
                 .as_str()
                 .unwrap()
                 .to_owned();
-            acks::decide(&self.state.db, &user, &turn.conversation_id, &card, true).await?;
+            acks::decide(
+                &self.state.db,
+                &self.state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::Person { id: user.clone() },
+                &user,
+                &turn.conversation_id,
+                &card,
+                true,
+            )
+            .await?;
             shared_args["acknowledgement_id"] = json!(card);
             shared_result = tools
                 .execute(&auth, "nyxid__update_channel_bot", &shared_args)
@@ -337,7 +346,16 @@ impl InspectOwnerEgress {
                 unchanged.label, owned_bot.label,
                 "confirmation is required before the mutation"
             );
-            acks::decide(&self.state.db, &user, &turn.conversation_id, &card, true).await?;
+            acks::decide(
+                &self.state.db,
+                &self.state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::Person { id: user.clone() },
+                &user,
+                &turn.conversation_id,
+                &card,
+                true,
+            )
+            .await?;
             args["acknowledgement_id"] = json!(card);
             managed = tools
                 .execute(&auth, "nyxid__update_channel_bot", &args)

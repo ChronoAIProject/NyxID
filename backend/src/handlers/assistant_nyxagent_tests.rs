@@ -2151,7 +2151,7 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
         decide_acknowledgement(
             State(f.state.clone()),
             test_auth_user(&f.owner),
-            Path((f.row.id.clone(), ack)),
+            Path((f.row.id.clone(), ack.clone())),
             Json(AcknowledgementDecision {
                 accept_reduced_scope: false,
                 decision: Decision::Deny
@@ -2160,36 +2160,42 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
         .await,
         Err(AppError::Conflict(_))
     ));
-    let audit = f
+    let pending = f
         .state
         .db
-        .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-        .find_one(doc! {"event_type": "assistant_acknowledgement_decided"})
+        .collection::<crate::models::audit_outbox::PendingAuditEvent>(
+            crate::models::audit_outbox::PENDING_COLLECTION_NAME,
+        )
+        .find_one(doc! {"event.action":"assistant_acknowledgement_decided"})
         .await
         .unwrap()
         .unwrap();
-    let metadata = audit.get_document("event_data").unwrap();
-    assert_eq!(metadata.get_str("conversation_id").unwrap(), f.row.id);
-    assert_eq!(metadata.get_str("decision").unwrap(), "allow");
-    // Metadata only: the original five fields plus who asked and who approved
-    // (Issue 1), never arguments or summaries.
-    let mut keys: Vec<&str> = metadata.keys().map(String::as_str).collect();
-    keys.sort_unstable();
+    assert_eq!(pending.event.target_id.as_deref(), Some(ack.as_str()));
     assert_eq!(
-        keys,
-        [
-            "approver_api_key_id",
-            "approver_kind",
-            "approver_user_id",
-            "conversation_id",
-            "decision",
-            "kind",
-            "requester_agent_id",
-            "service_id",
-            "tool_name",
-        ]
+        pending.event.principal,
+        crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone()
+        }
     );
-    assert_eq!(metadata.get_str("approver_kind").unwrap(), "owner");
+    assert_eq!(
+        pending.event.owner,
+        crate::models::audit_outbox::AuditOwner::Person {
+            id: f.owner.clone()
+        }
+    );
+    assert_eq!(
+        pending.event.detail,
+        Some(
+            crate::models::audit_outbox::AuditDetail::AcknowledgementDecision {
+                decision: crate::models::audit_outbox::AcknowledgementDecision::Allow,
+                card_kind: crate::models::audit_outbox::AcknowledgementCardKind::Service,
+                approver_kind: crate::models::audit_outbox::AcknowledgementApproverKind::Owner,
+            }
+        )
+    );
+    // The closed projection contains no arguments, summaries or tool names.
+    let detail = serde_json::to_value(pending.event.detail).unwrap();
+    assert_eq!(detail.as_object().unwrap().len(), 4);
     let response = crate::handlers::api_keys::list_keys(
         State(f.state.clone()),
         test_auth_user(&f.owner),
@@ -2275,9 +2281,19 @@ async fn history_keeps_user_decisions_and_receipts_with_their_message_pages() {
     )
     .await
     .unwrap();
-    acks::decide(&f.state.db, &f.owner, &f.row.id, &card.id, false)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &card.id,
+        false,
+    )
+    .await
+    .unwrap();
     let decisions = f.state.db.collection::<AssistantAcknowledgement>(ACKS);
     decisions
         .update_one(

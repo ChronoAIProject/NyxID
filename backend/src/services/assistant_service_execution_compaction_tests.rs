@@ -360,9 +360,19 @@ async fn org_stateful_model_transport_full_access_and_auto_resume_keep_exact_con
                     .unwrap();
                 let acknowledgement = card.get_str("_id").unwrap().to_owned();
                 idle(&mut f).await;
-                acks::decide(&f.state.db, &f.owner, &f.row.id, &acknowledgement, true)
-                    .await
-                    .unwrap();
+                acks::decide(
+                    &f.state.db,
+                    &f.state.audit_runtime,
+                    &crate::models::audit_outbox::AuditPrincipal::Person {
+                        id: f.owner.clone(),
+                    },
+                    &f.owner,
+                    &f.row.id,
+                    &acknowledgement,
+                    true,
+                )
+                .await
+                .unwrap();
                 let resumed = engine::begin_turn(
                     &f.state.db,
                     &f.owner,

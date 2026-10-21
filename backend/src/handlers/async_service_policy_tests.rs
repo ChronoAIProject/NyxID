@@ -156,9 +156,19 @@ fn submit_org_watch(a: &AsyncFixture) -> futures::future::BoxFuture<'_, AsyncSer
             "org submit awaits owner consent"
         );
         let id = card["acknowledgement_id"].as_str().unwrap();
-        acks::decide(&a.f.state.db, &a.f.owner, &a.f.row.id, id, true)
-            .await
-            .unwrap();
+        acks::decide(
+            &a.f.state.db,
+            &a.f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: a.f.owner.clone(),
+            },
+            &a.f.owner,
+            &a.f.row.id,
+            id,
+            true,
+        )
+        .await
+        .unwrap();
         let mut approved = args;
         approved["acknowledgement_id"] = json!(id);
         let response =

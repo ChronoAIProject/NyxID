@@ -426,9 +426,19 @@ async fn actual_bootstrap_card_allow_resumes_model_tool_model_and_new_turn_asks_
             .contains("Organization connection")
     );
     settled(&f, &f.row, &initial).await;
-    acks::decide(&f.state.db, &f.owner, &f.row.id, ack, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        ack,
+        true,
+    )
+    .await
+    .unwrap();
     let resumed = engine::begin_turn(
         &f.state.db,
         &f.owner,
@@ -691,9 +701,19 @@ async fn actual_bootstrap_deny_and_stop_do_not_dispatch_or_turn_failure_into_wai
             .unwrap()
             .unwrap();
         let ack = card.get_str("_id").unwrap();
-        acks::decide(&f.state.db, &f.owner, &f.row.id, ack, false)
-            .await
-            .unwrap();
+        acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            &f.row.id,
+            ack,
+            false,
+        )
+        .await
+        .unwrap();
         let settled_result = engine::TurnResult {
             text: String::new(),
             session_id: None,
@@ -797,9 +817,19 @@ async fn generic_gateway_org_primary_reaches_consent_before_legacy_codex_fallbac
             .unwrap();
         assert_eq!(bound.get_str("connection_id"), Ok(id.as_str()));
         assert!(server.received_requests().await.unwrap().is_empty());
-        acks::decide(&f.state.db, &f.owner, &f.row.id, ack, true)
-            .await
-            .unwrap();
+        acks::decide(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            &f.row.id,
+            ack,
+            true,
+        )
+        .await
+        .unwrap();
         let response = invoke(Some(ack.to_owned())).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         to_bytes(response.into_body(), 4096).await.unwrap();

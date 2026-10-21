@@ -338,7 +338,7 @@ pub async fn approve(
         review::confirm_learned_card(
             &state,
             &chat,
-            &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+            &crate::services::token_service::audit_principal(&auth)?,
             id,
             &args,
         )
@@ -475,13 +475,16 @@ pub(crate) async fn decide_authored_with_scope(
         return Err(withheld());
     }
     if card.status == "pending" {
-        card = acks::decide(&state.db, &actor, &card.conversation_id, &card.id, allow).await?;
-        acks::audit_decision(
+        card = acks::decide(
             &state.db,
-            &crate::services::audit_service::AuditActor::from_auth_user(auth),
-            &card,
+            &state.audit_runtime,
+            &crate::services::token_service::audit_principal(auth)?,
+            &actor,
+            &card.conversation_id,
+            &card.id,
+            allow,
         )
-        .await;
+        .await?;
     }
     if !allow {
         if card.status == "denied" && deny_proposal {

@@ -1965,7 +1965,7 @@ async fn record_base_changed_if_current(
 pub async fn confirm_learned_card(
     state: &AppState,
     chat: &ChatAuthority,
-    auditor: &super::audit_service::AuditActor,
+    principal: &crate::models::audit_outbox::AuditPrincipal,
     card_id: &str,
     binding: &Value,
 ) -> AppResult<()> {
@@ -1983,15 +1983,16 @@ pub async fn confirm_learned_card(
             AppError::Conflict("Learning approval card is missing, expired, used or stale".into())
         })?;
     if card.status == "pending" {
-        let decided = acks::decide(
+        acks::decide(
             &state.db,
+            &state.audit_runtime,
+            principal,
             &chat.user_id,
             &card.conversation_id,
             &card.id,
             true,
         )
         .await?;
-        acks::audit_decision(&state.db, auditor, &decided).await;
     }
     Ok(())
 }

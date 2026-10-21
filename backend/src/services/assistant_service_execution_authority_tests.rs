@@ -337,9 +337,19 @@ async fn oracle_http_person_platform_auto_proceeds_org_auto_asks_and_full_access
     // A real authenticated heartbeat advances the pool's transaction fence
     // between card issuance and approval/redemption, without changing consent.
     oracle_heartbeat(&f, &org_pool, &token).await;
-    acks::decide(&f.state.db, &f.owner, &f.row.id, &card.id, true)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        &card.id,
+        true,
+    )
+    .await
+    .unwrap();
     let response = crate::handlers::oracle_tasks::submit_task(
         State(f.state.clone()),
         auth.clone(),
@@ -480,9 +490,19 @@ async fn denied_exact_card_has_no_retry_or_continue_directive_and_no_outage() {
     let op = json!({"method":"GET","path":"/read"});
     let refusal = gate(&f, &id, &owner, &op, None).await.refusal.unwrap();
     let ack = refusal["acknowledgement_id"].as_str().unwrap();
-    acks::decide(&f.state.db, &f.owner, &f.row.id, ack, false)
-        .await
-        .unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        &f.row.id,
+        ack,
+        false,
+    )
+    .await
+    .unwrap();
     let row = f
         .state
         .db

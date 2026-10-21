@@ -1043,18 +1043,14 @@ pub async fn decide_acknowledgement(
     }
     let row = acknowledgements::decide(
         &state.db,
+        &state.audit_runtime,
+        &crate::services::token_service::audit_principal(&auth)?,
         &user,
         &id,
         &ack_id,
         matches!(body.decision, Decision::Allow),
     )
     .await?;
-    acknowledgements::audit_decision(
-        &state.db,
-        &crate::services::audit_service::AuditActor::from_auth_user(&auth),
-        &row,
-    )
-    .await;
     // A user decision on a subagent's request resumes the subagent.
     if row.decider == "orchestrator" && row.invocation_id.is_none() {
         super::assistant_team::permission_decided(&state, &user, &row).await;

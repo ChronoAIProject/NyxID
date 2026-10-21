@@ -503,7 +503,20 @@ pub(crate) async fn post(
     text: &str,
     author: Option<&AssistantAgent>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
-    post_with_uploads(state, owner, group_id, text, author, &[], None, None).await
+    // This test helper's owner is the fixture's explicit human actor.
+    let principal = crate::models::audit_outbox::AuditPrincipal::Person { id: owner.into() };
+    post_with_uploads(
+        state,
+        owner,
+        Some(&principal),
+        group_id,
+        text,
+        author,
+        &[],
+        None,
+        None,
+    )
+    .await
 }
 
 /// NyxBot posts into a group from one of its own threads (`follower`): the
@@ -521,6 +534,7 @@ pub(crate) async fn post_and_follow(
     post_with_uploads(
         state,
         owner,
+        None,
         group_id,
         text,
         author,
@@ -535,6 +549,7 @@ pub(crate) async fn post_and_follow(
 async fn post_with_uploads(
     state: &AppState,
     owner: &str,
+    principal: Option<&crate::models::audit_outbox::AuditPrincipal>,
     group_id: &str,
     text: &str,
     author: Option<&AssistantAgent>,
@@ -579,7 +594,18 @@ async fn post_with_uploads(
     // The owner answering a member's confirmation in words decides that card
     // and sends the member back to it.
     let confirmed = match author {
-        None => confirm_in_group(state, owner, &group, text).await?,
+        None => {
+            confirm_in_group(
+                state,
+                owner,
+                principal.ok_or_else(|| {
+                    AppError::Forbidden("Owner reply requires a verified caller".into())
+                })?,
+                &group,
+                text,
+            )
+            .await?
+        }
         Some(_) => None,
     };
     let mut addressed = match (&confirmed, explicit) {
@@ -657,6 +683,7 @@ async fn post_with_uploads(
 async fn confirm_in_group(
     state: &AppState,
     owner: &str,
+    principal: &crate::models::audit_outbox::AuditPrincipal,
     group: &AssistantGroup,
     text: &str,
 ) -> AppResult<Option<String>> {
@@ -674,21 +701,19 @@ async fn confirm_in_group(
         .rev()
         .find(|row| row.role == "user")
         .map(|row| row.created_at);
-    let Some(decided) = acks::decide_reply(&state.db, owner, &ids, text, since).await? else {
+    let Some(decided) = acks::decide_reply(
+        &state.db,
+        &state.audit_runtime,
+        principal,
+        owner,
+        &ids,
+        text,
+        since,
+    )
+    .await?
+    else {
         return Ok(None);
     };
-    acks::audit_decision(
-        &state.db,
-        &crate::services::audit_service::AuditActor {
-            user_id: owner.into(),
-            ip_address: None,
-            user_agent: None,
-            api_key_id: None,
-            api_key_name: None,
-        },
-        &decided,
-    )
-    .await;
     let Some(thread) = threads.iter().find(|row| row.id == decided.conversation_id) else {
         return Ok(None);
     };
@@ -1104,9 +1129,11 @@ pub async fn post_message(
     if !body.attachment_ids.is_empty() {
         super::login_client_context::require_first_party_human(&auth)?;
     }
+    let principal = crate::services::token_service::audit_principal(&auth)?;
     let (message, addressed) = post_with_uploads(
         &state,
         &owner,
+        Some(&principal),
         &id,
         &body.text,
         None,
