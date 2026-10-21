@@ -224,6 +224,7 @@ async fn mcp_echo(f: &Fixture) -> serde_json::Value {
             agent_owner: None,
             operation_scopes: None,
             api_key_id: None,
+            api_key_credential_id: None,
             allow_all_nodes: true,
             allowed_node_ids: &[],
         },
