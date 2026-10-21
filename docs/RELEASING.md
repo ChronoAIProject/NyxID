@@ -169,22 +169,35 @@ uses its existing private update-volume `tuf` directory and direct GitHub mirror
 transport. Native, backend and companion caches share the same state contract.
 
 On Unix the state directory must belong to the current user with mode0700, and
-state/lock files use mode0600 without following symlinks. Refreshes serialize
-through a file lock and publish one fsynced atomic state file containing verified
+state/lock files use mode0600 without following symlinks or accepting hardlinks.
+Every supplied ancestor and intermediate symlink target is checked while walking
+from pinned directory descriptors: owners must be root or the current UID, and
+group/other writes require a trusted-owned sticky directory. Platform aliases are
+supported only through trusted traversal. Rejection happens before creating state
+under an unsafe ancestor. Refreshes serialize through a file lock and publish one fsynced atomic state file containing verified
 root transitions, signed timestamp/snapshot metadata and the monotonic clock
 floor. Each refresh starts from the latest authenticated root, preserving
 rollback floors across restarts and avoiding repeated resets after key rotation.
 Malformed, missing previously initialized, or invalidly signed state fails
-closed; it is never silently replaced with the bootstrap. Existing flat tough
-datastores migrate only after their root lineage and cached roles authenticate.
+closed; it is never silently replaced with the bootstrap. State, lock and legacy
+metadata opens and atomic publication remain relative to the pinned state inode,
+so renaming/replacing its pathname during a refresh cannot redirect those
+operations. Linux also anchors tough's disposable scratch workspace through the
+directory descriptor and retains that handle for the repository lifetime.
+Existing flat tough datastores migrate only after their root lineage and cached roles authenticate.
 Do not delete or restore an older trust directory as routine cache cleanup.
 These local permissions protect state from other users and accidental corruption;
 they cannot detect restoration of the entire filesystem by its administrator.
 Place custom state under a trusted home or dedicated service volume whose
-existing parent directories cannot be replaced by an untrusted user. The leaf
-directory/file checks do not turn an attacker-controlled parent path into a
-trusted location. New binaries reconcile embedded bootstrap advancement with
-the retained authenticated lineage; applicable timestamp/snapshot floors survive
+existing parent directories cannot be replaced by an untrusted user. First-run
+bootstrap remains available in a new empty private directory under trusted
+ancestors. Its initialization marker detects subsequent missing state within that
+directory. Trusted ancestry prevents another identity from renaming the whole
+directory to remove that marker; root or the current UID can still deliberately
+replace the whole tree, which cannot be distinguished from a fresh installation
+after restart. There is no separate external initialization anchor, and replacing
+an entire tree/volume remains unsupported cleanup. New binaries reconcile
+embedded bootstrap advancement with the retained authenticated lineage; applicable timestamp/snapshot floors survive
 that upgrade. An incompatible embedded root fork is rejected.
 
 ## Versioned Install Layout

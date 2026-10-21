@@ -17,6 +17,10 @@ use tough::{
     schema::{Root, Signed, Snapshot, Timestamp},
 };
 
+#[path = "storage.rs"]
+mod storage;
+use storage::Directory;
+
 const MAX_STATE: u64 = 16 * 1024 * 1024;
 const STATE: &str = "trusted-state-v1.json";
 
@@ -103,73 +107,14 @@ impl State {
     }
 }
 
-fn private_directory(path: &Path) -> Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(path)?;
-    let metadata = fs::symlink_metadata(path)?;
-    ensure!(
-        metadata.is_dir() && !metadata.file_type().is_symlink(),
-        "TUF state directory is not a real directory"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        ensure!(
-            metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0,
-            "TUF state directory must be owned by this user and private (0700)"
-        );
-    }
-    Ok(())
-}
-
 pub(super) fn prepare_datastore(path: &Path) -> Result<()> {
-    ensure!(
-        path.is_absolute(),
-        "TUF state requires an absolute persistent path"
-    );
-    private_directory(path)?;
-    open_private(&path.join(".state.lock"), true)?;
+    Directory::open(path)?.open_private(".state.lock", true)?;
     Ok(())
 }
 
-fn open_private(path: &Path, create: bool) -> Result<fs::File> {
-    let mut options = fs::OpenOptions::new();
-    options
-        .read(true)
-        .write(create)
-        .create(create)
-        .truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        options
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
-        let file = options.open(path)?;
-        let metadata = file.metadata()?;
-        ensure!(
-            metadata.is_file()
-                && metadata.uid() == unsafe { libc::geteuid() }
-                && metadata.mode() & 0o077 == 0,
-            "TUF state file is not private"
-        );
-        Ok(file)
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(options.open(path)?)
-    }
-}
-
-fn read_state(path: &Path, lock: &fs::File) -> Result<Option<State>> {
+fn read_state(directory: &Directory, lock: &fs::File) -> Result<Option<State>> {
     let mut bytes = Vec::new();
-    match open_private(&path.join(STATE), false) {
+    match directory.open_private(STATE, false) {
         Ok(file) => {
             ensure!(
                 file.metadata()?.len() <= MAX_STATE,
@@ -196,15 +141,10 @@ fn read_state(path: &Path, lock: &fs::File) -> Result<Option<State>> {
     }
 }
 
-fn persist(path: &Path, lock: &mut fs::File, state: &State) -> Result<()> {
+fn persist(directory: &Directory, lock: &mut fs::File, state: &State) -> Result<()> {
     let bytes = serde_json::to_vec(state)?;
     ensure!(bytes.len() as u64 <= MAX_STATE, "TUF state exceeds limit");
-    let mut file = tempfile::NamedTempFile::new_in(path)?;
-    file.write_all(&bytes)?;
-    file.as_file().sync_all()?;
-    file.persist(path.join(STATE))?;
-    #[cfg(unix)]
-    fs::File::open(path)?.sync_all()?;
+    directory.publish(STATE, &bytes)?;
     if lock.metadata()?.len() == 0 {
         lock.write_all(b"initialized\n")?;
         lock.sync_all()?;
@@ -256,7 +196,18 @@ fn optional<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
     }
-    match options.open(path) {
+    optional_file(options.open(path).map_err(Into::into))
+}
+
+fn optional_in<T: serde::de::DeserializeOwned>(
+    directory: &Directory,
+    name: &str,
+) -> Result<Option<T>> {
+    optional_file(directory.open_metadata(name))
+}
+
+fn optional_file<T: serde::de::DeserializeOwned>(file: Result<fs::File>) -> Result<Option<T>> {
+    match file {
         Ok(file) => {
             ensure!(
                 file.metadata()?.is_file() && file.metadata()?.len() <= MAX_STATE,
@@ -270,14 +221,20 @@ fn optional<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
             );
             Ok(Some(serde_json::from_slice(&bytes)?))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e),
     }
 }
 
 pub(super) struct CachedRepository {
     repository: Repository,
     _scratch: tempfile::TempDir,
+    _directory: Directory,
 }
 
 impl std::ops::Deref for CachedRepository {
@@ -404,21 +361,22 @@ pub(super) async fn load<T: Transport + Clone + 'static>(
     targets: url::Url,
     path: &Path,
 ) -> Result<CachedRepository> {
-    ensure!(
-        path.is_absolute(),
-        "TUF state requires an absolute persistent path"
-    );
-    private_directory(path)?;
-    let mut lock = open_private(&path.join(".state.lock"), true)?;
+    let directory = Directory::open(path)?;
+    let mut lock = directory.open_private(".state.lock", true)?;
     lock.try_lock()
         .context("Another TUF refresh is running; retry later")?;
-    let prior = read_state(path, &lock)?;
+    let prior = read_state(&directory, &lock)?;
+    let had_state = prior.is_some();
+    let legacy_root = directory.exists("root.json")?;
     ensure!(
-        prior.is_some()
-            || path.join("root.json").exists()
+        had_state
+            || legacy_root
             || !["timestamp.json", "snapshot.json", "latest_known_time.json"]
-                .iter()
-                .any(|name| path.join(name).exists()),
+                .into_iter()
+                .map(|name| directory.exists(name))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .any(|exists| exists),
         "Incomplete legacy TUF state; refusing to reset rollback protection"
     );
     let embedded: Signed<Root> = serde_json::from_slice(bootstrap)?;
@@ -437,9 +395,9 @@ pub(super) async fn load<T: Transport + Clone + 'static>(
         roots: Arc::default(),
     };
     // Migrate the previous flat tough datastore without discarding its floors.
-    if !path.join(STATE).exists() && path.join("root.json").exists() {
+    if !had_state && legacy_root {
         let old: Signed<Root> =
-            optional(&path.join("root.json"))?.context("Missing legacy root")?;
+            optional_in(&directory, "root.json")?.context("Missing legacy root")?;
         if old.signed.version < root.signed.version {
             old.signed.verify_role(&old)?;
             state.anchor = old.clone();
@@ -473,18 +431,16 @@ pub(super) async fn load<T: Transport + Clone + 'static>(
             root.signed == old.signed,
             "Legacy TUF root differs from authenticated lineage"
         );
-        state.timestamp = optional(&path.join("timestamp.json"))?;
-        state.snapshot = optional(&path.join("snapshot.json"))?;
-        state.latest_time =
-            optional(&path.join("latest_known_time.json"))?.context("Missing legacy TUF time")?;
+        state.timestamp = optional_in(&directory, "timestamp.json")?;
+        state.snapshot = optional_in(&directory, "snapshot.json")?;
+        state.latest_time = optional_in(&directory, "latest_known_time.json")?
+            .context("Missing legacy TUF time")?;
         state.validate()?;
     }
     root = reconcile_bootstrap(&mut state, &embedded, &recording, &metadata).await?;
     state.validate()?;
-    persist(path, &mut lock, &state)?;
-    let scratch = tempfile::Builder::new()
-        .prefix(".refresh-")
-        .tempdir_in(path)?;
+    persist(&directory, &mut lock, &state)?;
+    let scratch = directory.scratch()?;
     fs::write(
         scratch.path().join("latest_known_time.json"),
         serde_json::to_vec(&state.latest_time)?,
@@ -555,11 +511,12 @@ pub(super) async fn load<T: Transport + Clone + 'static>(
     state.latest_time = optional(&scratch.path().join("latest_known_time.json"))?
         .context("Missing TUF clock state")?;
     state.validate()?;
-    persist(path, &mut lock, &state)?;
+    persist(&directory, &mut lock, &state)?;
     let repository = result?;
     Ok(CachedRepository {
         repository,
         _scratch: scratch,
+        _directory: directory,
     })
 }
 
@@ -715,6 +672,119 @@ mod tests {
         )
         .await?;
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replacing_initialized_directory_through_writable_parent_cannot_rebootstrap() {
+        use std::os::unix::fs::PermissionsExt;
+        let server = MockServer::start().await;
+        let key = Key::new();
+        let bootstrap = root(1, &key, None);
+        let parent = test_directory();
+        let state = parent.path().join("state");
+        publish(&server, &key, 7, 7, "2100-01-01T00:00:00Z").await;
+        refresh(&bootstrap, &server, &state).await.unwrap();
+        // Model the verifier's parent writer replacing the entire directory,
+        // including the initialization marker and every retained version floor.
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        fs::rename(&state, parent.path().join("removed")).unwrap();
+        publish(&server, &key, 1, 1, "2100-01-01T00:00:00Z").await;
+        assert!(refresh(&bootstrap, &server, &state).await.is_err());
+        assert!(
+            !state.exists(),
+            "must reject before recreating bootstrap state"
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(refresh(&bootstrap, &server, &state).await.is_err());
+        assert!(!state.join(STATE).exists());
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn writable_ancestor_and_alias_parent_rejected_before_first_bootstrap() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let server = MockServer::start().await;
+        let key = Key::new();
+        let bootstrap = root(1, &key, None);
+        let fixture = test_directory();
+        let trusted = fixture.path().join("trusted");
+        fs::create_dir(&trusted).unwrap();
+        let mutable = fixture.path().join("mutable");
+        fs::create_dir(&mutable).unwrap();
+        symlink(&trusted, mutable.join("alias")).unwrap();
+        fs::set_permissions(&mutable, fs::Permissions::from_mode(0o777)).unwrap();
+        for state in [mutable.join("direct/state"), mutable.join("alias/state")] {
+            assert!(prepare_datastore(&state).is_err());
+            assert!(refresh(&bootstrap, &server, &state).await.is_err());
+            assert!(!state.exists());
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+        fs::set_permissions(&mutable, fs::Permissions::from_mode(0o700)).unwrap();
+        publish(&server, &key, 2, 2, "2100-01-01T00:00:00Z").await;
+        let state = mutable.join("alias/state");
+        refresh(&bootstrap, &server, &state).await.unwrap();
+        fs::set_permissions(&mutable, fs::Permissions::from_mode(0o1777)).unwrap();
+        publish(&server, &key, 1, 1, "2100-01-01T00:00:00Z").await;
+        assert!(
+            format!(
+                "{:#}",
+                refresh(&bootstrap, &server, &state).await.unwrap_err()
+            )
+            .contains("previously fetched version 2")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_state_lock_reads_and_publication_survive_whole_directory_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+        let server = MockServer::start().await;
+        let key = Key::new();
+        let bootstrap = root(1, &key, None);
+        let parent = test_directory();
+        let path = parent.path().join("state");
+        publish(&server, &key, 7, 7, "2100-01-01T00:00:00Z").await;
+        refresh(&bootstrap, &server, &path).await.unwrap();
+        let directory = Directory::open(&path).unwrap();
+        let mut lock = directory.open_private(".state.lock", true).unwrap();
+        lock.try_lock().unwrap();
+        let moved = parent.path().join("moved");
+        fs::rename(&path, &moved).unwrap();
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let state = read_state(&directory, &lock).unwrap().unwrap();
+        assert_eq!(state.timestamp.as_ref().unwrap().signed.version.get(), 7);
+        persist(&directory, &mut lock, &state).unwrap();
+        assert!(!path.join(STATE).exists());
+        assert!(!path.join(".state.lock").exists());
+        let original = Directory::open(&moved).unwrap();
+        assert!(
+            original
+                .open_private(".state.lock", true)
+                .unwrap()
+                .try_lock()
+                .is_err()
+        );
+        assert_eq!(
+            read_state(&original, &lock)
+                .unwrap()
+                .unwrap()
+                .timestamp
+                .unwrap()
+                .signed
+                .version
+                .get(),
+            7
+        );
+        fs::remove_file(moved.join(STATE)).unwrap();
+        assert!(
+            format!("{:#}", read_state(&directory, &lock).err().unwrap())
+                .contains("missing after initialization")
+        );
     }
 
     #[tokio::test]
@@ -1014,7 +1084,10 @@ mod tests {
     #[tokio::test]
     async fn concurrent_refresh_and_nonprivate_or_symlink_state_are_rejected() {
         if let Some(path) = std::env::var_os("NYXID_TEST_TUF_LOCK_DIR") {
-            let lock = open_private(&PathBuf::from(path).join(".state.lock"), true).unwrap();
+            let lock = Directory::open(&PathBuf::from(path))
+                .unwrap()
+                .open_private(".state.lock", true)
+                .unwrap();
             assert!(
                 lock.try_lock().is_err(),
                 "Child process acquired an already held trust-state lock"
@@ -1022,7 +1095,10 @@ mod tests {
             return;
         }
         let state = test_directory();
-        let lock = open_private(&state.path().join(".state.lock"), true).unwrap();
+        let lock = Directory::open(state.path())
+            .unwrap()
+            .open_private(".state.lock", true)
+            .unwrap();
         lock.try_lock().unwrap();
         let full_name = concat!(
             module_path!(),
