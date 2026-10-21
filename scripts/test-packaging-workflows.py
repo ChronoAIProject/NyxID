@@ -46,7 +46,7 @@ def require_gates(data):
     if packaging['permissions'] != {'contents': 'read'}:
         raise ValueError('PR packaging permissions')
     jobs = packaging['jobs']
-    for script in ('test-image-runtime.py', 'test-image-entrypoint-dispatch.py'):
+    for script in ('test-image-runtime.py', 'test-image-entrypoint-dispatch.py', 'test-built-image-csp.py'):
         tests = [step for step in jobs['policy']['steps']
                  if step.get('run') == 'python3 scripts/' + script]
         if len(tests) != 1 or 'if' in tests[0] or tests[0].get('continue-on-error'):
@@ -237,6 +237,16 @@ class PackagingWorkflows(unittest.TestCase):
             elif mutation == 'warning': check['continue-on-error'] = True
             elif mutation == 'arch': job['strategy']['matrix']['include'].pop()
             else: check['run'] += ' || true'
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): require_gates(data)
+
+    def test_complete_browser_gate_regressions_are_required(self):
+        for mutation in ('missing', 'conditional', 'warning'):
+            data = workflows()
+            steps = data['artifact-packaging']['jobs']['policy']['steps']
+            check = next(step for step in steps if step.get('run') == 'python3 scripts/test-built-image-csp.py')
+            if mutation == 'missing': steps.remove(check)
+            elif mutation == 'conditional': check['if'] = 'false'
+            else: check['continue-on-error'] = True
             with self.subTest(mutation=mutation), self.assertRaises(ValueError): require_gates(data)
 
     def test_docker_cli_cannot_be_missing_conditional_or_warning_only(self):

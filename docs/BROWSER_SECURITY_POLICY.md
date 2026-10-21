@@ -149,6 +149,18 @@ renderer/template. Stop with Ctrl-C; the harness stops its own container and
 transport. Native nginx evidence is recorded separately and cannot substitute
 for this matrix.
 
+The required packaging job `Built Image Worklet CSP` retains its check name and
+runs **all 33 production browser cases**, across every project in
+`playwright.production.config.ts`, against the packaged frontend's default
+entrypoint. `Dockerfile.policy-tests` applies no project or title filter.
+`scripts/check-built-image-csp.py` verifies the offline fixture pins, supplies
+the same explicit fixture API/WebSocket origins as the native harness, and
+streams the actual container nginx log into browser evidence for claim-redaction
+checks. It requires every project/file/title identity in
+`frontend/e2e-production/required-cases.json` exactly once, with zero failures,
+skips, flakes or retries. The frontend inventory regression compares that list
+with Playwright's complete discovered suite, so new cases must join the gate.
+
 The frontend keeps one npm lockfile. Both Docker builders install npm 11.21.1
 from the integrity-locked `security/npm-tools` root, assert the selected version,
 and use it for the frontend install. The Node image's bundled npm verifies that

@@ -22,16 +22,28 @@ class BrowserAcceptance(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.report = Path(self.temporary.name) / 'results.json'
-        self.data = dict(errors=[], stats=dict(expected=2, unexpected=0, flaky=0, skipped=0), suites=[dict(suites=[dict(specs=[
-            dict(title=name, tests=[dict(status='expected', expectedStatus='passed', results=[dict(status='passed')])])
-            for name in sorted(csp.CASES)])])])
+        self.data = dict(errors=[], stats=dict(expected=len(csp.CASES), unexpected=0, flaky=0, skipped=0), suites=[dict(suites=[dict(specs=[
+            dict(title=title, file=file, tests=[dict(projectName=project, status='expected', expectedStatus='passed',
+                 results=[dict(status='passed', retry=0, errors=[])])])
+            for project, file, title in sorted(csp.CASES)])])])
 
     def check(self):
         self.report.write_text(json.dumps(self.data))
         csp.require_results(self.report)
 
-    def test_both_original_cases_pass_once(self):
+    def test_complete_suite_passes_once(self):
+        self.assertEqual(len(csp.CASES), 33)
+        self.assertEqual({item[0] for item in csp.CASES}, {'production-policy', 'production-oauth-meta', 'production-telegram-privacy'})
+        self.assertTrue({
+            'real microphone, shipped AudioWorklet, fonts and allowed websocket',
+            'rejects injected inline scripts, event handlers and unlisted connections',
+        } <= {item[2] for item in csp.CASES})
         self.check()
+
+    def test_old_two_case_report_rejects(self):
+        self.data['stats']['expected'] = 2
+        self.data['suites'][0]['suites'][0]['specs'] = self.data['suites'][0]['suites'][0]['specs'][:2]
+        with self.assertRaises(ValueError): self.check()
 
     def test_skipped_failed_flaky_or_report_errors_reject(self):
         original = copy.deepcopy(self.data)
@@ -44,21 +56,26 @@ class BrowserAcceptance(unittest.TestCase):
         with self.assertRaises(ValueError): self.check()
 
     def test_missing_or_replaced_case_rejects_even_with_success_stats(self):
-        for mutation in ('missing', 'replaced', 'duplicate'):
+        for mutation in ('missing', 'replaced', 'duplicate', 'project', 'file'):
             original = copy.deepcopy(self.data)
             specs = self.data['suites'][0]['suites'][0]['specs']
             if mutation == 'missing': specs.pop()
             elif mutation == 'replaced': specs[0]['title'] = 'different test'
-            else: specs[1]['title'] = specs[0]['title']
+            elif mutation == 'duplicate': specs[1] = copy.deepcopy(specs[0])
+            elif mutation == 'project': specs[0]['tests'][0]['projectName'] = 'different-project'
+            else: specs[0]['file'] = 'different.spec.ts'
             with self.subTest(mutation=mutation), self.assertRaises(ValueError): self.check()
             self.data = original
 
     def test_case_level_skip_failure_expected_failure_or_retry_rejects(self):
-        for mutation in ('skipped', 'failed', 'expected-failure', 'retry'):
+        for mutation in ('skipped', 'failed', 'expected-failure', 'retry', 'retry-number', 'errors', 'duplicate-test'):
             original = copy.deepcopy(self.data)
             test = self.data['suites'][0]['suites'][0]['specs'][0]['tests'][0]
             if mutation == 'expected-failure': test['expectedStatus'] = 'failed'
             elif mutation == 'retry': test['results'].insert(0, dict(status='failed'))
+            elif mutation == 'retry-number': test['results'][0]['retry'] = 1
+            elif mutation == 'errors': test['results'][0]['errors'] = [dict(message='fixture teardown failed')]
+            elif mutation == 'duplicate-test': self.data['suites'][0]['suites'][0]['specs'][0]['tests'].append(copy.deepcopy(test))
             else: test['results'][0]['status'] = mutation
             with self.subTest(mutation=mutation), self.assertRaises(ValueError): self.check()
             self.data = original
@@ -84,6 +101,7 @@ class RuntimeStartup(unittest.TestCase):
         self.assertNotIn('--mount', calls[0])
         self.assertNotIn('--volume', calls[0])
         self.assertIn('--read-only', calls[0])
+        self.assertIn('NYXID_BROWSER_CONNECT_ORIGINS=https://api.nyxid.example http://127.0.0.1:18489', calls[0])
         self.assertEqual(calls[-1][:5], ['docker', 'rm', '-f', '-v', calls[0][calls[0].index('--name') + 1]])
 
 
@@ -145,6 +163,50 @@ class ServedArtifact(unittest.TestCase):
 
 
 class BrowserInputs(unittest.TestCase):
+    def test_log_stream_uses_actual_container_and_cleans_up_on_browser_failure(self):
+        from unittest.mock import Mock
+        process = Mock()
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as temporary, patch.object(csp.subprocess, 'Popen', return_value=process) as start:
+            path = Path(temporary) / 'nginx.log'
+            with self.assertRaisesRegex(ValueError, 'browser failed'):
+                with csp.nginx_access_log('actual-image-container', path):
+                    command = start.call_args.args[0]
+                    self.assertEqual(command, ['docker', 'logs', '--follow', 'actual-image-container'])
+                    stream = start.call_args.kwargs['stdout']
+                    stream.write(b'"GET /channel-bots HTTP/1.1"\n')
+                    stream.flush()
+                    self.assertIn('GET /channel-bots', path.read_text())
+                    raise ValueError('browser failed')
+            process.terminate.assert_called_once()
+            process.wait.assert_called_once()
+
+    def test_premature_log_stream_exit_rejects(self):
+        from unittest.mock import Mock
+        process = Mock()
+        process.poll.return_value = 1
+        with tempfile.TemporaryDirectory() as temporary, patch.object(csp.subprocess, 'Popen', return_value=process):
+            with self.assertRaisesRegex(ValueError, 'log stream ended'):
+                with csp.nginx_access_log('actual-image-container', Path(temporary) / 'nginx.log'): pass
+            process.terminate.assert_not_called()
+
+    def test_offline_fixture_missing_or_modified_rejects(self):
+        import shutil
+        root = Path(__file__).resolve().parents[1]
+        csp.verify_offline_fixtures(root)
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            scripts = source / 'frontend/scripts'
+            scripts.mkdir(parents=True)
+            shutil.copyfile(root / 'frontend/scripts/prepare-production-policy-fixtures.py', scripts / 'prepare-production-policy-fixtures.py')
+            fixtures = source / 'frontend/e2e-production/fixtures'
+            shutil.copytree(root / 'frontend/e2e-production/fixtures', fixtures)
+            target = fixtures / 'telegram-widget-v22.js'
+            target.write_bytes(target.read_bytes() + b'altered')
+            with self.assertRaisesRegex(ValueError, 'reviewed pin'): csp.verify_offline_fixtures(source)
+            target.unlink()
+            with self.assertRaises(OSError): csp.verify_offline_fixtures(source)
+
     def test_fixture_import_preserves_exact_export_and_bytecode_setting(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary)
@@ -172,7 +234,7 @@ class BrowserInputs(unittest.TestCase):
                 for source in line.split()[1:-1]:
                     path = root / source
                     available.update(path.rglob('*') if path.is_dir() else [path])
-        pending = list((root / 'frontend/e2e-production').glob('*.spec.ts'))
+        pending = [root / 'frontend' / file for _, file, _ in csp.CASES]
         visited = set()
         while pending:
             path = pending.pop().resolve()
@@ -199,7 +261,9 @@ class BrowserInputs(unittest.TestCase):
         self.assertEqual(record['digest'], digest)
         self.assertEqual({item['platform']['architecture'] for item in record['platforms']}, {'amd64', 'arm64'})
         self.assertIn('npm ci --ignore-scripts', text)
-        for title in csp.CASES: self.assertIn(title, text)
+        entrypoint = json.loads(next(line.removeprefix('ENTRYPOINT ') for line in text.splitlines() if line.startswith('ENTRYPOINT ')))
+        self.assertEqual(entrypoint, ['node', 'node_modules/@playwright/test/cli.js', 'test',
+                                     '--config=playwright.production.config.ts', '--output=/results/artifacts'])
         self.assertIn('directory: /frontend', (root / '.github/dependabot.yml').read_text())
 
 

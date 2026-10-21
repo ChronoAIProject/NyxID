@@ -11,4 +11,4 @@ COPY frontend/e2e-production/ ./e2e-production/
 COPY frontend/e2e/ ./e2e/
 COPY frontend/src/test/fixtures/channel-platforms.ts ./src/test/fixtures/
 USER pwuser
-ENTRYPOINT ["node", "node_modules/@playwright/test/cli.js", "test", "--config=playwright.production.config.ts", "--project=production-policy", "--grep=real microphone, shipped AudioWorklet, fonts and allowed websocket|rejects injected inline scripts, event handlers and unlisted connections", "--output=/results/artifacts"]
+ENTRYPOINT ["node", "node_modules/@playwright/test/cli.js", "test", "--config=playwright.production.config.ts", "--output=/results/artifacts"]

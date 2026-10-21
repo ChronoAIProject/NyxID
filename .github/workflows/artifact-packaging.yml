@@ -240,7 +240,7 @@ jobs:
           provenance: false
           cache-from: type=gha,scope=policy-browser-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=policy-browser-${{ matrix.arch }}
-      - name: Require real worklet and enforcing CSP through packaged default startup
+      - name: Require complete production browser suite through packaged default startup
         run: |
           python3 scripts/check-built-image-csp.py --image nyxid-worklet-frontend:ci --browser-image nyxid-worklet-browser:ci \
             --source-root "$RUNNER_TEMP/image-source/source" --output "$RUNNER_TEMP/built-image-csp" \

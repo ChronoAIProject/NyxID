@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise packaged nginx startup and the existing real worklet/CSP browser cases."""
+"""Require the complete production browser suite through packaged nginx startup."""
 import argparse
 from contextlib import contextmanager
 import hashlib
@@ -20,17 +20,15 @@ from image_artifacts import copy, image_container
 from source_artifacts import verify_frontend, verify_labels
 
 ROOT = Path(__file__).resolve().parents[1]
-CASES = {
-    'real microphone, shipped AudioWorklet, fonts and allowed websocket',
-    'rejects injected inline scripts, event handlers and unlisted connections',
-}
+CASES = {tuple(item[key] for key in ('project', 'file', 'title')) for item in json.loads(
+    (ROOT / 'frontend/e2e-production/required-cases.json').read_text())}
 
 
 def require_results(path):
     report = json.loads(path.read_text())
     stats = report['stats']
-    if report.get('errors') or stats.get('expected') != 2 or any(stats.get(key) != 0 for key in ('unexpected', 'flaky', 'skipped')):
-        raise ValueError('both packaged-image browser cases must pass without skips/retries/errors')
+    if report.get('errors') or stats.get('expected') != len(CASES) or any(stats.get(key) != 0 for key in ('unexpected', 'flaky', 'skipped')):
+        raise ValueError('all packaged-image browser cases must pass without skips/retries/errors')
     specs = []
 
     def walk(suite):
@@ -40,13 +38,16 @@ def require_results(path):
 
     for suite in report['suites']:
         walk(suite)
-    if len(specs) != 2 or {item['title'] for item in specs} != CASES:
-        raise ValueError('missing or unexpected packaged-image browser case')
+    seen = []
     for spec in specs:
         tests = spec['tests']
         if len(tests) != 1 or tests[0].get('status') != 'expected' or tests[0].get('expectedStatus') != 'passed' or \
-                len(tests[0]['results']) != 1 or tests[0]['results'][0].get('status') != 'passed':
+                len(tests[0]['results']) != 1 or tests[0]['results'][0].get('status') != 'passed' or \
+                tests[0]['results'][0].get('retry') != 0 or tests[0]['results'][0].get('errors'):
             raise ValueError('packaged-image browser case failed, retried or was skipped')
+        seen.append((tests[0].get('projectName'), spec.get('file'), spec['title']))
+    if len(seen) != len(CASES) or set(seen) != CASES:
+        raise ValueError('missing, duplicate or unexpected packaged-image browser case/project/file')
 
 
 @contextmanager
@@ -59,6 +60,7 @@ def runtime(image_id):
                         '--cap-drop=ALL', '--security-opt=no-new-privileges', '--tmpfs', '/tmp',
                         '--tmpfs', '/etc/nginx/nyxid/generated:uid=101,gid=101,mode=0700',
                         '--env', 'BACKEND_URL=http://127.0.0.1:18489',
+                        '--env', 'NYXID_BROWSER_CONNECT_ORIGINS=https://api.nyxid.example http://127.0.0.1:18489',
                         '--env', 'NYXID_PUBLIC_ORIGIN=http://127.0.0.1:8080', image_id], check=True)
         yield name
     finally:
@@ -85,13 +87,29 @@ def probe(base, dist):
     print(f'Packaged worklet served: {worklets[0].name}, sha256={hashlib.sha256(data).hexdigest()}', flush=True)
 
 
-def transport_module(source):
+@contextmanager
+def nginx_access_log(name, path):
+    # The shipped access log goes to stdout. Stream the actual container log
+    # into browser evidence; do not replace nginx's config or log destination.
+    with path.open('wb') as output:
+        process = subprocess.Popen(['docker', 'logs', '--follow', name], stdout=output, stderr=subprocess.STDOUT)
+        try:
+            yield
+            if process.poll() is not None:
+                raise ValueError('packaged nginx log stream ended during browser acceptance')
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+
+
+def transport_module(source, filename='production-policy-server.py'):
     # The source export is immutable evidence. Importing its fixture must not
     # add __pycache__ (including on a failed import) to the verified inventory.
     previous = sys.dont_write_bytecode
     try:
         sys.dont_write_bytecode = True
-        spec = importlib.util.spec_from_file_location('packaged_transport', source / 'frontend/scripts/production-policy-server.py')
+        spec = importlib.util.spec_from_file_location('packaged_transport', source / 'frontend/scripts' / filename)
         fixture = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(fixture)
         return fixture
@@ -99,8 +117,22 @@ def transport_module(source):
         sys.dont_write_bytecode = previous
 
 
+def verify_offline_fixtures(source):
+    pins = transport_module(source, 'prepare-production-policy-fixtures.py').FIXTURES
+    directory = source / 'frontend/e2e-production/fixtures'
+    receipts = json.loads((directory / 'sources.json').read_text())
+    if len(receipts) != len(pins) or {item['file'] for item in receipts} != set(pins):
+        raise ValueError('incomplete or duplicate offline policy fixtures')
+    for item in receipts:
+        data = (directory / item['file']).read_bytes()
+        origin, digest = pins[item['file']]
+        if item['source'] != origin or item['sha256'] != digest or item['size'] != len(data) or hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError('offline policy fixture differs from its reviewed pin: ' + item['file'])
+
+
 def run(image, browser_image, source, output, arch, commit, epoch):
     output.mkdir(parents=True, exist_ok=False)
+    verify_offline_fixtures(source)
     with image_container(image) as (container, info):
         verify_labels(info, arch, commit, epoch)
         dist = output / 'image-dist'
@@ -130,17 +162,19 @@ def run(image, browser_image, source, output, arch, commit, epoch):
             print(f'Browser testing frontend image {image_id} with browser image {browser_id}; SOURCE_COMMIT={commit}', flush=True)
             results = output / 'browser'
             results.mkdir()
-            subprocess.run(['docker', 'run', '--rm', '--network=host', '--shm-size=256m', '--cap-drop=ALL',
-                            '--security-opt=no-new-privileges', '--user', f'{os.getuid()}:{os.getgid()}',
-                            '--env', 'HOME=/tmp', '--env', 'CI=true',
-                            '--env', 'NYXID_PRODUCTION_TEST_URL=http://127.0.0.1:8080',
-                            '--env', 'NYXID_PRODUCTION_DIST=/image-dist',
-                            '--env', 'NYXID_PRODUCTION_RESULTS=/results/playwright.json',
-                            '--env', 'NYXID_TEST_FONT=/tests/frontend/e2e-production/fixtures/jetbrainsmono-v24.ttf',
-                            '--mount', f'type=bind,source={dist},target=/image-dist,readonly',
-                            '--mount', f'type=bind,source={results},target=/results', browser_id], check=True)
+            with nginx_access_log(name, results / 'nginx.log'):
+                subprocess.run(['docker', 'run', '--rm', '--network=host', '--shm-size=256m', '--cap-drop=ALL',
+                                '--security-opt=no-new-privileges', '--user', f'{os.getuid()}:{os.getgid()}',
+                                '--env', 'HOME=/tmp', '--env', 'CI=true',
+                                '--env', 'NYXID_PRODUCTION_TEST_URL=http://127.0.0.1:8080',
+                                '--env', 'NYXID_PRODUCTION_DIST=/image-dist',
+                                '--env', 'NYXID_PRODUCTION_RESULTS=/results/playwright.json',
+                                '--env', 'NYXID_NGINX_ACCESS_LOG=/results/nginx.log',
+                                '--env', 'NYXID_TEST_FONT=/tests/frontend/e2e-production/fixtures/jetbrainsmono-v24.ttf',
+                                '--mount', f'type=bind,source={dist},target=/image-dist,readonly',
+                                '--mount', f'type=bind,source={results},target=/results', browser_id], check=True)
             require_results(results / 'playwright.json')
-            print('Built Image Worklet CSP: 2 passed, 0 failed/skipped/retried', flush=True)
+            print(f'Built Image Production CSP: {len(CASES)} passed, 0 failed/skipped/flaky/retried', flush=True)
     finally:
         server.shutdown()
         server.server_close()
