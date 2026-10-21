@@ -154,6 +154,8 @@ try{
  child=spawn('/usr/local/bin/nyxid-machine-entrypoint',['--machine','--browser','--computer'],{env:{...process.env,NYXID_MACHINE_SEPARATION:'require-separated',NYXID_NODE_TOKEN:token,NYXID_NODE_URL:`ws://127.0.0.1:${server.address().port}/api/v1/nodes/ws`},detached:true,stdio:['ignore','pipe','pipe']});
  for(const stream of [child.stdout,child.stderr])stream.on('data',bytes=>{output.push(bytes.toString());});
  await waitFor(()=>profile,'machine capabilities',60000);
+ // Isolation is reported only after the first credential custody observation.
+ await waitFor(()=>profile?.browser_isolated===true&&profile?.commands_isolated===true,'custody-backed isolation',60000);
  assert.equal(profile.browser_isolated,true);
  assert.equal(profile.commands_isolated,true);
  assert.equal(profile.computer_ready,true,'cua MCP must be ready');
