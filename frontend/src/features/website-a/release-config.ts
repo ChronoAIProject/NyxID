@@ -93,13 +93,16 @@ export function resolveWebsiteRelease(env: ReleaseEnvironment): WebsiteRelease {
   }
   if (env.VITE_WEBSITE_STATUS_ENABLED === "true") {
     const url = publicUrl(env.VITE_WEBSITE_STATUS_URL);
+    const status = url ? new URL(url) : null;
+    // public-site/publication.ts routes both /zh and /zh/ to the home page.
+    const statusPath = status?.pathname.replace(/\/$/, "") || "/";
     requireConfig(
-      url &&
+      status &&
         !(
-          new URL(url).origin === "https://nyx.chrono-ai.fun" &&
-          new URL(url).pathname === "/"
+          status.origin === "https://nyx.chrono-ai.fun" &&
+          ["/", "/zh"].includes(statusPath)
         ) &&
-        !/^\/(?:api|health)(?:\/|$)/.test(new URL(url).pathname) &&
+        !/^\/(?:api|health)(?:\/|$)/.test(status.pathname) &&
         accepted(env.VITE_WEBSITE_STATUS_ACCEPTANCE),
       "status",
     );

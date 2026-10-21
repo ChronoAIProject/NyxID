@@ -70,6 +70,8 @@ it("rejects credential-bearing endpoints and fake status destinations", () => {
     "https://nyx.chrono-ai.fun/",
     "https://nyx.chrono-ai.fun/?",
     "https://nyx.chrono-ai.fun/#",
+    "https://nyx.chrono-ai.fun/zh",
+    "https://nyx.chrono-ai.fun/zh/",
     "https://status.example.test/health",
     "javascript:alert(1)",
   ])
@@ -80,6 +82,14 @@ it("rejects credential-bearing endpoints and fake status destinations", () => {
         VITE_WEBSITE_STATUS_URL: url,
       }),
     ).toThrow();
+});
+it("allows the root of an independent public status site", () => {
+  expect(
+    resolveWebsiteRelease({
+      ...complete,
+      VITE_WEBSITE_STATUS_ENABLED: "true",
+    }).footerStatus,
+  ).toBe("https://status.example.test/");
 });
 it("enables only an individually accepted solution and rejects unsafe targets", () => {
   const release = resolveWebsiteRelease({
