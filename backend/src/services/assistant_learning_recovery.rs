@@ -398,7 +398,6 @@ pub struct StaleRelease {
 const STALE_RELEASE_MIN_AGE_HOURS: i64 = 24;
 const STALE_RELEASE_MAX_AGE_HOURS: i64 = 24 * 365;
 const STALE_RELEASE_MAX_ROWS: usize = 200;
-const STALE_RELEASE_CONCURRENCY: usize = 4;
 const STALE_RELEASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 const ABSENCE_ONLY: &str = "absence_only";
 const STALE_RELEASE_RESIDUAL: &str = "Absence-only evidence: a request stalled longer than min_age_hours can still land after release. A rebuilt package pins only after exact-version and ZIP-hash verification; a late landing makes it version_conflict.";

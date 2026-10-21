@@ -868,19 +868,18 @@ mod tests {
         let base =
             crate::test_utils::connect_transaction_test_database("channel_image_write_faults")
                 .await;
-        let app = format!("image-cas-{}", Uuid::new_v4());
-        let mut options = mongodb::options::ClientOptions::parse(
-            std::env::var("NYXID_TEST_DATABASE_URL").expect("MongoDB test URL"),
+        use crate::test_utils::fail_command::{Guard, GuardOptions};
+        let mut fault = Guard::acquire_with(
+            &base,
+            None,
+            GuardOptions {
+                retry_writes: Some(false),
+            },
         )
-        .await
-        .unwrap();
-        options.app_name = Some(app.clone());
-        options.retry_writes = Some(false);
-        let client = mongodb::Client::with_options(options).unwrap();
-        let db = client.database(base.name());
-        let admin = base.client().database("admin");
-        let fail = |committed: bool| {
-            let mut data = doc! {"failCommands":["update"],"appName":&app};
+        .await;
+        let db = fault.database().clone();
+        let fail_data = |committed: bool| {
+            let mut data = doc! {"failCommands":["update"]};
             if committed {
                 data.insert(
                     "writeConcernError",
@@ -889,27 +888,14 @@ mod tests {
             } else {
                 data.insert("errorCode", 91);
             }
-            admin.run_command(
-                doc! {"configureFailPoint":"failCommand","mode":{"times":1},"data":data},
-            )
+            data
         };
         // A rejected acquisition never authorizes dispatch; the pending claim
         // can safely be acquired by a later acknowledged CAS.
-        if let Err(error) = fail(false).await {
-            if matches!(
-                error.kind.as_ref(),
-                mongodb::error::ErrorKind::Command(command)
-                    if matches!(command.code, 13 | 59 | 115)
-            ) {
-                eprintln!(
-                    "Skipping image uncertain-write fault test: configureFailPoint was rejected; \
-                     enable MongoDB test commands and grant failpoint authority ({error})"
-                );
-                base.drop().await.unwrap();
-                return;
-            }
-            panic!("Failed to configure image write fault: {error}");
-        }
+        fault
+            .arm(doc! {"times": 1}, fail_data(false))
+            .await
+            .unwrap();
         assert!(matches!(
             claim(&db, "owner", "conversation", "A", "rejected")
                 .await
@@ -932,7 +918,10 @@ mod tests {
             panic!("pending is reacquirable")
         };
         // A rejected finish retains the durable sending barrier.
-        fail(false).await.unwrap();
+        fault
+            .arm(doc! {"times": 1}, fail_data(false))
+            .await
+            .unwrap();
         assert!(matches!(
             finish(&db, &id, &attempt, ImageDeliveryState::Sent, None)
                 .await
@@ -944,7 +933,7 @@ mod tests {
         );
         // The update commits but its acknowledgement reports uncertainty.
         // This caller reports unknown; subsequent readers trust durable sent.
-        fail(true).await.unwrap();
+        fault.arm(doc! {"times": 1}, fail_data(true)).await.unwrap();
         assert!(matches!(
             finish(&db, &id, &attempt, ImageDeliveryState::Sent, None)
                 .await
@@ -954,7 +943,7 @@ mod tests {
         assert!(
             matches!(claim(&base,"owner","conversation","A","rejected").await.unwrap(),ImageClaim::Existing(row) if row.state==ImageDeliveryState::Sent)
         );
-        fail(true).await.unwrap();
+        fault.arm(doc! {"times": 1}, fail_data(true)).await.unwrap();
         assert!(matches!(
             claim(&db, "owner", "conversation", "B", "committed")
                 .await
@@ -964,10 +953,8 @@ mod tests {
         assert!(
             matches!(claim(&base,"owner","conversation","B","committed").await.unwrap(),ImageClaim::Existing(row) if row.state==ImageDeliveryState::Sending)
         );
-        admin
-            .run_command(doc! {"configureFailPoint":"failCommand","mode":"off"})
-            .await
-            .unwrap();
-        base.drop().await.unwrap();
+        fault.disarm().await.unwrap();
+        drop(fault);
+        crate::test_utils::teardown_test_database(&base).await;
     }
 }

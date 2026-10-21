@@ -892,16 +892,10 @@ mod w8_tests {
         use mongodb::event::{EventHandler, command::CommandEvent};
         use std::sync::{Arc, Mutex};
         let (base, owner, principal, runtime) = fixture("w8_assist_settings_unknown").await;
-        let app = format!("w8-assist-{}", Uuid::new_v4());
+        use crate::test_utils::fail_command::Guard;
         let commands = Arc::new(Mutex::new(Vec::new()));
         let capture = commands.clone();
-        let mut options = mongodb::options::ClientOptions::parse(
-            std::env::var("NYXID_TEST_DATABASE_URL").unwrap(),
-        )
-        .await
-        .unwrap();
-        options.app_name = Some(app.clone());
-        options.command_event_handler = Some(EventHandler::callback(move |event| {
+        let handler = EventHandler::callback(move |event| {
             if let CommandEvent::Started(event) = event
                 && (event.command_name == "commitTransaction"
                     || event.command_name == "findAndModify")
@@ -911,19 +905,18 @@ mod w8_tests {
                     .unwrap()
                     .push((event.command_name, event.command));
             }
-        }));
-        let db = mongodb::Client::with_options(options)
-            .unwrap()
-            .database(base.name());
-        base.client()
-            .database("admin")
-            .run_command(doc! {
-                "configureFailPoint": "failCommand", "mode": {"times": 1}, "data": {
-                    "failCommands": ["commitTransaction"], "appName": &app,
+        });
+        let mut fault = Guard::acquire(&base, Some(handler)).await;
+        let db = fault.database().clone();
+        fault
+            .arm(
+                doc! {"times": 1},
+                doc! {
+                    "failCommands": ["commitTransaction"],
                     "writeConcernError": {"code": 64, "errmsg": "injected uncertain commit"},
                     "errorLabels": ["UnknownTransactionCommitResult"],
-                }
-            })
+                },
+            )
             .await
             .unwrap();
         update(
@@ -961,6 +954,7 @@ mod w8_tests {
             audit_state_service::load(&db).await.unwrap().pending_count,
             2
         );
-        base.drop().await.unwrap();
+        drop(fault);
+        crate::test_utils::teardown_test_database(&base).await;
     }
 }

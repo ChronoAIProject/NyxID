@@ -373,7 +373,7 @@ async fn w8_assist_scope_acceptance_unknown_commit_and_append_failure_are_atomic
         .run_command(doc! {"collMod":crate::models::audit_log::COLLECTION_NAME,"validator":{}})
         .await
         .unwrap();
-    let (_fault, commands) = w8_unknown_commit(&mut f, &row.id).await;
+    let (fault, commands) = w8_unknown_commit(&mut f, &row.id).await;
     review::accept_scope(&f.state, &f.owner, &row.agent_id, &row.id, &binding, true)
         .await
         .unwrap();
@@ -387,7 +387,8 @@ async fn w8_assist_scope_acceptance_unknown_commit_and_append_failure_are_atomic
             .is_some()
     );
     assert_eq!(logs.count_documents(doc! {"event_type":"assistant_skill_reduced_scope_accepted","event_data.proposal_id":&row.id}).await.unwrap(), 1);
-    f.state.db.drop().await.unwrap();
+    drop(fault);
+    crate::test_utils::teardown_test_database(&f.state.db).await;
 }
 
 #[tokio::test]

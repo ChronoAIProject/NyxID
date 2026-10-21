@@ -7,6 +7,7 @@ use crate::models::{
     },
     catalog_skill_revision::SkillReference,
 };
+use crate::services::agent_skill_service::OrnnReader;
 use futures::TryStreamExt;
 use std::io::Read;
 
@@ -77,30 +78,103 @@ async fn w8_assert_no_summary(f: &Fixture) {
 
 // Observe completion of the real proxy audits, without replacing the reader,
 // ordering concurrent candidates or changing the production admission snapshot.
-async fn w8_proxy_audits_settled(f: &Fixture, server: &MockServer) {
+async fn w8_proxy_audit_counts(f: &Fixture) -> (u64, u64) {
+    let logs = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    let routed = logs
+        .count_documents(doc! {"event_type":"proxy_routed_via_personal"})
+        .await
+        .unwrap();
+    let completed = logs
+        .count_documents(doc! {"event_type":"proxy_request"})
+        .await
+        .unwrap();
+    (routed, completed)
+}
+
+async fn w8_proxy_audits_settled(f: &Fixture, server: &MockServer, baseline: (u64, u64)) {
     let requests = server.received_requests().await.unwrap().len() as u64;
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let expected = (baseline.0 + requests, baseline.1 + requests);
+    let mut observed = baseline;
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let logs = f
-                .state
-                .db
-                .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
-            let routed = logs
-                .count_documents(doc! {"event_type":"proxy_routed_via_personal"})
-                .await
-                .unwrap();
-            let completed = logs
-                .count_documents(doc! {"event_type":"proxy_request"})
-                .await
-                .unwrap();
-            if routed >= requests && completed >= requests {
+            observed = w8_proxy_audit_counts(f).await;
+            if observed == expected {
                 break;
             }
             tokio::task::yield_now().await;
         }
     })
-    .await
-    .unwrap();
+    .await;
+    assert!(
+        settled.is_ok(),
+        "proxy audit writes did not settle: baseline {baseline:?}, observed {observed:?}, \
+         expected {expected:?} after {requests} requests (one routing and one request row each)"
+    );
+}
+
+// Proxy GET audits use log_async, so the real Reader can return before its two
+// rows commit. Only the two serial C2 tests settle each GET before continuing,
+// giving their exact boundary seeds a deterministic admission snapshot. This is
+// fixture ordering, not a production guarantee; concurrent and HTTP tests use
+// the unmodified real Reader.
+struct W8SettledRecoveryReader<'a> {
+    fixture: &'a Fixture,
+    person: String,
+}
+
+#[async_trait::async_trait]
+impl OrnnReader for W8SettledRecoveryReader<'_> {
+    async fn get(&self, path: &str) -> AppResult<Vec<u8>> {
+        self.classified(http::Method::GET, path, Vec::new())
+            .await
+            .into_app_result()
+    }
+
+    async fn request(&self, method: http::Method, path: &str, body: Vec<u8>) -> AppResult<Vec<u8>> {
+        self.classified(method, path, body).await.into_app_result()
+    }
+
+    async fn classified(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> crate::services::agent_skill_service::OrnnOutcome {
+        let baseline = w8_proxy_audit_counts(self.fixture).await;
+        let is_get = method == http::Method::GET;
+        let result = crate::handlers::agent_skills::Reader {
+            state: &self.fixture.state,
+            person: &self.person,
+            thread_key: None,
+            scopes: None,
+            chat: None,
+        }
+        .classified(method, path, body)
+        .await;
+        if is_get {
+            let expected = (baseline.0 + 1, baseline.1 + 1);
+            let mut observed = baseline;
+            let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    observed = w8_proxy_audit_counts(self.fixture).await;
+                    if observed == expected {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            assert!(
+                settled.is_ok(),
+                "proxy GET audit writes did not settle for {path}: baseline {baseline:?}, \
+                 observed {observed:?}, expected {expected:?} (one routing and one request row)"
+            );
+        }
+        result
+    }
 }
 
 #[tokio::test]
@@ -128,22 +202,50 @@ async fn w8_assist_learning_rebuild_standard_c2_keeps_proposal_and_target_atomic
             })
             .await
             .unwrap();
-        w8_proxy_audits_settled(&f, &server).await;
+        w8_proxy_audits_settled(&f, &server, (0, 0)).await;
         let before = bson::to_document(&stored(&f, &row.id).await).unwrap();
         let requests_before = server.received_requests().await.unwrap().len();
         let allowed = w8_recovery_admission(&mut f, case, W8_REBUILD_READ_AUDITS).await;
-        let result = reprepare(&f, &row, Some(&card)).await;
+        let reader = W8SettledRecoveryReader {
+            fixture: &f,
+            person: f.owner.clone(),
+        };
+        let actor = crate::services::audit_service::AuditActor::from_auth_user(
+            &crate::test_utils::test_auth_user(&f.owner),
+        );
+        let result = review::reprepare(
+            &f.state,
+            &actor,
+            &row.agent_id,
+            &row.id,
+            Some(&card.id),
+            &reader,
+        )
+        .await;
         if allowed {
-            assert_eq!(result.unwrap()["status"], "reprepared", "{case}");
+            assert_eq!(
+                result
+                    .as_ref()
+                    .unwrap_or_else(|_| panic!("{case}: {result:?}"))["status"],
+                "reprepared",
+                "{case}: {result:?}"
+            );
         } else {
-            assert!(matches!(
-                result,
-                Err(AppError::AuditAdmissionClosed { .. } | AppError::AuditWitnessDiverged)
-            ));
+            assert!(
+                matches!(
+                    &result,
+                    Err(AppError::AuditAdmissionClosed { .. } | AppError::AuditWitnessDiverged)
+                ),
+                "{case}: {result:?}"
+            );
         }
         let current = stored(&f, &row.id).await;
         if !allowed {
-            assert_eq!(bson::to_document(&current).unwrap(), before, "{case}");
+            assert_eq!(
+                bson::to_document(&current).unwrap(),
+                before,
+                "{case}: {result:?}"
+            );
         }
         let requests = server.received_requests().await.unwrap();
         let requests = &requests[requests_before..];
@@ -155,7 +257,7 @@ async fn w8_assist_learning_rebuild_standard_c2_keeps_proposal_and_target_atomic
             } else {
                 W8_REBUILD_REGISTRY_READS
             },
-            "{case}"
+            "{case}: {result:?}"
         );
         if reads != 0 {
             for (path, count) in [
@@ -177,29 +279,46 @@ async fn w8_assist_learning_rebuild_standard_c2_keeps_proposal_and_target_atomic
                             && request.url.path() == path)
                         .count(),
                     count,
-                    "{case}: {path}"
+                    "{case}: {result:?}: {path}"
                 );
             }
         }
-        assert_eq!(current.revision, row.revision + i64::from(allowed));
-        assert_eq!(barrier(&f, &base).await.is_none(), allowed);
+        assert_eq!(
+            current.revision,
+            row.revision + i64::from(allowed),
+            "{case}: {result:?}"
+        );
+        assert_eq!(
+            barrier(&f, &base).await.is_none(),
+            allowed,
+            "{case}: {result:?}"
+        );
         assert_eq!(
             current.publication.as_ref().unwrap().operation_id == p.operation_id,
-            !allowed
+            !allowed,
+            "{case}: {result:?}"
         );
         let logs = audits(&f, "assistant_learning_proposal_reprepared", &row.id).await;
-        assert_eq!(logs.len(), usize::from(allowed));
+        assert_eq!(logs.len(), usize::from(allowed), "{case}: {result:?}");
         if allowed {
-            assert_eq!(logs[0].get_str("user_id").unwrap(), f.owner);
+            assert_eq!(
+                logs[0].get_str("user_id").unwrap(),
+                f.owner,
+                "{case}: {result:?}"
+            );
             let data = logs[0].get_document("event_data").unwrap();
-            assert_eq!(data.len(), 7);
+            assert_eq!(data.len(), 7, "{case}: {result:?}");
             assert_eq!(
                 data.get_str("previous_operation_id").unwrap(),
-                p.operation_id
+                p.operation_id,
+                "{case}: {result:?}"
             );
-            assert!(!format!("{logs:?}").contains("w8_private_rebuild_draft"));
+            assert!(
+                !format!("{logs:?}").contains("w8_private_rebuild_draft"),
+                "{case}: {result:?}"
+            );
         }
-        assert_eq!(writes(&server).await, 0);
+        assert_eq!(writes(&server).await, 0, "{case}: {result:?}");
         f.state.db.drop().await.unwrap();
     }
 }
@@ -214,37 +333,60 @@ async fn w8_assist_learning_stale_release_standard_c2_preserves_uncertain_barrie
         let row = dispatch_and_deploy(&f, &row, &card).await;
         age(&f, &row, 25).await;
         let operator = admin(&f).await;
-        w8_proxy_audits_settled(&f, &server).await;
+        w8_proxy_audits_settled(&f, &server, (0, 0)).await;
+        let proxy_baseline = w8_proxy_audit_counts(&f).await;
         server.reset().await;
         mount_exact(&server, &base, version_not_found()).await;
         mount_latest(&server, &base, "1.0").await;
-        w8_proxy_audits_settled(&f, &server).await;
+        w8_proxy_audits_settled(&f, &server, proxy_baseline).await;
         let before = bson::to_document(&stored(&f, &row.id).await).unwrap();
         let requests_before = server.received_requests().await.unwrap().len();
         let allowed = w8_recovery_admission(&mut f, case, W8_STALE_RELEASE_READ_AUDITS).await;
-        let result = release_stale(&f, operator.clone(), json!({"dry_run":false})).await;
+        let actor = crate::services::audit_service::AuditActor::from_auth_user(&operator);
+        let result = review::release_stale(
+            &f.state,
+            &actor,
+            review::StaleRelease {
+                dry_run: false,
+                min_age_hours: 24,
+                limit: 200,
+            },
+            |owner| W8SettledRecoveryReader {
+                fixture: &f,
+                person: owner.to_owned(),
+            },
+        )
+        .await;
         if matches!(case, "count" | "age" | "diverged") {
             assert!(
                 matches!(
-                    result,
+                    &result,
                     Err(AppError::AuditAdmissionClosed { .. } | AppError::AuditWitnessDiverged)
                 ),
-                "{case}"
+                "{case}: {result:?}"
             );
         } else {
             assert_eq!(
-                decisions(&result.unwrap()),
+                decisions(
+                    result
+                        .as_ref()
+                        .unwrap_or_else(|_| panic!("{case}: {result:?}"))
+                ),
                 [if allowed {
                     "released_audited"
                 } else {
                     "skip:error"
                 }],
-                "{case}"
+                "{case}: {result:?}"
             );
         }
         let current = stored(&f, &row.id).await;
         if !allowed {
-            assert_eq!(bson::to_document(&current).unwrap(), before, "{case}");
+            assert_eq!(
+                bson::to_document(&current).unwrap(),
+                before,
+                "{case}: {result:?}"
+            );
         }
         let reads = server.received_requests().await.unwrap().len() - requests_before;
         assert_eq!(
@@ -254,32 +396,52 @@ async fn w8_assist_learning_stale_release_standard_c2_preserves_uncertain_barrie
             } else {
                 W8_STALE_RELEASE_REGISTRY_READS
             },
-            "{case}"
+            "{case}: {result:?}"
         );
         w8_assert_no_summary(&f).await;
         let p = current.publication.unwrap();
-        assert_eq!(p.started, !allowed);
-        assert_eq!(p.uncertain_dispatch, !allowed);
-        assert_eq!(barrier(&f, &base).await.is_none(), allowed);
+        assert_eq!(p.started, !allowed, "{case}: {result:?}");
+        assert_eq!(p.uncertain_dispatch, !allowed, "{case}: {result:?}");
+        assert_eq!(
+            barrier(&f, &base).await.is_none(),
+            allowed,
+            "{case}: {result:?}"
+        );
         let logs = audits(
             &f,
             "assistant_learning_publication_target_released",
             &row.id,
         )
         .await;
-        assert_eq!(logs.len(), usize::from(allowed));
+        assert_eq!(logs.len(), usize::from(allowed), "{case}: {result:?}");
         if allowed {
             assert_eq!(
                 logs[0].get_str("user_id").unwrap(),
-                operator.user_id.to_string()
+                operator.user_id.to_string(),
+                "{case}: {result:?}"
             );
-            assert_ne!(logs[0].get_str("user_id").unwrap(), f.owner);
+            assert_ne!(
+                logs[0].get_str("user_id").unwrap(),
+                f.owner,
+                "{case}: {result:?}"
+            );
             let data = logs[0].get_document("event_data").unwrap();
-            assert_eq!(data.get_str("previous_state").unwrap(), "uncertain");
-            assert_eq!(data.get_str("evidence").unwrap(), "absence_only");
-            assert!(!format!("{logs:?}").contains("w8_private_release_draft"));
+            assert_eq!(
+                data.get_str("previous_state").unwrap(),
+                "uncertain",
+                "{case}: {result:?}"
+            );
+            assert_eq!(
+                data.get_str("evidence").unwrap(),
+                "absence_only",
+                "{case}: {result:?}"
+            );
+            assert!(
+                !format!("{logs:?}").contains("w8_private_release_draft"),
+                "{case}: {result:?}"
+            );
         }
-        assert_eq!(writes(&server).await, 0);
+        assert_eq!(writes(&server).await, 0, "{case}: {result:?}");
         f.state.db.drop().await.unwrap();
     }
 }
@@ -361,7 +523,14 @@ async fn w8_assist_learning_recovery_unknown_commits_do_not_repeat_business_or_a
 }
 #[tokio::test]
 async fn w8_assist_stale_release_concurrent_batch_is_atomic_and_recovers_after_drain() {
-    const CANDIDATES: usize = 8;
+    // Before the first release finishes, only one concurrency wave can emit
+    // read audits. Leave a slot after that budget to guarantee a release.
+    const FIRST_WAVE_READ_AUDITS: i64 =
+        review::STALE_RELEASE_CONCURRENCY as i64 * W8_STALE_RELEASE_READ_AUDITS;
+    const RELEASE_CAPACITY: i64 = FIRST_WAVE_READ_AUDITS + 1;
+    // More release events than all available slots force at least one
+    // refusal even if every background proxy audit is delayed until afterward.
+    const CANDIDATES: usize = RELEASE_CAPACITY as usize + 1;
     let mut f = fixture("w8_assist_release_batch").await;
     let server = setup_ornn(&f).await;
     let mut candidates = Vec::new();
@@ -374,18 +543,14 @@ async fn w8_assist_stale_release_concurrent_batch_is_atomic_and_recovers_after_d
         candidates.push((base, row, before));
     }
     let operator = admin(&f).await;
-    w8_proxy_audits_settled(&f, &server).await;
+    w8_proxy_audits_settled(&f, &server, (0, 0)).await;
     server.reset().await;
     for (base, _, _) in &candidates {
         mount_exact(&server, base, version_not_found()).await;
         mount_latest(&server, base, "1.0").await;
     }
     w8_standard_admission(&mut f, "stale").await;
-    // Four concurrent candidates are retained. Allow all counted reads plus
-    // half the releases, so the real shared head closes during this batch.
-    let seed = W8_STANDARD_CEILING
-        - CANDIDATES as i64 * W8_STALE_RELEASE_READ_AUDITS
-        - (CANDIDATES / 2) as i64;
+    let seed = W8_STANDARD_CEILING - RELEASE_CAPACITY;
     w8_set_pending_count(&f, seed).await;
     let head = crate::services::audit_state_service::load(&f.state.db)
         .await
@@ -405,6 +570,9 @@ async fn w8_assist_stale_release_concurrent_batch_is_atomic_and_recovers_after_d
     f.state.db = mongodb::Client::with_options(options)
         .unwrap()
         .database(f.state.db.name());
+    // MockServer::reset clears requests, while the setup's audit rows remain.
+    // Only this batch's routing/request deltas can establish completion.
+    let proxy_baseline = w8_proxy_audit_counts(&f).await;
     let result = release_stale(&f, operator.clone(), json!({"dry_run":false}))
         .await
         .unwrap();
@@ -501,7 +669,7 @@ async fn w8_assist_stale_release_concurrent_batch_is_atomic_and_recovers_after_d
         committed > 0 && committed < CANDIDATES,
         "committed {committed} of {CANDIDATES}"
     );
-    w8_proxy_audits_settled(&f, &server).await;
+    w8_proxy_audits_settled(&f, &server, proxy_baseline).await;
     let state = crate::services::audit_state_service::load(&f.state.db)
         .await
         .unwrap();
@@ -537,7 +705,7 @@ async fn w8_assist_stale_release_concurrent_batch_is_atomic_and_recovers_after_d
     }
     w8_assert_no_summary(&f).await;
     assert_eq!(writes(&server).await, 0);
-    f.state.db.drop().await.unwrap();
+    crate::test_utils::teardown_test_database(&f.state.db).await;
 }
 
 /// Fields #1828 and this follow-up added to `publication`.

@@ -2935,6 +2935,7 @@ mod tests;
 #[path = "assistant_learning_recovery.rs"]
 mod recovery;
 pub use recovery::{StaleRelease, release_stale, reprepare};
+pub(super) const STALE_RELEASE_CONCURRENCY: usize = 4;
 
 /// First-party human preview of the exact package bound to an authored card.
 /// Without a card it keeps the original response; card actions are additive.
