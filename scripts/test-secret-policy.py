@@ -116,6 +116,16 @@ class SecretPolicy(unittest.TestCase):
                 with self.subTest(path=entry['path'], field=field):
                     self.assertIsNone(disposition(changed, entries, **context))
 
+    def test_deleted_file_exceptions_are_bound_to_immutable_history_only(self):
+        entries = load_exceptions(ROOT / 'security/secret-exceptions.json')
+        for entry in entries:
+            if (ROOT / entry['path']).exists():
+                continue
+            with self.subTest(path=entry['path']):
+                self.assertTrue(entry.get('history_commits'))
+                identity = {key: entry[key] for key in IDENTITY}
+                self.assertIsNone(disposition(identity, entries, scope='tree', commit='0' * 40))
+
     def test_inert_historical_kind_requires_all_reviewed_code_evidence(self):
         entries = load_exceptions(ROOT / 'security/secret-exceptions.json')
         inert = next(e for e in entries if e['kind'] == 'inert-historical-credential')
@@ -162,17 +172,17 @@ class SecretPolicy(unittest.TestCase):
         self.assertTrue(findings)
         self.assertTrue(all(disposition(item, [self.entry]) is None for item in findings))
 
-    def test_inventory_progress_prose_is_exact_and_cannot_cover_a_new_key(self):
-        name = 'docs/SECURITY_W8_INVENTORY.md'
+    def test_runtime_directory_text_is_exact_and_cannot_cover_a_new_key(self):
+        name = 'scripts/export-node-rootfs.py'
         content = (ROOT / name).read_bytes()
         entries = load_exceptions(ROOT / 'security/secret-exceptions.json')
         findings = self.detect(content, name)
         self.assertEqual(len(findings), 1)
         self.assertEqual(disposition(findings[0], entries)['kind'], 'non-secret-identifier')
         # Include the new key on the reviewed line: its full-content binding
-        # must refuse both the changed prose finding and the new credential.
-        content = content.replace(b'undeclared/missing/mixed/stale',
-                                  b'undeclared/missing/mixed/stale provider_api_key = "' +
+        # must refuse both the changed directory finding and the new credential.
+        content = content.replace(b"'app/keys', 'var/lib/nyxid/tuf'",
+                                  b"'app/keys', 'var/lib/nyxid/tuf' # provider_api_key = \"" +
                                   secrets.token_hex(24).encode() + b'"')
         changed = self.detect(content, name)
         self.assertGreaterEqual(len(changed), 2)

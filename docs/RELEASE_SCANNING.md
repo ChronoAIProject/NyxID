@@ -110,12 +110,18 @@ in the same inventory. The current worker-log record expires monthly; the
 checkpoint record applies only to revision `61781e414d5c` and expires after
 12 months. Neither record grants an exception to any credential value.
 
-The W8 inventory's slash-separated `undeclared/missing/mixed/stale` writer
-matrix prose is another generic-detector false positive after the word `key`.
-One exact monthly record binds the identical full source line in its introducing
-revision `a71e937c1cb9` and the current tree. A real-detector regression adds a
-key to that same line and requires both changed findings to remain unresolved.
-The W8 document is scanned in full; it has no path-level exemption.
+The W8 inventory is absent from this bundle. Full-history scanning still reaches
+its two reviewed prose findings through repository refs, so their exact records
+bind only the immutable introducing revisions. They cannot cover a current-tree
+copy. All deleted-file exceptions are similarly restricted to observed immutable
+history findings; no deleted file retains a current-tree allowance.
+
+The runtime rootfs exporter's fixed key/TUF directory names are public filesystem
+paths. Its exact monthly record binds the rule, path, match, value and
+full source line. A real-detector regression adds a key on that same line and
+requires both changed findings to remain unresolved. A separate immutable-history
+record covers a sequential mock-keychain test value from the excluded node
+migration work. Neither record covers operational credential material.
 
 ## Exact dependency dispositions
 
@@ -155,7 +161,7 @@ file bytes, with no version normalization.
 The monthly braces 3.0.3 disposition requires exact Metro/Jest parent chains,
 lock/archive identity and a real production app export proving no braces or
 micromatch module ships. A new braces release forces review. The two RSA
-RUSTSEC-2023-0071 records expire within 90 days and bind exact registry checksums,
+RUSTSEC-2023-0071 records expire on 2026-11-19 and bind exact registry checksums,
 resolved parent chains/features and reviewed source. Machine bootstrap private
 operations moved to AWS-LC. Remaining backend public/generation and pinned
 owner-selected SSH client-signing uses are described in
@@ -163,14 +169,16 @@ owner-selected SSH client-signing uses are described in
 private-operation spelling or changed reviewed context fails the source guard;
 review must establish the use before updating that baseline.
 
-The release follow-up reviewed four added node-storage AES-GCM call lines in
-the committed integration: `managed_runtime.rs` reads an old fixture through
-`LocalEncryption`, `oauth/storage.rs` uses `Aes256Gcm` directly, and
-`secret_operation.rs` / `secret_transaction.rs` validate fields through
-`LocalEncryption` (which uses `Aes256Gcm`). Only their exact line hashes/counts
-were added to the conservative private-operation guard. No RSA/SSH reference
-file, parent chain, feature, advisory scope or expiry changed. Guard failures
-name each changed path and category without printing source or secret bytes.
+The bundle source review removes guard entries for excluded W8 and W9.6 files
+and binds the exact merged W1–W4 contextual AES-GCM adapters and tests. The JWT
+key-material module validates/imports keys and creates local development pairs;
+request-time JWT signing still uses AWS-LC. The SSH CA context adapter retains
+Ed25519 signing. The changed SigV4 call uses HMAC-SHA256. Exact production
+RSA/SSH file hashes, every private-operation line/count and the canonical
+manifest bindings are refreshed only after reviewing that source delta.
+RSA archive checksums, Linux/KMS features, parent chains and advisory scope
+remain unchanged. Guard failures name each changed path and category without
+printing source or secret bytes.
 
 Every expired record fails globally, including unused entries. Failed or missing
 proof never becomes a warning. Scanner Policy tests tamper, scope, new-use and
