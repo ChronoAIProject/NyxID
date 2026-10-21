@@ -202,9 +202,8 @@ A signed-out human verifies identity on the original request with hints preserve
 **Only for this request** creates a browser proof accepted exclusively by the
 dedicated approval endpoints, without an account session. **Keep me signed in**
 also creates a normal browser session. Both offer configured social providers,
-the NyxID app and enabled email/password. Password sign-in retains configured
-NyxID MFA; social providers handle their own challenges and the app uses its
-existing human session. Identity verification **does not approve the requester**.
+the NyxID app and enabled email/password. Password and social sign-in both require configured NyxID TOTP or recovery
+verification. The app uses its existing MFA-assured human session. Identity verification **does not approve the requester**.
 The human must explicitly review and approve afterward. An expired proof or
 changed approving identity clears the earlier selection and returns to verification.
 An Agent Key or third-party OAuth credential cannot approve or elevate another login.
@@ -3439,3 +3438,27 @@ queued/delivered commands first (`oracle_pool_active_work`, 409). Deleted pools
 reserve their slug, revoke workers, and retain terminal-task TTL/history. These
 routes require the first tagged release containing #1527/#1542 and a fully
 upgraded/drained backend fleet. Full contract: `docs/ORACLE_RELAY.md`.
+
+### MFA session assurance
+
+MFA management is available to every human account, including social-only accounts
+when email authentication is disabled. Setup, confirm and disable require a
+first-party human session or access token; Agent Keys, service accounts, delegated,
+relay and third-party OAuth tokens cannot manage factors. Disable always requires
+a current TOTP or single-use recovery code, plus the current password when one exists.
+Enrollment keeps and assures the current identified session and signs out other devices.
+
+Google, GitHub and Apple first factors issue no session before NyxID MFA succeeds.
+Web social challenges use a five-minute HttpOnly cookie scoped to `/api/v1/auth/mfa`
+and redirect to `/login?mfa=required`; no challenge token or user ID is in that URL.
+Mobile receives the challenge in the callback fragment and submits it as `mfa_token`
+to `/auth/mfa/verify`. Social token exchange at `/oauth/token` returns HTTP 400
+`{"error":"mfa_required","error_description":"MFA required","error_code":2002,"session_token":"<challenge>"}`.
+Submit that challenge as `mfa_token` with a code and `client: "token"` to verify.
+Password sign-in retains its existing HTTP 403 / error code 2002 contract.
+
+Completed sessions store MFA assurance. Legacy/unassured sessions of MFA users
+receive HTTP 401 and must sign in again, including cookie/bearer authentication,
+first-party refresh and MCP fallback. Device and app approval, login codes, CLI
+tokens and refresh-derived sessions preserve their parent/approval assurance.
+OAuth authorization and Agent Key approval require this validated human authority.

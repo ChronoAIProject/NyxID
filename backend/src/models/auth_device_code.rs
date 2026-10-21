@@ -69,6 +69,8 @@ pub struct AuthDeviceCode {
     pub supports_grant_choice: bool,
     #[serde(default)]
     pub login_approval_id: Option<String>,
+    #[serde(default)]
+    pub mfa_assured: bool,
     pub device_code_hmac: String,
     pub user_code_hmac: String,
     #[serde(default)]
@@ -254,6 +256,7 @@ mod tests {
         let now = Utc::now();
         AuthDeviceCode {
             login_approval_id: None,
+            mfa_assured: false,
             supports_grant_choice: false,
             id: uuid::Uuid::new_v4().to_string(),
             device_code_hmac: "abc123ff".repeat(8),

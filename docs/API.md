@@ -991,9 +991,9 @@ OAuth callback handler. Called by the provider after user authorization.
 | `state`   | string | CSRF state token (must match the `nyx_social_state` cookie) |
 | `error`   | string | Error code from the provider (if authorization was denied) |
 
-**Response (302 on success, web):** Redirects to the frontend root and sets the `nyx_session` cookie.
+**Response (302 on success, web):** For users without MFA, redirects to the frontend root and sets the `nyx_session` cookie. For users with MFA enabled, no session is created: the callback sets the narrowly scoped, HttpOnly `nyx_mfa_challenge` cookie for five minutes and redirects to `/login?mfa=required` (with a trusted `return_to` value when an OAuth authorization is being resumed).
 
-**Response (302 on success, mobile):** Redirects to the provided deep link with `status=success`, `provider`, `user_id`, `access_token`, `refresh_token`, and `expires_in` query parameters.
+**Response (302 on success, mobile):** For users without MFA, redirects to the provided deep link with `status=success`, `provider`, `user_id`, `access_token`, `refresh_token`, and `expires_in` query parameters. MFA users receive no tokens; the deep link fragment contains `status=mfa_required`, `provider`, and the short-lived `mfa_token` challenge. The app posts that token and a TOTP/recovery code to `/auth/mfa/verify`.
 
 **Response (302 on error):** Redirects to `{FRONTEND_URL}/login?error={error_key}`.
 
@@ -1018,6 +1018,7 @@ Possible error keys in the redirect:
 - `social_auth_conflict` is reserved for write-time identity collisions (for example, if the provider identity is already bound to another account)
 - New users created via social login have `email_verified = true` (provider verified the email) and no password set
 - Existing email/password accounts keep their password login path after social linking
+- Existing accounts with MFA enabled must complete MFA before either a browser session or mobile tokens are issued. The challenge token never appears in a web URL, audit row, log, or telemetry event.
 
 ---
 
@@ -5506,6 +5507,11 @@ Complete MFA enrollment by verifying a TOTP code. On success, MFA is enabled on 
 
 **Auth:** Required
 
+MFA enrollment is a first-party human operation. Browser sessions and first-party
+access tokens may call this route; API keys, service-account tokens, delegated
+tokens, and relay tokens are rejected. Successful confirmation keeps the current
+session and revokes other sessions, refresh tokens, and session-fallback MCP rows.
+
 **Request Body:**
 
 | Field  | Type   | Required | Description                           |
@@ -5543,6 +5549,59 @@ curl -X POST http://localhost:3001/api/v1/auth/mfa/confirm \
   -H "Content-Type: application/json" \
   -d '{"code": "123456"}'
 ```
+
+#### POST /api/v1/auth/mfa/verify
+
+Redeem a five-minute first-factor challenge with a TOTP or single-use recovery
+code. Password login and token clients send `mfa_token` in the JSON body. A web
+social login may omit it: the server reads the HttpOnly `nyx_mfa_challenge`
+cookie instead. Success issues the normal browser cookie or token response and
+clears the challenge cookie. The cookie value is never placed in a URL.
+
+```json
+{ "code": "123456", "client": "web" }
+```
+
+Expired, cancelled, unknown, exhausted and already consumed challenges return HTTP 401
+with `details.reason: "mfa_challenge_expired"` and clear the challenge cookie.
+A wrong code on a live challenge keeps the cookie and spends the existing attempt budget.
+Clients return to sign-in after terminal failures. The web form explicitly offers recovery codes.
+
+Social token exchange at `/oauth/token` uses OAuth error JSON (HTTP 400):
+
+```json
+{ "error": "mfa_required", "error_description": "MFA required", "error_code": 2002, "session_token": "<five-minute-challenge>" }
+```
+
+No access/refresh token or session is issued in that response. Send `session_token`
+as `mfa_token` with `code` and `client: "token"` (or `"mobile"`) to MFA verify.
+Password login keeps its existing HTTP 403 error code 2002 response.
+
+Completed sessions record MFA assurance. A legacy session without assurance is
+rejected with HTTP 401 for a live MFA-enabled account by cookie/bearer auth,
+first-party refresh and MCP fallback; sign in again. Derived login-code, device
+approval/poll-web, CLI-token and approval keep-signed-in sessions inherit the exact
+parent/approval assurance. OAuth authorize, Agent Key approval and app approval
+require an accepted human session. Confirmation requires an identified session,
+marks it assured and signs out other devices transactionally. There is no startup cutoff.
+
+#### POST /api/v1/auth/mfa/cancel
+
+Abandon a pending browser challenge. This deletes the challenge and clears the
+`nyx_mfa_challenge` cookie. It is safe to call after expiry or a replay.
+
+#### POST /api/v1/auth/mfa/disable
+
+Disable MFA after proving a current factor. Every account must send `code`; a
+password-backed account must also send its current `password` (including social-linked accounts that retain one). `GET /users/me` reports `has_password` for this decision. Social-only
+accounts omit `password`. Recovery codes are consumed when used for disable.
+
+```json
+{ "code": "123456", "password": "current-password" }
+```
+
+The route is first-party human only and applies the same rate limits and account
+state fencing as login MFA.
 
 ---
 

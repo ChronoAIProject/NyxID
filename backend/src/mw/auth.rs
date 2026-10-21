@@ -52,6 +52,8 @@ pub enum AuthMethod {
 pub struct AuthUser {
     pub user_id: Uuid,
     pub session_id: Option<Uuid>,
+    /// Assurance from the live first-party session, never from JWT claims.
+    pub mfa_assured: bool,
     /// Space-separated scopes from the access token or API key (empty for session auth).
     pub scope: String,
     /// If this is a delegated request, the OAuth client_id of the acting service.
@@ -878,6 +880,7 @@ pub(crate) async fn api_key_auth_user(
         None
     };
     Ok(AuthUser {
+        mfa_assured: false,
         user_id,
         session_id: None,
         scope: key.scopes.clone(),
@@ -962,6 +965,7 @@ pub(crate) async fn machine_external_gateway_auth_user(
                 })
                 .ok_or(AppError::MachinePermissionRevoked)?;
             AuthUser {
+                mfa_assured: false,
                 user_id: Uuid::parse_str(&user.id).map_err(|_| AppError::MachineNotAllowed)?,
                 session_id: None,
                 scope: "proxy machine".into(),
@@ -1170,6 +1174,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         })?;
 
                         return Ok(AuthUser {
+                            mfa_assured: false,
                             org_agent_access: None,
                             assistant_group_id: None,
                             assistant_agent_owner_id: None,
@@ -1215,14 +1220,14 @@ impl FromRequestParts<AppState> for AuthUser {
                         .await
                         .map_err(|e| AppError::Internal(format!("User lookup failed: {e}")))?;
 
-                    match user_model {
-                        Some(u) if u.is_active => {}
+                    let user = match user_model {
+                        Some(u) if u.is_active => u,
                         _ => {
                             return Err(AppError::Unauthorized(
                                 "User account is inactive".to_string(),
                             ));
                         }
-                    }
+                    };
 
                     let auth_method = if claims.act.is_some() {
                         AuthMethod::Delegated
@@ -1231,6 +1236,9 @@ impl FromRequestParts<AppState> for AuthUser {
                     } else {
                         AuthMethod::AccessToken
                     };
+
+                    let first_party_session = auth_method == AuthMethod::AccessToken
+                        && claims.client_id.is_none();
 
                     if auth_method == AuthMethod::Delegated {
                         if crate::services::catalog_delegation_service::scope_has_catalog_read(
@@ -1338,9 +1346,8 @@ impl FromRequestParts<AppState> for AuthUser {
                         (true, true, vec![], vec![], None, None)
                     };
 
-                    let session_id = if auth_method == AuthMethod::AccessToken
-                        && claims.client_id.is_none()
-                    {
+                    let mut mfa_assured = false;
+                    let session_id = if first_party_session {
                         if let Some(id) = claims.sid.as_deref() {
                             let id = Uuid::parse_str(id)
                                 .map_err(|_| AppError::Unauthorized("Invalid session".into()))?;
@@ -1348,13 +1355,26 @@ impl FromRequestParts<AppState> for AuthUser {
                                 "_id": id.to_string(), "user_id": &user_id_str, "revoked": false,
                                 "expires_at": {"$gt": bson::DateTime::from_chrono(chrono::Utc::now())}
                             })).await?;
-                            if live.is_none() {
+                            let Some(live) = live else {
                                 return Err(AppError::Unauthorized(
                                     "Session expired or revoked".into(),
                                 ));
+                            };
+                            if user.mfa_enabled && !live.mfa_assured {
+                                Box::pin(crate::services::session_authority::reject_unassured(&state.db, &user_id_str, Some(&id.to_string()), "bearer", request_ip.as_deref(), request_ua.as_deref())).await?;
+                                return Err(AppError::Unauthorized(
+                                    "MFA verification required; sign in again".into(),
+                                ));
                             }
+                            mfa_assured = live.mfa_assured;
                             Some(id)
                         } else {
+                            if user.mfa_enabled {
+                                Box::pin(crate::services::session_authority::reject_unassured(&state.db, &user_id_str, None, "sidless_bearer", request_ip.as_deref(), request_ua.as_deref())).await?;
+                                return Err(AppError::Unauthorized(
+                                    "MFA verification required; sign in again".into(),
+                                ));
+                            }
                             None
                         }
                     } else {
@@ -1375,6 +1395,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     };
                     let oauth_lineage = jwt::authority_lineage(&claims);
                     return Ok(AuthUser {
+                        mfa_assured,
                         org_agent_access: None,
                         assistant_group_id: None,
                         assistant_agent_owner_id,
@@ -1448,12 +1469,19 @@ impl FromRequestParts<AppState> for AuthUser {
 
                         match user_model {
                             Some(u) if u.is_active => {
+                                if u.mfa_enabled && !sess.mfa_assured {
+                                    Box::pin(crate::services::session_authority::reject_unassured(&state.db, &sess.user_id, Some(&sess.id), "cookie", request_ip.as_deref(), request_ua.as_deref())).await?;
+                                    return Err(AppError::Unauthorized(
+                                        "MFA verification required; sign in again".into(),
+                                    ));
+                                }
                                 // Session-based auth uses an empty scope string.
                                 // RBAC-scoped claims (roles, groups) are only
                                 // included in OAuth tokens that explicitly request
                                 // those scopes. Session users can retrieve RBAC
                                 // data via the /oauth/userinfo endpoint instead.
                                 return Ok(AuthUser {
+                                    mfa_assured: sess.mfa_assured,
                                     org_agent_access: None,
                                     assistant_group_id: None,
                                     assistant_agent_owner_id: None,
@@ -2006,6 +2034,7 @@ mod tests {
 
     fn test_auth_user(auth_method: AuthMethod, scope: &str) -> AuthUser {
         AuthUser {
+            mfa_assured: false,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -3595,6 +3624,7 @@ mod tests {
         };
         let user_id = Uuid::new_v4().to_string();
         let auth = AuthUser {
+            mfa_assured: false,
             assistant_turn_fence: Some(Box::new(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
                     channel_adapter_origin: None,
@@ -3669,6 +3699,7 @@ mod tests {
             .await
             .unwrap();
         let mut auth = AuthUser {
+            mfa_assured: false,
             assistant_turn_fence: Some(Box::new(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
                     channel_adapter_origin: None,
@@ -3795,6 +3826,7 @@ mod tests {
     #[test]
     fn api_key_auth_includes_key_identity() {
         let user = AuthUser {
+            mfa_assured: false,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,

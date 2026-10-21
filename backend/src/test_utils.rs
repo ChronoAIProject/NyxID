@@ -2393,6 +2393,7 @@ pub(crate) async fn test_app_state_no_db() -> AppState {
 /// Build a permissive session-auth `AuthUser` for handler tests.
 pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
     AuthUser {
+        mfa_assured: false,
         org_agent_access: None,
         assistant_group_id: None,
         assistant_agent_owner_id: None,

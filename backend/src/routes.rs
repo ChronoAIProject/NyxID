@@ -553,7 +553,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     let mfa_routes = Router::new()
         .route("/setup", post(handlers::mfa::setup))
         .route("/confirm", post(handlers::mfa::confirm))
-        .route("/verify", post(handlers::mfa::verify))
+        .route("/verify", post(handlers::mfa::verify_http))
+        .route("/cancel", post(handlers::mfa::cancel))
         .route("/disable", post(handlers::mfa::disable));
 
     let auth_routes = Router::new()

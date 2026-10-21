@@ -3700,6 +3700,8 @@ mod tests {
         db.collection::<Session>(crate::models::session::COLLECTION_NAME)
             .insert_one(Session {
                 purpose: Some(crate::models::session::SessionPurpose::Authenticated),
+                mfa_method: None,
+                mfa_assured: false,
                 id: Uuid::new_v4().to_string(),
                 user_id: fixture.conversation.user_id.clone(),
                 token_hash: crate::crypto::token::hash_token("channel-test-session"),
@@ -3823,6 +3825,7 @@ mod tests {
 
     fn api_key_auth_user(api_key: &ApiKey) -> AuthUser {
         AuthUser {
+            mfa_assured: false,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -3856,6 +3859,7 @@ mod tests {
 
     fn auth_user_with_method(method: crate::mw::auth::AuthMethod) -> AuthUser {
         AuthUser {
+            mfa_assured: false,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,

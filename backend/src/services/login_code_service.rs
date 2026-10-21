@@ -80,6 +80,7 @@ pub async fn mint(
     actor: &str,
     mut selection: Option<Selection>,
     expiry: Option<DateTime<Utc>>,
+    mfa_assured: bool,
 ) -> AppResult<MintedCode> {
     limit(db, "login-code-mint-owner", actor, 5).await?;
     let created_at = Utc::now();
@@ -99,6 +100,7 @@ pub async fn mint(
         let row = LoginCode {
             id: Uuid::new_v4().to_string(),
             user_id: actor.into(),
+            mfa_assured,
             code_hmac: hash(key, &code)?,
             status: Status::Pending,
             selection: selection.clone(),
@@ -246,15 +248,26 @@ pub async fn redeem(
     if let Some(error) = state_error(&row) {
         return Err(error);
     }
+    let user = db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.user_id, "is_active": true})
+        .await?
+        .ok_or(AppError::LoginCodeInvalid)?;
+    if user.mfa_enabled && !row.mfa_assured {
+        return Err(AppError::Unauthorized(
+            "MFA verification required; sign in again".into(),
+        ));
+    }
     let account = if row.selection.is_none() && row.device_request_id.is_none() {
         Some(
-            token_service::prepare_session_tokens(
+            token_service::prepare_session_tokens_with_assurance(
                 db,
                 config,
                 jwt,
                 &row.user_id,
                 context.client_ip.as_deref(),
                 context.client_user_agent.as_deref(),
+                row.mfa_assured,
             )
             .await?,
         )
@@ -376,6 +389,7 @@ pub async fn browser_handoff(
     let row = LoginCode {
         id: Uuid::new_v4().to_string(),
         user_id: actor.into(),
+        mfa_assured: request.mfa_assured,
         code_hmac: hash(key, &code)?,
         status: Status::Pending,
         selection: None,
