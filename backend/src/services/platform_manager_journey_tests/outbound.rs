@@ -158,9 +158,6 @@ async fn manager_outbound_429_resumes_after_the_prefix_but_ambiguous_parts_never
 
 #[tokio::test]
 async fn manager_outbound_sends_native_photos_and_files_with_v2_source_claims() {
-    use crate::models::{
-        assistant_attachment::AssistantAttachment, assistant_conversation::TurnAttachment,
-    };
     let j = Journey::new().await;
     j.link().await;
     let (destination, reply, mut saved) = j.prepared_reply(7003).await;
@@ -168,42 +165,8 @@ async fn manager_outbound_sends_native_photos_and_files_with_v2_source_claims() 
         ("image/png", b"\x89PNG\r\n\x1a\nimage".as_slice()),
         ("application/pdf", b"%PDF-1.7 test".as_slice()),
     ] {
-        let id = uuid::Uuid::new_v4().to_string();
-        let encrypted = j.state.encryption_keys.encrypt(bytes).await.unwrap();
-        j.state
-            .db
-            .collection::<AssistantAttachment>(crate::models::assistant_attachment::COLLECTION_NAME)
-            .insert_one(AssistantAttachment {
-                id: id.clone(),
-                user_id: j.owner.clone(),
-                conversation_id: saved.conversation_id.clone(),
-                turn_id: saved.turn_id.clone(),
-                origin: "tool".into(),
-                content_type: mime.into(),
-                size: bytes.len() as i64,
-                data_encrypted: encrypted,
-                created_at: Utc::now(),
-            })
-            .await
-            .unwrap();
-        saved.attachments.push(TurnAttachment {
-            id,
-            origin: "tool".into(),
-            content_type: mime.into(),
-            size: bytes.len() as i64,
-            label: "generated attachment".into(),
-            chat_delivery: Some(true),
-            image_input: None,
-            image_inspection: None,
-            pages: None,
-        });
+        attach(&j, &mut saved, mime, bytes).await;
     }
-    j.state
-        .db
-        .collection::<AssistantMessage>(MESSAGES)
-        .replace_one(doc! {"_id":&saved.id}, &saved)
-        .await
-        .unwrap();
     for method_name in ["sendPhoto", "sendDocument"] {
         Mock::given(method("POST"))
             .and(path(format!("/bot100:manager-test-secret/{method_name}")))
