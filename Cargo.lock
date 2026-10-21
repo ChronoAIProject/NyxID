@@ -4329,6 +4329,7 @@ dependencies = [
  "nyxid-service-adapters",
  "open",
  "p256",
+ "proc-macro2",
  "quick-xml 0.41.0",
  "rand 0.8.5",
  "rcgen",
