@@ -159,6 +159,37 @@ class SbomEvidence(unittest.TestCase):
         for converted in ({'components':[]},{'components':[dict(name='fixture',version='2',purl='pkg:apk/alpine/fixture@1')]}):
             with self.assertRaises(ValueError):image_sbom.verify_conversion({'artifacts':[dict(name='fixture',version='1',purl='pkg:apk/alpine/fixture@1')]},converted)
 
+    def test_known_syft_file_omissions_are_preserved_without_repairing_package_loss(self):
+        packages = [dict(name='webpki-roots', version=version, purl='pkg:cargo/webpki-roots@' + version)
+                    for version in ('0.26.11', '1.0.10')]
+        files = [dict(id='file-' + str(i), location=dict(path='/lib/' + str(i)), **extra)
+                 for i, extra in enumerate(({}, {'metadata': {'type': 'SymbolicLink', 'linkDestination': 'target'}},
+                                            {'metadata': {'type': 'Directory'}}, {'metadata': {'type': 'Socket'}}))]
+        files[0]['digests'] = [dict(algorithm='sha256', value='2' * 64)]
+        raw = dict(artifacts=packages, files=files)
+        converted = dict(components=[dict(p, type='library', **{'bom-ref': str(i)}) for i, p in enumerate(packages)])
+        with self.assertRaisesRegex(ValueError, 'actual package identities'):
+            image_sbom.verify_conversion(raw, converted)
+        image_sbom.complete_file_inventory(raw, converted)
+        image_sbom.verify_conversion(raw, converted)
+        self.assertEqual(converted['components'][2]['hashes'], [dict(alg='SHA-256', content='2' * 64)])
+        self.assertEqual([c['bom-ref'] for c in converted['components'][2:]], [f['id'] for f in files])
+        self.assertIn('linkDestination', str(converted['components'][3]['properties']))
+        for kind in ('drop', 'version', 'purl', 'duplicate'):
+            changed = copy.deepcopy(converted)
+            if kind == 'drop': changed['components'].pop(0)
+            elif kind == 'version': changed['components'][0]['version'] = '1.0.10'
+            elif kind == 'purl': changed['components'][0]['purl'] += '?changed=1'
+            else: changed['components'].append(copy.deepcopy(changed['components'][0]))
+            image_sbom.complete_file_inventory(raw, changed)
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, 'actual package identities'):
+                image_sbom.verify_conversion(raw, changed)
+        # Losing an ordinary file is not the known Syft omission and remains fatal.
+        raw['files'].append(dict(id='regular', location=dict(path='/actual-file'), metadata=dict(type='RegularFile')))
+        image_sbom.complete_file_inventory(raw, converted)
+        with self.assertRaisesRegex(ValueError, '/actual-file'):
+            image_sbom.verify_conversion(raw, converted)
+
     def test_platform_manifest_config_and_scope_changes_fail(self):
         d=self.root/'platform';r=platform_bundle(d,'frontend','amd64');catalog=load_json(d/'filesystem.syft.json')
         for kind in ('manifest','config','scope','platform','tool'):
@@ -304,6 +335,17 @@ class RealFilesystem(unittest.TestCase):
             image_sbom.run_syft(syft,['scan','oci-dir:'+str(root/'oci'),'--scope','squashed','-o','syft-json'],root/'raw.json')
             image_sbom.run_syft(syft,['convert',str(root/'raw.json'),'-o','cyclonedx-json@1.6'],root/'cdx.json')
             raw=load_json(root/'raw.json');converted=load_json(root/'cdx.json')
+            # Real Syft conversion omits coordinates without metadata, as found
+            # for glibc ELF references in the exported node-agent rootfs. Retain
+            # the coordinate in the catalog and exercise that exact encoder path.
+            raw.setdefault('files', []).append(dict(id='metadata-less-elf-file',
+                location=dict(path='/usr/lib/fixture.so', accessPath='/usr/lib/fixture.so')))
+            write(root/'raw.json',raw)
+            image_sbom.run_syft(syft,['convert',str(root/'raw.json'),'-o','cyclonedx-json@1.6'],root/'cdx.json')
+            converted=load_json(root/'cdx.json')
+            with self.assertRaisesRegex(ValueError, '/usr/lib/fixture.so'):
+                image_sbom.verify_conversion(raw,converted)
+            image_sbom.complete_file_inventory(raw,converted)
             receipt=dict(component='frontend',platform='linux/amd64',source_commit=COMMIT,image_id='sha256:'+config_id,subject=dict(digest=digest,mediaType='application/vnd.oci.image.manifest.v1+json'))
             image_sbom.verify_catalog(raw,receipt);image_sbom.verify_conversion(raw,converted)
             result=image_sbom.assembled(receipt,converted,{'assets':simple()})

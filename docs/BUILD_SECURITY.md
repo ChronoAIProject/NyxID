@@ -69,6 +69,15 @@ and the committed frontend lock hash. Developer builds can remain explicitly
 unverified. Identity metadata identifies a build; authenticated signatures and
 actual-artifact SBOMs remain separate required release controls.
 
+Filesystem SBOM generation retains the complete raw Syft file inventory. The
+pinned Syft CycloneDX encoder omits file coordinates without metadata and
+directory/symlink/socket entries; the assembler preserves those entries with
+their raw IDs, paths, locations, available digests and metadata. Exact package,
+version, PURL and file-identity comparison still rejects conversion loss or
+changes, including missing ordinary files. Failed image jobs retain partial
+catalogs and conversion diagnostics for inspection; publication still requires
+the complete verified, subject-bound receipt.
+
 `Artifact Packaging` is required by PR `CI Pipeline` and runs weekly with
 read-only permissions and no private context or secrets. It extracts the actual
 backend/frontend runtime images on both native Linux architectures, checks

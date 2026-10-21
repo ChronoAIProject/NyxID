@@ -424,7 +424,8 @@ jobs:
             --stage "$RUNNER_TEMP/image-scan" --source-root "$RUNNER_TEMP/image-source/source" \
             --epoch '${{ steps.source.outputs.epoch }}' --syft "$RUNNER_TEMP/sbom-tools/bin/syft" \
             --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
-      - name: Preserve verified application SBOM evidence without publication
+      - name: Preserve application SBOM evidence and conversion diagnostics
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ contains(fromJSON('["node-agent","nyxid-node-machine","nyxid-machine-updater"]'), matrix.component) && 'pr-image-sbom' || 'pr-auxiliary-sbom' }}-${{ matrix.component }}-${{ matrix.arch }}

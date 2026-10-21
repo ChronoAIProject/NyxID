@@ -545,3 +545,29 @@
   ~/Library/Caches/nyxid-targets/w7-apt-followup/delta-report.md and adjacent
   evidence. Portable APT/build/catalog/image policies, freshness, workflow YAML,
   permissions and pinned actionlint all pass.
+
+## W7 PR #1976 follow-up — node-agent filesystem SBOM conversion
+
+- Both hosted node-agent architectures fail the same conversion check after
+  clean Trivy scans. Export the actual node runtime-inputs stage and scan it
+  with pinned Syft 1.54.1, without building application code. All five Debian
+  package identities survive, while 273 raw metadata-less file coordinates
+  (including glibc references) disappear in the CycloneDX encoder. This reproduces
+  the failure independently of Rust crate versions and architecture.
+- Preserve only the encoder's known omitted categories: metadata-less
+  coordinates, directories, symlinks and sockets. Carry original IDs, paths,
+  locations, available digests and metadata. Run the unchanged exact identity
+  Counter comparison before writing the completed SBOM. Package loss, changed
+  version/PURL, duplication and missing ordinary files remain fatal; regressions
+  include two webpki-roots versions and a real pinned-Syft conversion.
+- Preserve partial image SBOM evidence with always() on failure. Verification
+  and publication closure remain mandatory; mutation tests reject loss of
+  diagnostic retention or any publication bypass. Mismatch errors list every
+  missing/unexpected identity instead of hiding the delta.
+- The real exported-rootfs conversion, completed identity comparison and
+  CycloneDX schema/graph validation pass. SBOM evidence/workflows, Rust binary,
+  archive, node-rootfs, packaging and workflow policy suites pass. Full final
+  node-agent image rebuild and hosted native execution remain PR CI evidence.
+- All 273 preserved identities and reproduction files are recorded in
+  ~/Library/Caches/nyxid-targets/w7-apt-followup/delta-report.md and adjacent
+  node-rootfs*.json evidence. No application source or package version changed.

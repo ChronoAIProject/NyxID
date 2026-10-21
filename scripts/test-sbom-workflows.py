@@ -39,7 +39,9 @@ def require(data):
             if any(c in s.get('run','') for c in ('publish-scanned-image.py','publish-index','promote-sbom-images.py','artifact put','gh release')):
                 raise ValueError('PR jobs cannot publish SBOMs or image/release subjects')
     for job in ('credentials','images'):gate(jobs[job],'scripts/check-image-sbom.py')
-    upload = next(s for s in jobs['images']['steps'] if s.get('name') == 'Preserve verified application SBOM evidence without publication')
+    upload = next(s for s in jobs['images']['steps'] if s.get('name') == 'Preserve application SBOM evidence and conversion diagnostics')
+    if upload.get('if') != 'always()' or upload['with'].get('if-no-files-found') != 'error':
+        raise ValueError('retain partial SBOM conversion diagnostics on failure')
     if "'pr-auxiliary-sbom'" not in upload['with']['name'] or \
             "fromJSON('[\"node-agent\",\"nyxid-node-machine\",\"nyxid-machine-updater\"]')" not in upload['with']['name']:
         raise ValueError('auxiliary image evidence must not enter the official publication set')
@@ -95,7 +97,7 @@ class SbomWorkflows(unittest.TestCase):
         with self.assertRaises(ValueError):require(d)
 
     def test_partial_publication_dependencies_or_pr_bypass_rejected(self):
-        for kind in ('images','release','pr','write','filter','early-tags','auxiliary'):
+        for kind in ('images','release','pr','write','filter','early-tags','auxiliary','diagnostics'):
             d=workflows()
             if kind=='images':d['publish-images']['jobs']['promote']['needs'].remove('image-sbom-closure')
             elif kind=='release':d['release']['jobs']['host']['needs'].remove('sbom-gate')
@@ -103,9 +105,10 @@ class SbomWorkflows(unittest.TestCase):
             elif kind=='write':d['artifact-packaging']['jobs']['image-sbom-closure']['steps'].append({'run':'regctl artifact put'})
             elif kind=='filter':
                 step=next(s for s in d['ci']['jobs']['changes']['steps'] if s.get('uses','').startswith('dorny/paths-filter@'));step['with']['filters']='packaging: []'
-            elif kind=='auxiliary':
-                step=next(s for s in d['artifact-packaging']['jobs']['images']['steps'] if s.get('name')=='Preserve verified application SBOM evidence without publication')
-                step['with']['name']='pr-image-sbom-${{ matrix.component }}-${{ matrix.arch }}'
+            elif kind in ('auxiliary', 'diagnostics'):
+                step=next(s for s in d['artifact-packaging']['jobs']['images']['steps'] if s.get('name')=='Preserve application SBOM evidence and conversion diagnostics')
+                if kind=='auxiliary':step['with']['name']='pr-image-sbom-${{ matrix.component }}-${{ matrix.arch }}'
+                else:step.pop('if')
             else:d['publish-images']['jobs']['merge']['steps'].append({'run':'docker buildx imagetools create -t latest'})
             with self.subTest(kind=kind),self.assertRaises(ValueError):require(d)
 

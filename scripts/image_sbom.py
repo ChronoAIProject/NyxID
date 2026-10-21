@@ -80,6 +80,33 @@ def metadata_capture(catalog, receipt):
                 size=len(records[receipt['subject']['digest']])), records
 
 
+def complete_file_inventory(catalog, converted):
+    # Syft 1.54.1's CycloneDX encoder omits file coordinates without metadata,
+    # directories, symlinks and sockets (cyclonedxhelpers.ToFormatModel). ELF
+    # references in the minimal Debian rootfs have coordinates but no metadata.
+    # Preserve those exact raw file identities; never repair package conversion
+    # or a missing regular file that Syft's encoder is expected to retain.
+    components = converted.setdefault('components', [])
+    present = {item['bom-ref'] for item in components}
+    for item in catalog.get('files', []):
+        if item['id'] in present:
+            continue
+        metadata = item.get('metadata')
+        if metadata is not None and metadata.get('type') not in ('Directory', 'SymbolicLink', 'Socket'):
+            continue  # The independent exact comparison below must reject this.
+        component = {'type': 'file', 'name': item['location']['path'], 'bom-ref': item['id'],
+                     'properties': [{'name': 'syft:file:location', 'value': json.dumps(item['location'], sort_keys=True)}]}
+        if metadata is not None:
+            component['properties'].append({'name': 'syft:file:metadata', 'value': json.dumps(metadata, sort_keys=True)})
+        hashes = [{'alg': {'sha256': 'SHA-256', 'sha1': 'SHA-1', 'md5': 'MD5',
+                           'sha384': 'SHA-384', 'sha512': 'SHA-512'}[digest['algorithm']],
+                   'content': digest['value']} for digest in item.get('digests', [])]
+        if hashes:
+            component['hashes'] = hashes
+        components.append(component)
+        present.add(item['id'])
+
+
 def verify_conversion(catalog, converted):
     # Conversion must retain every package detected in the final filesystem,
     # including identities with no purl. This is independent of graph merging.
@@ -91,7 +118,9 @@ def verify_conversion(catalog, converted):
         raw[(distro['id'], distro.get('versionID'), None)] += 1
     actual = Counter((a['name'], a.get('version'), a.get('purl')) for a in converted.get('components', []))
     if raw != actual:
-        raise ValueError('converted filesystem SBOM omits or changes actual package identities')
+        delta = lambda values: [dict(name=k[0], version=k[1], purl=k[2], count=v) for k, v in values.items()]
+        raise ValueError('converted filesystem SBOM omits or changes actual package identities: ' +
+                         json.dumps(dict(missing=delta(raw - actual), unexpected=delta(actual - raw)), sort_keys=True))
 
 
 def runtime_inventory(catalog, receipt, path):
@@ -132,6 +161,10 @@ def generate(stage, source, epoch, extractor, syft):
     run_syft(syft, ['scan', 'oci-dir:' + str(stage / 'oci'), '--scope', 'squashed', '-o', 'syft-json'], catalog_path)
     catalog = load_json(catalog_path); verify_catalog(catalog, scan)
     run_syft(syft, ['convert', str(catalog_path), '-o', 'cyclonedx-json@1.6'], output / 'filesystem.cdx.json')
+    filesystem = load_json(output / 'filesystem.cdx.json')
+    complete_file_inventory(catalog, filesystem)
+    verify_conversion(catalog, filesystem)
+    write(output / 'filesystem.cdx.json', filesystem)
     names += ['filesystem.syft.json', 'filesystem.cdx.json']
     component = scan['component']; _, _, package, path, abi = IMAGES[component]
     arch = scan['platform'].split('/')[1]; commit = scan['source_commit']
