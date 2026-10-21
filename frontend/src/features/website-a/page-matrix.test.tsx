@@ -27,7 +27,7 @@ vi.mock("@tanstack/react-router", () => ({
   Link: forwardRef<HTMLAnchorElement, Record<string, unknown>>(
     function TestLink({ to, search, hash, preload: _preload, ...props }, ref) {
       void _preload;
-    const query = new URLSearchParams(
+      const query = new URLSearchParams(
         search as Record<string, string>,
       ).toString();
       return (
@@ -154,6 +154,11 @@ describe.each(["en", "zh"])("public page matrix: %s", (language) => {
       ...container.querySelectorAll<HTMLAnchorElement>("nav a.nl"),
     ];
     const active = links.filter((link) => link.getAttribute("aria-current"));
+    if (section === "/blog") {
+      expect(container.querySelector('nav [data-nav="blog"]')).toBeNull();
+      expect(active).toHaveLength(0);
+      return;
+    }
     expect(active).toHaveLength(1);
     expect(parsePublicPath(active[0]?.pathname ?? "/").route).toBe(section);
     expect(active[0]).toHaveClass("on");

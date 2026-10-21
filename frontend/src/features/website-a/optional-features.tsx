@@ -1,3 +1,4 @@
+import { websiteNavProps } from "./navigation";
 import { useWebsite } from "./website-context";
 import { SiteLink } from "./site-link";
 import {
@@ -15,10 +16,14 @@ export const NewsletterSignup = NEWSLETTER_ENABLED ? Newsletter : Hidden;
 export const ContactChat = CONTACT_CHAT_ENABLED ? Chat : Hidden;
 export const FooterStatus = STATUS_ENABLED ? Status : Hidden;
 
-function MenuBlogLink() {
+export function MenuBlogLink() {
   const s = useWebsite();
   return (
-    <SiteLink className="nl" data-nav="blog" href={s.siteHref("/blog")}>
+    <SiteLink
+      {...websiteNavProps(s.route, "/blog")}
+      data-nav="blog"
+      href={s.siteHref("/blog")}
+    >
       {s.language === "zh" ? "博客" : "Blog"}
     </SiteLink>
   );

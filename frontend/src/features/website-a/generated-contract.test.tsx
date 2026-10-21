@@ -53,6 +53,11 @@ describe.each([
         window.history.replaceState({}, "", `${route}${query}`);
         const { container } = render(<Header />);
         const active = container.querySelectorAll("a.nl.on");
+        if (column === "blog") {
+          expect(container.querySelector('[data-nav="blog"]')).toBeNull();
+          expect(active).toHaveLength(0);
+          return;
+        }
         expect(active).toHaveLength(1);
         expect(active[0]).toHaveAttribute("data-nav", column);
         expect(active[0]).toHaveAttribute("aria-current", current);
@@ -115,4 +120,11 @@ describe.each([
   },
 );
 
-vi.mock("./site-link", () => ({ SiteLink: forwardRef<HTMLAnchorElement, React.AnchorHTMLAttributes<HTMLAnchorElement>>(function Anchor(props,ref) { return <a {...props} ref={ref} />; }) }));
+vi.mock("./site-link", () => ({
+  SiteLink: forwardRef<
+    HTMLAnchorElement,
+    React.AnchorHTMLAttributes<HTMLAnchorElement>
+  >(function Anchor(props, ref) {
+    return <a {...props} ref={ref} />;
+  }),
+}));

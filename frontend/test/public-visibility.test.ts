@@ -100,6 +100,10 @@ it.each(["false", "true"])(
     for (const path of ["/blog", "/zh/blog"]) {
       const page = await renderPage(path, async () => "");
       expect(page.html.includes('data-nav="blog"')).toBe(enabled === "true");
+      if (enabled === "true")
+        expect(page.html.match(/<a[^>]*data-nav="blog"[^>]*>/)?.[0]).toContain(
+          'aria-current="page"',
+        );
       expect(page.html).toContain("<h1");
       expect(page.html).toContain(path);
       expect(page.html).toMatch(/href="(?:\/zh)?\/blog"/);
