@@ -471,6 +471,27 @@ fn web_research_guidance_reaches_both_roles_without_lifting_guest_limits() {
 }
 
 #[test]
+fn cli_guidance_reaches_both_roles_and_confines_cli_to_cma_sandboxes() {
+    let mut row = stale_test_row(Utc::now());
+    for role in [AgentRole::Orchestrator, AgentRole::Subagent] {
+        row.role = role;
+        for guest_turn in [false, true] {
+            row.guest_turn = guest_turn;
+            let prompt = base_prompt(&row, None);
+            for guidance in [
+                "Avoid CLI commands",
+                "If a CLI is absolutely necessary",
+                "CMA (slug cma) sandbox command tool",
+                "only when the owner names that machine",
+                "Guests retain their existing tool limits",
+            ] {
+                assert!(prompt.contains(guidance), "missing {guidance} for {role:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
     assert_eq!(
         TurnError::new("first_byte_timeout").code,
