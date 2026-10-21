@@ -1,3 +1,4 @@
+import { mfaPrompt } from "./mfaPrompt";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
 import * as WebBrowser from "expo-web-browser";
@@ -10,7 +11,9 @@ import type { RootStackParamList } from "../../app/AppNavigator";
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
 import { runAuthAttempt } from "../../lib/auth/authAttempt";
+import { parseSocialCallback } from "./socialCallback";
 import { MfaChallengeError } from "../../lib/auth/mfaChallenge";
+import { ApiError } from "../../lib/api/ApiError";
 import { authSessionGeneration } from "../../lib/auth/sessionStore";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
@@ -25,15 +28,6 @@ type SocialProvider = "google" | "github" | "apple";
 type Props = NativeStackScreenProps<RootStackParamList, "Auth">;
 const SOCIAL_CALLBACK_URL = "nyxid://auth/social/callback";
 
-type SocialCallback = {
-  status: "success" | "error";
-  accessToken?: string;
-  refreshToken?: string;
-  expiresIn?: number;
-  error?: string;
-  provider?: SocialProvider;
-};
-
 function resolveAuthError(error: unknown): string {
   if (!(error instanceof Error)) return "Sign-in failed. Please try again.";
   return error.message || "Sign-in failed. Please try again.";
@@ -41,6 +35,8 @@ function resolveAuthError(error: unknown): string {
 
 function resolveSocialAuthError(error: string | undefined): string {
   switch (error) {
+    case "social_auth_invalid_mfa":
+      return "Your verification challenge is invalid. Please sign in again.";
     case "social_auth_denied":
       return "Social sign-in was cancelled.";
     case "social_auth_csrf":
@@ -58,54 +54,6 @@ function resolveSocialAuthError(error: string | undefined): string {
       return "WAITLIST";
     default:
       return error || "Social sign-in failed. Please try again.";
-  }
-}
-
-function parseSocialCallback(url: string): SocialCallback | null {
-  if (!url.startsWith(SOCIAL_CALLBACK_URL)) {
-    return null;
-  }
-
-  try {
-    const parsed = new URL(url);
-    const statusRaw = parsed.searchParams.get("status");
-    const providerRaw = parsed.searchParams.get("provider");
-    const provider: SocialProvider | undefined =
-      providerRaw === "google" || providerRaw === "github" || providerRaw === "apple"
-        ? providerRaw
-        : undefined;
-    if (statusRaw !== "success" && statusRaw !== "error") {
-      return {
-        status: "error",
-        error: "social_auth_unknown",
-        provider,
-      };
-    }
-
-    if (statusRaw === "error") {
-      return {
-        status: "error",
-        error: parsed.searchParams.get("error") ?? parsed.searchParams.get("message") ?? undefined,
-        provider,
-      };
-    }
-
-    const expiresInRaw = parsed.searchParams.get("expires_in");
-    const expiresInParsed = expiresInRaw ? Number(expiresInRaw) : NaN;
-
-    return {
-      status: "success",
-      accessToken: parsed.searchParams.get("access_token") ?? undefined,
-      refreshToken: parsed.searchParams.get("refresh_token") ?? undefined,
-      expiresIn:
-        Number.isFinite(expiresInParsed) && expiresInParsed > 0 ? expiresInParsed : undefined,
-      provider,
-    };
-  } catch (e) {
-    return {
-      status: "error",
-      error: e instanceof Error ? e.message : "social_auth_unknown",
-    };
   }
 }
 
@@ -191,6 +139,8 @@ export function AuthHomeScreen({ navigation }: Props) {
   const [toast, setToast] = useState<ToastState | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [mfaProvider, setMfaProvider] = useState<string | null>(null);
+  const [recoveryMode, setRecoveryMode] = useState(false);
   const [mfaChallenge, setMfaChallenge] = useState<MfaChallengeError | null>(null);
   const [mfaCode, setMfaCode] = useState("");
   const [isEmailAuthPending, setIsEmailAuthPending] = useState(false);
@@ -230,7 +180,6 @@ export function AuthHomeScreen({ navigation }: Props) {
       lastHandledSocialUrlRef.current = url;
 
       const callback = parseSocialCallback(url);
-      if (__DEV__) console.log(`[auth] Parsed callback:`, JSON.stringify(callback));
 
       if (!callback) {
         setLoginError("Unable to complete social sign-in.");
@@ -239,8 +188,17 @@ export function AuthHomeScreen({ navigation }: Props) {
       }
 
       if (callback.status === "error") {
-        if (__DEV__) console.log(`[auth] Social auth error:`, callback.error);
         setLoginError(resolveSocialAuthError(callback.error));
+        resetSocialState();
+        return;
+      }
+
+      if (callback.status === "mfa_required" && callback.mfaToken) {
+        setMfaProvider(callback.provider ?? "social");
+        setRecoveryMode(false);
+        setMfaChallenge(new MfaChallengeError(callback.mfaToken));
+        setMfaCode("");
+        setLoginError(null);
         resetSocialState();
         return;
       }
@@ -312,17 +270,14 @@ export function AuthHomeScreen({ navigation }: Props) {
 
     try {
       const authorizeUrl = mobileApi.getSocialAuthorizeUrl(provider, SOCIAL_CALLBACK_URL);
-      if (__DEV__) console.log(`[auth] Opening ${provider} auth: ${authorizeUrl}`);
 
       const result = await WebBrowser.openAuthSessionAsync(
         authorizeUrl,
         SOCIAL_CALLBACK_URL
       );
 
-      if (__DEV__) console.log(`[auth] Browser result:`, JSON.stringify(result));
 
       if (result.type === "success") {
-        if (__DEV__) console.log(`[auth] Callback URL: ${result.url}`);
         await handleSocialCallback(result.url);
         return;
       }
@@ -334,7 +289,6 @@ export function AuthHomeScreen({ navigation }: Props) {
 
       setLoginError(`Social sign-in failed: ${result.type}`);
     } catch (error) {
-      if (__DEV__) console.log(`[auth] startSocialLogin error:`, error);
       setLoginError(resolveErrorMessage(error));
     } finally {
       if (isMountedRef.current) {
@@ -357,7 +311,7 @@ export function AuthHomeScreen({ navigation }: Props) {
           : mobileApi.loginWithPassword({ email: email.trim(), password }),
         current,
         async (result) => {
-          setMfaChallenge(null); setMfaCode(""); setPassword("");
+          setMfaProvider(null); setRecoveryMode(false); setMfaChallenge(null); setMfaCode(""); setPassword("");
           await signInWithSession({
             accessToken: result.accessToken,
             refreshToken: result.refreshToken,
@@ -366,8 +320,14 @@ export function AuthHomeScreen({ navigation }: Props) {
         },
         (error) => {
           if (error instanceof MfaChallengeError) {
-            setMfaChallenge(error); setPassword(""); setMfaCode("");
-          } else { setMfaCode(""); setLoginError(resolveErrorMessage(error)); }
+            setMfaProvider(null); setRecoveryMode(false); setMfaChallenge(error); setPassword(""); setMfaCode("");
+          } else {
+            setMfaCode("");
+            if (error instanceof ApiError && error.reason === "mfa_challenge_expired") {
+              setMfaProvider(null); setRecoveryMode(false); setMfaChallenge(null);
+              setLoginError("Your verification expired. Please sign in again.");
+            } else { setLoginError(resolveErrorMessage(error)); }
+          }
         },
       );
     } finally {
@@ -377,6 +337,7 @@ export function AuthHomeScreen({ navigation }: Props) {
     }
   };
 
+  const prompt = mfaPrompt(mfaProvider, recoveryMode);
   const isAnyPending = isSocialAuthPending || isEmailAuthPending;
 
   return (
@@ -395,34 +356,43 @@ export function AuthHomeScreen({ navigation }: Props) {
 
         {/* Email login */}
         <View style={flowStyles.card}>
-          <TextInput
-            style={styles.input}
-            placeholder="Email"
-            placeholderTextColor={colors.textMuted}
-            value={email}
-            onChangeText={(v) => { setEmail(v); setMfaChallenge(null); setMfaCode(""); setLoginError(null); }}
-            editable={!isEmailAuthPending && !mfaChallenge}
-            keyboardType="email-address"
-            autoCapitalize="none"
-            autoComplete="email"
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Password"
-            placeholderTextColor={colors.textMuted}
-            value={password}
-            onChangeText={(v) => { setPassword(v); setLoginError(null); }}
-            editable={!isEmailAuthPending && !mfaChallenge}
-            secureTextEntry
-            autoComplete="current-password"
-          />
+          {prompt.showPasswordFields && (
+            <>
+              <TextInput
+                style={styles.input}
+                placeholder="Email"
+                placeholderTextColor={colors.textMuted}
+                value={email}
+                onChangeText={(v) => { setEmail(v); setMfaChallenge(null); setMfaCode(""); setLoginError(null); }}
+                editable={!isEmailAuthPending && !mfaChallenge}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoComplete="email"
+              />
+              <TextInput
+                style={styles.input}
+                placeholder="Password"
+                placeholderTextColor={colors.textMuted}
+                value={password}
+                onChangeText={(v) => { setPassword(v); setLoginError(null); }}
+                editable={!isEmailAuthPending && !mfaChallenge}
+                secureTextEntry
+                autoComplete="current-password"
+              />
+            </>
+          )}
           {mfaChallenge && <View>
-            <Text style={styles.heroTagline}>Enter your authenticator or single-use recovery code.</Text>
-            <TextInput accessibilityLabel="Authenticator or recovery code" style={styles.input} value={mfaCode}
+            <Text style={styles.heroTagline}>{prompt.title}</Text>
+            <TextInput accessibilityLabel={prompt.label}
+              placeholder={prompt.placeholder}
+              keyboardType={recoveryMode ? "default" : "number-pad"} style={styles.input} value={mfaCode}
               onChangeText={setMfaCode} maxLength={32} autoCapitalize="none" autoCorrect={false}
               autoComplete="one-time-code" editable={!isEmailAuthPending} />
-            <Pressable accessibilityRole="button" disabled={isEmailAuthPending} onPress={() => { setMfaChallenge(null); setMfaCode(""); setPassword(""); }}>
-              <Text style={styles.heroTagline}>Back to password sign-in</Text>
+            <Pressable accessibilityRole="button" disabled={isEmailAuthPending} onPress={() => { setRecoveryMode(!recoveryMode); setMfaCode(""); }}>
+              <Text style={styles.heroTagline}>{prompt.toggle}</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" disabled={isEmailAuthPending} onPress={() => { setMfaProvider(null); setRecoveryMode(false); setMfaChallenge(null); setMfaCode(""); setPassword(""); }}>
+              <Text style={styles.heroTagline}>Back to sign-in</Text>
             </Pressable>
           </View>}
           {/* DESIGN.md §Buttons: primary CTA uses `nyx-gradient-vivid`. */}

@@ -2106,6 +2106,32 @@ The `telegram_new` handler delegates creation and Telegram consent to `telegram_
 
 Two collections hold setup metadata: `telegram_bot_requests` stores actor/destination bindings, hashed challenges, revisions, and request expiry; `telegram_managed_bot_events` stores immutable creation provenance and subsequent management revisions. Neither stores ordinary chat content or raw updates. The registration transaction checks shared Telegram identity and owner quota, inserts the pending `ChannelBot`, consumes creation provenance, and transitions the request to provisioning. Durable pending state and renewable per-bot leases support retries without duplicate registration. Observed management changes suspend both incoming messages and outgoing replies.
 
+The manager registry retains the default `telegram-new` credential and stores
+additional installations under `telegram-new/{manager_bot_id}`. Each has separate
+context-bound encrypted credentials, webhook secret, observed identity and
+configuration lease. Child creation and recovery select the issuing manager.
+
+BotFather help uses `platform_help_libraries` for mutable drafts and publication
+pointers, `platform_help_revisions` for immutable published snapshots, and
+`platform_help_assignments` for profile-to-library selection. The help service
+validates bounded public content, fences current administrators in transactions,
+and uses optimistic versions to reject stale updates. Missing assignments use a
+seeded shared library; a turn pins its first revision so publishing or rollback
+cannot change a response halfway through delivery.
+
+`channel_reply_plan` renders bounded provider parts before sending.
+`channel_text_deliveries` records the logical delivery identity, owner, content
+fingerprint and each part's pending/sending/sent/failed state without storing the
+message body. Confirmed parts are not replayed; ambiguous provider outcomes stop
+resubmission. The personal-erasure worker deletes these journals by exact owner.
+Direct Telegram input extraction preserves forwarded/quoted content as reference data.
+Current relay-sourced gateway delivery supplies plain text, original-message
+eligibility and own/quoted file handles, losing forward-origin names, quoted text
+and hidden link URLs (accepted demo limitation; see the CMA follow-up plan);
+only verified original messages can exercise pairing or action-card controls.
+Forwarded files use the existing owner-bound attachment roots and encrypted
+chunks, committed with the assistant turn.
+
 See [Telegram New](TELEGRAM_NEW.md) for the state machine, administrator steps, MongoDB and rollout requirements, and staging checks that must pass before customer enablement.
 
 ---

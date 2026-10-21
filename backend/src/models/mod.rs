@@ -30,6 +30,7 @@ pub mod channel_event_log;
 pub mod channel_message;
 pub mod channel_reply_delivery;
 pub mod channel_send_claim;
+pub mod channel_text_delivery;
 pub mod channel_thread;
 pub mod channel_thread_follow;
 pub mod cli_pairing;
@@ -226,3 +227,5 @@ pub(crate) mod platform_native_reply_handle;
 pub mod credit_allocation_request;
 pub mod credit_service_limit;
 pub mod oauth_delegation_authority;
+
+pub mod platform_help;

@@ -16,7 +16,44 @@ use mongodb::{
     bson::{self, doc},
     options::{IndexOptions, ReturnDocument},
 };
+use rand::{RngCore, rngs::OsRng};
 use zeroize::Zeroizing;
+
+pub struct ReviewDecision {
+    pub request: PlatformBindingRequest,
+    pub confirmation_code: Option<Zeroizing<String>>,
+}
+
+pub(crate) async fn link_command(db: &Database, profile_id: &str) -> AppResult<&'static str> {
+    Ok(
+        if super::platform_bot_runtime_control_service::get(db, profile_id)
+            .await?
+            .is_some()
+        {
+            "/onboarding"
+        } else {
+            "/link"
+        },
+    )
+}
+
+fn confirmation_hash(key: &[u8], code: &str) -> AppResult<String> {
+    let code = code.trim();
+    if code.len() != 34
+        || !code.starts_with("O-")
+        || !code[2..].bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(unavailable());
+    }
+    Ok(super::auth_device_service::hmac_hex(
+        key,
+        format!(
+            "platform-onboarding-confirm:v2:{}",
+            code.to_ascii_uppercase()
+        )
+        .as_bytes(),
+    ))
+}
 
 fn unavailable() -> AppError {
     AppError::NotFound("Onboarding link is unavailable or expired".into())
@@ -218,6 +255,7 @@ pub(crate) async fn begin(
         telegram_sender_id: sender.into(),
         telegram_chat_id: chat.into(),
         code_hmac: hash,
+        confirmation_hmac: None,
         initiation_ref,
         state: BindingRequestState::Pending,
         approved_user_id: None,
@@ -284,7 +322,7 @@ pub async fn decide(
     matched_code: &str,
     approve: bool,
     replace: bool,
-) -> AppResult<PlatformBindingRequest> {
+) -> AppResult<ReviewDecision> {
     admit_decision(db, actor).await?;
     let hash = code_hash(key, code)?;
     if hash != code_hash(key, matched_code)? {
@@ -292,6 +330,14 @@ pub async fn decide(
             "Match the code shown in the initiating chat".into(),
         ));
     }
+    let mut random = Zeroizing::new([0u8; 16]);
+    OsRng.fill_bytes(random.as_mut());
+    let confirmation = Zeroizing::new(format!("O-{}", hex::encode_upper(random.as_ref())));
+    let confirmation_hmac = if approve {
+        Some(confirmation_hash(key, &confirmation)?)
+    } else {
+        None
+    };
     let db = db.clone();
     let actor = actor.to_owned();
     let mut session = db.client().start_session().await?;
@@ -306,10 +352,12 @@ pub async fn decide(
             if approve && !replace && previous.as_ref().is_some_and(|b| b.is_active && b.user_id != actor) {
                 return Err(AppError::Conflict("This chat has another account binding; explicitly review account replacement".into()));
             }
-            db.collection::<PlatformBindingRequest>(REQUESTS).find_one_and_update(doc! {"_id": &request.id, "state": "pending"},
+            let request = db.collection::<PlatformBindingRequest>(REQUESTS).find_one_and_update(doc! {"_id": &request.id, "state": "pending"},
                 doc! {"$set": {"state": if approve {"awaiting_chat_confirmation"} else {"denied"}, "approved_user_id": if approve {bson::Bson::String(actor.clone())} else {bson::Bson::Null}, "replace_existing": replace,
+                    "confirmation_hmac": &confirmation_hmac,
                     "binding_generation_at_review": previous.map(|b| bson::Bson::Int64(b.generation)).unwrap_or(bson::Bson::Null)}})
-                .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(unavailable)
+                .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(unavailable)?;
+            Ok(ReviewDecision {request, confirmation_code: approve.then(|| confirmation.clone())})
         }.await;
         transaction_result(result)
     }).await.map_err(map_transaction_error)
@@ -326,7 +374,7 @@ pub(crate) async fn confirm_from_chat(
     if sender != chat {
         return Err(unavailable());
     }
-    let hash = code_hash(key, code)?;
+    let hash = confirmation_hash(key, code)?;
     let db = db.clone();
     let profile = profile.clone();
     let sender = sender.to_owned();
@@ -335,7 +383,7 @@ pub(crate) async fn confirm_from_chat(
     session.start_transaction().and_run2(async move |session| {
         let result: AppResult<_> = async {
             fence_profile(&db, &profile.id, profile.generation, session).await?;
-            let request = db.collection::<PlatformBindingRequest>(REQUESTS).find_one(doc! {"code_hmac": &hash, "platform_config_id": &profile.id,
+            let request = db.collection::<PlatformBindingRequest>(REQUESTS).find_one(doc! {"confirmation_hmac": &hash, "platform_config_id": &profile.id,
                 "manager_bot_id": &profile.manager_bot_id, "profile_generation": profile.generation, "telegram_sender_id": &sender, "telegram_chat_id": &chat,
                 "state": "awaiting_chat_confirmation", "expires_at": {"$gt": bson::DateTime::now()}}).session(&mut *session).await?.ok_or_else(unavailable)?;
             let actor = request.approved_user_id.as_deref().ok_or_else(unavailable)?;
@@ -378,6 +426,49 @@ pub(crate) async fn live_for_sender(
         }
     }
     Ok(None)
+}
+
+pub(crate) async fn chat_status(
+    db: &Database,
+    profile: &PlatformBotConfig,
+    sender: &str,
+    chat: &str,
+) -> AppResult<String> {
+    let command = link_command(db, &profile.id).await?;
+    if sender != chat {
+        return Err(unavailable());
+    }
+    if live_for_sender(db, profile, sender, chat).await?.is_some() {
+        return Ok(
+            "Onboarding link status: linked. Use /setups to view progress, or /unlink to disconnect this chat.".into(),
+        );
+    }
+    let request = db
+        .collection::<PlatformBindingRequest>(REQUESTS)
+        .find_one(doc! {
+            "platform_config_id": &profile.id, "profile_generation": profile.generation,
+            "manager_bot_id": &profile.manager_bot_id,
+            "telegram_sender_id": sender, "telegram_chat_id": chat,
+        })
+        .sort(doc! {"created_at": -1, "_id": -1})
+        .await?;
+    Ok(match request {
+        Some(request) if request.expires_at <= Utc::now() => {
+            format!("Onboarding link status: expired. Send {command} to start a fresh review.")
+        }
+        Some(request) => match request.state {
+            BindingRequestState::Pending => {
+                "Onboarding link status: awaiting browser approval. Open the review link from this chat and approve your account. /check only checks status.".into()
+            }
+            BindingRequestState::AwaitingChatConfirmation
+                if request.confirmation_hmac.is_some() =>
+            {
+                "Onboarding link status: approved; waiting for confirmation here. Return to the approval page and tap Open Telegram to finish, or copy its /confirm command into this private chat. /check does not complete linking.".into()
+            }
+            _ => format!("Onboarding link status: not linked. Send {command} to start a fresh review."),
+        },
+        None => format!("Onboarding link status: not linked. Send {command} to start a fresh review."),
+    })
 }
 
 pub(crate) async fn fence_reply(
@@ -665,17 +756,19 @@ mod tests {
                 .unwrap(),
             1
         );
-        decide(&db, key, &actor, &code, &code, true, false)
+        let code_confirmation = decide(&db, key, &actor, &code, &code, true, false)
             .await
+            .unwrap()
+            .confirmation_code
             .unwrap();
         assert!(
-            confirm_from_chat(&db, key, &profile, "124", "124", &code)
+            confirm_from_chat(&db, key, &profile, "124", "124", &code_confirmation)
                 .await
                 .is_err()
         );
         unlink_sender(&db, &profile, "123", "123").await.unwrap();
         assert!(
-            confirm_from_chat(&db, key, &profile, "123", "123", &code)
+            confirm_from_chat(&db, key, &profile, "123", "123", &code_confirmation)
                 .await
                 .is_err()
         );
@@ -689,14 +782,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn platform_onboarding_browser_proof_is_fresh_scoped_and_single_use() {
+        let (db, profile, actor) = fixture("platform_binding_fresh_browser_proof").await;
+        let key = b"test-only-hmac-key";
+        let (request, code) = begin(&db, key, &profile, "123", "123", 10).await.unwrap();
+        assert!(
+            chat_status(&db, &profile, "123", "123")
+                .await
+                .unwrap()
+                .contains("awaiting browser")
+        );
+        assert!(
+            chat_status(&db, &profile, "124", "124")
+                .await
+                .unwrap()
+                .contains("not linked")
+        );
+        let proof = decide(&db, key, &actor, &code, &code, true, false)
+            .await
+            .unwrap()
+            .confirmation_code
+            .unwrap();
+        assert!(
+            chat_status(&db, &profile, "123", "123")
+                .await
+                .unwrap()
+                .contains("approved; waiting")
+        );
+        assert_eq!(
+            db.collection::<PlatformBinding>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        // The code in the initiation link is known to a relaying attacker.
+        assert!(
+            confirm_from_chat(&db, key, &profile, "123", "123", &code)
+                .await
+                .is_err()
+        );
+        assert!(
+            confirm_from_chat(&db, key, &profile, "124", "124", &proof)
+                .await
+                .is_err()
+        );
+        assert!(
+            confirm_from_chat(&db, key, &profile, "123", "-100", &proof)
+                .await
+                .is_err()
+        );
+        let mut other = profile.clone();
+        other.manager_bot_id = "991101".into();
+        assert!(
+            confirm_from_chat(&db, key, &other, "123", "123", &proof)
+                .await
+                .is_err()
+        );
+        let stored = db
+            .collection::<bson::Document>(REQUESTS)
+            .find_one(doc! {"_id": &request.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!format!("{stored:?}").contains(proof.as_str()));
+        // Pending rows approved before this upgrade lack a fresh proof and fail closed.
+        db.collection::<bson::Document>(REQUESTS)
+            .update_one(
+                doc! {"_id": &request.id},
+                doc! {"$unset":{"confirmation_hmac":""}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            confirm_from_chat(&db, key, &profile, "123", "123", &code)
+                .await
+                .is_err()
+        );
+        assert!(
+            confirm_from_chat(&db, key, &profile, "123", "123", &proof)
+                .await
+                .is_err()
+        );
+        db.collection::<bson::Document>(REQUESTS)
+            .update_one(
+                doc! {"_id": &request.id},
+                doc! {"$set":{"confirmation_hmac": confirmation_hash(key, &proof).unwrap()}},
+            )
+            .await
+            .unwrap();
+        let binding = confirm_from_chat(&db, key, &profile, "123", "123", &proof)
+            .await
+            .unwrap();
+        assert_eq!(binding.user_id, actor);
+        assert!(
+            chat_status(&db, &profile, "123", "123")
+                .await
+                .unwrap()
+                .contains("status: linked")
+        );
+        assert!(
+            confirm_from_chat(&db, key, &profile, "123", "123", &proof)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            db.collection::<PlatformBinding>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn platform_onboarding_binding_revocation_fences_prepared_reply_and_confirmation() {
         let (db, profile, actor) = fixture("platform_binding_revoke_reply").await;
         let key = b"test-only-hmac-key";
         let (_, code) = begin(&db, key, &profile, "123", "123", 10).await.unwrap();
-        decide(&db, key, &actor, &code, &code, true, false)
+        let code_confirmation = decide(&db, key, &actor, &code, &code, true, false)
             .await
+            .unwrap()
+            .confirmation_code
             .unwrap();
-        let binding = confirm_from_chat(&db, key, &profile, "123", "123", &code)
+        let binding = confirm_from_chat(&db, key, &profile, "123", "123", &code_confirmation)
             .await
             .unwrap();
         admit_reply(&db, &profile, Some(&binding)).await.unwrap();
@@ -723,15 +933,18 @@ mod tests {
             )
             .await
             .unwrap();
-        decide(&db, key, &actor, &second_code, &second_code, true, false)
-            .await
-            .unwrap();
+        let second_code_confirmation =
+            decide(&db, key, &actor, &second_code, &second_code, true, false)
+                .await
+                .unwrap()
+                .confirmation_code
+                .unwrap();
         revoke_owned(&db, &actor, &binding.id, binding.generation)
             .await
             .unwrap();
         assert!(admit_reply(&db, &profile, Some(&binding)).await.is_err());
         assert!(
-            confirm_from_chat(&db, key, &profile, "123", "123", &second_code)
+            confirm_from_chat(&db, key, &profile, "123", "123", &second_code_confirmation)
                 .await
                 .is_err()
         );
@@ -750,11 +963,13 @@ mod tests {
         assert!(begin(&db, key, &profile, "123", "124", 1).await.is_err());
         assert!(begin(&db, key, &profile, "0", "0", 1).await.is_err());
         let (request, code) = begin(&db, key, &profile, "123", "123", 1).await.unwrap();
-        decide(&db, key, &actor, &code, &code, true, false)
+        let code_confirmation = decide(&db, key, &actor, &code, &code, true, false)
             .await
+            .unwrap()
+            .confirmation_code
             .unwrap();
         assert!(
-            confirm_from_chat(&db, key, &profile, "124", "124", &code)
+            confirm_from_chat(&db, key, &profile, "124", "124", &code_confirmation)
                 .await
                 .is_err()
         );
@@ -767,7 +982,7 @@ mod tests {
             .unwrap();
         assert!(preview(&db, key, &code).await.is_err());
         assert!(
-            confirm_from_chat(&db, key, &profile, "123", "123", &code)
+            confirm_from_chat(&db, key, &profile, "123", "123", &code_confirmation)
                 .await
                 .is_err()
         );

@@ -210,12 +210,13 @@ pub(crate) async fn verify_identity_in_transaction(
                 .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(invalid)?;
     let browser = if verified.keep_signed_in {
         Some(
-            token_service::create_session_with_transaction(
+            token_service::create_session_with_transaction_and_assurance(
                 db,
                 verified.user_id.as_deref().ok_or_else(invalid)?,
                 Some(ip),
                 user_agent,
                 Some(&mut *session),
+                mfa_verified,
             )
             .await?,
         )
@@ -255,6 +256,7 @@ pub async fn approve_app_identity(
     key: &[u8],
     request: &AuthDeviceCode,
     input: &device::ApproveInput,
+    mfa_assured: bool,
 ) -> AppResult<()> {
     let id = request.login_approval_id.as_deref().ok_or_else(invalid)?;
     let approval = db
@@ -269,10 +271,13 @@ pub async fn approve_app_identity(
         .await?
         .ok_or_else(invalid)?;
     auth_service::ensure_person_user(&actor)?;
+    if actor.mfa_enabled && !mfa_assured {
+        return Err(invalid());
+    }
     let result = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(
         doc! {"_id": &request.id, "status": "pending", "expires_at": {"$gt": mongodb::bson::DateTime::now()}},
         doc! {"$set": {"status": "approved", "approved_user_id": &actor.id,
-            "approved_at": mongodb::bson::DateTime::now(),
+            "approved_at": mongodb::bson::DateTime::now(), "mfa_assured": mfa_assured,
             "approver_ip_hmac": input.approver_ip.as_deref().map(|ip| device::hmac_hex(key, ip.as_bytes()))}})
         .await?;
     if result.modified_count != 1 {
@@ -318,6 +323,9 @@ pub async fn app_identity(
         .find_one(doc! {"_id": &request.approved_user_id, "is_active": true})
         .await?
         .ok_or_else(invalid)?;
+    if actor.mfa_enabled && !request.mfa_assured {
+        return Err(invalid());
+    }
     let row = if row.user_id.as_deref() == Some(&actor.id) && !row.verified {
         row.clone()
     } else {

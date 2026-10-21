@@ -553,7 +553,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     let mfa_routes = Router::new()
         .route("/setup", post(handlers::mfa::setup))
         .route("/confirm", post(handlers::mfa::confirm))
-        .route("/verify", post(handlers::mfa::verify))
+        .route("/verify", post(handlers::mfa::verify_http))
+        .route("/cancel", post(handlers::mfa::cancel))
         .route("/disable", post(handlers::mfa::disable));
 
     let auth_routes = Router::new()
@@ -1156,6 +1157,34 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_nodes::admin_disconnect_node),
         )
         .route("/audit-log", get(handlers::admin::list_audit_log))
+        .route(
+            "/telegram-managers/clear",
+            post(handlers::telegram_managers::clear),
+        )
+        .route(
+            "/telegram-managers",
+            get(handlers::telegram_managers::list).post(handlers::telegram_managers::configure),
+        )
+        .route(
+            "/platform-help",
+            get(handlers::platform_help::list).post(handlers::platform_help::create),
+        )
+        .route(
+            "/platform-help/{id}",
+            axum::routing::put(handlers::platform_help::save),
+        )
+        .route(
+            "/platform-help/{id}/publish",
+            post(handlers::platform_help::publish),
+        )
+        .route(
+            "/platform-help/{id}/history",
+            get(handlers::platform_help::history),
+        )
+        .route(
+            "/platform-bots/{id}/help-library",
+            get(handlers::platform_help::assignment).put(handlers::platform_help::assign),
+        )
         .route(
             "/platform-bots",
             get(handlers::platform_bots::list).post(handlers::platform_bots::convert),
@@ -2524,6 +2553,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::agent_skills::preview_attached),
         )
         .route(
+            "/nyxagent/agents/{id}/skills/{skill_id}/preload",
+            put(handlers::agent_skills::set_preload),
+        )
+        .route(
             "/nyxagent/agents/{id}/skills/{skill_id}/improve",
             post(handlers::agent_skills::improve),
         )
@@ -3307,6 +3340,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/api/v1/webhooks/call-adapters/{id}/sms-receipts/{send}", post(handlers::call_adapters::sms_receipt))
         .route("/api/v1/webhooks/call-adapters/{id}/socket/{sid}", get(handlers::call_adapters::socket))
         .route("/api/v1/webhooks/call-adapters/{id}/v1/chat/completions", post(handlers::call_adapters::completions))
+        .route("/api/v1/webhooks/channel/telegram-new/manager/{id}", post(handlers::telegram_new::scoped_webhook).layer(axum::extract::DefaultBodyLimit::max(256*1024)))
         .route(
             "/api/v1/webhooks/channel/telegram-new/manager",
             post(handlers::telegram_new::webhook)
@@ -3409,6 +3443,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             crate::services::platform_manager_transport::compose(
                 state.clone(),
                 crate::handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+                crate::handlers::agent_skills::preload_context(state.clone()),
             ),
         ))
     } else {

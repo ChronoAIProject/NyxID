@@ -1135,6 +1135,16 @@ it("shows capacity waiting without an error and links billing remedies", () => {
   expect(screen.queryByText("Details")).not.toBeInTheDocument();
 });
 
+it("labels a queued reply with its queue clock", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-15T00:00:12Z"));
+  render(<ChatMessageBubble message={{ ...BASE, content: "", status: "streaming", waitingForCapacity: true, queued: true,
+    capacityWaitStartedAt: "2026-10-15T00:00:00Z", capacityWaitDeadline: "2026-10-15T00:10:00Z" }} />);
+  expect(screen.queryByText(/Waiting for the assistant/)).not.toBeInTheDocument();
+  expect(screen.getByText(/Queued until another reply finishes/).closest("[data-waiting-status]")).toHaveTextContent("0:12 of up to 10:00");
+  vi.useRealTimers();
+});
+
 it("restores the shared capacity clock after remount and clears it on acceptance", () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-10-15T00:00:23Z"));

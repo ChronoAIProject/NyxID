@@ -1229,6 +1229,7 @@ async fn authenticated_batch_cannot_be_relabelled_to_a_live_entry_or_transport()
 
 pub(crate) fn bot() -> ChannelBot {
     ChannelBot {
+        manager_instance: None,
         diagnostics: Default::default(),
         x_events: None,
         last_verification: None,

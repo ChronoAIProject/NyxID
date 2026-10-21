@@ -155,12 +155,37 @@ async fn exchange_social_token_inner(
         SocialProvider::Apple => verify_apple_token(jwks_cache, config, subject_token).await?,
     };
 
+    complete_verified_exchange(db, config, jwt_keys, client_id, social_provider, profile).await
+}
+
+/// Provider verification stays at the caller; all verified first factors cross
+/// this session-issuance boundary, including the NyxID MFA gate.
+async fn complete_verified_exchange(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    client_id: &str,
+    social_provider: SocialProvider,
+    profile: SocialProfile,
+) -> AppResult<SocialTokenExchangeInner> {
     // Step 4: Find or create user. First-time social sign-ups are blocked
     // when the invite-code gate is enabled.
     let allow_new_users = !feature_flag_service::invitation_code_required(db).await?;
     let user = social_auth_service::find_or_create_user(db, &profile, allow_new_users)
         .await?
         .user;
+
+    // Social subject-token exchange is a first-factor login. MFA users must
+    // redeem the same bounded challenge as password/social browser flows
+    // before any session or refresh token is materialized.
+    if user.mfa_enabled {
+        let challenge =
+            token_service::start_social_mfa_challenge(db, &user.id, social_provider.as_str())
+                .await?;
+        return Err(AppError::MfaRequired {
+            session_token: challenge.to_string(),
+        });
+    }
 
     // Step 5: Issue full NyxID token set
     let tokens = token_service::create_session_and_issue_tokens(
@@ -369,6 +394,92 @@ mod tests {
     use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
     use crate::test_utils::{cached_test_jwt_keys, connect_test_database, test_app_config};
     use chrono::Utc;
+    use mongodb::bson::doc;
+
+    #[tokio::test]
+    async fn verified_social_exchange_requires_mfa_before_any_session_or_tokens() {
+        use crate::models::{
+            session::{COLLECTION_NAME as SESSIONS, Session},
+            user::{User, UserType},
+        };
+        let db = crate::test_utils::connect_transaction_test_database("social_exchange_mfa").await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        for provider in [
+            SocialProvider::Google,
+            SocialProvider::GitHub,
+            SocialProvider::Apple,
+        ] {
+            let id = uuid::Uuid::new_v4().to_string();
+            let mut user = crate::test_utils::test_user(&id, UserType::Person);
+            user.social_provider = Some(provider.as_str().into());
+            user.social_provider_id = Some(format!("provider-{id}"));
+            user.mfa_enabled = true;
+            let email = user.email.clone();
+            db.collection::<User>(crate::models::user::COLLECTION_NAME)
+                .insert_one(user)
+                .await
+                .unwrap();
+            let profile = || SocialProfile {
+                provider,
+                provider_id: format!("provider-{id}"),
+                email: email.clone(),
+                display_name: None,
+                avatar_url: None,
+            };
+            let result = complete_verified_exchange(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                "public-client",
+                provider,
+                profile(),
+            )
+            .await;
+            let Err(AppError::MfaRequired { session_token }) = result else {
+                panic!("MFA challenge expected")
+            };
+            assert_eq!(
+                db.collection::<Session>(SESSIONS)
+                    .count_documents(doc! {"user_id": &id})
+                    .await
+                    .unwrap(),
+                0
+            );
+            let pending = crate::services::mfa_service::reserve_pending_challenge(
+                &db,
+                &hash_token(&session_token),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                pending.session.mfa_method.as_deref(),
+                Some(provider.as_str())
+            );
+            db.collection::<User>(crate::models::user::COLLECTION_NAME)
+                .update_one(doc! {"_id": &id}, doc! {"$set": {"mfa_enabled": false}})
+                .await
+                .unwrap();
+            let tokens = complete_verified_exchange(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                "public-client",
+                provider,
+                profile(),
+            )
+            .await
+            .unwrap();
+            assert!(!tokens.access_token.is_empty() && !tokens.refresh_token.is_empty());
+            assert_eq!(
+                db.collection::<Session>(SESSIONS)
+                    .count_documents(doc! {"user_id": &id})
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        db.drop().await.unwrap();
+    }
 
     async fn insert_public_oauth_client(db: &mongodb::Database, client_id: &str) {
         let now = Utc::now();

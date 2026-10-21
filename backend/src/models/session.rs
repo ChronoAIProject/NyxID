@@ -20,6 +20,14 @@ pub struct Session {
     pub user_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<SessionPurpose>,
+    /// Non-secret first-factor method retained on pending MFA challenges.
+    /// Completed sessions leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mfa_method: Option<String>,
+    /// A completed session may authenticate an MFA-enabled account only after
+    /// this assurance was established by a successful MFA step.
+    #[serde(default)]
+    pub mfa_assured: bool,
     /// SHA-256 hash of the session token stored in the cookie
     pub token_hash: String,
     pub ip_address: Option<String>,
@@ -58,6 +66,8 @@ mod tests {
     fn make_session() -> Session {
         Session {
             purpose: Some(crate::models::session::SessionPurpose::Authenticated),
+            mfa_method: None,
+            mfa_assured: false,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             token_hash: "abcdef0123456789".to_string(),

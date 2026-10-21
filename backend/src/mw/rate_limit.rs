@@ -17,7 +17,7 @@ use crate::config::{TrustedProxyRange, normalize_ip_address};
 use crate::errors::AppError;
 use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode};
 use crate::services::cluster_slot_service::{RenewableSlotGuard, RenewableSlotManager};
-use crate::services::coordination_service::{RateWindowStore, TokenBucketStore};
+use crate::services::coordination_service::{RateWindowStore, SlotStore, TokenBucketStore};
 
 const GLOBAL_NAMESPACE: &str = "global";
 
@@ -262,9 +262,52 @@ impl PerKeyRateLimiter {
 
 pub type SharedPerKeyRateLimiter = Arc<PerKeyRateLimiter>;
 
-/// Cost control for the human-only direct assistant endpoint. A successful
-/// acquisition consumes one request from the fixed window and one in-flight
-/// slot until the returned permit is dropped.
+/// Replies one person may have running at once on the human assistant
+/// endpoints. Further NyxAgent turns queue; Direct model chat is refused.
+pub const DIRECT_CHAT_MAX_IN_FLIGHT: u32 = 4;
+/// NyxAgent turns one person may have waiting for a running slot. A send
+/// beyond this is refused with 429.
+pub const DIRECT_CHAT_MAX_QUEUED: u32 = 8;
+/// Turns one person may start per minute, queued or not.
+pub const DIRECT_CHAT_MAX_REQUESTS_PER_MINUTE: u32 = 30;
+/// Slots live in MongoDB and free up on any replica, so a queued turn polls.
+pub const DIRECT_CHAT_QUEUE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const DIRECT_CHAT_NAMESPACE: &str = "direct_chat";
+pub(crate) const DIRECT_CHAT_QUEUE_NAMESPACE: &str = "direct_chat_queue";
+
+/// Tests pause running-slot claims at this gate to interleave other work.
+#[cfg(test)]
+pub(crate) struct SlotClaimGate {
+    pub arrived: tokio::sync::Notify,
+    pub open: tokio::sync::Semaphore,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SLOT_CLAIM_GATE: std::cell::RefCell<Option<Arc<SlotClaimGate>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn gate_slot_claims(gate: Option<Arc<SlotClaimGate>>) {
+    SLOT_CLAIM_GATE.with(|slot| *slot.borrow_mut() = gate);
+}
+
+async fn before_slot_claim() {
+    #[cfg(test)]
+    {
+        let gate = SLOT_CLAIM_GATE.with(|slot| slot.borrow().clone());
+        if let Some(gate) = gate {
+            gate.arrived.notify_one();
+            gate.open.acquire().await.expect("gate open").forget();
+        }
+    }
+}
+
+/// Cost control for the human-only direct assistant endpoints. A successful
+/// acquisition consumes one request from the fixed window and holds one
+/// running slot, or for a queued NyxAgent turn one queue place, until the
+/// returned permit is dropped.
 #[derive(Clone)]
 pub struct DirectChatRateLimiter {
     db: Option<Database>,
@@ -274,6 +317,7 @@ pub struct DirectChatRateLimiter {
     max_requests: u32,
     window_secs: u64,
     max_in_flight: u32,
+    max_queued: u32,
 }
 
 #[cfg(test)]
@@ -295,6 +339,7 @@ impl DirectChatRateLimiter {
             max_requests,
             window_secs,
             max_in_flight,
+            max_queued: 0,
         }
     }
 
@@ -304,40 +349,25 @@ impl DirectChatRateLimiter {
             slot_manager: Some(slot_manager),
             #[cfg(test)]
             state: Arc::new(Mutex::new(HashMap::new())),
-            max_requests: 10,
+            max_requests: DIRECT_CHAT_MAX_REQUESTS_PER_MINUTE,
             window_secs: 60,
-            max_in_flight: 2,
+            max_in_flight: DIRECT_CHAT_MAX_IN_FLIGHT,
+            max_queued: DIRECT_CHAT_MAX_QUEUED,
         }
     }
 
+    /// Run now or refuse: for callers that cannot wait inside a claimed turn.
     pub async fn try_acquire(
         self: &Arc<Self>,
         user_id: &str,
     ) -> Result<DirectChatPermit, AppError> {
         if let (Some(db), Some(slot_manager)) = (&self.db, &self.slot_manager) {
             let slot = slot_manager
-                .acquire("direct_chat", user_id, self.max_in_flight)
+                .acquire(DIRECT_CHAT_NAMESPACE, user_id, self.max_in_flight)
                 .await?
                 .ok_or(AppError::RateLimited)?;
-            let admitted = RateWindowStore::admit(
-                db,
-                "direct_chat_request",
-                user_id,
-                u64::from(self.max_requests),
-                std::time::Duration::from_secs(self.window_secs),
-            )
-            .await?
-            .allowed;
-            if !admitted {
-                return Err(AppError::RateLimited);
-            }
-            return Ok(DirectChatPermit {
-                slot: Some(slot),
-                #[cfg(test)]
-                local_limiter: None,
-                #[cfg(test)]
-                user_id: user_id.to_string(),
-            });
+            self.admit_request(db, user_id).await?;
+            return Ok(DirectChatPermit::running(slot));
         }
 
         #[cfg(not(test))]
@@ -370,9 +400,75 @@ impl DirectChatRateLimiter {
 
             Ok(DirectChatPermit {
                 slot: None,
+                queued: None,
                 local_limiter: Some(self.clone()),
                 user_id: user_id.to_string(),
             })
+        }
+    }
+
+    /// Admit a NyxAgent turn. It runs at once while one of the person's
+    /// running slots is free and nobody is waiting; otherwise it takes one of
+    /// their bounded queue places and waits inside its claimed turn
+    /// (`DirectChatPermit::claim_slot`), first come first served.
+    pub async fn admit(self: &Arc<Self>, user_id: &str) -> Result<DirectChatPermit, AppError> {
+        let (Some(db), Some(slot_manager)) = (&self.db, &self.slot_manager) else {
+            // Test-only in-memory limiters have no queue.
+            return self.try_acquire(user_id).await;
+        };
+        before_slot_claim().await;
+        let slot = match slot_manager
+            .acquire(DIRECT_CHAT_NAMESPACE, user_id, self.max_in_flight)
+            .await?
+        {
+            // Checked after the claim: a turn that queued before this slot
+            // was taken keeps its place ahead of this one.
+            Some(slot) if SlotStore::any_live(db, DIRECT_CHAT_QUEUE_NAMESPACE, user_id).await? => {
+                drop(slot);
+                None
+            }
+            slot => slot,
+        };
+        let permit = match slot {
+            Some(slot) => DirectChatPermit::running(slot),
+            None => {
+                let place = slot_manager
+                    .acquire(DIRECT_CHAT_QUEUE_NAMESPACE, user_id, self.max_queued)
+                    .await?
+                    .ok_or(AppError::RateLimited)?;
+                DirectChatPermit {
+                    slot: None,
+                    queued: Some(QueuePlace {
+                        place,
+                        slot_manager: slot_manager.clone(),
+                        user_id: user_id.to_owned(),
+                        max_in_flight: self.max_in_flight,
+                    }),
+                    #[cfg(test)]
+                    local_limiter: None,
+                    #[cfg(test)]
+                    user_id: user_id.to_owned(),
+                }
+            }
+        };
+        self.admit_request(db, user_id).await?;
+        Ok(permit)
+    }
+
+    async fn admit_request(&self, db: &Database, user_id: &str) -> Result<(), AppError> {
+        let admitted = RateWindowStore::admit(
+            db,
+            "direct_chat_request",
+            user_id,
+            u64::from(self.max_requests),
+            std::time::Duration::from_secs(self.window_secs),
+        )
+        .await?
+        .allowed;
+        if admitted {
+            Ok(())
+        } else {
+            Err(AppError::RateLimited)
         }
     }
 
@@ -389,19 +485,14 @@ impl DirectChatRateLimiter {
             return Ok(slot_manager
                 .acquire(namespace, scope, limit.max(1))
                 .await?
-                .map(|slot| DirectChatPermit {
-                    slot: Some(slot),
-                    #[cfg(test)]
-                    local_limiter: None,
-                    #[cfg(test)]
-                    user_id: String::new(),
-                }));
+                .map(DirectChatPermit::running));
         }
         #[cfg(not(test))]
         unreachable!("production direct-chat limiters always have a MongoDB backend");
         #[cfg(test)]
         Ok(Some(DirectChatPermit {
             slot: None,
+            queued: None,
             local_limiter: None,
             user_id: String::new(),
         }))
@@ -428,18 +519,92 @@ impl DirectChatRateLimiter {
 
 pub struct DirectChatPermit {
     slot: Option<RenewableSlotGuard>,
+    queued: Option<QueuePlace>,
     #[cfg(test)]
     local_limiter: Option<Arc<DirectChatRateLimiter>>,
     #[cfg(test)]
     user_id: String,
 }
 
+/// A running slot claimed for a queued turn, not yet accepted by it.
+pub struct ClaimedSlot(RenewableSlotGuard);
+
+pub type SlotClaim = tokio::task::JoinHandle<Result<Option<ClaimedSlot>, AppError>>;
+
+/// A queued turn's place in line and what it needs to claim a running slot.
+struct QueuePlace {
+    place: RenewableSlotGuard,
+    slot_manager: RenewableSlotManager,
+    user_id: String,
+    max_in_flight: u32,
+}
+
 impl DirectChatPermit {
+    fn running(slot: RenewableSlotGuard) -> Self {
+        Self {
+            slot: Some(slot),
+            queued: None,
+            #[cfg(test)]
+            local_limiter: None,
+            #[cfg(test)]
+            user_id: String::new(),
+        }
+    }
+
+    /// The turn is waiting for one of its owner's running slots.
+    pub fn is_queued(&self) -> bool {
+        self.queued.is_some()
+    }
+
+    /// Start one attempt to leave the queue: when this is the oldest waiting
+    /// turn and a running slot is free, the attempt claims it. It runs on its
+    /// own task so the waiter can still observe Stop and its deadline; a slot
+    /// it claims after its handle is dropped is released. `None`: not queued.
+    pub fn claim_slot(&self) -> Option<SlotClaim> {
+        let queued = self.queued.as_ref()?;
+        let oldest = queued.place.is_oldest();
+        let slot_manager = queued.slot_manager.clone();
+        let user_id = queued.user_id.clone();
+        let limit = queued.max_in_flight;
+        Some(tokio::spawn(async move {
+            if !oldest.await? {
+                return Ok(None);
+            }
+            before_slot_claim().await;
+            Ok(slot_manager
+                .acquire(DIRECT_CHAT_NAMESPACE, &user_id, limit)
+                .await?
+                .map(ClaimedSlot))
+        }))
+    }
+
+    /// Trade the queue place for a claimed slot. `false`, releasing the slot,
+    /// when the place was lost meanwhile.
+    pub fn take_slot(&mut self, slot: ClaimedSlot) -> bool {
+        match self.queued.as_ref() {
+            Some(queued) if !queued.place.cancellation_token().is_cancelled() => {
+                self.slot = Some(slot.0);
+                self.queued = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Give back the running slot or queue place now, before the permit is
+    /// dropped (for example while a failed turn settles).
+    pub fn release(&mut self) {
+        self.slot = None;
+        self.queued = None;
+    }
+
+    /// Resolves when the held running slot, or while queued the queue place,
+    /// is lost.
     pub async fn cancelled(&self) {
-        if let Some(slot) = self.slot.as_ref() {
-            slot.cancelled().await;
-        } else {
-            std::future::pending::<()>().await;
+        match (self.slot.as_ref(), self.queued.as_ref()) {
+            (Some(slot), _) => slot.cancelled().await,
+            (None, Some(queued)) => queued.place.cancelled().await,
+            (None, None) => std::future::pending::<()>().await,
         }
     }
 }

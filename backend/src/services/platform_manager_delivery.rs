@@ -1,4 +1,5 @@
-//! Single-send delivery of retained personal replies and ephemeral command output.
+//! Ordered delivery of retained personal replies and ephemeral command output.
+mod media;
 use super::{
     api_key_mutation_service as tx, platform_bot_runtime_control_service as controls,
     platform_chat_presentation::ChatPresentation, platform_entry_scope as scope,
@@ -54,6 +55,7 @@ pub(super) async fn with_control_capacity_for_test<T>(
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    super::channel_text_delivery::ensure_indexes(db).await?;
     db.collection::<Delivery>(COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
@@ -103,66 +105,84 @@ fn refused() -> AppError {
     AppError::Conflict("Chat reply authority is unavailable".into())
 }
 
-pub(crate) fn fixed_text(reason: UnavailableReason) -> &'static str {
+pub(crate) fn fixed_text(reason: UnavailableReason, chat: ChatPresentation) -> String {
+    let link = if chat == ChatPresentation::Telegram {
+        "/link"
+    } else {
+        chat.login()
+    };
+    let help = chat.help();
     match reason {
         UnavailableReason::ConfirmationRejected => {
-            "This confirmation could not be accepted. The code or account review may be expired, invalid, or for another chat, or linking may be unavailable. Send /link for a fresh account review when personal linking is enabled, then use its one-time confirmation in this same private chat."
+            format!(
+                "This confirmation could not be accepted. The code or account review may be expired, invalid, or for another chat, or linking may be unavailable. Send {link} for a fresh account review when personal linking is enabled, then use its one-time confirmation in this same private chat."
+            )
         }
         UnavailableReason::ControlInvalid => {
-            "That command could not be completed. Use /help for supported controls, or send /link for a fresh account review in this private chat."
+            format!(
+                "That command could not be completed. Use {help} for supported controls, or send {link} for a fresh account review in this private chat."
+            )
         }
         UnavailableReason::ControlRateLimited => {
-            "Too many chat controls were requested. Wait a moment, then retry here. Use /help for supported controls."
+            format!(
+                "Too many chat controls were requested. Wait a moment, then retry here. Use {help} for supported controls."
+            )
         }
         UnavailableReason::UnsupportedInput => {
-            "This chat supports text questions. Use /help for the available controls, or open NyxID for attachments and actions."
+            format!(
+                "This chat supports text questions. Use {help} for the available controls, or open NyxID for attachments and actions."
+            )
         }
         UnavailableReason::PersonalDisabled => {
-            "Personal NyxBot is paused for this manager. Your saved thread remains in NyxID."
+            "Personal NyxBot is paused for this manager. Your saved thread remains in NyxID.".into()
         }
         UnavailableReason::OwnerUnavailable | UnavailableReason::OriginRevoked => {
-            "This personal link is unavailable. Open NyxID to review your account and links."
+            "This personal link is unavailable. Open NyxID to review your account and links.".into()
         }
         UnavailableReason::InsufficientFunds => {
             "Your NyxBot could not start with the available credits. Review Billing in NyxID."
+                .into()
         }
         UnavailableReason::CapacityLimited => {
-            "Your NyxBot is busy. Wait for the current work or open NyxID."
+            "Your NyxBot is busy. Wait for the current work or open NyxID.".into()
         }
         UnavailableReason::PublicQuotaLimited => {
-            "Public chat has reached a daily limit. Try again after midnight UTC, or send /link to use your own NyxBot."
+            format!(
+                "Public chat has reached a daily limit. Try again after midnight UTC, or send {link} to use your own NyxBot."
+            )
         }
         UnavailableReason::PublicTurnFailed => {
-            "The public guide could not finish this turn. Please try again to start fresh, or send /link to use your own NyxBot."
+            format!(
+                "The public guide could not finish this turn. Please try again to start fresh, or send {link} to use your own NyxBot."
+            )
         }
         UnavailableReason::SponsorUnavailable => {
-            "Public chat funding is unavailable. Send /link to use your own NyxBot when personal linking is enabled."
+            format!(
+                "Public chat funding is unavailable. Send {link} to use your own NyxBot when personal linking is enabled."
+            )
         }
         UnavailableReason::EmergencyStopped
         | UnavailableReason::ManagerUnavailable
         | UnavailableReason::TransportUnavailable => {
-            "This manager is currently unavailable. Open NyxID to continue."
+            "This manager is currently unavailable. Open NyxID to continue.".into()
         }
         UnavailableReason::PublicDisabled
         | UnavailableReason::PublicNotReady
         | UnavailableReason::RuntimeUninitialized => {
-            "Public chat is unavailable. Send /link in this private chat to use your own NyxBot when personal linking is enabled."
+            format!(
+                "Public chat is unavailable. Send {link} in this private chat to use your own NyxBot when personal linking is enabled."
+            )
         }
         _ => {
-            "This request is unavailable. Open NyxID to continue, or send an original /link command in the manager's private chat."
+            format!(
+                "This request is unavailable. Open NyxID to continue, or send an original {link} command in the manager's private chat."
+            )
         }
     }
 }
 
 fn fixed_text_for(reason: UnavailableReason, entry: &EntryIdentity) -> AppResult<String> {
-    let chat = ChatPresentation::for_entry(entry)?;
-    Ok(if chat == ChatPresentation::Telegram {
-        fixed_text(reason).to_owned()
-    } else {
-        fixed_text(reason)
-            .replace("/link", chat.login())
-            .replace("/help", chat.help())
-    })
+    Ok(fixed_text(reason, ChatPresentation::for_entry(entry)?))
 }
 
 fn manager_lane(row: &Delivery) -> String {
@@ -179,37 +199,30 @@ fn manager_lane(row: &Delivery) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn render_saved(message: &AssistantMessage, frontend: &str) -> String {
-    render_saved_for(message, frontend, ChatPresentation::Telegram)
+pub(crate) fn render_saved(message: &AssistantMessage, _frontend: &str) -> String {
+    render_saved_text(message)
 }
 
-fn render_saved_for(message: &AssistantMessage, frontend: &str, chat: ChatPresentation) -> String {
-    let mut text = message.text.clone();
-    if !message.attachments.is_empty() {
-        text.push_str("\n\nImages or files are available in your NyxID conversation.");
-    }
+fn render_saved_text(message: &AssistantMessage) -> String {
+    let text = message.text.clone();
     if text.trim().is_empty() {
-        text = "Your NyxBot turn finished. Open the conversation in NyxID for details.".into();
-    }
-    // One provider operation per durable claim. Oversized output stays in the app.
-    if text.encode_utf16().count() > chat.text_limit().saturating_sub(196) {
-        text = format!(
-            "Your NyxBot reply is ready in NyxID; it is too long for one {} message.",
-            chat.name()
-        );
-    }
-    if let Ok(mut url) = reqwest::Url::parse(frontend) {
-        url.set_path("/assistant");
-        url.set_query(None);
-        url.query_pairs_mut()
-            .append_pair("c", &message.conversation_id);
-        url.set_fragment(None);
-        let link = format!("\n\nReview actions and continue this conversation in NyxID: {url}");
-        if text.encode_utf16().count() + link.encode_utf16().count() <= chat.text_limit() {
-            text.push_str(&link);
-        }
+        return if message.attachments.is_empty() {
+            "Your NyxBot turn finished.".into()
+        } else {
+            "Your NyxBot attachments are ready.".into()
+        };
     }
     text
+}
+
+fn conversation_url(frontend: &str, conversation: &str) -> String {
+    let Ok(mut frontend) = reqwest::Url::parse(frontend) else {
+        return String::new();
+    };
+    frontend.set_path("/");
+    frontend.set_query(None);
+    frontend.set_fragment(None);
+    super::assistant_links::AssistantPage::Conversation { conversation }.url(frontend.as_str())
 }
 
 fn blocked_reply(message: &AssistantMessage) -> bool {
@@ -290,6 +303,7 @@ fn append_card_notices(
     use crate::models::assistant_acknowledgement::CardRouting;
     let mut rendered = message.clone();
     let mut notices = String::new();
+    let mut chat_actions = 0;
     // The selector considers all pending action cards in this conversation.
     // A bounded overflow cannot prove code uniqueness and directs to the app.
     if cards.len() <= 64 {
@@ -327,33 +341,66 @@ fn append_card_notices(
             let summary = super::assistant_nyxagent::excerpt(&card.summary, 260);
             let instruction = chat.action_instruction(&code)?;
             notices.push_str(&format!("\n\nAction: {summary}\n{instruction}"));
+            chat_actions += 1;
         }
     }
-    if !cards.is_empty() && notices.is_empty() {
-        notices.push_str("\n\nPending actions require review in this exact NyxID conversation.");
+    if chat_actions < cards.len() {
+        notices.push_str(&format!(
+            "\n\nPending actions require review in NyxID: <{}>",
+            conversation_url(frontend, &message.conversation_id)
+        ));
     }
-    if rendered.text.encode_utf16().count() > 1800 && !notices.is_empty() {
-        rendered.text = "Your full NyxBot reply is ready in NyxID.".into();
+    if chat != ChatPresentation::Telegram
+        && message.attachments.iter().any(|attachment| {
+            attachment.origin == "tool"
+                && attachment.chat_delivery != Some(false)
+                && !(attachment.chat_delivery.is_none() && attachment.label == "Machine screenshot")
+        })
+    {
+        notices.push_str(&format!(
+            "\n\nThis chat cannot receive these attachments. Open them in NyxID: <{}>",
+            conversation_url(frontend, &message.conversation_id)
+        ));
     }
     rendered.text.push_str(&notices);
-    Ok(render_saved_for(&rendered, frontend, chat))
+    Ok(render_saved_text(&rendered))
 }
 
 pub(crate) async fn render_personal(
     state: &AppState,
     message: &AssistantMessage,
-    session: Option<&mut mongodb::ClientSession>,
+    mut session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<String> {
     use crate::models::assistant_acknowledgement::{
         AssistantAcknowledgement, COLLECTION_NAME as ACKS,
     };
-    let filter = doc! {"user_id":&message.user_id,"conversation_id":&message.conversation_id,
+    // Pin only card identities, never private summaries or rendered bodies. A
+    // decided/expired card must not change the plan after an accepted prefix.
+    let deliveries = state.db.collection::<bson::Document>(COLLECTION_NAME);
+    let saved_filter = doc! {"reference.reply_id": &message.id, "reference.kind": "reply"};
+    let snapshot = match session.as_deref_mut() {
+        Some(tx) => {
+            deliveries
+                .find_one(saved_filter.clone())
+                .session(tx)
+                .await?
+        }
+        None => deliveries.find_one(saved_filter.clone()).await?,
+    };
+    let ids = snapshot
+        .as_ref()
+        .and_then(|row| row.get_array("notice_card_ids").ok());
+    let mut filter = doc! {"user_id":&message.user_id,"conversation_id":&message.conversation_id,
     "kind":"action","status":"pending","decider":"user","authored_skill":bson::Bson::Null,
     "expires_at":{"$gt":bson::DateTime::now()}};
+    if let Some(ids) = ids {
+        filter = doc! {"_id": {"$in": ids}, "user_id": &message.user_id,
+        "conversation_id": &message.conversation_id};
+    }
     let collection = state.db.collection::<AssistantAcknowledgement>(ACKS);
     let conversations = state.db.collection::<AssistantConversation>(CONVERSATIONS);
     let (cards, thread): (Vec<AssistantAcknowledgement>, Option<AssistantConversation>) =
-        match session {
+        match session.as_deref_mut() {
             Some(session) => {
                 let mut cursor = collection
                     .find(filter)
@@ -381,6 +428,23 @@ pub(crate) async fn render_personal(
                     .await?,
             ),
         };
+    if ids.is_none()
+        && let Some(saved) = snapshot
+    {
+        let ids: Vec<_> = cards.iter().map(|card| card.id.as_str()).collect();
+        let update = deliveries.update_one(
+            doc! {"_id":saved.get_str("_id").map_err(|_| refused())?,
+            "notice_card_ids":{"$exists":false}},
+            doc! {"$set":{"notice_card_ids":ids}},
+        );
+        let changed = match session {
+            Some(tx) => update.session(tx).await?,
+            None => update.await?,
+        };
+        if changed.matched_count != 1 {
+            return Err(AppError::Conflict("Reply notice snapshot changed".into()));
+        }
+    }
     let thread = thread.ok_or_else(refused)?;
     let entry = &thread.platform_thread.as_ref().ok_or_else(refused)?.entry;
     append_card_notices(
@@ -593,6 +657,15 @@ pub(crate) async fn queue_faq_in_session(
     controls: &PlatformBotRuntimeControls,
     text: &str,
 ) -> AppResult<()> {
+    let help = super::platform_help_service::published(db, &update.profile_id).await?;
+    let article_ids = super::platform_faq_service::select_from(
+        text,
+        super::platform_faq_service::all_articles(&help.content),
+    );
+    let help = crate::models::platform_help::HelpReference {
+        library_id: help.library_id,
+        revision: help.revision,
+    };
     let now = Utc::now();
     let row = Delivery {
         id: uuid::Uuid::new_v4().to_string(),
@@ -607,7 +680,8 @@ pub(crate) async fn queue_faq_in_session(
         origin: None,
         origin_turn_id: None,
         reference: DeliveryReference::Faq {
-            article_ids: super::platform_faq_service::select(text)?,
+            help: Some(help),
+            article_ids,
             linking_enabled: controls.personal_enabled,
             public_policy_revision: controls.public_policy_revision,
         },
@@ -640,7 +714,8 @@ pub(crate) async fn deliver_faq(
     let Some(row) = row else {
         return Ok(false);
     };
-    let body = super::platform_faq_service::render_for(&row.reference, &row.entry)?;
+    let body =
+        super::platform_faq_service::render_saved(&state.db, &row.reference, &row.entry).await?;
     send(state, identity, None, row, Zeroizing::new(body), api).await?;
     Ok(true)
 }
@@ -691,7 +766,9 @@ async fn fence_transport_in_session(
                 .collection::<PlatformCredential>(
                     crate::models::platform_credential::COLLECTION_NAME,
                 )
-                .find_one(doc! {"provider":"telegram-new"})
+                .find_one(super::telegram_manager_registry::filter(
+                    &row.manager_bot_id,
+                ))
                 .session(&mut *session)
                 .await?;
             if current
@@ -876,7 +953,13 @@ async fn validate_in_session(
                     != (IngressAudience::Public {
                         public_policy_revision: *public_policy_revision,
                     })
-                || body != super::platform_faq_service::render_for(&row.reference, &row.entry)?
+                || body
+                    != super::platform_faq_service::render_saved(
+                        &state.db,
+                        &row.reference,
+                        &row.entry,
+                    )
+                    .await?
             {
                 return Err(refused());
             }
@@ -1225,7 +1308,16 @@ fn native_send_deadline(row: &Delivery) -> AppResult<Option<chrono::DateTime<Utc
     if !matches!(row.entry, EntryIdentity::NativeV2 { .. }) {
         return Ok(None);
     }
-    let budget = std::time::Duration::from_secs(20);
+    let budget = if matches!(
+        row.reference,
+        DeliveryReference::Reply { .. }
+            | DeliveryReference::PublicReply { .. }
+            | DeliveryReference::Faq { .. }
+    ) {
+        std::time::Duration::from_secs(10 * 60)
+    } else {
+        std::time::Duration::from_secs(20)
+    };
     #[cfg(test)]
     let budget = TEST_NATIVE_SEND_BUDGET
         .try_with(|value| *value)
@@ -1343,7 +1435,7 @@ async fn capture_material_in_session(
         ))));
     }
     let credential=state.db.collection::<PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME)
-        .find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&row.manager_bot_id,"fields.observation_id":observation,"fields.webhook_ready":"true"})
+        .find_one(doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &row.manager_bot_id)]}, "fields.manager_bot_id": &row.manager_bot_id,"fields.observation_id":observation,"fields.webhook_ready":"true"})
         .session(&mut *session).await?.ok_or_else(refused)?;
     Ok(CapturedSend::Ready(CapturedMaterial::Telegram(Box::new(
         credential,
@@ -1378,8 +1470,15 @@ async fn send_impl(
         return Ok(DeliveryOutcome::Duplicate);
     }
     let native_deadline = native_send_deadline(&row)?;
+    let multipart = matches!(
+        row.reference,
+        DeliveryReference::Reply { .. }
+            | DeliveryReference::PublicReply { .. }
+            | DeliveryReference::Faq { .. }
+    );
     if row.expires_at <= Utc::now()
-        || body.encode_utf16().count() > ChatPresentation::for_entry(&row.entry)?.text_limit()
+        || (!multipart
+            && body.encode_utf16().count() > ChatPresentation::for_entry(&row.entry)?.text_limit())
     {
         cleanup_before_deadline(native_deadline, refuse_pending(state, &row)).await?;
         return Ok(DeliveryOutcome::Refused(
@@ -1513,12 +1612,12 @@ async fn send_impl(
     let worker_claim = claim_id.clone();
     let result = before_native_deadline(native_deadline, async {
         let mut session = state.db.client().start_session().await?;
-        session.start_transaction().and_run((captured,identity,public,delivery,worker_claim,body.clone(),native.as_ref()),|session,(state,identity,public,row,claim,body,native)|Box::pin(async move {
+        session.start_transaction().and_run((captured,identity.clone(),public.clone(),delivery,worker_claim,body.clone(),native.as_ref()),|session,(state,identity,public,row,claim,body,native)|Box::pin(async move {
         #[cfg(test)]
         stall_native_claim_for_test(native.is_some()).await;
         let result:AppResult<_>=async {
             let Some(observation)=validate_in_session(state,identity.as_ref(),public.as_deref(),session,row,body.as_str()).await? else {return Ok(CapturedSend::Deferred);};
-            if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending","expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":{"state":"dispatching","claim_id":&*claim,"updated_at":bson::DateTime::now()}}).session(&mut *session).await?.matched_count!=1{return Ok(CapturedSend::Duplicate);}
+            if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending","expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":{"state":"dispatching","claim_id":&*claim,"multipart_version":1,"updated_at":bson::DateTime::now()}}).session(&mut *session).await?.matched_count!=1{return Ok(CapturedSend::Duplicate);}
             capture_material_in_session(state,session,row,claim,&observation,*native).await
         }.await;
         tx::transaction_result(result)
@@ -1572,11 +1671,424 @@ async fn send_impl(
         credential,
         native.as_ref(),
         api,
+        identity,
+        public,
     )
     .await
 }
 
+fn multipart_key(row: &Delivery) -> String {
+    format!("manager:{}", row.id)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn send_claimed(
+    state: &AppState,
+    row: &Delivery,
+    claim_id: &str,
+    body: Zeroizing<String>,
+    material: CapturedMaterial,
+    native: Option<&NativeSendPreparation>,
+    api: &super::telegram_new_api::TelegramApi<'_>,
+    identity: Arc<dyn ManagerIdentityProducer>,
+    public: Option<Arc<dyn PublicTurnProducer>>,
+) -> AppResult<DeliveryOutcome> {
+    use super::channel_text_delivery as journal;
+    use crate::models::channel_text_delivery::TextPartState;
+    if !matches!(
+        row.reference,
+        DeliveryReference::Reply { .. }
+            | DeliveryReference::PublicReply { .. }
+            | DeliveryReference::Faq { .. }
+    ) {
+        return send_single_claimed(state, row, claim_id, body, material, native, api).await;
+    }
+    let chat = ChatPresentation::for_entry(&row.entry)?;
+    let (source, owner, url) = match &row.reference {
+        DeliveryReference::Reply {
+            reply_id,
+            conversation_id,
+            ..
+        } => (
+            reply_id.as_str(),
+            row.origin
+                .as_ref()
+                .ok_or_else(refused)?
+                .thread
+                .user_id
+                .as_str(),
+            conversation_url(&state.config.frontend_url, conversation_id),
+        ),
+        DeliveryReference::PublicReply {
+            reply_id,
+            conversation_id,
+            ..
+        } => (
+            reply_id.as_str(),
+            row.profile_id.as_str(),
+            conversation_url(&state.config.frontend_url, conversation_id),
+        ),
+        _ => (row.id.as_str(), row.profile_id.as_str(), String::new()),
+    };
+    let credential = if let CapturedMaterial::Telegram(credential) = &material {
+        let values = super::platform_credential_service::decrypt_platform_snapshot(
+            &state.encryption_keys,
+            Some(credential.as_ref()),
+        )
+        .await?;
+        let token = values
+            .get(super::channel_adapters::telegram_new::MANAGER_TOKEN)
+            .ok_or_else(refused)?;
+        if token
+            .split(':')
+            .next()
+            .and_then(|id| id.parse::<i64>().ok())
+            .map(|id| id.to_string())
+            .as_deref()
+            != Some(row.manager_bot_id.as_str())
+        {
+            finish(state, row, claim_id, "refused", vec![], None).await?;
+            return Ok(DeliveryOutcome::Refused(
+                UnavailableReason::TransportUnavailable,
+            ));
+        }
+        Some(Zeroizing::new(token.to_owned()))
+    } else {
+        None
+    };
+    let mut rendered = body.to_string();
+    if let Some(token) = &credential {
+        let media = media::send_saved(
+            state,
+            row,
+            claim_id,
+            body.as_str(),
+            identity.as_ref(),
+            public.as_deref(),
+            token,
+            api,
+        )
+        .await;
+        match media {
+            Ok(note) => rendered.push_str(&note),
+            Err(error) if error.retry_after_seconds().is_some() => {
+                let retry_at =
+                    Utc::now() + Duration::seconds(error.retry_after_seconds().unwrap() as i64);
+                finish(state, row, claim_id, "pending", vec![], Some(retry_at)).await?;
+                return Ok(DeliveryOutcome::Deferred { retry_at });
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let parts = super::channel_reply_plan::assistant_parts(&rendered, chat.platform(), &url);
+    let plan = journal::begin(
+        &state.db,
+        &multipart_key(row),
+        owner,
+        source,
+        &super::channel_reply_plan::fingerprint(&parts),
+        parts.len(),
+    )
+    .await?;
+    let mut telegram_ids = Vec::new();
+    let mut platform_ids = Vec::new();
+    for (index, part) in parts.into_iter().enumerate() {
+        if plan.parts[index].state != TextPartState::Sent {
+            pace_part(state, row, claim_id).await?;
+        }
+        // Recheck the complete captured route and current owner generation before
+        // every effect, including after a prefix was accepted or a retry waited.
+        let authorized = revalidate_part(
+            state,
+            row,
+            claim_id,
+            body.as_str(),
+            identity.as_ref(),
+            public.as_deref(),
+        )
+        .await?;
+        if !authorized {
+            finish(state, row, claim_id, "refused", telegram_ids, None).await?;
+            return Ok(DeliveryOutcome::Refused(UnavailableReason::OriginRevoked));
+        }
+        let attempt = match journal::claim(&state.db, &plan, index).await {
+            Ok(journal::PartClaim::Sent(previous)) => {
+                if let Some(id) = previous.platform_message_id {
+                    if credential.is_some() {
+                        telegram_ids.push(id.parse::<i64>().map_err(|_| refused())?);
+                    } else {
+                        platform_ids.push(id);
+                    }
+                }
+                continue;
+            }
+            Ok(journal::PartClaim::Send(attempt)) => attempt,
+            Err(_) => {
+                finish(state, row, claim_id, "uncertain", telegram_ids, None).await?;
+                return Ok(DeliveryOutcome::Uncertain);
+            }
+        };
+        let result = if let Some(token) = &credential {
+            telegram_part(api, token, scope::actor_string(&row.sender).as_str(), &part).await
+        } else if let CapturedMaterial::Native(authority) = &material {
+            use super::platform_native_reply_service::NativeSendOutcome;
+            match super::platform_native_reply_service::send_part(
+                state,
+                authority,
+                Zeroizing::new(part.text.clone().unwrap_or_default()),
+                native.ok_or_else(refused)?.adapter.as_ref(),
+                part.metadata.as_ref(),
+            )
+            .await?
+            {
+                NativeSendOutcome::Sent {
+                    platform_message_id,
+                } => PartResult::Sent(platform_message_id),
+                NativeSendOutcome::Refused => PartResult::Refused,
+                NativeSendOutcome::Uncertain => PartResult::Uncertain,
+            }
+        } else {
+            return Err(refused());
+        };
+        match result {
+            PartResult::Sent(id) => {
+                journal::finish(
+                    &state.db,
+                    &plan,
+                    index,
+                    &attempt,
+                    TextPartState::Sent,
+                    Some(&id),
+                    None,
+                )
+                .await?;
+                if credential.is_some() {
+                    telegram_ids.push(id.parse::<i64>().map_err(|_| refused())?);
+                } else {
+                    platform_ids.push(id);
+                }
+                state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
+                    doc! {"_id":&row.id,"state":"dispatching","claim_id":claim_id},
+                    doc! {"$set":{"telegram_message_ids":&telegram_ids,"platform_message_ids":&platform_ids,"updated_at":bson::DateTime::now()}}
+                ).await?;
+            }
+            PartResult::Retry(delay) => {
+                journal::finish(
+                    &state.db,
+                    &plan,
+                    index,
+                    &attempt,
+                    TextPartState::Pending,
+                    None,
+                    None,
+                )
+                .await?;
+                let retry_at = Utc::now() + Duration::seconds(delay);
+                finish(
+                    state,
+                    row,
+                    claim_id,
+                    "pending",
+                    telegram_ids,
+                    Some(retry_at),
+                )
+                .await?;
+                return Ok(DeliveryOutcome::Deferred { retry_at });
+            }
+            PartResult::Refused => {
+                journal::finish(
+                    &state.db,
+                    &plan,
+                    index,
+                    &attempt,
+                    TextPartState::Refused,
+                    None,
+                    None,
+                )
+                .await?;
+                finish(state, row, claim_id, "refused", telegram_ids, None).await?;
+                return Ok(DeliveryOutcome::Refused(
+                    UnavailableReason::TransportUnavailable,
+                ));
+            }
+            PartResult::Uncertain => {
+                finish(state, row, claim_id, "uncertain", telegram_ids, None).await?;
+                return Ok(DeliveryOutcome::Uncertain);
+            }
+        }
+    }
+    finish(state, row, claim_id, "sent", telegram_ids.clone(), None).await?;
+    Ok(if credential.is_some() {
+        DeliveryOutcome::Sent {
+            telegram_message_ids: telegram_ids,
+        }
+    } else {
+        DeliveryOutcome::NativeSent {
+            platform_message_ids: platform_ids,
+        }
+    })
+}
+
+async fn pace_part(state: &AppState, row: &Delivery, claim: &str) -> AppResult<()> {
+    loop {
+        if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
+            doc! {"_id":&row.id,"state":"dispatching","claim_id":claim,"expires_at":{"$gt":bson::DateTime::now()}},
+            doc! {"$set":{"updated_at":bson::DateTime::now()}},
+        ).await?.matched_count != 1 {
+            return Err(refused());
+        }
+        let chat = super::coordination_service::RateWindowStore::admit(
+            &state.db,
+            "manager_part_chat",
+            &format!("{}:{}", manager_lane(row), scope::actor_string(&row.sender)),
+            1,
+            std::time::Duration::from_secs(1),
+        )
+        .await?;
+        if chat.allowed {
+            let personal = matches!(row.reference, DeliveryReference::Reply { .. });
+            let lane = super::coordination_service::RateWindowStore::admit(
+                &state.db,
+                if personal {
+                    "manager_part_personal"
+                } else {
+                    "manager_part_public"
+                },
+                &manager_lane(row),
+                if personal { 24 } else { 4 },
+                std::time::Duration::from_secs(1),
+            )
+            .await?;
+            if lane.allowed {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    }
+}
+
+async fn revalidate_part(
+    state: &AppState,
+    row: &Delivery,
+    claim: &str,
+    body: &str,
+    identity: &dyn ManagerIdentityProducer,
+    public: Option<&dyn PublicTurnProducer>,
+) -> AppResult<bool> {
+    let mut session = state.db.client().start_session().await?;
+    let result = session
+        .start_transaction()
+        .and_run(
+            (state, row, claim, body, identity, public),
+            |session, (state, row, claim, body, identity, public)| {
+                Box::pin(async move {
+                    let result: AppResult<bool> = async {
+                        if row.expires_at <= Utc::now() {
+                            return Ok(false);
+                        }
+                        if validate_in_session(state, *identity, *public, session, row, body)
+                            .await?
+                            .is_none()
+                        {
+                            return Ok(false);
+                        }
+                        Ok(state
+                            .db
+                            .collection::<Delivery>(COLLECTION_NAME)
+                            .update_one(
+                                doc! {"_id":&row.id,"state":"dispatching","claim_id":*claim},
+                                doc! {"$set":{"updated_at":bson::DateTime::now()}},
+                            )
+                            .session(session)
+                            .await?
+                            .matched_count
+                            == 1)
+                    }
+                    .await;
+                    tx::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(tx::map_transaction_error);
+    match result {
+        Err(AppError::Conflict(_) | AppError::NotFound(_) | AppError::Forbidden(_)) => Ok(false),
+        other => other,
+    }
+}
+
+enum PartResult {
+    Sent(String),
+    Retry(i64),
+    Refused,
+    Uncertain,
+}
+
+async fn telegram_part(
+    api: &super::telegram_new_api::TelegramApi<'_>,
+    token: &str,
+    chat: &str,
+    part: &super::channel_platform::OutboundReply,
+) -> PartResult {
+    let Ok(chat) = chat.parse::<i64>() else {
+        return PartResult::Refused;
+    };
+    let mut payload = serde_json::json!({"chat_id":chat,"text":part.text,"protect_content":true,"link_preview_options":{"is_disabled":true}});
+    if let Some(entities) = part.metadata.as_ref().and_then(|m| m.get("entities")) {
+        payload["entities"] = entities.clone();
+    }
+    let response = api
+        .http
+        .post(format!("{}/bot{token}/sendMessage", api.base_url))
+        .timeout(std::time::Duration::from_secs(20))
+        .json(&payload)
+        .send()
+        .await;
+    let envelope = match response {
+        Ok(mut response) => {
+            if !response.status().is_success() && !response.status().is_client_error() {
+                return PartResult::Uncertain;
+            }
+            let mut bytes = Zeroizing::new(Vec::new());
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) if bytes.len() + chunk.len() <= 65536 => {
+                        bytes.extend_from_slice(&chunk)
+                    }
+                    Ok(None) => break,
+                    _ => return PartResult::Uncertain,
+                }
+            }
+            serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+        }
+        Err(_) => None,
+    };
+    if let Some(value) = envelope {
+        if value["ok"] == true
+            && let Some(id) = value["result"]["message_id"].as_i64().filter(|id| *id > 0)
+        {
+            return PartResult::Sent(id.to_string());
+        }
+        if value["ok"] == false {
+            if value["error_code"] == 429
+                && let Some(delay) = value["parameters"]["retry_after"]
+                    .as_i64()
+                    .filter(|n| *n > 0 && *n <= 86400)
+            {
+                return PartResult::Retry(delay);
+            }
+            if value["error_code"]
+                .as_i64()
+                .is_some_and(|code| (400..500).contains(&code))
+            {
+                return PartResult::Refused;
+            }
+        }
+    }
+    PartResult::Uncertain
+}
+
+async fn send_single_claimed(
     state: &AppState,
     row: &Delivery,
     claim_id: &str,
@@ -1755,19 +2267,36 @@ async fn finish(
     ids: Vec<i64>,
     retry: Option<chrono::DateTime<Utc>>,
 ) -> AppResult<()> {
-    let mut set =
-        doc! {"state":status,"telegram_message_ids":ids,"updated_at":bson::DateTime::now()};
+    finish_parent(&state.db, &row.id, claim, status, ids, retry).await
+}
+
+async fn finish_parent(
+    db: &Database,
+    id: &str,
+    claim: &str,
+    status: &str,
+    ids: Vec<i64>,
+    retry: Option<chrono::DateTime<Utc>>,
+) -> AppResult<()> {
+    // A retry can lose authority while traversing an already accepted prefix.
+    // Keep its earlier receipts even if this attempt observed fewer of them.
+    let previous = doc! {"$ifNull":["$telegram_message_ids",[]]};
+    let mut set = doc! {"state":status,"telegram_message_ids":{
+        "$cond":[{"$gte":[{"$size":previous.clone()},ids.len() as i64]},previous,{"$literal":ids}]
+    },"updated_at":bson::DateTime::now()};
     if let Some(at) = retry {
         set.insert("retry_at", bson::DateTime::from_chrono(at));
     }
-    state
-        .db
+    let changed = db
         .collection::<Delivery>(COLLECTION_NAME)
         .update_one(
-            doc! {"_id":&row.id,"state":"dispatching","claim_id":claim},
-            doc! {"$set":set},
+            doc! {"_id":id,"state":"dispatching","claim_id":claim},
+            vec![doc! {"$set":set}],
         )
         .await?;
+    if changed.matched_count != 1 {
+        return Err(super::channel_text_delivery::unconfirmed());
+    }
     Ok(())
 }
 
@@ -2217,7 +2746,8 @@ pub(crate) async fn deliver_public_signup_with_api(
         .await?;
         return Ok(PublicSignupDeliveryOutcome::Unavailable);
     }
-    let outcome = send_claimed(state, &row, &claim, body, credential, native.as_ref(), api).await?;
+    let outcome =
+        send_single_claimed(state, &row, &claim, body, credential, native.as_ref(), api).await?;
     report_delivery(&outcome, "public_signup");
     Ok(match outcome {
         DeliveryOutcome::Sent { .. } | DeliveryOutcome::NativeSent { .. } => {
@@ -2290,9 +2820,16 @@ pub async fn sweep(
     while let Some(row) = rows.try_next().await? {
         // A process lost after claim may have sent. Never replay the attempt.
         if row.state == DeliveryState::Dispatching {
+            let versioned = state.db.collection::<bson::Document>(COLLECTION_NAME)
+                .find_one(doc! {"_id":&row.id,"multipart_version":1,"reference.kind":{"$in":["reply","public_reply","faq"]}}).await?.is_some();
+            let safe = versioned
+                && super::channel_text_delivery::load(&state.db, &multipart_key(&row))
+                    .await?
+                    .as_ref()
+                    .is_none_or(super::channel_text_delivery::recoverable);
             state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
                 doc! {"_id":&row.id,"state":"dispatching","claim_id":&row.claim_id,"updated_at":{"$lte":stale_before}},
-                doc! {"$set":{"state":"uncertain","updated_at":due}},
+                doc! {"$set":{"state":if safe {"pending"} else {"uncertain"},"updated_at":due,"retry_at":due}},
             ).await?;
         } else if row.expires_at <= now
             || matches!(
@@ -2344,7 +2881,9 @@ pub async fn sweep(
                     .transpose()?,
                 DeliveryReference::Handoff => Some(handoff_text().to_owned()),
                 DeliveryReference::Faq { .. } => {
-                    super::platform_faq_service::render_for(&row.reference, &row.entry).ok()
+                    super::platform_faq_service::render_saved(&state.db, &row.reference, &row.entry)
+                        .await
+                        .ok()
                 }
                 DeliveryReference::Command { .. } | DeliveryReference::PublicSignup { .. } => None,
             };
@@ -2458,6 +2997,40 @@ mod native_render_tests {
     }
 
     #[test]
+    fn native_attachment_fallback_keeps_the_exact_thread_without_linking_plain_replies() {
+        for platform in [EntryPlatform::Discord, EntryPlatform::Slack] {
+            for text in ["", "Here is the report."] {
+                let mut message = saved(text);
+                let render = |message: &AssistantMessage| {
+                    append_card_notices(
+                        message,
+                        "https://app.nyxid.test/old?secret=discard#discard",
+                        &[],
+                        "exact-thread-key",
+                        None,
+                        ChatPresentation::Native(platform),
+                    )
+                    .unwrap()
+                };
+                assert!(!render(&message).contains("/assistant?c="));
+                message.attachments.push(
+                    bson::from_document(doc! {
+                        "id":"report", "origin":"tool", "content_type":"application/pdf",
+                        "size":100_i64, "label":"Report",
+                    })
+                    .unwrap(),
+                );
+                let output = render(&message);
+                assert!(output.starts_with(text));
+                assert!(output.contains("Open them in NyxID: <https://app.nyxid.test/assistant?c=nyxa-0123456789abcdef0123456789abcdef>"));
+                assert!(!output.contains("discard"));
+                message.attachments[0].chat_delivery = Some(false);
+                assert!(!render(&message).contains("/assistant?c="));
+            }
+        }
+    }
+
+    #[test]
     fn control_failures_reconstruct_exact_safe_provider_guidance() {
         for platform in [EntryPlatform::Slack, EntryPlatform::Discord] {
             let entry = EntryIdentity::NativeV2 {
@@ -2493,14 +3066,12 @@ mod native_render_tests {
     }
 
     #[test]
-    fn long_unicode_native_reply_and_action_cards_use_one_bounded_message_or_exact_app_review() {
+    fn long_unicode_native_reply_and_action_cards_keep_full_content() {
         let chat = ChatPresentation::Native(EntryPlatform::Discord);
         let message = saved(&"🧑🏽‍💻相談".repeat(600));
         let frontend = "https://app.nyxid.test/old?discard=secret#discard";
-        let rendered = render_saved_for(&message, frontend, chat);
-        assert!(rendered.encode_utf16().count() <= 2000);
-        assert!(rendered.contains("too long for one Discord message"));
-        assert!(rendered.contains("/assistant?c=nyxa-0123456789abcdef0123456789abcdef"));
+        let rendered = render_saved_text(&message);
+        assert_eq!(rendered, message.text);
         assert!(!rendered.contains("discard"));
 
         let action = card(&message);
@@ -2514,11 +3085,11 @@ mod native_render_tests {
             chat,
         )
         .unwrap();
-        assert!(rendered.encode_utf16().count() <= 2000);
+        assert!(rendered.starts_with(&message.text));
         assert!(rendered.contains(&format!("/nyx ask question:\"yes {code}\"")));
         assert!(rendered.contains(&format!("/nyx ask question:\"no {code}\"")));
         assert!(!rendered.contains("Reply yes"));
-        assert!(rendered.contains("/assistant?c=nyxa-0123456789abcdef0123456789abcdef"));
+        assert!(!rendered.contains("/assistant?c="));
 
         let mut cards = vec![action];
         while cards.len() < 3 {
@@ -2535,8 +3106,8 @@ mod native_render_tests {
         let rendered =
             append_card_notices(&message, frontend, &cards, "exact-thread-key", None, chat)
                 .unwrap();
-        assert!(rendered.encode_utf16().count() <= 2000);
-        assert!(rendered.contains("/assistant?c=nyxa-0123456789abcdef0123456789abcdef"));
+        assert!(rendered.starts_with(&message.text));
+        assert!(!rendered.contains("/assistant?c="));
         assert!(rendered.contains("Action:"));
         assert!(!rendered.contains("Reply yes"));
     }
@@ -2606,5 +3177,56 @@ mod future_size_tests {
             native < 1024,
             "native send caller future grew to {native} bytes"
         );
+    }
+
+    #[tokio::test]
+    async fn manager_outbound_parent_keeps_prior_receipts_when_a_retry_loses_authority() {
+        let db = crate::test_utils::connect_transaction_test_database("manager_prefix").await;
+        let rows = db.collection::<bson::Document>(COLLECTION_NAME);
+        let id = uuid::Uuid::new_v4().to_string();
+        rows.insert_one(doc! {"_id":&id,"state":"dispatching","claim_id":"attempt","telegram_message_ids":[101_i64,102_i64,103_i64]}).await.unwrap();
+        for observed in [vec![], vec![101]] {
+            rows.update_one(doc! {"_id":&id}, doc! {"$set":{"state":"dispatching"}})
+                .await
+                .unwrap();
+            finish_parent(&db, &id, "attempt", "refused", observed, None)
+                .await
+                .unwrap();
+            let row = rows.find_one(doc! {"_id":&id}).await.unwrap().unwrap();
+            assert_eq!(
+                row.get_array("telegram_message_ids").unwrap(),
+                &vec![
+                    bson::Bson::Int64(101),
+                    bson::Bson::Int64(102),
+                    bson::Bson::Int64(103)
+                ]
+            );
+            assert_eq!(row.get_str("state").unwrap(), "refused");
+        }
+        rows.update_one(
+            doc! {"_id":&id},
+            doc! {"$set":{"state":"dispatching","claim_id":"successor"}},
+        )
+        .await
+        .unwrap();
+        assert!(
+            finish_parent(&db, &id, "attempt", "sent", vec![999], None)
+                .await
+                .is_err()
+        );
+        finish_parent(
+            &db,
+            &id,
+            "successor",
+            "sent",
+            vec![101, 102, 103, 104],
+            None,
+        )
+        .await
+        .unwrap();
+        let row = rows.find_one(doc! {"_id":&id}).await.unwrap().unwrap();
+        assert_eq!(row.get_array("telegram_message_ids").unwrap().len(), 4);
+        assert_eq!(row.get_str("state").unwrap(), "sent");
+        db.drop().await.unwrap();
     }
 }

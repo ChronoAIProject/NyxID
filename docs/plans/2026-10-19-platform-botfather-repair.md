@@ -235,3 +235,12 @@ The tested binary's SHA-256 is
 Only documentation changed after this source build. Primary owns the remaining
 PR #1945 CI, final review, push and authorized squash merge; no remote operation
 or deployment is implied by these local results.
+
+## 2026-10-20 outbound delivery revision
+
+The BotFather UX work replaces the former single-message/link fallback for saved
+replies and proactive posts with complete ordered text, a shared 64-part planner,
+per-part durable receipts, native manager photo/document delivery and conditional
+web links. The current contract, recovery and rollout rules are in
+`docs/TELEGRAM_NEW.md#full-saved-reply-delivery`. Earlier verification records
+above remain historical; the new phase records its own commands and results.

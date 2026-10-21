@@ -1995,7 +1995,7 @@ async fn fence_probe_authority(
             for (collection, filter) in [
                 (
                     crate::models::platform_credential::COLLECTION_NAME,
-                    doc! {"provider":"telegram-new","fields.manager_bot_id":&binding.manager_bot_id,"fields.webhook_ready":"true"},
+                    doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &binding.manager_bot_id)]}, "fields.manager_bot_id": &binding.manager_bot_id,"fields.webhook_ready":"true"},
                 ),
                 (
                     crate::models::channel_bot::COLLECTION_NAME,

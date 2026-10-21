@@ -55,6 +55,8 @@ pub struct PlatformManagerIngress, RawPlatformManagerIngress {
 pub enum ChatLoginStatus {
     LoggedOut,
     Pending,
+    AwaitingConfirmation,
+    Expired,
     LoggedIn,
     Unavailable,
 }

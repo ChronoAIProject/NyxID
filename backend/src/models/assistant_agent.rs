@@ -161,6 +161,11 @@ pub struct AssistantAgent {
 pub struct AgentSkillMetadata {
     pub description: String,
     pub size_bytes: usize,
+    /// Owner-selected files automatically supplied as untrusted turn context.
+    #[serde(default)]
+    pub preload_paths: Vec<String>,
+    #[serde(default)]
+    pub preload_bytes: usize,
 }
 
 impl AssistantAgent {

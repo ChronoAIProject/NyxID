@@ -526,6 +526,7 @@ mod tests {
         let producers = crate::services::platform_manager_transport::compose(
             state.clone(),
             Arc::new(InventorySettledHook),
+            crate::handlers::agent_skills::preload_context(state.clone()),
         );
         let list_for_owner = || {
             list(

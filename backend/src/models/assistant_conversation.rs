@@ -390,6 +390,12 @@ pub struct ActiveTurn {
     pub tool_progress: ToolProgress,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub lease_expires_at: Option<DateTime<Utc>>,
+    /// A turn admitted while its owner's running replies were at their limit:
+    /// when it started waiting and when it gives up. Cleared once it runs.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub queued_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub queue_deadline: Option<DateTime<Utc>>,
     /// Worker liveness marker. Absent on turns written before heartbeat support.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub heartbeat_at: Option<DateTime<Utc>>,

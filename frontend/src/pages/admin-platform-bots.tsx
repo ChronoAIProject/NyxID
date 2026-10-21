@@ -1,3 +1,8 @@
+import { TelegramManagers } from "@/components/telegram-managers";
+import {
+  PlatformHelpEditor,
+  PlatformHelpAssignment,
+} from "@/components/platform-help-editor";
 import { channelPlatformName } from "@/lib/assistant/nyxbot-labels";
 import { NativePlatformEntrySetup } from "@/components/native-platform-entry-setup";
 import { ManagerRuntimeSettings } from "@/components/platform-manager-runtime";
@@ -201,6 +206,8 @@ function AdminProfiles() {
         title="Platform BotFather"
         description="Shared FAQ and personal NyxBot access. Review existing bots or prepare another channel."
       />
+      <PlatformHelpEditor />
+      <TelegramManagers />
       {action.error && <ErrorBanner message={action.error.message} />}
       {profiles.error && (
         <ErrorBanner
@@ -227,7 +234,10 @@ function AdminProfiles() {
           <div className="space-y-3 p-4 text-12">
             {profile.deleted_at && <p>Retired</p>}
             {!profile.deleted_at && (
-              <ManagerRuntimeSettings profile={profile} />
+              <>
+                <ManagerRuntimeSettings profile={profile} />
+                <PlatformHelpAssignment profile={profile} />
+              </>
             )}
             {!profile.deleted_at && (
               <details>

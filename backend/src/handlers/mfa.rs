@@ -12,8 +12,8 @@ use zeroize::Zeroizing;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::{
-    AuthClientMode, LoginResponse, apply_browser_session_cookies, extract_ip, extract_user_agent,
-    resolve_auth_client_mode,
+    AuthClientMode, LoginResponse, apply_browser_session_cookies, build_cookie_with_same_site,
+    clear_cookie_with_same_site, extract_ip, extract_user_agent, resolve_auth_client_mode,
 };
 use crate::models::mfa_factor::{COLLECTION_NAME as MFA_FACTORS, MfaFactor};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -22,6 +22,38 @@ use crate::services::{audit_service, mfa_service, token_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
+
+#[cfg(test)]
+mod enforcement_tests;
+
+pub(crate) const MFA_CHALLENGE_COOKIE: &str = "nyx_mfa_challenge";
+const MFA_CHALLENGE_COOKIE_PATH: &str = "/api/v1/auth/mfa";
+
+pub(crate) fn mfa_challenge_cookie(value: &str, secure: bool, domain: Option<&str>) -> String {
+    build_cookie_with_same_site(
+        MFA_CHALLENGE_COOKIE,
+        value,
+        300,
+        MFA_CHALLENGE_COOKIE_PATH,
+        secure,
+        domain,
+        "Lax",
+    )
+}
+
+pub(crate) fn clear_mfa_challenge_cookie(secure: bool, domain: Option<&str>) -> String {
+    clear_cookie_with_same_site(
+        MFA_CHALLENGE_COOKIE,
+        MFA_CHALLENGE_COOKIE_PATH,
+        secure,
+        domain,
+        "Lax",
+    )
+}
+
+fn challenge_cookie(headers: &HeaderMap) -> Option<String> {
+    super::social_auth::extract_cookie_value(headers, MFA_CHALLENGE_COOKIE)
+}
 
 #[derive(Serialize)]
 pub struct MfaSetupResponse {
@@ -44,13 +76,15 @@ pub struct MfaConfirmResponse {
 #[derive(Deserialize)]
 pub struct MfaLoginVerifyRequest {
     pub code: Zeroizing<String>,
-    pub mfa_token: Zeroizing<String>,
+    pub mfa_token: Option<Zeroizing<String>>,
     pub client: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct MfaDisableRequest {
-    pub password: Zeroizing<String>,
+    pub code: Zeroizing<String>,
+    #[serde(default)]
+    pub password: Option<Zeroizing<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +102,7 @@ pub async fn setup(
     auth_user: AuthUser,
     tele: TelemetryContext,
 ) -> AppResult<Json<MfaSetupResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let user_id_str = auth_user.user_id.to_string();
 
     let user = state
@@ -109,6 +144,7 @@ pub async fn confirm(
     tele: TelemetryContext,
     Json(body): Json<MfaConfirmRequest>,
 ) -> AppResult<Json<MfaConfirmResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let user_id_str = auth_user.user_id.to_string();
 
     // Find the pending (unverified, active) TOTP factor for this user
@@ -126,12 +162,22 @@ pub async fn confirm(
             AppError::NotFound("No pending MFA setup found. Start setup first.".to_string())
         })?;
 
+    let current_session_id = auth_user.session_id.map(|id| id.to_string());
+    if current_session_id.is_none() {
+        return Err(AppError::Conflict(
+            "MFA confirmation requires an identified session; sign in again".into(),
+        ));
+    }
     let recovery_codes = mfa_service::verify_totp_setup(
         &state.db,
         &state.encryption_keys,
         &factor.id,
         &user_id_str,
         &body.code,
+        current_session_id.as_deref(),
+        Some(&crate::services::audit_service::AuditActor::from_auth_user(
+            &auth_user,
+        )),
     )
     .await?;
 
@@ -147,7 +193,8 @@ pub async fn confirm(
     .await;
 
     Ok(Json(MfaConfirmResponse {
-        message: "MFA enabled successfully. Save your recovery codes.".to_string(),
+        message: "MFA enabled. Other devices were signed out. Save your recovery codes."
+            .to_string(),
         recovery_codes,
     }))
 }
@@ -162,11 +209,23 @@ pub async fn verify(
     headers: HeaderMap,
     Json(body): Json<MfaLoginVerifyRequest>,
 ) -> AppResult<(HeaderMap, Json<LoginResponse>)> {
+    let cookie_token = challenge_cookie(&headers);
+    let mfa_token = body
+        .mfa_token
+        .as_deref()
+        .map(String::as_str)
+        .or(cookie_token.as_deref())
+        .ok_or_else(|| AppError::AuthenticationFailed("MFA challenge is missing".into()))?;
     // Validate the MFA pending session via its token hash
-    let token_hash = crate::crypto::token::hash_token(&body.mfa_token);
+    let token_hash = crate::crypto::token::hash_token(mfa_token);
 
     let challenge = mfa_service::reserve_pending_challenge(&state.db, &token_hash).await?;
     let user_id = &challenge.session.user_id;
+    let challenge_method = challenge
+        .session
+        .mfa_method
+        .clone()
+        .unwrap_or_else(|| "password".to_string());
 
     // Challenge-phase product analytics is always denied, including failures.
     let tele_mfa = TelemetryContext::pre_auth(&headers);
@@ -227,12 +286,13 @@ pub async fn verify(
 
     match client_mode {
         AuthClientMode::BrowserSession => {
-            let session_result = token_service::create_session_with_transaction(
+            let session_result = token_service::create_session_with_transaction_and_assurance(
                 &state.db,
                 user_id,
                 ip.as_deref(),
                 ua.as_deref(),
                 Some(&mut completion.transaction),
+                true,
             )
             .await;
             let session = match session_result {
@@ -251,6 +311,12 @@ pub async fn verify(
                 completion.abort().await?;
                 return Err(error);
             }
+            response_headers.append(
+                axum::http::header::SET_COOKIE,
+                clear_mfa_challenge_cookie(secure, domain)
+                    .parse()
+                    .map_err(|_| AppError::Internal("Cookie error".into()))?,
+            );
             let factor = completion.commit().await?;
             mfa_service::notify_recovery_use(&state, user_id, factor);
 
@@ -258,7 +324,9 @@ pub async fn verify(
                 state.db.clone(),
                 Some(user_id.to_string()),
                 "login_mfa".to_string(),
-                Some(serde_json::json!({ "session_id": session.session_id })),
+                Some(
+                    serde_json::json!({ "session_id": session.session_id, "method": challenge_method, "mfa_required": true }),
+                ),
                 ip,
                 ua,
                 None,
@@ -274,7 +342,7 @@ pub async fn verify(
                 None,
                 &tele_mfa,
                 TelemetryEvent::AuthLoggedIn {
-                    method: "password".to_string(),
+                    method: challenge_method.clone(),
                     mfa_required: true,
                 },
             )
@@ -291,13 +359,14 @@ pub async fn verify(
             ))
         }
         AuthClientMode::TokenClient => {
-            let prepared_result = token_service::prepare_session_tokens(
+            let prepared_result = token_service::prepare_session_tokens_with_assurance(
                 &state.db,
                 &state.config,
                 &state.jwt_keys,
                 user_id,
                 ip.as_deref(),
                 ua.as_deref(),
+                true,
             )
             .await;
             let prepared = match prepared_result {
@@ -321,11 +390,19 @@ pub async fn verify(
             let factor = completion.commit().await?;
             let tokens = prepared.tokens;
             mfa_service::notify_recovery_use(&state, user_id, factor);
+            response_headers.append(
+                axum::http::header::SET_COOKIE,
+                clear_mfa_challenge_cookie(secure, domain)
+                    .parse()
+                    .map_err(|_| AppError::Internal("Cookie error".into()))?,
+            );
             audit_service::log_async(
                 state.db.clone(),
                 Some(user_id.to_string()),
                 "login_mfa".to_string(),
-                Some(serde_json::json!({ "session_id": tokens.session_id })),
+                Some(
+                    serde_json::json!({ "session_id": tokens.session_id, "method": challenge_method, "mfa_required": true }),
+                ),
                 ip,
                 ua,
                 None,
@@ -342,7 +419,7 @@ pub async fn verify(
                 None,
                 &tele_mfa,
                 TelemetryEvent::AuthLoggedIn {
-                    method: "password".to_string(),
+                    method: challenge_method,
                     mfa_required: true,
                 },
             )
@@ -361,22 +438,110 @@ pub async fn verify(
     }
 }
 
+/// The HTTP boundary attaches cookie cleanup to terminal challenge errors.
+/// A wrong code retains a live challenge, including its existing attempt budget.
+pub async fn verify_http(
+    State(state): State<AppState>,
+    peer: ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<MfaLoginVerifyRequest>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let cookie_mode = body.mfa_token.is_none();
+    let challenge_hash = body
+        .mfa_token
+        .as_deref()
+        .map(String::as_str)
+        .map(crate::crypto::token::hash_token)
+        .or_else(|| {
+            challenge_cookie(&headers).map(|token| crate::crypto::token::hash_token(&token))
+        });
+    let result = verify(State(state.clone()), peer, headers, Json(body)).await;
+    let clear = if result.is_err() {
+        if let Some(hash) = challenge_hash {
+            !mfa_service::pending_challenge_is_live(&state.db, &hash)
+                .await
+                .unwrap_or(true)
+        } else {
+            // Browsers remove the cookie at its five-minute expiry. Treat
+            // absence in cookie mode as terminal so the UI can restart login.
+            cookie_mode
+        }
+    } else {
+        false
+    };
+    let mut response = match result {
+        Err(error) if clear => {
+            let mut body = error.response_body();
+            body.details = Some(serde_json::json!({"reason": "mfa_challenge_expired"}));
+            (axum::http::StatusCode::UNAUTHORIZED, Json(body)).into_response()
+        }
+        other => other.into_response(),
+    };
+    if clear
+        && cookie_mode
+        && let Ok(value) = clear_mfa_challenge_cookie(
+            state.config.use_secure_cookies(),
+            state.config.cookie_domain(),
+        )
+        .parse()
+    {
+        response
+            .headers_mut()
+            .append(axum::http::header::SET_COOKIE, value);
+    }
+    response
+}
+
 /// POST /api/v1/auth/mfa/disable
 ///
-/// Disable MFA on the account. Requires password confirmation.
+/// Disable MFA with a current factor and, when configured, the password.
 pub async fn disable(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(body): Json<MfaDisableRequest>,
 ) -> AppResult<Json<MfaDisableResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let user_id_str = auth_user.user_id.to_string();
-
-    let proof = mfa_service::prepare_totp_disable(&state.db, &user_id_str, &body.password).await?;
-    mfa_service::disable_totp(&state.db, proof).await?;
+    mfa_service::disable_totp_with_code(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &body.code,
+        body.password.as_deref().map(String::as_str),
+        Some(&crate::services::audit_service::AuditActor::from_auth_user(
+            &auth_user,
+        )),
+    )
+    .await?;
+    mfa_service::notify_mfa_disabled(&state, &user_id_str);
 
     Ok(Json(MfaDisableResponse {
         message: "MFA has been disabled.".to_string(),
     }))
+}
+
+/// Abandon a browser MFA challenge. The raw token is read only from the
+/// HttpOnly cookie and is never returned, logged, or placed in a URL.
+pub async fn cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<(HeaderMap, Json<serde_json::Value>)> {
+    if let Some(token) = challenge_cookie(&headers) {
+        let token_hash = crate::crypto::token::hash_token(&token);
+        mfa_service::cancel_pending_challenge(&state.db, &token_hash).await?;
+    }
+    let mut response = HeaderMap::new();
+    response.append(
+        axum::http::header::SET_COOKIE,
+        clear_mfa_challenge_cookie(
+            state.config.use_secure_cookies(),
+            state.config.cookie_domain(),
+        )
+        .parse()
+        .map_err(|_| AppError::Internal("Cookie error".into()))?,
+    );
+    Ok((response, Json(serde_json::json!({"cancelled": true}))))
 }
 
 #[cfg(test)]
@@ -447,10 +612,11 @@ mod tests {
         // one exact recovery hash. Neither challenge grants account authority.
         let tokens = ["first-challenge", "second-challenge"];
         for token in tokens {
-            token_service::create_mfa_pending_session(
+            token_service::create_mfa_pending_session_with_method(
                 &db,
                 &id,
                 &crate::crypto::token::hash_token(token),
+                Some("password"),
             )
             .await
             .unwrap();
@@ -638,7 +804,8 @@ mod tests {
             State(state),
             auth,
             Json(MfaDisableRequest {
-                password: "wrong_password".to_string().into(),
+                code: "000000".to_string().into(),
+                password: Some("wrong_password".to_string().into()),
             }),
         )
         .await;
@@ -663,7 +830,8 @@ mod tests {
             State(state),
             auth,
             Json(MfaDisableRequest {
-                password: "any".to_string().into(),
+                code: "000000".to_string().into(),
+                password: Some("any".to_string().into()),
             }),
         )
         .await;
@@ -1166,9 +1334,14 @@ mod tests {
             .await
             .unwrap();
         let raw = crate::crypto::token::generate_random_token();
-        token_service::create_mfa_pending_session(&db, &id, &hash_token(&raw))
-            .await
-            .unwrap();
+        token_service::create_mfa_pending_session_with_method(
+            &db,
+            &id,
+            &hash_token(&raw),
+            Some("password"),
+        )
+        .await
+        .unwrap();
         let pending = tokio::spawn({
             let client = client.clone();
             let base = base.clone();
@@ -1217,9 +1390,14 @@ mod tests {
             db.collection::<bson::Document>(MFA_FACTORS).update_one(doc! {"user_id":&id,"is_active":true},
                 doc! {"$push":{"recovery_codes":password::hash_password(&submission_code).unwrap()}}).await.unwrap();
             let raw = crate::crypto::token::generate_random_token();
-            token_service::create_mfa_pending_session(&db, &id, &hash_token(&raw))
-                .await
-                .unwrap();
+            token_service::create_mfa_pending_session_with_method(
+                &db,
+                &id,
+                &hash_token(&raw),
+                Some("password"),
+            )
+            .await
+            .unwrap();
             match invalidation {
                 "revoke" => {
                     crate::services::admin_user_service::revoke_all_user_sessions(&db, &id)
@@ -1240,10 +1418,19 @@ mod tests {
                     .unwrap();
                 }
                 _ => {
-                    let proof = mfa_service::prepare_totp_disable(&db, &id, "replacement-password")
-                        .await
-                        .unwrap();
-                    mfa_service::disable_totp(&db, proof).await.unwrap();
+                    let proof =
+                        mfa_service::prepare_totp_disable(&db, &id, Some("replacement-password"))
+                            .await
+                            .unwrap();
+                    mfa_service::disable_totp(
+                        &db,
+                        &state.encryption_keys,
+                        proof,
+                        &submission_code,
+                        None,
+                    )
+                    .await
+                    .unwrap();
                     let setup = mfa_service::setup_totp(&db, &state.encryption_keys, &id, &email)
                         .await
                         .unwrap();
@@ -1265,6 +1452,8 @@ mod tests {
                         &setup.factor_id,
                         &id,
                         &totp.generate_current().unwrap(),
+                        None,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -1657,11 +1846,12 @@ fn mfa_dto_debug_never_discloses_factor_challenge_or_recovery_material() {
     };
     let request = MfaLoginVerifyRequest {
         code: Zeroizing::new(secret.into()),
-        mfa_token: Zeroizing::new(secret.into()),
+        mfa_token: Some(Zeroizing::new(secret.into())),
         client: None,
     };
     let disable = MfaDisableRequest {
-        password: Zeroizing::new(secret.into()),
+        code: Zeroizing::new(secret.into()),
+        password: Some(Zeroizing::new(secret.into())),
     };
     for value in [&setup as &dyn std::fmt::Debug, &confirm, &request, &disable] {
         assert!(!format!("{value:?}").contains(secret));

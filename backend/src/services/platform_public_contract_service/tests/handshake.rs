@@ -533,6 +533,7 @@ impl Handshake {
         let producers = crate::services::platform_manager_transport::compose(
             state.clone(),
             Arc::new(UnusedOwnerHook),
+            crate::handlers::agent_skills::preload_context(state.clone()),
         );
         let actor = AuditActor {
             user_id: actor_id,
@@ -966,6 +967,7 @@ async fn refresh_pins_original_proof_and_only_human_activation_adopts_upgrade() 
             &fixture.state.db,
             &original,
             TurnInput {
+                channel_uploads: Vec::new(),
                 text: "What is NyxID?".into(),
             },
         )
@@ -1347,6 +1349,7 @@ async fn failed_dispatched_settlement_preserves_original_unknown_handle_cleanup_
             &fixture.state.db,
             &context,
             TurnInput {
+                channel_uploads: Vec::new(),
                 text: "Guide me".into(),
             },
         )
@@ -1617,6 +1620,7 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
             &fixture.state.db,
             &context,
             TurnInput {
+                channel_uploads: Vec::new(),
                 text: "What is NyxID?".into(),
             },
         )
@@ -1915,6 +1919,7 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
             &fixture.state.db,
             &retry_context,
             TurnInput {
+                channel_uploads: Vec::new(),
                 text: "Please explain that again".into(),
             },
         )
@@ -1969,6 +1974,7 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
             &fixture.state.db,
             &compact_context,
             TurnInput {
+                channel_uploads: Vec::new(),
                 text: "Summarize the earlier help".into(),
             },
         )
@@ -2130,6 +2136,7 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
             &fixture.state.db,
             live_context.clone(),
             TurnInput {
+                channel_uploads: Vec::new(),
                 text: "What is NyxID?".into(),
             },
             events,

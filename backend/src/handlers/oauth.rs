@@ -332,11 +332,16 @@ pub struct PushedAuthorizationRequestResponse {
 /// RFC 6749 §5.2 compliant error body for the token endpoint.
 /// Standard OAuth clients expect `error` + `error_description`, not our
 /// internal `ErrorResponse` format which carries `error_code` / `message`.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct OAuthErrorBody {
     error: &'static str,
     error_description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_token: Option<zeroize::Zeroizing<String>>,
 }
+crate::errors::redacted_debug!(OAuthErrorBody);
 
 const CONSENT_REQUEST_AUDIENCE: &str = "nyxid/oauth-consent";
 const CONSENT_REQUEST_TOKEN_TYPE: &str = "oauth_consent_request";
@@ -393,6 +398,13 @@ fn oauth_error_response(err: AppError) -> Response {
         axum::Json(OAuthErrorBody {
             error: oauth_error,
             error_description: description,
+            error_code: matches!(err, AppError::MfaRequired { .. }).then_some(err.error_code()),
+            session_token: match &err {
+                AppError::MfaRequired { session_token } => {
+                    Some(zeroize::Zeroizing::new(session_token.clone()))
+                }
+                _ => None,
+            },
         }),
     )
         .into_response();
@@ -6104,6 +6116,24 @@ mod tests {
         let err = AppError::UnsupportedGrantType("magic_grant".to_string());
         let response = oauth_error_response(err);
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn oauth_mfa_challenge_has_oauth_error_shape_and_no_session_tokens() {
+        let response = oauth_error_response(AppError::MfaRequired {
+            session_token: "private-challenge".into(),
+        });
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "mfa_required");
+        assert_eq!(body["error_code"], 2002);
+        assert_eq!(body["session_token"], "private-challenge");
+        assert!(body.get("access_token").is_none());
+        assert!(body.get("refresh_token").is_none());
     }
 
     #[test]

@@ -252,6 +252,8 @@ pub async fn verify_totp_setup(
     factor_id: &str,
     user_id: &str,
     code: &str,
+    current_session_id: Option<&str>,
+    actor: Option<&super::audit_service::AuditActor>,
 ) -> AppResult<Zeroizing<Vec<String>>> {
     let factor = db
         .collection::<MfaFactor>(MFA_FACTORS)
@@ -330,6 +332,48 @@ pub async fn verify_totp_setup(
         session.abort_transaction().await?;
         return Err(AppError::AuthenticationFailed("TOTP code expired".into()));
     }
+    super::session_authority::revoke_other_sessions_in_transaction(
+        db,
+        user_id,
+        current_session_id,
+        &mut session,
+    )
+    .await?;
+    if let Some(current_session_id) = current_session_id {
+        let retained = db
+            .collection::<crate::models::session::Session>(crate::models::session::COLLECTION_NAME)
+            .update_one(
+                super::session_authority::authenticated(
+                    doc! {"_id": current_session_id, "user_id": user_id,
+                    "revoked": false, "expires_at": {"$gt": bson::DateTime::now()}},
+                ),
+                doc! {"$set": {"mfa_assured": true}},
+            )
+            .session(&mut session)
+            .await
+            .map_err(mfa_db_error)?;
+        if retained.matched_count != 1 {
+            session.abort_transaction().await?;
+            return Err(AppError::Unauthorized(
+                "Session expired; sign in again".into(),
+            ));
+        }
+    }
+    super::session_authority::revoke_pending(db, user_id, &mut session).await?;
+    super::audit_service::log_actor_event_in_transaction(
+        db,
+        &mut session,
+        &super::audit_service::AuditActor {
+            user_id: user_id.into(),
+            ip_address: actor.and_then(|a| a.ip_address.clone()),
+            user_agent: actor.and_then(|a| a.user_agent.clone()),
+            api_key_id: None,
+            api_key_name: None,
+        },
+        "mfa_enabled",
+        serde_json::json!({"factor_type": "totp", "other_sessions_signed_out": true}),
+    )
+    .await?;
     commit_mfa(&mut session).await?;
 
     Ok(recovery_codes)
@@ -352,7 +396,7 @@ async fn fence_live_account(
             doc! {"mfa_enabled": enabled, "updated_at": bson::DateTime::now()},
         );
     }
-    let live = db.collection::<bson::Document>("users").update_one(
+    let live = db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME).update_one(
         doc! {"_id": user_id, "is_active": true, "user_type": {"$ne": "org"}, "platform_personal_deleting": {"$ne": true}}, update
     ).session(session).await.map_err(mfa_db_error)?;
     if live.matched_count != 1 {
@@ -373,7 +417,7 @@ pub struct TotpDisableProof {
 pub async fn prepare_totp_disable(
     db: &mongodb::Database,
     user_id: &str,
-    password: &str,
+    password: Option<&str>,
 ) -> AppResult<TotpDisableProof> {
     let row = db
         .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
@@ -392,51 +436,94 @@ pub async fn prepare_totp_disable(
     };
     let user: crate::models::user::User = bson::from_document(row)
         .map_err(|_| AppError::Internal("Account state is unavailable".into()))?;
-    let valid = match user.password_hash.as_deref() {
-        Some(hash) => crate::crypto::password::verify_password(password, hash)?,
-        None => false,
-    };
-    if !valid {
-        return Err(AppError::AuthenticationFailed("Invalid password".into()));
+    if let Some(hash) = user.password_hash.as_deref() {
+        let supplied = password
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| AppError::AuthenticationFailed("Password is required".into()))?;
+        if !crate::crypto::password::verify_password(supplied, hash)? {
+            return Err(AppError::AuthenticationFailed("Invalid password".into()));
+        }
     }
     Ok(TotpDisableProof { user, generation })
 }
 
-pub async fn disable_totp(db: &mongodb::Database, proof: TotpDisableProof) -> AppResult<()> {
-    let user_id = proof.user.id.as_str();
-    let mut session = db.client().start_session().await?;
-    session
-        .start_transaction()
-        .write_concern(mongodb::options::WriteConcern::majority())
-        .await?;
-    super::auth_service::fence_password_proof(db, &proof.user, &mut session).await?;
-    let live = db
+/// Password proof, MFA generation and current factor are redeemed together.
+/// The login verifier writes the same account row and increments its generation;
+/// comparing the immediately following generation also rejects disable/re-enroll.
+pub async fn disable_totp(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    proof: TotpDisableProof,
+    code: &str,
+    actor: Option<&super::audit_service::AuditActor>,
+) -> AppResult<LoginFactor> {
+    let user_id = &proof.user.id;
+    let mut completion = begin_login_completion(db, encryption_keys, user_id, code, None)
+        .await?
+        .ok_or_else(|| AppError::AuthenticationFailed("Invalid MFA code".into()))?;
+    let expected = proof
+        .generation
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| AppError::AuthenticationFailed("MFA state is unavailable".into()))?;
+    let changed = db
         .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
         .update_one(
-            doc! {"_id":user_id,"mfa_state_version":proof.generation},
-            doc! {"$set":{"mfa_disable_fence":Uuid::new_v4().to_string()}},
+            doc! {
+                "_id": user_id, "is_active": true, "mfa_enabled": true,
+                "user_type": {"$ne": "org"}, "mfa_state_version": expected,
+                "password_hash": &proof.user.password_hash,
+            },
+            doc! {
+                "$set": {"mfa_enabled": false, "updated_at": bson::DateTime::now()},
+                "$inc": {"mfa_state_version": 1_i64},
+            },
         )
-        .session(&mut session)
+        .session(&mut completion.transaction)
         .await
         .map_err(mfa_db_error)?;
-    if live.matched_count != 1 {
-        session.abort_transaction().await?;
+    if changed.matched_count != 1 {
+        completion.abort().await?;
         return Err(AppError::AuthenticationFailed(
-            "MFA state changed; verify your password again".into(),
+            "MFA or password changed; verify again".into(),
         ));
     }
-    fence_live_account(db, &mut session, user_id, Some(false)).await?;
-    super::session_authority::revoke_pending(db, user_id, &mut session).await?;
     db.collection::<MfaFactor>(MFA_FACTORS)
         .update_many(
             doc! {"user_id": user_id, "is_active": true},
             doc! {"$set": {"is_active": false, "updated_at": bson::DateTime::now()}},
         )
-        .session(&mut session)
+        .session(&mut completion.transaction)
         .await
         .map_err(mfa_db_error)?;
-    commit_mfa(&mut session).await?;
-    Ok(())
+    super::session_authority::revoke_pending(db, user_id, &mut completion.transaction).await?;
+    super::audit_service::log_actor_event_in_transaction(
+        db,
+        &mut completion.transaction,
+        &super::audit_service::AuditActor {
+            user_id: user_id.clone(),
+            ip_address: actor.and_then(|a| a.ip_address.clone()),
+            user_agent: actor.and_then(|a| a.user_agent.clone()),
+            api_key_id: None,
+            api_key_name: None,
+        },
+        "mfa_disabled",
+        serde_json::json!({"factor_kind": completion.factor.as_str()}),
+    )
+    .await?;
+    completion.commit().await
+}
+
+pub async fn disable_totp_with_code(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    code: &str,
+    password: Option<&str>,
+    actor: Option<&super::audit_service::AuditActor>,
+) -> AppResult<LoginFactor> {
+    let proof = prepare_totp_disable(db, user_id, password).await?;
+    disable_totp(db, encryption_keys, proof, code, actor).await
 }
 
 static RECOVERY_WORK: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
@@ -517,6 +604,14 @@ pub enum LoginFactor {
     Totp,
     Recovery,
 }
+impl LoginFactor {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Totp => "totp",
+            Self::Recovery => "recovery",
+        }
+    }
+}
 
 /// Match the documented one-step skew and retain the highest matching counter.
 fn matching_totp_counter(totp: &TOTP, code: &str, now: i64) -> Option<i64> {
@@ -542,7 +637,10 @@ pub async fn reserve_pending_challenge(
     token_hash: &str,
 ) -> AppResult<ReservedChallenge> {
     use crate::models::session::{MFA_CHALLENGES, Session};
-    for (collection, legacy) in [(MFA_CHALLENGES, false), ("sessions", true)] {
+    for (collection, legacy) in [
+        (MFA_CHALLENGES, false),
+        (crate::models::session::COLLECTION_NAME, true),
+    ] {
         let row = db
             .collection::<Session>(collection)
             .find_one_and_update(
@@ -562,6 +660,61 @@ pub async fn reserve_pending_challenge(
     Err(AppError::AuthenticationFailed(
         "Invalid or expired MFA challenge".into(),
     ))
+}
+
+pub async fn pending_challenge_is_live(
+    db: &mongodb::Database,
+    token_hash: &str,
+) -> AppResult<bool> {
+    for (collection, legacy) in [
+        (crate::models::session::MFA_CHALLENGES, false),
+        (crate::models::session::COLLECTION_NAME, true),
+    ] {
+        if db
+            .collection::<bson::Document>(collection)
+            .find_one(super::session_authority::pending(
+                doc! {
+                    "token_hash": token_hash, "revoked": false,
+                    "$expr": {"$gt": ["$expires_at", "$$NOW"]},
+                    "$or": [{"mfa_attempts": {"$exists": false}}, {"mfa_attempts": {"$lt": 5}}],
+                },
+                legacy,
+            ))
+            .await?
+            .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub async fn cancel_pending_challenge(db: &mongodb::Database, token_hash: &str) -> AppResult<()> {
+    for (collection, legacy) in [
+        (crate::models::session::MFA_CHALLENGES, false),
+        (crate::models::session::COLLECTION_NAME, true),
+    ] {
+        if let Some(challenge) = db
+            .collection::<crate::models::session::Session>(collection)
+            .find_one_and_delete(super::session_authority::pending(
+                doc! {"token_hash": token_hash, "revoked": false},
+                legacy,
+            ))
+            .await?
+        {
+            super::audit_service::log_async(
+                db.clone(),
+                Some(challenge.user_id),
+                "mfa_challenge_cancelled".into(),
+                Some(serde_json::json!({"source": "cookie"})),
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn valid_login_code(code: &str) -> bool {
@@ -841,6 +994,19 @@ pub fn notify_recovery_use(state: &crate::AppState, user_id: &str, factor: Login
     });
 }
 
+pub fn notify_mfa_disabled(state: &crate::AppState, user_id: &str) {
+    let Ok(permit) = RECOVERY_NOTICES.clone().try_acquire_owned() else {
+        return;
+    };
+    let state = state.clone();
+    let user_id = user_id.to_owned();
+    schedule_recovery_notice(permit, async move {
+        super::notification_service::send_mfa_disabled_notification(&state, &user_id)
+            .await
+            .map(|_| ())
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,7 +1136,7 @@ mod tests {
             .unwrap();
         verify_current_secret(&keys, &current_factor).await.unwrap();
         let code = current(&successor.secret);
-        verify_totp_setup(&db, &keys, &successor.factor_id, &user, &code)
+        verify_totp_setup(&db, &keys, &successor.factor_id, &user, &code, None, None)
             .await
             .unwrap();
         db.drop().await.unwrap();
@@ -1069,7 +1235,9 @@ mod tests {
                 doc! {"$set":{"password_hash":password::hash_password(&old_password).unwrap(),"mfa_enabled":true}}).await.unwrap();
             let active = factor(&db, &keys, &id, &["Recovery"]).await;
             // This is the production seam after verification and before mutation.
-            let held = prepare_totp_disable(&db, &id, &old_password).await.unwrap();
+            let held = prepare_totp_disable(&db, &id, Some(&old_password))
+                .await
+                .unwrap();
             let new_password = if change == "password_reset" {
                 let actor = db
                     .collection::<User>("users")
@@ -1094,11 +1262,16 @@ mod tests {
                 old_password.as_str()
             };
             let token = crate::crypto::token::hash_token("successor-pending-proof");
-            token_service::create_mfa_pending_session(&db, &id, &token)
-                .await
-                .unwrap();
+            token_service::create_mfa_pending_session_with_method(
+                &db,
+                &id,
+                &token,
+                Some("password"),
+            )
+            .await
+            .unwrap();
             assert!(matches!(
-                disable_totp(&db, held).await,
+                disable_totp(&db, &keys, held, "Recovery", None).await,
                 Err(AppError::AuthenticationFailed(_))
             ));
             assert_eq!(
@@ -1116,8 +1289,12 @@ mod tests {
                 1,
                 "stale proof invalidated successor pending authority"
             );
-            let fresh = prepare_totp_disable(&db, &id, new_password).await.unwrap();
-            disable_totp(&db, fresh).await.unwrap();
+            let fresh = prepare_totp_disable(&db, &id, Some(new_password))
+                .await
+                .unwrap();
+            disable_totp(&db, &keys, fresh, "Recovery", None)
+                .await
+                .unwrap();
             assert_eq!(
                 db.collection::<MfaFactor>(MFA_FACTORS)
                     .count_documents(doc! {"user_id":&id,"is_active":true})
@@ -1247,12 +1424,20 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            verify_totp_setup(&db, &keys, &old.factor_id, &id, &current(&old.secret))
-                .await
-                .is_err()
+            verify_totp_setup(
+                &db,
+                &keys,
+                &old.factor_id,
+                &id,
+                &current(&old.secret),
+                None,
+                None
+            )
+            .await
+            .is_err()
         );
         let enrolled_code = current(&new.secret);
-        let codes = verify_totp_setup(&db, &keys, &new.factor_id, &id, &enrolled_code)
+        let codes = verify_totp_setup(&db, &keys, &new.factor_id, &id, &enrolled_code, None, None)
             .await
             .unwrap();
         assert_eq!(codes.len(), 10);
@@ -1275,7 +1460,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            verify_totp_setup(&db, &keys, &new.factor_id, &id, &codes[0])
+            verify_totp_setup(&db, &keys, &new.factor_id, &id, &codes[0], None, None)
                 .await
                 .is_err(),
             "recovery cannot enroll"
@@ -1500,12 +1685,20 @@ mod tests {
     #[tokio::test]
     async fn pending_challenge_is_single_use_expired_and_attempt_limits_fail_closed() {
         let (db, keys, id) = fixture("mfa_pending").await;
+        db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(doc! {"_id": &id}, doc! {"$set": {"mfa_enabled": true}})
+            .await
+            .unwrap();
         factor(&db, &keys, &id, &["Recovery", "An0ther_"]).await;
         let token_hash = crate::crypto::token::hash_token("pending-token");
-        let pending_id =
-            crate::services::token_service::create_mfa_pending_session(&db, &id, &token_hash)
-                .await
-                .unwrap();
+        let pending_id = crate::services::token_service::create_mfa_pending_session_with_method(
+            &db,
+            &id,
+            &token_hash,
+            Some("password"),
+        )
+        .await
+        .unwrap();
         // The handler reserves an attempt before bounded password work.
         db.collection::<bson::Document>(crate::models::session::MFA_CHALLENGES)
             .update_one(
@@ -1584,19 +1777,34 @@ mod tests {
             .unwrap();
         let code = current(&setup.secret);
         let (confirm, replace) = tokio::join!(
-            verify_totp_setup(&db, &keys, &setup.factor_id, &id, &code),
+            verify_totp_setup(&db, &keys, &setup.factor_id, &id, &code, None, None),
             setup_totp(&db, &keys, &id, "user@example.com")
         );
         assert_eq!(
             usize::from(confirm.is_ok()) + usize::from(replace.is_ok()),
             1
         );
-        if let Err(error) = confirm {
-            assert!(
-                matches!(error, AppError::Conflict(_) | AppError::NotFound(_)),
-                "unexpected confirmation error: {error:?}"
-            );
-        }
+        let recovery_codes = match confirm {
+            Ok(codes) => codes,
+            Err(error) => {
+                assert!(
+                    matches!(error, AppError::Conflict(_) | AppError::NotFound(_)),
+                    "unexpected confirmation error: {error:?}"
+                );
+                let replacement = replace.as_ref().unwrap();
+                verify_totp_setup(
+                    &db,
+                    &keys,
+                    &replacement.factor_id,
+                    &id,
+                    &current(&replacement.secret),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            }
+        };
         if let Err(error) = replace {
             assert!(
                 matches!(error, AppError::Conflict(_)),
@@ -1626,9 +1834,15 @@ mod tests {
             .unwrap()
             .get_i64("mfa_state_version")
             .ok();
-        disable_totp(&db, TotpDisableProof { user, generation })
-            .await
-            .unwrap();
+        disable_totp(
+            &db,
+            &keys,
+            TotpDisableProof { user, generation },
+            &recovery_codes[0],
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             db.collection::<MfaFactor>(MFA_FACTORS)
                 .count_documents(doc! {"user_id": &id,"is_active":true})
@@ -1645,7 +1859,7 @@ mod tests {
                 .mfa_enabled
         );
         assert!(
-            verify_totp_setup(&db, &keys, &setup.factor_id, &id, &code)
+            verify_totp_setup(&db, &keys, &setup.factor_id, &id, &code, None, None)
                 .await
                 .is_err()
         );
@@ -1667,7 +1881,9 @@ mod tests {
                 &keys,
                 &pending.factor_id,
                 &id,
-                &current(&pending.secret)
+                &current(&pending.secret),
+                None,
+                None
             )
             .await,
             Err(AppError::Conflict(_))

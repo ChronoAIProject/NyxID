@@ -227,6 +227,9 @@ impl From<crate::models::assistant_conversation::StreamReply> for StreamReplyRes
 pub struct ActiveTurnResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     reply: Option<StreamReplyResponse>,
+    /// Waiting for one of the owner's running slots; also reported through
+    /// the capacity-wait fields for clients that predate it.
+    queued: bool,
     waiting_for_capacity: bool,
     capacity_wait_note_origin: Option<String>,
     engine_request_started_at: Option<DateTime<Utc>>,
@@ -332,11 +335,12 @@ impl From<AssistantConversation> for ConversationResponse {
     fn from(row: AssistantConversation) -> Self {
         let active_turn = engine::live_turn(&row, Utc::now()).map(|turn| ActiveTurnResponse {
             reply: None,
-            waiting_for_capacity: turn.waiting_for_capacity,
+            queued: turn.queued_at.is_some(),
+            waiting_for_capacity: turn.waiting_for_capacity || turn.queued_at.is_some(),
             capacity_wait_note_origin: turn.capacity_wait_note_origin.clone(),
             engine_request_started_at: turn.engine_request_started_at,
-            capacity_wait_started_at: turn.capacity_wait_started_at,
-            capacity_wait_deadline: turn.capacity_wait_deadline,
+            capacity_wait_started_at: turn.queued_at.or(turn.capacity_wait_started_at),
+            capacity_wait_deadline: turn.queue_deadline.or(turn.capacity_wait_deadline),
             platform_origin: turn
                 .platform_origin
                 .as_ref()
@@ -345,10 +349,12 @@ impl From<AssistantConversation> for ConversationResponse {
                 .running_response
                 .as_ref()
                 .map(|r| r.response_id.clone()),
-            steering_allowed: matches!(
-                crate::services::assistant_steering::unavailable(&row, &turn.turn_id),
-                None | Some("starting")
-            ),
+            // A queued turn has nothing upstream to steer yet.
+            steering_allowed: turn.queued_at.is_none()
+                && matches!(
+                    crate::services::assistant_steering::unavailable(&row, &turn.turn_id),
+                    None | Some("starting")
+                ),
             stop_requested: turn.stop_requested,
             continuations: turn.continuations,
             activity_total: turn.activity_total,
@@ -1538,6 +1544,14 @@ pub(crate) fn http_egress(
 
 #[async_trait::async_trait]
 impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgentEgress {
+    async fn preload_skills(
+        &self,
+        row: &AssistantConversation,
+        agent: &crate::models::assistant_agent::AssistantAgent,
+    ) -> AppResult<String> {
+        super::agent_skills::preload_for_turn(&self.state, row, agent).await
+    }
+
     fn admission_acknowledged(
         &self,
         row: &AssistantConversation,
@@ -1599,11 +1613,12 @@ pub async fn turns(
     } else {
         None
     };
-    let permit = state.direct_chat_limiter.try_acquire(&user_id).await?;
+    // A full set of running replies queues the turn rather than refusing it.
+    let permit = state.direct_chat_limiter.admit(&user_id).await?;
     let policy = parts.extensions.get::<BillingRoutePolicy>().copied();
     let mut start = engine::TurnStart::from(&input);
     start.org_access = org_access;
-    if start.conversation_id.is_none() && start.model.is_none() {
+    if start.conversation_id.is_none() && start.agent_id.is_none() && start.model.is_none() {
         start.model = Some(
             crate::services::assistant_profile_routing::model_for(
                 &state.db,
@@ -1840,6 +1855,7 @@ pub(crate) async fn run_turn(
         crate::services::assistant_nyxagent_egress::producer(
             state.clone(),
             crate::services::platform_personal_binding_service::producer(state.clone()),
+            super::agent_skills::preload_context(state.clone()),
         )
     } else {
         http_egress(state.clone(), auth.clone())

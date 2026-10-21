@@ -49,7 +49,7 @@ several agents, routines/scheduled triggers, and cross-user agents.
 | --- | --- |
 | One NyxAgent conversation = one `assistant_conversations` row + one restricted `nyxid-assistant` key + encrypted raw key; NyxAgent binds its session to that key | A thread keeps its own key; an agent's authority is applied to every thread key |
 | Execution authority is the key (`allow_all_services`, `allowed_service_ids`, `allowed_platform_service_ids`, `assistant:account`), enforced in MCP (`chat_access`, gates, `ensure_service_in_scope`) | Specialist grants are enforced by NyxID, never by prompts |
-| Per-user turn limiter: 2 in flight, 10 starts per 60 s | Server-started turns need their own owner-level pool |
+| Per-user browser turn limiter: 4 running, 8 queued, 30 starts per 60 s | Server-started turns need their own owner-level pool |
 | NyxAgent per turn: 600 s, 40 tool calls, results truncated; NyxID calls time out at 150 s | Waiting is bounded (120 s) and completion wakes NyxBot later |
 | NyxAgent disables Codex multi-agent | Codex subagents would share one key and vanish; NyxID owns agents instead |
 | Turns are detached server tasks | NyxID can start turns itself for tasks, wake-ups and chat apps |
@@ -644,7 +644,7 @@ Telegram bots can be linked:
 `max_inflight` caps concurrent gateway calls to NyxID across all NyxBot
 channels; each running turn holds a slot for its whole duration. 256 equals
 the gateway-wide ceiling (`CMAEG_PROVIDER_MAX_INFLIGHT`) and `cma_codex`, and
-each provider has its own pool. NyxID still limits each owner to two
+each provider has its own pool. NyxID still limits each owner to four
 concurrent channel turns and queues the rest.
 
 ### 12a. Chats, groups and guests
@@ -835,6 +835,16 @@ per-image counts (`sent_now`, `previously_delivered`, `failed`, `skipped`,
 `unknown`, `in_progress_or_unknown`, `cancelled`); its failure line covers only
 this call's attempts. Tool-image notes mention `include_images` when the turn's
 images would not otherwise reach a chat the agent posts to. Guests cannot post.
+
+Chat destinations add a bounded turn-only length note using the delivery
+planner's platform budget (Telegram 4,096 UTF-16 code units; Discord 2,000).
+Prefer one message unless the user explicitly asks for long or complete output;
+the planner still splits longer output without truncation. This follows channel,
+followed-thread, manager and automation destinations, including additional
+recipients. Assigned specialists capture their requesting turn's guidance at
+assignment. Chat-list tool results provide `reply_length_guidance` for drafting
+explicit posts, whose input bound is 32,768 characters. App-only turns receive no
+channel-length note, and destination advice stays out of stable instructions.
 
 Upgrade from 0.71.0 keeps v1 image barriers in `nyxbot_image_deliveries`
 (read-only, original seven-day TTL) before every v2 attempt in the separate

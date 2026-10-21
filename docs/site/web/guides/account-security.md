@@ -18,19 +18,35 @@ NyxID supports TOTP-based MFA (Time-based One-Time Password) using any authentic
 5. Enter the 6-digit code from your app to confirm the setup.
 6. Save the **backup codes** shown on the confirmation screen. These are single-use emergency codes for when your authenticator is unavailable.
 
+After confirmation, NyxID keeps the device you used for setup signed in and
+signs out other browser sessions, refresh tokens, and session-backed MCP
+connections. Sign those devices in again with MFA.
+
 :::warning
 Store your backup codes in a secure location (password manager, printed and locked away). If you lose access to your authenticator and have no backup codes, account recovery requires manual admin intervention.
 :::
 
 ### Sign in with MFA enabled
 
-After entering your email and password on the login page, NyxID prompts for a 6-digit TOTP code. Enter the current code from your authenticator app.
+After entering your email and password on the login page, NyxID prompts for a
+6-digit TOTP code. Social sign-in (Google, GitHub, or Apple) prompts for the
+same MFA form before creating a session. Mobile social sign-in keeps the
+short-lived challenge in the deep-link fragment and never receives tokens until
+the code is verified. Choose **Use a recovery code** when your authenticator is
+unavailable; each recovery code is single-use.
+
+Sessions from before MFA enforcement may ask you to sign in again. NyxID checks
+MFA assurance on every human session request, refresh, and session-backed MCP
+connection. Device approval, login codes, CLI tokens and app approval inherit
+the MFA assurance of the human session that approved them.
 
 ### Disable MFA
 
 1. Go to **Settings → Security**.
 2. Click **Disable two-factor authentication**.
 3. Confirm with your current TOTP code or a backup code.
+4. If the account has a password, enter it as well. Social-only accounts do not
+   have a password field.
 
 :::note
 MFA setup is idempotent on the backend — calling setup again while a factor is unverified replaces the pending factor without error. A verified factor must be explicitly disabled before setup can be repeated.

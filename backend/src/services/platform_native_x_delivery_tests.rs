@@ -241,6 +241,7 @@ async fn actual_paid_native_x_final_delivery_fences_funding_and_preserves_header
         let producers = crate::services::platform_manager_transport::compose(
             fixture.state.clone(),
             Arc::new(Settled),
+            crate::handlers::agent_skills::preload_context(fixture.state.clone()),
         );
         fixture.state.db.collection::<PlatformManagerDelivery>(DELIVERIES).update_one(doc! {"_id":&stored.id},
             doc! {"$set":{"updated_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::minutes(3))}}).await.unwrap();

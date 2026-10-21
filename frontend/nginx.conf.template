@@ -5,6 +5,7 @@ map $request_uri $nyxid_has_claim {
     # internal redirect; $uri does not.
     ~^/channel-bots(?:[?]|$) 1;
     ~[?&]claim(?:=|&|$) 1;
+    ~^/onboarding/link(?:[?]|$) 1;
 }
 # Never write raw queries or Referer values. This also protects encoded names,
 # duplicate parameters and asset requests from a client ignoring the policy.

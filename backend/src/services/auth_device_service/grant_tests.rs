@@ -60,6 +60,7 @@ async fn abandoned_new_parent_survives_reuse_and_concurrent_issuance() {
             input(&actor, &first.user_code),
             selection(),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -83,6 +84,7 @@ async fn abandoned_new_parent_survives_reuse_and_concurrent_issuance() {
                 api_key_id: grant.api_key_id.clone(),
             },
             None,
+            false,
         );
         rows.update_one(doc! {"_id": &row.id}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
         let approved = if concurrent {
@@ -148,7 +150,8 @@ async fn v2_grants_are_invisible_to_legacy_poll_and_expiry_indexes() {
             KEY,
             input(&actor, &legacy.user_code),
             selection(),
-            None
+            None,
+            false
         )
         .await
         .is_err()
@@ -166,6 +169,7 @@ async fn v2_grants_are_invisible_to_legacy_poll_and_expiry_indexes() {
         input(&actor, &request.user_code),
         selection(),
         None,
+        false,
     )
     .await
     .unwrap();
@@ -242,6 +246,7 @@ async fn v2_grants_are_invisible_to_legacy_poll_and_expiry_indexes() {
         &state.encryption_keys,
         KEY,
         input(&actor, &legacy.user_code),
+        false,
     )
     .await
     .unwrap();
@@ -274,7 +279,8 @@ async fn account_and_agent_approval_race_commits_only_one_grant() {
             &state.jwt_keys,
             &state.encryption_keys,
             KEY,
-            input(&actor, &request.user_code)
+            input(&actor, &request.user_code),
+            false
         ),
         approve_with_agent_key(
             &state.db,
@@ -282,7 +288,8 @@ async fn account_and_agent_approval_race_commits_only_one_grant() {
             KEY,
             input(&actor, &request.user_code),
             selection(),
-            None
+            None,
+            false
         )
     );
     assert_ne!(account.is_ok(), restricted.is_ok());
@@ -409,6 +416,7 @@ async fn expiry_during_decryption_reports_expired_for_cli_and_browser() {
             &encryption,
             KEY,
             input(&actor, &request.user_code),
+            false,
         )
         .await
         .unwrap();
@@ -469,6 +477,7 @@ async fn failed_kms_unwrap_keeps_account_delivery_retryable_and_expiry_cleans_up
             &encryption,
             KEY,
             input(&actor, &request.user_code),
+            false,
         )
         .await
         .unwrap();
@@ -542,6 +551,7 @@ async fn browser_session_insert_failure_rolls_back_delivery_and_revocation() {
         &state.encryption_keys,
         KEY,
         input(&actor, &request.user_code),
+        false,
     )
     .await
     .unwrap();
@@ -654,7 +664,8 @@ async fn retained_terminal_outcomes_precede_expiry_and_codes_are_not_reused() {
             &state.jwt_keys,
             &state.encryption_keys,
             KEY,
-            input(&actor, &request.user_code)
+            input(&actor, &request.user_code),
+            false
         )
         .await,
         Err(AppError::AuthDeviceCodeDenied)

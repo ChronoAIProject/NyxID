@@ -1,10 +1,10 @@
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate } from "@tanstack/react-router";
 import { mfaLoginSchema, type MfaVerifyFormData } from "@/schemas/auth";
 import { useMfaVerify } from "@/hooks/use-auth";
 import { useAuthStore } from "@/stores/auth-store";
-import { ApiError } from "@/lib/api-client";
+import { apiClient, ApiError } from "@/lib/api-client";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import {
   useAppForm,
@@ -21,14 +21,16 @@ import { ShieldCheck } from "lucide-react";
 
 interface MfaVerifyFormProps {
   readonly returnTo?: string;
+  readonly cookieChallenge?: boolean;
 }
 
-export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
+export function MfaVerifyForm({ returnTo, cookieChallenge = false }: MfaVerifyFormProps) {
   const navigate = useNavigate();
   const verifyMutation = useMfaVerify();
   const mfaToken = useAuthStore((s) => s.mfaToken);
   const clearMfaState = useAuthStore((s) => s.clearMfaState);
   const codeInputRef = useRef<HTMLInputElement>(null);
+  const [recoveryMode, setRecoveryMode] = useState(false);
 
   const form = useAppForm<MfaVerifyFormData>({
     resolver: zodResolver(mfaLoginSchema),
@@ -42,11 +44,11 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
   }, []);
 
   async function onSubmit(data: MfaVerifyFormData) {
-    if (!mfaToken) return;
+    if (!cookieChallenge && !mfaToken) return;
     try {
       await verifyMutation.mutateAsync({
         code: data.code,
-        mfa_token: mfaToken,
+        ...(!cookieChallenge && mfaToken ? { mfa_token: mfaToken } : {}),
       });
       const trustedReturnTo = resolveTrustedAuthReturnTo(returnTo);
       if (trustedReturnTo) {
@@ -56,6 +58,15 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
       void navigate({ to: "/dashboard" as string });
     } catch (error) {
       if (error instanceof ApiError) {
+        const details = error.errorResponse.details;
+        if (details && typeof details === "object" && "reason" in details && details.reason === "mfa_challenge_expired") {
+          clearMfaState();
+          const params = new URLSearchParams({ mfa: "expired" });
+          const trustedReturnTo = resolveTrustedAuthReturnTo(returnTo);
+          if (trustedReturnTo) params.set("return_to", trustedReturnTo);
+          window.location.assign(`/login?${params}`);
+          return;
+        }
         form.setError("root", { message: error.message });
       } else {
         form.setError("root", {
@@ -65,8 +76,22 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
     }
   }
 
-  function handleCancel() {
+  async function handleCancel() {
+    if (cookieChallenge) {
+      try {
+        await apiClient("/auth/mfa/cancel", { method: "POST" });
+      } catch {
+        form.setError("root", { message: "Could not cancel verification. Please try again." });
+        return;
+      }
+    }
     clearMfaState();
+    if (cookieChallenge) {
+      const params = new URLSearchParams();
+      const trustedReturnTo = resolveTrustedAuthReturnTo(returnTo);
+      if (trustedReturnTo) params.set("return_to", trustedReturnTo);
+      window.location.assign(`/login${params.size ? `?${params}` : ""}`);
+    }
   }
 
   return (
@@ -81,7 +106,9 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
         <p className="text-12 text-muted-foreground">
           {verifyMutation.sessionConfirmationPending
             ? "Verification was submitted. Confirm your session to continue."
-            : "Enter your authenticator code or a single-use recovery code"}
+            : cookieChallenge
+              ? "Your social sign-in needs one more verification step."
+              : "Enter your authenticator code or a single-use recovery code"}
         </p>
       </div>
 
@@ -101,15 +128,15 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
             name="code"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Verification Code</FormLabel>
+                <FormLabel>{recoveryMode ? "Recovery code" : "Authenticator code"}</FormLabel>
                 <FormControl>
                   <Input
-                    placeholder="000000"
+                    placeholder={recoveryMode ? "Paste a recovery code" : "000000"}
                     maxLength={32}
                     autoComplete="one-time-code"
-                    inputMode="text"
+                    inputMode={recoveryMode ? "text" : "numeric"}
                     disabled={verifyMutation.sessionConfirmationPending}
-                    aria-label="Authenticator or recovery code"
+                    aria-label={recoveryMode ? "Recovery code" : "Authenticator code"}
                     className="min-w-0 font-mono text-xs tracking-normal sm:text-sm"
                     {...field}
                     ref={codeInputRef}
@@ -119,6 +146,15 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
               </FormItem>
             )}
           />
+
+          <Button
+            type="button"
+            variant="link"
+            className="h-auto p-0 text-12"
+            onClick={() => setRecoveryMode((value) => !value)}
+          >
+            {recoveryMode ? "Use an authenticator code" : "Use a recovery code"}
+          </Button>
 
           <div className="flex flex-col gap-2">
             <Button

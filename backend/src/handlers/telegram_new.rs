@@ -23,6 +23,7 @@ static MANAGER_CHANNEL_DELIVERIES: Semaphore = Semaphore::const_new(32);
 
 pub(crate) fn service(state: &AppState) -> TelegramNewService<'_> {
     TelegramNewService {
+        manager_id: None,
         db: &state.db,
         keys: &state.encryption_keys,
         config: &state.config,
@@ -205,19 +206,19 @@ pub async fn configuration(
     Query(query): Query<ConfigurationQuery>,
 ) -> AppResult<(HeaderMap, Json<ConfigurationResponse>)> {
     let actor = human(&auth)?;
-    let row = crate::services::platform_credential_service::load(
-        &state.db,
-        &crate::services::channel_adapters::telegram_new::credential_descriptor(),
-    )
-    .await?;
-    let available = row.as_ref().is_some_and(|row| {
-        row.fields.get("webhook_ready").is_some_and(|v| v == "true")
-            && row.secrets.contains_key("manager_bot_token")
-    });
     let request = match query.request_id {
         Some(id) => Some(service(&state).get(&actor, &id.to_string()).await?),
         None => service(&state).current(&actor).await?,
     };
+    let manager = request
+        .as_ref()
+        .map(|request| request.manager_bot_id.to_string());
+    let row =
+        crate::services::telegram_manager_registry::load(&state.db, manager.as_deref()).await?;
+    let available = row.as_ref().is_some_and(|row| {
+        row.fields.get("webhook_ready").is_some_and(|v| v == "true")
+            && row.secrets.contains_key("manager_bot_token")
+    });
     Ok((
         private_headers(),
         Json(ConfigurationResponse {
@@ -401,6 +402,16 @@ pub(crate) async fn webhook_with_producers(
                 return Ok(native_dispatch_status(&error));
             }
         }
+        if update["message"]["text"]
+            .as_str()
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.split('@').next())
+            .is_some_and(|s| {
+                s.eq_ignore_ascii_case("/confirm") || s.eq_ignore_ascii_case("confirm")
+            })
+        {
+            return Ok(StatusCode::OK);
+        }
         match crate::services::platform_guide_service::dispatch(state, &bot, &update, service).await
         {
             Ok(true) => return Ok(StatusCode::OK),
@@ -497,6 +508,40 @@ pub(crate) async fn relay_manager_channel(
             }
         }
     });
+}
+
+/// Scoped URL selects exactly one additional manager; its secret is still
+/// verified before parsing any provider content.
+pub async fn scoped_webhook(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    producers: Option<
+        Extension<
+            std::sync::Arc<crate::services::platform_manager_contract::PlatformManagerProducers>,
+        >,
+    >,
+    body: Bytes,
+) -> AppResult<StatusCode> {
+    if id <= 0 {
+        return Err(AppError::ChannelWebhookVerificationFailed(
+            "Invalid manager".into(),
+        ));
+    }
+    let selected = service(&state).for_manager(id).await?;
+    if selected.manager_id != Some(id) {
+        return Err(AppError::ChannelWebhookVerificationFailed(
+            "Invalid manager route".into(),
+        ));
+    }
+    webhook_with_producers(
+        &state,
+        &selected,
+        &headers,
+        &body,
+        producers.map(|Extension(v)| v),
+    )
+    .await
 }
 
 #[cfg(test)]

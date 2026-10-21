@@ -1,3 +1,10 @@
+vi.mock("@/components/platform-help-editor", () => ({
+  PlatformHelpEditor: () => <div>Shared help editor</div>,
+  PlatformHelpAssignment: () => <div>Help assignment</div>,
+}));
+vi.mock("@/components/telegram-managers", () => ({
+  TelegramManagers: () => <div>Telegram managers</div>,
+}));
 vi.mock("@/components/native-platform-entry-setup", () => ({
   NativePlatformEntrySetup: () => <div>Native shared entry setup</div>,
 }));

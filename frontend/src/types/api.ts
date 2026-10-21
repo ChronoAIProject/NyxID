@@ -25,6 +25,7 @@ export interface User {
   /// Social login provider ("google", "github", ...) or null for
   /// email/password accounts. Older backends omit the field.
   readonly social_provider?: string | null;
+  readonly has_password?: boolean;
   readonly is_admin: boolean;
   /// Read-only platform admin. Defaults to false. When true (and `is_admin`
   /// is false) the user can hit admin GET endpoints but no writes.
@@ -755,7 +756,7 @@ export interface MfaRequiredError {
 
 export interface MfaVerifyRequest {
   readonly code: string;
-  readonly mfa_token: string;
+  readonly mfa_token?: string;
 }
 
 export interface PublicConfig {
