@@ -21,9 +21,11 @@ import urllib.request
 from apt_inputs import INPUTS
 
 ROOT = Path(__file__).resolve().parents[1]
-MODES = ('wrong-digest', 'malformed-signature', 'bad-signature', 'absent-signature',
-         'missing-index', 'bad-index', 'bad-package', 'missing-archive', 'success')
-METADATA_FAILURES = frozenset(MODES[:6])
+# Establish that the unmodified snapshot works before testing rejection paths.
+MODES = ('success', 'wrong-digest', 'malformed-signature', 'bad-signature', 'absent-signature',
+         'missing-index', 'bad-index', 'bad-package', 'missing-archive')
+METADATA_FAILURES = frozenset(('wrong-digest', 'malformed-signature', 'bad-signature',
+                               'absent-signature', 'missing-index', 'bad-index'))
 
 
 def mutate_signature(data, mode):
@@ -80,6 +82,8 @@ class Proxy(BaseHTTPRequestHandler):
                 data += b'NyxID checksum-negative fixture'
                 state['injected'] += 1
         except urllib.error.HTTPError as error:
+            if error.code != 404:  # APT may probe optional index encodings.
+                state['errors'].append('upstream HTTP ' + str(error.code) + ': ' + self.path)
             self.send_error(error.code)
             return
         except Exception as error:
@@ -97,12 +101,17 @@ class Proxy(BaseHTTPRequestHandler):
 
 def validate_case(mode, state, log, output):
     debs = [path for path in state['requests'] if path.endswith('.deb')]
-    if not state['requests'] or state['errors']:
-        raise ValueError('fixture boundary not reached or upstream proxy failed: ' + repr(state['errors']))
+    if state['errors']:
+        raise ValueError('upstream proxy transport failed: ' + repr(state['errors']))
+    if not state['requests']:
+        raise ValueError('fixture boundary not reached: no upstream requests')
     if mode in METADATA_FAILURES and debs:
         raise ValueError('package download preceded metadata rejection')
     if mode not in ('success', 'wrong-digest', 'missing-archive') and not state['injected']:
-        raise ValueError('selected injection did not execute')
+        reason = ('unmodified signed metadata failed catalog digest verification' if
+                  'signed snapshot bytes differ from the reviewed catalog' in log else
+                  'APT stopped before the selected boundary; inspect command.log and requests.txt')
+        raise ValueError('selected injection did not execute (' + mode + '): ' + reason)
     if mode == 'wrong-digest' and 'signed snapshot bytes differ from the reviewed catalog' not in log:
         raise ValueError('catalog digest rejection did not execute')
     if mode == 'bad-signature':
@@ -222,8 +231,11 @@ fi
                         with log.open('w') as stream:
                             result = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, timeout=1200)
                         (output / 'requests.txt').write_text('\n'.join(state['requests']) + '\n')
+                        (output / 'proxy-state.json').write_text(json.dumps(state, indent=2) + '\n')
+                        if state['errors']:
+                            raise ValueError('upstream proxy transport failed: ' + repr(state['errors']))
                         if result.returncode:
-                            raise ValueError('container assertions failed')
+                            raise ValueError('container assertions failed (' + mode + '); inspect command.log')
                         validate_case(mode, state, log.read_text(), output)
                     except Exception:
                         print(log.read_text()[-16000:], flush=True)

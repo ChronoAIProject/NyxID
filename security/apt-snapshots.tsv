@@ -8,6 +8,6 @@ ubuntu	noble	noble-security	main,universe	https://snapshot.ubuntu.com/ubuntu/202
 debian	bookworm	bookworm	main	https://snapshot.debian.org/archive/debian/20261020T000000Z	77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa
 debian	bookworm	bookworm-updates	main	https://snapshot.debian.org/archive/debian/20261020T000000Z	fb5ccff7febeb90f812ca9aa7d8348acac1eeb53791e1c2c68661717b12fdd4c
 debian	bookworm	bookworm-security	main	https://snapshot.debian.org/archive/debian-security/20261020T000000Z	debdb23d9224f88d20a26b1f9876ece2f3112edc94f37f1618bac2fe41f4408f
-debian	trixie	trixie	main	https://snapshot.debian.org/archive/debian/20261020T000000Z	0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675
-debian	trixie	trixie-updates	main	https://snapshot.debian.org/archive/debian/20261020T000000Z	3ea800baec602255b1b450a0434052c05cf9eb72636eaf0b0144e0bd0a181080
-debian	trixie	trixie-security	main	https://snapshot.debian.org/archive/debian-security/20261020T000000Z	a2adb375ee0ba03cf8b9c707ba780ddf37cd6d91b069c36fcd28e07466cfae5f
+debian	trixie	trixie	main	https://snapshot.debian.org/archive/debian/20261021T000000Z	0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675
+debian	trixie	trixie-updates	main	https://snapshot.debian.org/archive/debian/20261021T000000Z	1b01d660dc2b0c97a5045bfa37bb8857623a533549323b749930ac800b5b0847
+debian	trixie	trixie-security	main	https://snapshot.debian.org/archive/debian-security/20261021T000000Z	0caa1ca5caed3dd9ac5e5b14ca25db487b86e2cab3e36a17140a337e5fa6c93e

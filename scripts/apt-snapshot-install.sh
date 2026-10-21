@@ -97,8 +97,11 @@ while IFS="$tab" read -r distro codename suite components url digest; do
     # APT encodes these catalog hosts/paths as this exact cache basename.
     cache=$(printf '%s/dists/%s/InRelease' "${url#https://}" "$suite" | tr '/' '_')
     [ -f "$work/lists/$cache" ] || fail 'required signed snapshot metadata was not fetched'
-    printf '%s  %s\n' "$digest" "$work/lists/$cache" | sha256sum -c - >/dev/null \
-        || fail 'signed snapshot bytes differ from the reviewed catalog'
+    if ! printf '%s  %s\n' "$digest" "$work/lists/$cache" | sha256sum -c - >/dev/null; then
+        actual=$(sha256sum "$work/lists/$cache")
+        actual=${actual%% *}
+        fail "signed snapshot bytes differ from the reviewed catalog: $distro:$suite $url/dists/$suite/InRelease expected=$digest actual=$actual"
+    fi
     # Old APT versions can report a failed optional index as a warning. Require
     # every selected component's native-architecture Packages index explicitly;
     # an empty authenticated index still exists as a compressed cache file.

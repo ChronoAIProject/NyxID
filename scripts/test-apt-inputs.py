@@ -194,6 +194,21 @@ class DockerPolicy(unittest.TestCase):
 
 
 class Harness(unittest.TestCase):
+    def test_unmodified_snapshot_precedes_all_injections(self):
+        self.assertEqual(harness.MODES[0], 'success')
+        self.assertEqual(len(harness.MODES), 9)
+        self.assertEqual(harness.METADATA_FAILURES, {
+            'wrong-digest', 'malformed-signature', 'bad-signature',
+            'absent-signature', 'missing-index', 'bad-index'})
+
+    def test_harness_distinguishes_transport_from_unmodified_catalog_drift(self):
+        state = {'requests': ['/InRelease'], 'errors': ['upstream HTTP 503'], 'injected': 0}
+        with self.assertRaisesRegex(ValueError, 'upstream proxy transport failed.*503'):
+            harness.validate_case('bad-package', state, '', ROOT)
+        state['errors'] = []
+        with self.assertRaisesRegex(ValueError, r'\(bad-package\).*unmodified signed metadata failed catalog'):
+            harness.validate_case('bad-package', state, 'signed snapshot bytes differ from the reviewed catalog', ROOT)
+
     def test_bad_signature_changes_cleartext_only(self):
         data = b'-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nOrigin: Debian\n-----BEGIN PGP SIGNATURE-----\n\n' + b'B' * 64 + b'\n-----END PGP SIGNATURE-----\n'
         changed = harness.mutate_signature(data, 'bad-signature')

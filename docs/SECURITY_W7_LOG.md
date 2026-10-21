@@ -508,3 +508,40 @@
   was run; hosted base coverage must confirm the historical source build.
 - Full command results are in w7-apt-followup/results.jsonl and logs/ under
   ~/Library/Caches/nyxid-targets/.
+
+## W7 PR #1976 follow-up — authenticated trixie snapshot refresh
+
+- Fetch and independently verify all twelve original InRelease files with the
+  archive keys from the exact pinned Debian/Ubuntu base images. Eleven match;
+  only October 20 trixie-updates differs reproducibly. The returned signed file
+  hashes to 4beaf635c236f829c7e133f26c10a5fc30165a7f172cf0ef0ba126b2eab728eb,
+  versus the catalog's 3ea800baec602255b1b450a0434052c05cf9eb72636eaf0b0144e0bd0a181080.
+- Recover the original expected signed bytes through the October 19 18:00
+  snapshot and verify their signature too. Their cleartext differs only in Date
+  and Valid-Until (14:08 versus 20:11 on October 19); all package-index digests
+  agree. This proves two authentic metadata generations, not an unsigned or
+  garbled response. It does not establish whether initial collection saw a
+  stale response or historical URL selection subsequently changed.
+- Generate the October 21 candidate with refresh-apt-catalog.py, independently
+  verify its three trixie signatures/digests, and promote only those rows. Other
+  bases remain on October 20. Dockerfiles select the catalog and contain no
+  separate timestamp needing replacement. Rebind the 2,472 existing image
+  dispositions to the new full-catalog digest; noble rows, native security
+  candidates (6.8.0-147.147), payload/finding hashes and November 19 expiry are
+  unchanged in this refresh.
+- Keep the exact-byte check, and include suite, URL, expected and actual hashes
+  on failure. The harness establishes success before all eight injections and
+  preserves proxy state. Its prior bad-package "selected injection did not
+  execute" was a consequence of the earlier metadata failure, before any .deb
+  request. Diagnostics now distinguish that case from upstream HTTP errors.
+- Native arm64 snapshot replay passes all 36 cases across four bases. The real
+  sandbox passes after one upstream HTTP 503; the Dockerfile-prefix gate passes
+  minimal transport then fails Ubuntu archive DNS/downloads. The amd64 replay
+  on arm64 QEMU passes bookworm success but QEMU segfaults in wrong-digest; it is
+  not native amd64 acceptance. Hosted native amd64 and full image replay remain
+  required. No application compilation or timeout/policy relaxation occurred.
+- Exact URLs, response headers, signature logs, recovered metadata diff,
+  candidate and each policy-binding delta are retained in
+  ~/Library/Caches/nyxid-targets/w7-apt-followup/delta-report.md and adjacent
+  evidence. Portable APT/build/catalog/image policies, freshness, workflow YAML,
+  permissions and pinned actionlint all pass.
