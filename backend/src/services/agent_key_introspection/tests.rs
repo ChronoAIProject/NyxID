@@ -146,7 +146,7 @@ async fn oauth_endpoint_authenticates_client_and_returns_service_bound_evidence(
             assert_eq!(body["aud"], f.service);
             assert_eq!(body["sub"], f.owner);
             assert_eq!(body["token_type"], "api_key");
-            assert!(body.get("exp").is_none());
+            assert_eq!(body["exp"], f.key.expires_at.unwrap().timestamp());
         } else {
             assert_eq!(body, serde_json::json!({"active":false}));
         }
@@ -284,7 +284,15 @@ async fn resource_server_receives_live_permissions_and_exact_owner() {
     assert_eq!(evidence.subject, f.owner);
     assert_eq!(evidence.service_id, f.service);
     assert_eq!(evidence.permissions, ["cma:sandbox:use"]);
-    assert_eq!(evidence.expires_at, None);
+    let stored =
+        f.db.collection::<ApiKey>(KEYS)
+            .find_one(doc! {"_id": &f.key.id})
+            .await
+            .unwrap()
+            .unwrap();
+    let expected = stored.created_at + chrono::Duration::days(90);
+    assert_eq!(f.key.expires_at, Some(expected));
+    assert_eq!(evidence.expires_at, Some(expected));
     f.db.collection::<Role>(ROLES)
         .update_one(doc! {"_id": &f.role}, doc! {"$set": {"permissions": []}})
         .await
