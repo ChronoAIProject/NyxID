@@ -27,7 +27,7 @@ function formatter({ locale, timeZone }: MessageTimeOptions): Intl.DateTimeForma
   const resolvedLocale = locale ?? (
     typeof navigator === "undefined"
       ? undefined
-      : navigator.languages[0] ?? navigator.language
+      : navigator.languages?.[0] ?? navigator.language
   );
   const key = `${resolvedLocale ?? ""}|${timeZone ?? ""}`;
   let cached = formatters.get(key);
