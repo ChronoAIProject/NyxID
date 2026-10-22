@@ -205,6 +205,24 @@ export function AnalyticsWorkspace({
   return (
     <div className="space-y-5 pb-6">
       <UsageHeader />
+      <fieldset
+        disabled={Boolean(workspace.pendingRecovery)}
+        className="min-w-0 space-y-2"
+        aria-label="Usage filters"
+      >
+        <FilterBar
+          filters={view.filters}
+          sample={options}
+          onChange={(filters) =>
+            setConfig({ ...config, draft: { ...view, filters } })
+          }
+        />
+        <p className="text-11 text-muted-foreground">
+          Applies to Dashboard and List totals and charts. Users select who made
+          requests; Users / organizations selects the billing account that paid.
+          NyxBot has its own filters.
+        </p>
+      </fieldset>
       {import.meta.env.DEV &&
         import.meta.env.VITE_USAGE_SEEDED === "true" &&
         !sample && (
@@ -501,15 +519,6 @@ export function AnalyticsWorkspace({
           disabled={Boolean(workspace.pendingRecovery)}
           className="min-w-0"
         >
-          <div className="mt-5">
-            <FilterBar
-              filters={view.filters}
-              sample={options}
-              onChange={(filters) =>
-                setConfig({ ...config, draft: { ...view, filters } })
-              }
-            />
-          </div>
           <TabsContent value="dashboard" className="mt-6">
             <AnalyticsCanvas
               view={view}

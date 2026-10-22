@@ -528,6 +528,10 @@ pub async fn approve(
         return Err(service::invalid());
     }
     let actor = service::user(&state.db, &row).await?;
+    let authority = crate::services::session_authority::DerivedMfaAuthority::new(
+        actor.mfa_enabled,
+        row.mfa_verified,
+    );
     let ip = limit(&state, &headers, addr, Some(&actor.id)).await?;
     let ua = extract_user_agent(&headers);
     let expiry = body
@@ -571,7 +575,7 @@ pub async fn approve(
                     input,
                     selection,
                     expiry,
-                    false,
+                    authority,
                 )
                 .await
             } else {
@@ -582,7 +586,7 @@ pub async fn approve(
                     &state.encryption_keys,
                     state.auth_device_hmac_key.as_slice(),
                     input,
-                    row.mfa_verified,
+                    authority,
                 )
                 .await
             }

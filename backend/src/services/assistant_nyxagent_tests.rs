@@ -5539,6 +5539,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
     };
     let watch = AsyncServiceOperation {
         secret_context_versions: Default::default(),
+        cma: None,
         id: "watch".into(),
         user_id: row.user_id.clone(),
         conversation_id: row.id.clone(),
@@ -5548,6 +5549,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         service_id: "service".into(),
         submit_endpoint_id: "submit".into(),
         contract: crate::models::async_service_operation::AsyncOperationContract {
+            presentation: None,
             status_operation: "status".into(),
             result_operation: "result".into(),
             cancel_operation: None,

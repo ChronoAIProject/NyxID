@@ -61,7 +61,7 @@ async fn concurrent_redemption_commits_exactly_one_grant_of_either_kind() {
             &actor,
             restricted.then(selection),
             None,
-            false,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false),
         )
         .await
         .unwrap();
@@ -135,7 +135,7 @@ async fn expiry_cancellation_and_invalid_selection_issue_nothing() {
             &actor,
             restricted.then(selection),
             None,
-            false,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false),
         )
         .await
         .unwrap();
@@ -150,7 +150,7 @@ async fn expiry_cancellation_and_invalid_selection_issue_nothing() {
             &actor,
             restricted.then(selection),
             None,
-            false,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false),
         )
         .await
         .unwrap();
@@ -166,9 +166,16 @@ async fn expiry_cancellation_and_invalid_selection_issue_nothing() {
     )
     .unwrap();
     assert!(
-        mint(&state.db, KEY, &actor, Some(invalid), None, false)
-            .await
-            .is_err()
+        mint(
+            &state.db,
+            KEY,
+            &actor,
+            Some(invalid),
+            None,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false)
+        )
+        .await
+        .is_err()
     );
     for collection in [SESSIONS, CHILDREN, API_KEYS] {
         assert_eq!(
@@ -193,7 +200,7 @@ async fn failed_issuance_rolls_back_claim_and_all_rows_then_can_retry() {
             &actor,
             restricted.then(selection),
             None,
-            false,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false),
         )
         .await
         .unwrap();
@@ -262,9 +269,16 @@ async fn source_and_owner_budgets_throttle_distributed_attempts() {
         redeem_code(&state, "ABCD-EFGH", "192.0.2.1").await,
         Err(AppError::LoginCodeRateLimited)
     ));
-    let code = mint(&state.db, KEY, &actor, None, None, false)
-        .await
-        .unwrap();
+    let code = mint(
+        &state.db,
+        KEY,
+        &actor,
+        None,
+        None,
+        crate::services::session_authority::DerivedMfaAuthority::new(false, false),
+    )
+    .await
+    .unwrap();
     cancel(&state.db, &actor, &code.id).await.unwrap();
     for i in 1..=10 {
         assert!(matches!(
@@ -277,12 +291,27 @@ async fn source_and_owner_budgets_throttle_distributed_attempts() {
         Err(AppError::LoginCodeRateLimited)
     ));
     for _ in 0..4 {
-        mint(&state.db, KEY, &actor, None, None, false)
-            .await
-            .unwrap();
+        mint(
+            &state.db,
+            KEY,
+            &actor,
+            None,
+            None,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false),
+        )
+        .await
+        .unwrap();
     }
     assert!(matches!(
-        mint(&state.db, KEY, &actor, None, None, false).await,
+        mint(
+            &state.db,
+            KEY,
+            &actor,
+            None,
+            None,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false)
+        )
+        .await,
         Err(AppError::LoginCodeRateLimited)
     ));
 }
@@ -310,9 +339,16 @@ async fn protected_status(state: &AppState, token: &str) -> axum::http::StatusCo
 #[tokio::test]
 async fn issuer_revocation_blocks_initial_and_refreshed_access_at_authentication() {
     let (state, actor) = fixture("login_code_revoke_access").await;
-    let code = mint(&state.db, KEY, &actor, None, None, false)
-        .await
-        .unwrap();
+    let code = mint(
+        &state.db,
+        KEY,
+        &actor,
+        None,
+        None,
+        crate::services::session_authority::DerivedMfaAuthority::new(false, false),
+    )
+    .await
+    .unwrap();
     let Delivery::Account(tokens) = redeem_code(&state, &code.code, "192.0.2.1").await.unwrap()
     else {
         panic!("expected account");
@@ -350,9 +386,16 @@ async fn issuer_revocation_blocks_initial_and_refreshed_access_at_authentication
 async fn refresh_refuses_expired_deleted_or_revoked_bound_session_before_rotation() {
     let (state, actor) = fixture("login_bound_refresh").await;
     for action in ["expired", "deleted", "revoked"] {
-        let code = mint(&state.db, KEY, &actor, None, None, false)
-            .await
-            .unwrap();
+        let code = mint(
+            &state.db,
+            KEY,
+            &actor,
+            None,
+            None,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false),
+        )
+        .await
+        .unwrap();
         let Delivery::Account(tokens) = redeem_code(&state, &code.code, "192.0.2.1").await.unwrap()
         else {
             panic!("expected account");
@@ -384,7 +427,7 @@ async fn refresh_refuses_expired_deleted_or_revoked_bound_session_before_rotatio
                 None
             )
             .await,
-            Err(AppError::Unauthorized(_))
+            Err(AppError::Unauthorized(message)) if message == "Session expired or revoked"
         ));
         assert_eq!(
             state
@@ -416,7 +459,7 @@ async fn restricted_browser_handoff_and_direct_delivery_cannot_both_win() {
         },
         selection(),
         None,
-        false,
+        crate::services::session_authority::DerivedMfaAuthority::new(false, false),
     )
     .await
     .unwrap();
@@ -572,9 +615,16 @@ async fn third_party_oauth_cannot_mint_or_approve_human_login_grants() {
 #[tokio::test]
 async fn mint_freezes_default_intent_and_old_shaped_pending_codes_remain_readable() {
     let (state, actor) = fixture("w9_code_intent").await;
-    let code = mint(&state.db, KEY, &actor, Some(selection()), None, false)
-        .await
-        .unwrap();
+    let code = mint(
+        &state.db,
+        KEY,
+        &actor,
+        Some(selection()),
+        None,
+        crate::services::session_authority::DerivedMfaAuthority::new(false, false),
+    )
+    .await
+    .unwrap();
     let rows = state.db.collection::<LoginCode>(COLLECTION_NAME);
     let row = rows
         .find_one(doc! {"_id": &code.id})
@@ -604,9 +654,16 @@ async fn mint_freezes_default_intent_and_old_shaped_pending_codes_remain_readabl
         frozen_child.map(|value| value.to_rfc3339())
     );
 
-    let code = mint(&state.db, KEY, &actor, Some(selection()), None, false)
-        .await
-        .unwrap();
+    let code = mint(
+        &state.db,
+        KEY,
+        &actor,
+        Some(selection()),
+        None,
+        crate::services::session_authority::DerivedMfaAuthority::new(false, false),
+    )
+    .await
+    .unwrap();
     // Simulate an old replica's persisted intent: absent new field and no expiry.
     let created_at = bson::DateTime::from_chrono(Utc::now() - Duration::hours(1));
     rows.update_one(
@@ -635,8 +692,8 @@ async fn mint_freezes_default_intent_and_old_shaped_pending_codes_remain_readabl
 
 #[tokio::test]
 async fn mfa_browser_handoff_inherits_device_assurance_and_rejects_unassured_delivery() {
+    let (state, actor) = fixture("mfa_handoff_assurance").await;
     for assured in [false, true] {
-        let (state, actor) = fixture("mfa_handoff_assurance").await;
         state
             .db
             .collection::<User>(USERS)
@@ -646,6 +703,25 @@ async fn mfa_browser_handoff_inherits_device_assurance_and_rejects_unassured_del
         let request = device::initiate_v2(&state.db, KEY, context("192.0.2.1"), true)
             .await
             .unwrap();
+        if !assured {
+            let error = device::approve_with_agent_key(
+                &state.db,
+                &state.encryption_keys,
+                KEY,
+                device::ApproveInput {
+                    user_id: actor.clone(),
+                    user_code: request.user_code.clone(),
+                    approver_ip: None,
+                    approver_user_agent: None,
+                },
+                selection(),
+                None,
+                crate::services::session_authority::DerivedMfaAuthority::new(true, false),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error, AppError::MfaStepUpRequired));
+        }
         device::approve_with_agent_key(
             &state.db,
             &state.encryption_keys,
@@ -658,13 +734,32 @@ async fn mfa_browser_handoff_inherits_device_assurance_and_rejects_unassured_del
             },
             selection(),
             None,
-            assured,
+            crate::services::session_authority::DerivedMfaAuthority::new(true, true),
         )
         .await
         .unwrap();
         let handoff = browser_handoff(&state.db, KEY, &request.device_code)
             .await
             .unwrap();
+        if !assured {
+            // Simulate an in-flight delivery approved by an older replica.
+            state.db.collection::<bson::Document>(crate::models::auth_device_code::V2_COLLECTION_NAME)
+                .update_one(doc! {"device_code_hmac": device::hmac_hex(KEY, request.device_code.as_bytes())},
+                    doc! {"$set": {"mfa_assured": false}}).await.unwrap();
+            state
+                .db
+                .collection::<bson::Document>(COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id": &handoff.id},
+                    doc! {"$unset": {"mfa_assured": ""}},
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                browser_handoff(&state.db, KEY, &request.device_code).await,
+                Err(AppError::AuthDeviceCodeDenied)
+            ));
+        }
         let row = state
             .db
             .collection::<LoginCode>(COLLECTION_NAME)
@@ -677,7 +772,7 @@ async fn mfa_browser_handoff_inherits_device_assurance_and_rejects_unassured_del
         if assured {
             assert!(matches!(delivery.unwrap(), Delivery::AgentKey(_)));
         } else {
-            assert!(matches!(delivery, Err(AppError::Unauthorized(_))));
+            assert!(matches!(delivery, Err(AppError::MfaStepUpRequired)));
         }
         assert_eq!(
             state
@@ -688,6 +783,6 @@ async fn mfa_browser_handoff_inherits_device_assurance_and_rejects_unassured_del
                 .unwrap(),
             0
         );
-        state.db.drop().await.unwrap();
     }
+    state.db.drop().await.unwrap();
 }

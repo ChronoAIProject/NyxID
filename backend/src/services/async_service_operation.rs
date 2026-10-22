@@ -94,6 +94,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         doc! {"state":1,"expires_at":1},
         doc! {"user_id":1,"state":1},
         doc! {"user_id":1,"conversation_id":1,"state":1},
+        doc! {"user_id":1,"conversation_id":1,"created_at":-1,"_id":-1},
         doc! {"delivery.trigger_run_id":1,"state":1},
         doc! {"delivery.voice_request_id":1,"state":1},
     ] {
@@ -117,6 +118,19 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     db.collection::<bson::Document>(WATCHES)
         .create_index(
             IndexModel::builder()
+                .keys(doc! {"user_id":1,"api_key_id":1,"service_id":1,"submit_endpoint_id":1,"cma.receipt_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {"cma.receipt_id":{"$type":"string"}})
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    db.collection::<bson::Document>(WATCHES)
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! {"user_id":1,"api_key_id":1,"service_id":1,"submit_endpoint_id":1,"operation_id":1})
                 .options(
                     IndexOptions::builder()
@@ -132,11 +146,22 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
 
 /// Reserve before submission, under an owner-wide write fence, so parallel
 /// submissions cannot exceed bounds or leave an unwatchable upstream job.
+#[cfg(test)]
 pub async fn reserve(
     db: &Database,
     chat: &super::assistant_acknowledgement_service::ChatAuthority,
     service: &super::mcp_service::McpToolService,
     endpoint: &super::mcp_service::McpToolEndpoint,
+) -> AppResult<AsyncServiceOperation> {
+    reserve_with_arguments(db, chat, service, endpoint, &Value::Null).await
+}
+
+pub async fn reserve_with_arguments(
+    db: &Database,
+    chat: &super::assistant_acknowledgement_service::ChatAuthority,
+    service: &super::mcp_service::McpToolService,
+    endpoint: &super::mcp_service::McpToolEndpoint,
+    args: &Value,
 ) -> AppResult<AsyncServiceOperation> {
     if chat.guest {
         return Err(AppError::Forbidden(
@@ -145,6 +170,7 @@ pub async fn reserve(
     }
     let contract = endpoint.async_operation.clone().ok_or_else(invalid)?;
     validate_endpoints(&contract, service, endpoint)?;
+    let cma = super::cma_operation::metadata(&contract, args);
     let db_ref_for_audit = db;
     let db = db.clone();
     let chat = chat.clone();
@@ -189,9 +215,9 @@ pub async fn reserve(
                     .update_one(doc!{"_id":request,"user_id":&chat.user_id,"state":{"$ne":"cancelled"}},doc!{"$set":{"async_operation_pending":true}}).session(&mut *session).await?;
             }
             let now=Utc::now();
-            let watch=AsyncServiceOperation{secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
+            let watch=AsyncServiceOperation{cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
                 delivery,
-                operation_id:None,execution_binding:None,authority_version:1,contract_binding:None,state:"submitting".into(),reason:None,attempts:0,lease_id:None,lease_until:None,created_at:now,deadline:now+Duration::hours(2),poll_at:now+Duration::seconds(60),expires_at:now+Duration::hours(4),result_encrypted:None};
+                operation_id:None,execution_binding:None,authority_version:1,contract_binding:None,state:"submitting".into(),reason:None,attempts:0,lease_id:None,lease_until:None,created_at:now,deadline:now+Duration::hours(2),poll_at:now+Duration::seconds(60),expires_at:now+if cma.is_some(){Duration::days(30)}else{Duration::hours(4)},result_encrypted:None};
             watches.insert_one(&watch).session(&mut *session).await?;
             Ok(watch)
         }).await;
@@ -206,22 +232,59 @@ pub async fn submitted(
     watch: &AsyncServiceOperation,
     response: Option<&super::mcp_service::ToolResponse>,
 ) -> AppResult<()> {
-    let id = response
+    let parsed = response
         .filter(|r| (200..300).contains(&r.status))
-        .and_then(|r| serde_json::from_str::<Value>(&r.text).ok())
-        .and_then(|v| {
+        .and_then(|r| {
+            if watch.cma.is_some() {
+                super::cma_operation::response_metadata(&r.text)
+            } else {
+                serde_json::from_str::<Value>(&r.text).ok()
+            }
+        });
+    let agent_input = watch
+        .cma
+        .as_ref()
+        .is_some_and(|c| c.kind == crate::models::async_service_operation::CmaOperationKind::Agent);
+    let id = if agent_input {
+        response
+            .filter(|r| (200..300).contains(&r.status))
+            .and(watch.cma.as_ref())
+            .and_then(|c| c.agent_id.clone())
+    } else {
+        parsed.as_ref().and_then(|v| {
             v.pointer(&watch.contract.id_field)
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })
-        .filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control));
+    }
+    .filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
+    .filter(|id| watch.cma.is_none() || super::cma_operation::identifier(Some(id), None).is_some());
     let Some(id) = id else {
         return ready(db, watch, None, "submission_failed", None).await;
     };
+    let mut cma = watch.cma.clone();
+    if let (Some(cma), Some(parsed)) = (cma.as_mut(), parsed.as_ref()) {
+        super::cma_operation::observed(cma, parsed);
+    }
+    // An agent ID identifies the status resource, not an input operation. Keep
+    // it outside the operation-ID index so later inputs are independently tracked.
+    // Idempotent retries with the same safe receipt key still reuse one watch.
+    if agent_input && let Some(cma) = cma.as_mut() {
+        use sha2::{Digest, Sha256};
+        cma.receipt_id = cma.idempotency_key.as_ref().map(|key| {
+            hex::encode(Sha256::digest(
+                serde_json::json!([id, key]).to_string().as_bytes(),
+            ))
+        });
+        if cma.status.is_none() {
+            cma.status = Some("queued".into());
+        }
+    }
+    let operation_id = (!agent_input).then_some(&id);
     // Replayed idempotent submissions reuse the existing watch, never queue a
     // second completion. Do not change another thread's existing destination.
     let result=db.collection::<bson::Document>(WATCHES).update_one(doc!{"_id":&watch.id,"state":{"$in":["submitting","cancelling"]}},vec![doc!{"$set":{
-        "operation_id":{"$literal":&id},"state":{"$cond":[{"$eq":["$state","cancelling"]},"cancelling","waiting"]},"poll_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(5))}}]).await;
+        "operation_id":{"$literal":operation_id},"cma":{"$literal":bson::to_bson(&cma).map_err(|_|invalid())?},"state":{"$cond":[{"$eq":["$state","cancelling"]},"cancelling","waiting"]},"poll_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(5))}}]).await;
     match result {
         Ok(_) => Ok(()),
         Err(e) if matches!(e.kind.as_ref(),mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(w)) if w.code==11000) =>
@@ -647,7 +710,7 @@ pub async fn input_context(
     let Some(w) = bound(db, row).await? else {
         return Ok(zeroize::Zeroizing::new(String::new()));
     };
-    let expired = Utc::now() >= w.expires_at;
+    let expired = Utc::now() >= w.expires_at.min(w.created_at + Duration::hours(4));
     let data = if expired {
         zeroize::Zeroizing::new(String::new())
     } else {
@@ -710,7 +773,7 @@ pub async fn claim_cancel(
 ) -> AppResult<Option<AsyncServiceOperation>> {
     let now = Utc::now();
     Ok(db.collection::<AsyncServiceOperation>(WATCHES).find_one_and_update(
-        doc!{"user_id":user,"conversation_id":id,"state":"cancelling","operation_id":{"$type":"string"},"$or":[{"lease_until":null},{"lease_until":{"$lte":bson::DateTime::from_chrono(now)}}]},
+        doc!{"user_id":user,"conversation_id":id,"state":"cancelling","$and":[{"$or":[{"operation_id":{"$type":"string"}},{"cma.kind":"cma_agent","cma.agent_id":{"$type":"string"}}]},{"$or":[{"lease_until":null},{"lease_until":{"$lte":bson::DateTime::from_chrono(now)}}]}]},
         doc!{"$set":{"lease_id":Uuid::new_v4().to_string(),"lease_until":bson::DateTime::from_chrono(now+Duration::seconds(60))}}).return_document(ReturnDocument::After).await?)
 }
 
@@ -804,7 +867,7 @@ pub async fn pending_voice_in_session(
 /// after the encrypted payload expires, so admission can deliver a stable reason.
 pub async fn expire_results(db: &Database) -> AppResult<()> {
     db.collection::<bson::Document>(WATCHES).update_many(
-        doc!{"state":{"$in":["ready","queued"]},"expires_at":{"$lte":bson::DateTime::now()},"result_encrypted":{"$ne":null}},
+        doc!{"state":{"$in":["ready","queued"]},"$or":[{"expires_at":{"$lte":bson::DateTime::now()}},{"created_at":{"$lte":bson::DateTime::from_chrono(Utc::now()-Duration::hours(4))}}],"result_encrypted":{"$ne":null}},
         doc!{"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"result_encrypted":null,"reason":"result_expired"}}).await?;
     Ok(())
 }

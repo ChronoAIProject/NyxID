@@ -1676,7 +1676,8 @@ async fn load_user_tools_with_grants(
         }
 
         let endpoint_rows = eps_by_svc.get(svc.id.as_str()).cloned().unwrap_or_default();
-        let endpoints = stored_service_endpoints_to_mcp(&endpoint_rows, Some(svc));
+        let mut endpoints = stored_service_endpoints_to_mcp(&endpoint_rows, Some(svc));
+        super::cma_operation::apply_contracts(&svc.slug, &mut endpoints);
         let durable_endpoint_metadata =
             service_endpoint_durable_metadata(&endpoint_rows, Some(svc.slug.as_str()));
 
@@ -1778,6 +1779,7 @@ fn service_endpoint_durable_metadata(
 /// overlay says about the operations they share, matched literally by
 /// endpoint name or `METHOD path`.
 fn mark_catalog_operations(published: &mut ParsedMcpEndpoints, catalog_slug: &str) {
+    super::cma_operation::apply_contracts(catalog_slug, &mut published.endpoints);
     for endpoint in &published.endpoints {
         let marks = super::catalog_spec_registry::operation_marks(
             catalog_slug,

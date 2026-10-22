@@ -18,6 +18,8 @@ import type { User } from "@/types/api";
  * every call site becomes compile-time checked.
  */
 export const FEATURE_FLAG = {
+  // Off permits mobile social first-factor holders to sign in without MFA.
+  MOBILE_MFA: "auth:mobile-mfa",
   INVITATION_CODE: "auth:invitation-code",
   AI_ASSISTANT: "experimental:ai-assistant",
   BILLING: "experimental:billing",

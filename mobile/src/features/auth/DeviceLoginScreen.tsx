@@ -1,3 +1,4 @@
+import { useMfaStepUp } from "./useMfaStepUp";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -325,6 +326,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   const [confirmedCode, setConfirmedCode] = useState<string | null>(null);
   const [preview, setPreview] = useState<AuthDevicePreview | null>(null);
   const [terminal, setTerminal] = useState<TerminalState>(null);
+  const stepUp = useMfaStepUp(`${confirmedCode}:${isAuthenticated}:${terminal}`);
   const [isScanning, setIsScanning] = useState(
     () => route.params?.start_scanner === true && !route.params?.user_code,
   );
@@ -452,9 +454,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     setIsScanning(false);
   };
 
-  const handleDecision = async (decision: "approve" | "deny") => {
+  const handleDecision = async (decision: "approve" | "deny", verifiedRetry = false) => {
     if (!confirmedCode || !preview) return;
-    if (!claimAction()) {
+    if (!verifiedRetry && !claimAction()) {
       setErrorMessage("Please wait a moment before trying again.");
       return;
     }
@@ -475,6 +477,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
         setTerminal("denied");
       }
     } catch (error) {
+      if (await stepUp.handle(error, () => handleDecision(decision, true))) return;
       setErrorMessage(resolveAuthDeviceErrorMessage(error));
     } finally {
       setDecisionPending(null);
@@ -579,6 +582,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     );
   }
 
+  if (stepUp.prompt) {
+    return <ScreenContainer><ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">{stepUp.prompt}</ScrollView></ScreenContainer>;
+  }
   return (
     <ScreenContainer>
       <KeyboardAvoidingView

@@ -211,6 +211,11 @@ pub enum AppError {
     #[error("MFA required")]
     MfaRequired { session_token: String },
 
+    #[error(
+        "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."
+    )]
+    MfaStepUpRequired,
+
     #[error("PKCE verification failed")]
     PkceVerificationFailed,
 
@@ -851,7 +856,7 @@ impl AppError {
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => StatusCode::TOO_MANY_REQUESTS,
-            Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
+            Self::MfaRequired { .. } | Self::MfaStepUpRequired => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
             | Self::InvalidDpopProof(_)
             | Self::InvalidRedirectUri
@@ -1093,6 +1098,7 @@ impl AppError {
             Self::AuthenticationFailed(_) => 2000,
             Self::TokenExpired => 2001,
             Self::MfaRequired { .. } => 2002,
+            Self::MfaStepUpRequired => 2003,
             Self::PkceVerificationFailed => 3000,
             Self::InvalidRedirectUri => 3001,
             Self::InvalidScope(_) => 3002,
@@ -1295,6 +1301,7 @@ impl AppError {
     pub(crate) fn oauth_error_code(&self) -> &'static str {
         match self {
             Self::MfaRequired { .. } => "mfa_required",
+            Self::MfaStepUpRequired => "mfa_step_up_required",
             Self::OAuthAuthorityUnavailable => "temporarily_unavailable",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::PkceVerificationFailed | Self::InvalidRedirectUri => "invalid_grant",
@@ -1365,6 +1372,7 @@ impl AppError {
             Self::AuthenticationFailed(_) => "authentication_failed",
             Self::TokenExpired => "token_expired",
             Self::MfaRequired { .. } => "mfa_required",
+            Self::MfaStepUpRequired => "mfa_step_up_required",
             Self::PkceVerificationFailed => "pkce_verification_failed",
             Self::InvalidDpopProof(_) => "invalid_dpop_proof",
             Self::InvalidRedirectUri => "invalid_redirect_uri",
@@ -1707,6 +1715,27 @@ impl From<crate::models::credits::CreditsError> for AppError {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn mfa_step_up_error_preserves_typed_403_with_actionable_message() {
+        let response = AppError::MfaStepUpRequired.into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !response
+                .headers()
+                .contains_key(axum::http::header::SET_COOKIE)
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error_code"], 2003);
+        assert_eq!(body["error"], "mfa_step_up_required");
+        assert_eq!(
+            body["message"],
+            "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."
+        );
+    }
+
     #[test]
     fn rate_refusal_preserves_bounded_retry_after_without_changing_the_error_contract() {
         use axum::response::IntoResponse;

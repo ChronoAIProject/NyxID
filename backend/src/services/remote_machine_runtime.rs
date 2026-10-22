@@ -343,8 +343,9 @@ pub async fn queue_native_deadline_in_session(
         return Ok(false);
     }
     let changed = db.collection::<Document>(MACHINES).update_one(doc!{
-        "_id":&machine.node_id,"revision":machine.revision,
+        "_id":&machine.node_id,"owner_id":&machine.owner_id,"revision":machine.revision,
         "runtime_generation":machine.runtime_generation,"credential_epoch":machine.credential_epoch,
+        "writer_fence":&machine.writer_fence,"writer_admitted":machine.writer_admitted,
         "active_operation_id":&operation_id,"resource_state":machine.resource_state.as_str()
     },doc!{"$set":{"native_run_not_after":bson::DateTime::from_chrono(cutoff)},
         "$inc":{"native_deadline_fence":1_i64}}).session(&mut *session).await?;
@@ -378,6 +379,73 @@ pub async fn queue_native_deadline_in_session(
     Ok(true)
 }
 
+/// Bind maintenance to the exact lifecycle decision it evaluated. Evidence-only
+/// writes need not advance revision, so retain the execution tuple as well.
+pub(crate) fn maintenance_snapshot_filter(machine: &ManagedMachine) -> Document {
+    doc! {
+        "_id":&machine.node_id,"owner_id":&machine.owner_id,"revision":machine.revision,
+        "active_operation_id":&machine.active_operation_id,
+        "runtime_generation":machine.runtime_generation,"credential_epoch":machine.credential_epoch,
+        "writer_fence":&machine.writer_fence,"writer_admitted":machine.writer_admitted,
+        "resource_state":machine.resource_state.as_str(),"native_uncertainty":&machine.native_uncertainty,
+    }
+}
+
+/// A stopped predecessor's deadline cannot govern a newly accepted Resume.
+/// This only defers old-generation maintenance; it grants no execution, money
+/// or deadline extension. The worker still owns generation initialization.
+pub(crate) async fn pending_resume_initialization(
+    db: &Database,
+    machine: &ManagedMachine,
+    now: DateTime<Utc>,
+) -> AppResult<bool> {
+    use crate::models::remote_machine_operation::{LifecycleAction, OperationState};
+    if machine.resource_state != ResourceState::Resuming
+        || machine.writer_admitted
+        || machine.native_uncertainty.is_some()
+        || !funding_is_live(machine, now)
+        || !(has_never_submitted_stop(machine)
+            || super::remote_machine_native::predecessor_stopped(machine))
+    {
+        return Ok(false);
+    }
+    let Some(next_generation) = machine.runtime_generation.checked_add(1) else {
+        return Ok(false);
+    };
+    let Some(operation_id) = machine.active_operation_id.as_deref() else {
+        return Ok(false);
+    };
+    let Some(operation) =
+        super::remote_machine_operation_service::get_operation(db, &machine.owner_id, operation_id)
+            .await?
+    else {
+        return Ok(false);
+    };
+    if operation.machine_id.as_deref() != Some(machine.node_id.as_str())
+        || operation.action != LifecycleAction::Resume
+        || operation.terminal_at.is_some()
+        || !matches!(
+            operation.state,
+            OperationState::Accepted | OperationState::Applying | OperationState::Reconciling
+        )
+        || operation.desired_runtime_generation != Some(next_generation)
+        || operation
+            .expected_revision
+            .is_none_or(|revision| revision >= machine.revision)
+        || operation
+            .deadline_at
+            .unwrap_or(operation.created_at + Duration::minutes(15))
+            <= now
+    {
+        return Ok(false);
+    }
+    let owner = db
+        .collection::<Document>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id":&machine.owner_id})
+        .await?;
+    Ok(lifecycle::owner_ineligibility(owner.as_ref()).is_none())
+}
+
 pub async fn ensure_native_deadline(
     db: &Database,
     machine: &ManagedMachine,
@@ -395,11 +463,7 @@ pub async fn ensure_native_deadline(
             let result: AppResult<()> = async {
                 let current = db_owned
                     .collection::<ManagedMachine>(MACHINES)
-                    .find_one(doc! {
-                        "_id":&snapshot.node_id,"runtime_generation":snapshot.runtime_generation,
-                        "credential_epoch":snapshot.credential_epoch,
-                        "active_operation_id":&snapshot.active_operation_id
-                    })
+                    .find_one(maintenance_snapshot_filter(&snapshot))
                     .session(&mut *session)
                     .await?
                     .ok_or(AppError::MachineNotAllowed)?;
@@ -945,7 +1009,7 @@ pub async fn safety_pause(
     let now = Utc::now();
     db_owned.client().start_session().await?.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
         let result: AppResult<()> = async {
-            let changed=db_owned.collection::<Document>(MACHINES).update_one(doc! {"_id":&machine.node_id,"revision":machine.revision,"resource_state":{"$in":["provisioning","ready","degraded","resuming","reconciling","stopping"]}},doc! {"$set":{"resource_state":"stopping","stop_reason":&reason,"writer_admitted":false,"active_operation_id":&operation_id,"cleanup_state":"pending","updated_at":bson::DateTime::from_chrono(now)},"$inc":{"revision":1_i64}}).session(&mut *session).await?;
+            let changed=db_owned.collection::<Document>(MACHINES).update_one(maintenance_snapshot_filter(&machine),doc! {"$set":{"resource_state":"stopping","stop_reason":&reason,"writer_admitted":false,"active_operation_id":&operation_id,"cleanup_state":"pending","updated_at":bson::DateTime::from_chrono(now)},"$inc":{"revision":1_i64}}).session(&mut *session).await?;
             if changed.matched_count!=1{return Err(AppError::Conflict("runtime_safety_stop_raced".into()));}
             stop_in_session(&db_owned,billing.as_deref(),session,&machine,false).await?;
             db_owned.collection::<Document>(crate::models::node::COLLECTION_NAME).update_one(doc! {"_id":&machine.node_id},doc! {"$set":{"is_active":false,"status":"offline","connection_owner":bson::Bson::Null},"$inc":{"machine_authority_admission_fence":1_i64}}).session(&mut *session).await?;

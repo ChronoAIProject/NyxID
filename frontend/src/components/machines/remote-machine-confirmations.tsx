@@ -103,6 +103,10 @@ export function RemoteMachineConfirmations({
   const cursor = pages.machineId === context ? pages.cursors.at(-1) : undefined;
   const query = useRemoteMachineConfirmations(machineId, cursor);
   const [review, setReview] = useState<RemoteMachineConfirmation | null>(null);
+  const [notice, setNotice] = useState<{
+    context: string;
+    message: string;
+  } | null>(null);
   const [clock, setClock] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
@@ -129,6 +133,14 @@ export function RemoteMachineConfirmations({
   if (review && !reviewStillCurrent) setReview(null);
   return (
     <div className="space-y-4">
+      {notice?.context === context && (
+        <p
+          role="status"
+          className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground"
+        >
+          {notice.message}
+        </p>
+      )}
       <p className="text-12 text-muted-foreground">
         Only the human owner can approve external execution. The client must
         retry the same operation and parameters using the same valid identity;
@@ -146,6 +158,11 @@ export function RemoteMachineConfirmations({
         {query.data?.next_cursor === undefined
           ? " Older-page availability is unknown on this server."
           : " Older pages use the server’s stable cursor."}
+      </p>
+      <p className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
+        Assistant action confirmations stay in the original conversation. This
+        list contains external client requests, not Assistant conversation
+        cards.
       </p>
       {query.isPending && (
         <p role="status" className="text-12">
@@ -235,6 +252,13 @@ export function RemoteMachineConfirmations({
               />
             )}
             <div className="space-y-2 px-4 py-3 text-12 text-muted-foreground">
+              {status === "approved" && (
+                <p role="status">
+                  Approved — waiting for the original caller to retry within the
+                  returned deadline. This approval does not execute the request;
+                  live permissions and Machine state are checked again.
+                </p>
+              )}
               {row.safe_parameters.length ? (
                 <dl className="space-y-2">
                   {row.safe_parameters.map((parameter, index) => (
@@ -317,9 +341,11 @@ export function RemoteMachineConfirmations({
           key={review.id}
           confirmation={review}
           machineId={machineId}
-          onClose={() => {
+          onClose={(message) => {
+            if (useAuthStore.getState().user?.id !== owner) return;
             setReview(null);
             setPages({ machineId: context, cursors: [undefined] });
+            if (message) setNotice({ context, message });
           }}
         />
       )}
@@ -333,7 +359,7 @@ export function ConfirmationDecision({
 }: {
   readonly confirmation: RemoteMachineConfirmation;
   readonly machineId: string;
-  readonly onClose: () => void;
+  readonly onClose: (message?: string) => void;
 }) {
   const mutation = useDecideRemoteMachineConfirmation();
   const active = useRef(true);
@@ -376,7 +402,7 @@ export function ConfirmationDecision({
     )
       return;
     try {
-      await mutation.mutateAsync({
+      const result = await mutation.mutateAsync({
         machineId,
         confirmationId: confirmation.id,
         body: {
@@ -386,7 +412,13 @@ export function ConfirmationDecision({
           parameters_digest: confirmation.parameters_digest,
         },
       });
-      onClose();
+      onClose(
+        result.status === "approved"
+          ? "Approval recorded. Waiting for the original caller to retry within the returned deadline; the request has not been executed by this page."
+          : result.status === "declined"
+            ? "Request declined. This page has not executed the operation."
+            : "Decision response received. Refresh confirmations to check the latest status.",
+      );
     } catch (cause) {
       setError(
         cause instanceof Error
@@ -416,6 +448,37 @@ export function ConfirmationDecision({
         <p className="text-12 text-muted-foreground">
           Operation: {confirmation.operation}
         </p>
+        <DetailSection title="Reviewed authority">
+          <DetailRow label="Confirmation ID" value={confirmation.id} mono />
+          <DetailRow label="Grant ID" value={confirmation.grant_id} mono />
+          <DetailRow
+            label="Grant / assignment revision"
+            value={`${confirmation.grant_revision} / ${confirmation.assignment_revision}`}
+          />
+          <DetailRow
+            label="Runtime generation"
+            value={
+              confirmation.runtime_generation === null
+                ? "Unknown"
+                : String(confirmation.runtime_generation)
+            }
+          />
+          <DetailRow
+            label="Parameter digest"
+            value={confirmation.parameters_digest}
+            mono
+          />
+          <DetailRow
+            label="Waiting approval expires"
+            value={new Date(confirmation.expires_at).toLocaleString()}
+          />
+        </DetailSection>
+        {confirmation.review_content_available === false && (
+          <p className="text-12 text-muted-foreground">
+            Full request content is unavailable. Review the server’s safe
+            summary below; it does not verify every effect of the operation.
+          </p>
+        )}
         <dl className="space-y-2 text-12">
           {confirmation.safe_parameters.map((parameter, index) => (
             <div key={`${index}:${parameter.name}`}>
@@ -461,7 +524,7 @@ export function ConfirmationDecision({
           </div>
         )}
         <DialogFooter>
-          <Button onClick={onClose} disabled={mutation.isPending}>
+          <Button onClick={() => onClose()} disabled={mutation.isPending}>
             Close
           </Button>
           <Button

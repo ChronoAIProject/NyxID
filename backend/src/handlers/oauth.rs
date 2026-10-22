@@ -2750,10 +2750,6 @@ async fn token_inner(
             // - provider present: social token exchange (provider-specific token type validation)
             // - provider absent + access_token type: delegated token exchange
             if let Some(provider) = body.provider.as_deref() {
-                // TODO(telemetry): social branch blocked — see TELEMETRY.md §6.5
-                // (auth.token_exchanged). `SocialTokenExchangeResponse` does not
-                // carry `user_id`, so no distinct_id is available at this site.
-                // Lift once §6.5 is resolved and the service response is extended.
                 let result = social_token_exchange_service::exchange_social_token(
                     &state.db,
                     &state.config,
@@ -2768,6 +2764,31 @@ async fn token_inner(
                 )
                 .await?;
 
+                emit_event(
+                    state.telemetry.as_deref(),
+                    &result.user_id_for_telemetry,
+                    None,
+                    tele,
+                    TelemetryEvent::AuthTokenExchanged {
+                        // Provider verification has validated the token type.
+                        // Short canonical values survive telemetry scrubbing.
+                        subject_token_type: subject_token_type
+                            .trim_start_matches("urn:ietf:params:oauth:token-type:")
+                            .to_string(),
+                        exchange_provider: Some(provider.to_string()),
+                    },
+                )
+                .await;
+                if result.mobile_mfa_exempt {
+                    emit_event(
+                        state.telemetry.as_deref(),
+                        &result.user_id_for_telemetry,
+                        None,
+                        tele,
+                        TelemetryEvent::AuthMobileMfaExempted,
+                    )
+                    .await;
+                }
                 Ok(Json(TokenResponse {
                     access_token: result.access_token,
                     token_type: "Bearer".to_string(),
@@ -4167,6 +4188,81 @@ mod tests {
         connect_test_database, test_app_state, test_app_state_with_config, test_membership,
         test_user, test_user_service,
     };
+
+    #[tokio::test]
+    async fn social_exchange_emits_canonical_telemetry_and_one_outer_audit() {
+        Box::pin(async {
+            let db = crate::test_utils::connect_transaction_test_database("social_exchange_events").await;
+            let mut state = test_app_state(db.clone());
+            state.config.google_client_id = Some("test-mobile-client".into());
+            let (captures, mut received) = tokio::sync::mpsc::channel::<serde_json::Value>(8);
+            let app = axum::Router::new().route("/capture/", axum::routing::post(
+                move |Json(body): Json<serde_json::Value>| {
+                    let captures = captures.clone();
+                    async move { captures.send(body).await.unwrap(); StatusCode::OK }
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            state.config.telemetry_dsn = Some("phc_test".into());
+            state.config.telemetry_host = Some(format!("http://{}", listener.local_addr().unwrap()));
+            let server = tokio::spawn(async move {axum::serve(listener, app).await.unwrap()});
+            state.telemetry = crate::telemetry::TelemetryClient::from_config(&state.config, Some(db.clone()));
+            state.jwks_cache.seed_google_test_key(state.jwt_keys.decoding.clone()).await;
+            let client_id = Uuid::new_v4().to_string();
+            insert_public_client(&db, &client_id, "openid email profile").await;
+            for mfa in [false, true] {
+                let id = Uuid::new_v4().to_string();
+                let mut user = test_user(&id, UserType::Person);
+                user.mfa_enabled = mfa;
+                user.social_provider = Some("google".into());
+                user.social_provider_id = Some(id.clone());
+                let email = user.email.clone();
+                db.collection::<crate::models::user::User>(USERS).insert_one(user).await.unwrap();
+                crate::services::analytics_consent_service::set(&db, &id, true).await.unwrap();
+                let tele = TelemetryContext {surface: "mobile", client_version: None,
+                    analytics_allowed: true, analytics_account: Some(id.clone())};
+                let now = Utc::now().timestamp();
+                let subject = jsonwebtoken::encode(&jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+                    &serde_json::json!({"sub": id, "iss": "https://accounts.google.com",
+                        "aud": "test-mobile-client", "iat": now, "exp": now + 300,
+                        "email": email, "email_verified": true}), &state.jwt_keys.encoding).unwrap();
+                let request = || serde_json::from_value::<TokenRequest>(serde_json::json!({
+                    "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                    "client_id": client_id, "subject_token": subject,
+                    "subject_token_type": "urn:ietf:params:oauth:token-type:id_token", "provider": "google"
+                })).unwrap();
+                let response = token_inner(&state, &tele, &HeaderMap::new(), request()).await.unwrap().0;
+                assert!(!response.access_token.is_empty());
+                let event = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv()).await.unwrap().unwrap();
+                assert_eq!(event["event"], "auth.token_exchanged");
+                assert_eq!(event["distinct_id"], id);
+                assert_eq!(event["properties"]["exchange_provider"], "google");
+                assert_eq!(event["properties"]["subject_token_type"], "id_token");
+                if mfa {
+                    let event = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv()).await.unwrap().unwrap();
+                    assert_eq!(event["event"], "auth.mobile_mfa_exempted");
+                }
+                let audits = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+                let filter = doc! {"user_id": &id, "event_type": "social_token_exchange"};
+                for _ in 0..100 {
+                    if audits.count_documents(filter.clone()).await.unwrap() == 1 {break;}
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                assert_eq!(audits.count_documents(doc! {"user_id": &id}).await.unwrap(), 1);
+                let audit = audits.find_one(filter).await.unwrap().unwrap();
+                let data = audit.get_document("event_data").unwrap();
+                assert_eq!(data.get_str("provider").unwrap(), "google");
+                assert_eq!(data.get_str("client_id").unwrap(), client_id);
+                assert_eq!(data.get_str("mfa").unwrap(), if mfa {"skipped_mobile_rollout"} else {"not_required"});
+                assert!(data.get_str("session_id").is_ok());
+                // The same successful exchange cannot bypass pre-auth narrowing.
+                let pre_auth = token_inner(&state, &TelemetryContext::pre_auth(&HeaderMap::new()), &HeaderMap::new(), request()).await.unwrap().0;
+                assert!(!pre_auth.access_token.is_empty());
+                assert!(tokio::time::timeout(std::time::Duration::from_millis(50), received.recv()).await.is_err());
+            }
+            server.abort();
+            db.drop().await.unwrap();
+        }).await;
+    }
 
     #[tokio::test]
     async fn consent_requests_validate_retained_signer_and_reject_retired_or_wrong_subject() {

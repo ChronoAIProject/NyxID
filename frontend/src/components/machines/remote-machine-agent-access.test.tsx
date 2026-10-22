@@ -10,12 +10,14 @@ import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { RemoteMachineAgentAccess } from "./remote-machine-agent-access";
 import { useAuthStore } from "@/stores/auth-store";
 import type { MachineAccess } from "@/schemas/machine-access";
+import type { NodeInfo } from "@/types/nodes";
 
 const state = vi.hoisted(() => ({
   setGrants: vi.fn(),
   setCapabilities: vi.fn(),
   refetch: vi.fn(),
   feature: true,
+  assigned: false,
   machine: undefined as MachineAccess | undefined,
 }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
@@ -30,7 +32,9 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
           kind: "specialist",
           status: "idle",
           can_maintain: true,
-          machines: ["other-machine"],
+          machines: state.assigned
+            ? ["other-machine", "machine-1"]
+            : ["other-machine"],
           services: ["my-service"],
           account_read: true,
           logins: ["existing-login"],
@@ -58,6 +62,7 @@ const auth = useAuthStore.getState();
 beforeEach(() => {
   useAuthStore.setState({ user: { ...auth.user!, id: "owner" } });
   state.feature = true;
+  state.assigned = false;
   state.machine = {
     node_id: "machine-1",
     name: "Hosted machine",
@@ -84,6 +89,7 @@ beforeEach(() => {
   };
   state.setGrants.mockResolvedValue({});
   state.setCapabilities.mockResolvedValue({});
+  state.refetch.mockResolvedValue({ error: null });
 });
 afterEach(() => {
   cleanup();
@@ -91,12 +97,25 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 async function show() {
-  render(<RemoteMachineAgentAccess machineId="machine-1" />);
+  const view = render(<RemoteMachineAgentAccess machineId="machine-1" />);
   await userEvent.click(
     screen.getByRole("combobox", { name: "Agent for machine access" }),
   );
   await userEvent.click(screen.getByRole("option", { name: "Researcher" }));
+  return view;
 }
+
+it("renders Node machine_confirm as read-only detail data", async () => {
+  const node = { id: "node-1", machine_confirm: "changes" } as NodeInfo;
+  render(<RemoteMachineAgentAccess machineId="machine-1" node={node} />);
+  expect(screen.getByText("Confirm changes")).toBeInTheDocument();
+  expect(
+    screen.getByText(/does not save confirmation settings/),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Save confirmation policy" }),
+  ).not.toBeInTheDocument();
+});
 
 it("updates specialist membership through existing grants while preserving services and other machines", async () => {
   await show();
@@ -112,10 +131,84 @@ it("updates specialist membership through existing grants while preserving servi
       id: "agent-1",
       services: ["my-service"],
       account_read: true,
+      logins: ["existing-login"],
       machines: ["other-machine", "machine-1"],
     }),
   );
-  expect(state.setGrants.mock.calls[0]![0]).not.toHaveProperty("logins");
+  expect(state.setGrants.mock.calls[0]![0]).toHaveProperty("logins", [
+    "existing-login",
+  ]);
+});
+
+it("keeps a successful assignment when the separate capability save fails", async () => {
+  const view = await show();
+  const membership = screen.getByRole("form", {
+    name: "Specialist machine membership",
+  });
+  await userEvent.click(within(membership).getByRole("checkbox"));
+  await userEvent.click(
+    within(membership).getByRole("button", { name: "Save assignment" }),
+  );
+  await waitFor(() => expect(state.setGrants).toHaveBeenCalled());
+  // The real grants mutation invalidates and refreshes the Agent list.
+  state.assigned = true;
+  view.rerender(<RemoteMachineAgentAccess machineId="machine-1" />);
+  expect(
+    await screen.findByText(/Machine assignment saved/),
+  ).toBeInTheDocument();
+  state.setCapabilities.mockRejectedValueOnce(new Error("capability failed"));
+  const capabilities = screen.getByRole("form", { name: /capabilities$/ });
+  await userEvent.click(
+    within(capabilities).getByRole("checkbox", { name: "Shell commands" }),
+  );
+  await userEvent.click(
+    within(capabilities).getByRole("button", { name: /^Save capabilities$/ }),
+  );
+  expect(
+    await screen.findByText(
+      /Assignment succeeded, but capability changes failed/,
+    ),
+  ).toBeInTheDocument();
+  expect(
+    within(
+      screen.getByRole("form", { name: "Specialist machine membership" }),
+    ).getByRole("checkbox"),
+  ).toBeChecked();
+  expect(state.setGrants).toHaveBeenCalledTimes(1);
+  state.assigned = false;
+  view.rerender(<RemoteMachineAgentAccess machineId="machine-1" />);
+  await waitFor(() =>
+    expect(
+      within(
+        screen.getByRole("form", { name: "Specialist machine membership" }),
+      ).getByRole("checkbox"),
+    ).not.toBeChecked(),
+  );
+  expect(
+    screen.queryByText(/Assignment succeeded, but capability changes failed/),
+  ).not.toBeInTheDocument();
+});
+
+it("refreshes authoritative membership without keeping another Machine's feedback", async () => {
+  const view = await show();
+  state.assigned = true;
+  view.rerender(<RemoteMachineAgentAccess machineId="machine-1" />);
+  await waitFor(() =>
+    expect(
+      within(
+        screen.getByRole("form", { name: "Specialist machine membership" }),
+      ).getByRole("checkbox"),
+    ).toBeChecked(),
+  );
+  view.rerender(<RemoteMachineAgentAccess machineId="different-machine" />);
+  expect(
+    within(
+      screen.getByRole("form", { name: "Specialist machine membership" }),
+    ).getByRole("checkbox"),
+  ).not.toBeChecked();
+  expect(
+    screen.queryByText(/Machine assignment saved/),
+  ).not.toBeInTheDocument();
 });
 
 it("uses the observed revision and live capability ceiling for shell/file edits", async () => {

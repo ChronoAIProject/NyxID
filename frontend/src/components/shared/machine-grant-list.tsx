@@ -5,6 +5,7 @@ import type { MachineGrant } from "@/schemas/machine-grants";
 import { formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { MachineGrantCard } from "./machine-grant-card";
 import { ErrorBanner } from "./error-banner";
 
 function reasonLabel(reason: string | null | undefined): string {
@@ -54,6 +55,7 @@ function GrantValidity({ grant, active }: { readonly grant: MachineGrant; readon
 
 export function MachineGrantList({ machineId }: { readonly machineId: string }) {
   const query = useMachineGrantList(machineId);
+  const [managedGrantId, setManagedGrantId] = useState<string>();
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
   return <section aria-labelledby="external-machine-grants" className="space-y-3">
@@ -73,7 +75,8 @@ export function MachineGrantList({ machineId }: { readonly machineId: string }) 
         <GrantValidity key={`${machineId}-${grant.id}-${grant.revision}`} grant={grant} active={grant.status === "active" && !expired} />
         {assignment ? <dl className="grid gap-3 text-12 sm:grid-cols-2"><div><dt className="text-muted-foreground">Capabilities / mode</dt><dd>{[assignment.capabilities.shell && "Commands", assignment.capabilities.files && "Files"].filter(Boolean).join(" · ") || "None"} · {assignment.mode}</dd></div><div><dt className="text-muted-foreground">Assignment revision</dt><dd>{assignment.revision}</dd></div><div><dt className="text-muted-foreground">File-tool roots</dt><dd className="break-all">{assignment.file_roots.join(", ") || "None"}</dd></div><div><dt className="text-muted-foreground">Gateway service ceiling</dt><dd className="break-all">{assignment.service_ids.join(", ") || "None"}</dd></div></dl> : <p role="alert" className="text-12 text-warning">This returned grant no longer includes this Machine. Refresh the view.</p>}
         <p className="text-11 text-muted-foreground">Changes or revocation affect this subject’s earlier work across all Machines in its grant. File roots do not isolate shell access. Revocation leaves the Machine and other subjects’ permissions intact.</p>
-        {grant.source.kind === "api_key" ? <Link to="/keys/api-key/$keyId" params={{ keyId: grant.source.api_key_id }} className="text-12 text-primary-text hover:underline">Manage parent Key and login credentials</Link> : <Link to="/settings/consents" search={{ tab: "apps" }} className="text-12 text-primary-text hover:underline">Manage OAuth consent and Machine permissions</Link>}
+        <div className="flex flex-wrap items-center gap-3"><Button variant="outline" size="sm" onClick={() => setManagedGrantId((current) => current === grant.id ? undefined : grant.id)}>{managedGrantId === grant.id ? "Close source review" : "Manage source permissions"}</Button>{grant.source.kind === "api_key" ? <Link to="/keys/api-key/$keyId" params={{ keyId: grant.source.api_key_id }} className="text-12 text-primary-text hover:underline">Manage parent Key and login credentials</Link> : <Link to="/settings/consents" search={{ tab: "apps" }} className="text-12 text-primary-text hover:underline">Manage OAuth consent and Machine permissions</Link>}</div>
+        {managedGrantId === grant.id ? <MachineGrantCard machineId={machineId} source={grant.source.kind === "api_key" ? { kind: "api_key", id: grant.source.api_key_id } : { kind: "oauth", id: grant.source.oauth_client_id }} /> : null}
       </article>;
     })}
     {!query.error && query.hasNextPage && <Button variant="outline" onClick={() => void query.fetchNextPage()} disabled={query.isFetchingNextPage}>{query.isFetchingNextPage ? "Loading older grants…" : "Load older grants"}</Button>}

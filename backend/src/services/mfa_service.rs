@@ -347,7 +347,7 @@ pub async fn verify_totp_setup(
                     doc! {"_id": current_session_id, "user_id": user_id,
                     "revoked": false, "expires_at": {"$gt": bson::DateTime::now()}},
                 ),
-                doc! {"$set": {"mfa_assured": true}},
+                doc! {"$set": {"mfa_assured": true}, "$unset": {"mfa_exemption": ""}},
             )
             .session(&mut session)
             .await
@@ -956,6 +956,76 @@ pub async fn begin_login_completion(
     }))
 }
 
+/// Upgrade only the requesting live session. The existing login verifier owns
+/// replay counters, recovery consumption and the account-generation write
+/// fence; the session upgrade and audit join that same transaction.
+pub async fn step_up(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    user_id: &str,
+    session_id: &str,
+    code: &str,
+    actor: &super::audit_service::AuditActor,
+) -> AppResult<LoginFactor> {
+    let user = db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id": user_id, "is_active": true})
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("User account is inactive".into()))?;
+    if !user.mfa_enabled {
+        return Err(AppError::BadRequest(
+            "MFA is not enabled for this account".into(),
+        ));
+    }
+    let mut completion = begin_login_completion(db, keys, user_id, code, None)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("Invalid MFA code".into()))?;
+    let result: AppResult<()> = async {
+        let enabled = db
+            .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .count_documents(doc! {"_id": user_id, "mfa_enabled": true, "is_active": true})
+            .session(&mut completion.transaction)
+            .await?;
+        if enabled != 1 {
+            return Err(AppError::BadRequest("MFA is not enabled for this account".into()));
+        }
+        let changed = db
+            .collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+            .update_one(
+                super::session_authority::authenticated(doc! {
+                    "_id": session_id, "user_id": user_id, "revoked": false,
+                    "$expr": {"$gt": ["$expires_at", "$$NOW"]}
+                }),
+                doc! {"$set": {"mfa_assured": true}, "$unset": {"mfa_exemption": ""}},
+            )
+            .session(&mut completion.transaction)
+            .await?;
+        if changed.matched_count != 1 {
+            return Err(AppError::Unauthorized("Session expired or revoked".into()));
+        }
+        super::audit_service::log_actor_event_in_transaction(
+            db,
+            &mut completion.transaction,
+            actor,
+            "mfa_step_up",
+            serde_json::json!({"session_id": session_id, "factor_type": completion.factor.as_str()}),
+        ).await
+    }
+    .await;
+    if let Err(error) = result {
+        completion.abort().await?;
+        return Err(error);
+    }
+    completion.commit().await.map_err(|error| match error {
+        // A factor can age out while the session/audit writes are in flight.
+        // Invalid input must not make clients discard an otherwise live login.
+        AppError::AuthenticationFailed(_) => {
+            AppError::BadRequest("MFA code expired; try a new code".into())
+        }
+        error => error,
+    })
+}
+
 const RECOVERY_NOTICE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 static RECOVERY_NOTICES: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(8)));
@@ -1222,6 +1292,167 @@ mod tests {
             .await
             .unwrap();
         factor
+    }
+
+    #[tokio::test]
+    async fn step_up_totp_shares_login_replay_counters() {
+        let (db, keys, id) = fixture("step_up_totp_replay").await;
+        db.collection::<bson::Document>("users")
+            .update_one(doc! {"_id": &id}, doc! {"$set": {"mfa_enabled": true}})
+            .await
+            .unwrap();
+        let stored = factor(&db, &keys, &id, &[]).await;
+        let secret = decrypt_factor_secret(&keys, &stored).await.unwrap();
+        let code = current(std::str::from_utf8(&secret).unwrap());
+        let session = super::super::token_service::create_session(&db, &id, None, None)
+            .await
+            .unwrap();
+        let actor = super::super::audit_service::AuditActor {
+            user_id: id.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        };
+        assert_eq!(
+            Box::pin(step_up(&db, &keys, &id, &session.session_id, &code, &actor))
+                .await
+                .unwrap(),
+            LoginFactor::Totp
+        );
+        assert!(matches!(
+            Box::pin(step_up(&db, &keys, &id, &session.session_id, &code, &actor)).await,
+            Err(AppError::BadRequest(_))
+        ));
+        assert_eq!(
+            verify_login_factor(&db, &keys, &id, &code, None)
+                .await
+                .unwrap(),
+            None
+        );
+        let row = db
+            .collection::<bson::Document>("sessions")
+            .find_one(doc! {"_id": &session.session_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.get_bool("mfa_assured").unwrap());
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"user_id": &id, "event_type": "mfa_step_up"})
+                .await
+                .unwrap(),
+            1
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn step_up_dead_session_rolls_back_recovery_consumption_and_audit() {
+        for revoked in [false, true] {
+            let (db, keys, id) = fixture("step_up_dead_session").await;
+            db.collection::<bson::Document>("users")
+                .update_one(doc! {"_id": &id}, doc! {"$set": {"mfa_enabled": true}})
+                .await
+                .unwrap();
+            let code = Uuid::new_v4().simple().to_string();
+            factor(&db, &keys, &id, &[&code]).await;
+            let session = super::super::token_service::create_session(&db, &id, None, None)
+                .await
+                .unwrap();
+            let sessions = db.collection::<bson::Document>("sessions");
+            sessions.update_one(doc! {"_id": &session.session_id}, doc! {"$set": {
+                "revoked": revoked, "expires_at": bson::DateTime::from_chrono(if revoked { Utc::now() + chrono::Duration::days(1) } else { Utc::now() - chrono::Duration::seconds(1) })
+            }}).await.unwrap();
+            let actor = super::super::audit_service::AuditActor {
+                user_id: id.clone(),
+                ip_address: None,
+                user_agent: None,
+                api_key_id: None,
+                api_key_name: None,
+            };
+            assert!(matches!(
+                Box::pin(step_up(&db, &keys, &id, &session.session_id, &code, &actor)).await,
+                Err(AppError::Unauthorized(_))
+            ));
+            let row = sessions
+                .find_one(doc! {"_id": &session.session_id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!row.get_bool("mfa_assured").unwrap());
+            assert_eq!(
+                db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                    .count_documents(doc! {"user_id": &id, "event_type": "mfa_step_up"})
+                    .await
+                    .unwrap(),
+                0
+            );
+            sessions.update_one(doc! {"_id": &session.session_id}, doc! {"$set": {"revoked": false, "expires_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::days(1))}}).await.unwrap();
+            assert_eq!(
+                Box::pin(step_up(&db, &keys, &id, &session.session_id, &code, &actor))
+                    .await
+                    .unwrap(),
+                LoginFactor::Recovery
+            );
+            db.drop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn step_up_and_login_share_the_account_attempt_budget() {
+        let (db, keys, id) = fixture("step_up_rate_budget").await;
+        db.collection::<bson::Document>("users")
+            .update_one(doc! {"_id": &id}, doc! {"$set": {"mfa_enabled": true}})
+            .await
+            .unwrap();
+        let session = super::super::token_service::create_session(&db, &id, None, None)
+            .await
+            .unwrap();
+        let actor = super::super::audit_service::AuditActor {
+            user_id: id.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        };
+        for _ in 0..5 {
+            assert!(
+                begin_login_completion(&db, &keys, &id, "invalid", None)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(matches!(
+                Box::pin(step_up(
+                    &db,
+                    &keys,
+                    &id,
+                    &session.session_id,
+                    "invalid",
+                    &actor
+                ))
+                .await,
+                Err(AppError::BadRequest(_))
+            ));
+        }
+        assert!(matches!(
+            Box::pin(step_up(
+                &db,
+                &keys,
+                &id,
+                &session.session_id,
+                "invalid",
+                &actor
+            ))
+            .await,
+            Err(AppError::RateLimited)
+        ));
+        assert!(matches!(
+            begin_login_completion(&db, &keys, &id, "invalid", None).await,
+            Err(AppError::RateLimited)
+        ));
+        db.drop().await.unwrap();
     }
     #[tokio::test]
     async fn disable_password_proof_held_across_reset_or_factor_generation_is_rejected() {

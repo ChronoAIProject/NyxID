@@ -9,6 +9,8 @@ pub const QUOTAS_COLLECTION_NAME: &str = "assistant_async_quotas";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AsyncOperationContract {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<CmaOperationKind>,
     pub status_operation: String,
     pub result_operation: String,
     pub cancel_operation: Option<String>,
@@ -18,6 +20,33 @@ pub struct AsyncOperationContract {
     pub success_states: Vec<String>,
     pub failure_states: Vec<String>,
     pub error_field: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CmaOperationKind {
+    #[serde(rename = "cma_provisioning")]
+    Provisioning,
+    #[serde(rename = "cma_response")]
+    Response,
+    #[serde(rename = "cma_agent")]
+    Agent,
+}
+
+/// Bounded identifiers and observed lifecycle metadata, never task input/output.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CmaOperation {
+    /// Internal deduplication for idempotent input receipts without an operation ID.
+    #[serde(default)]
+    pub receipt_id: Option<String>,
+    #[serde(default)]
+    pub seen_working: bool,
+    pub kind: CmaOperationKind,
+    pub agent_id: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub status: Option<String>,
+    pub phase: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub checked_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -49,6 +78,8 @@ pub struct DeliveryBinding {
 pub struct AsyncServiceOperation {
     #[serde(default)]
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
+    #[serde(default)]
+    pub cma: Option<CmaOperation>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
