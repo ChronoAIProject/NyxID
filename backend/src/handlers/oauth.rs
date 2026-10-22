@@ -2444,6 +2444,9 @@ fn authorization_code_grant_error(error: AppError) -> AppError {
 /// silently. A deactivated issuing client (`AuthenticationFailed`) stays
 /// `invalid_client` so the client re-registers.
 fn refresh_token_grant_error(error: AppError) -> AppError {
+    if crate::services::token_service::is_rotation_conflict(&error) {
+        return AppError::OAuthAuthorityUnavailable;
+    }
     match error {
         AppError::Unauthorized(message) | AppError::Conflict(message) => {
             AppError::ExternalTokenInvalid(message)
@@ -2451,6 +2454,7 @@ fn refresh_token_grant_error(error: AppError) -> AppError {
         AppError::TokenExpired => {
             AppError::ExternalTokenInvalid("Refresh token has expired".to_string())
         }
+        AppError::DatabaseError(_) | AppError::Internal(_) => AppError::OAuthAuthorityUnavailable,
         other => other,
     }
 }
@@ -6296,6 +6300,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn refresh_grant_transients_return_temporarily_unavailable_without_revoking() {
+        for indeterminate in [false, true] {
+            let (db, config, _, issued) =
+                crate::services::token_service::refresh_tests::fixture().await;
+            let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
+            if !indeterminate {
+                db.collection::<mongodb::bson::Document>(crate::models::refresh_token::COLLECTION_NAME).update_one(doc!{"session_id":&issued.session_id},doc!{"$set":{
+                    "revoked":true,"revoked_at":mongodb::bson::DateTime::now(),"replaced_by":"missing-successor"}}).await.unwrap();
+            }
+            let request = refresh_grant_error(&state, &issued.refresh_token);
+            let (status, error) = if indeterminate {
+                crate::services::service_history::transaction::COMMIT_RESPONSE_LOSS
+                    .scope(
+                        std::cell::RefCell::new(
+                            crate::services::service_history::transaction::CommitResponseLoss {
+                                remaining: usize::MAX,
+                                attempts: 0,
+                                budget: std::time::Duration::from_millis(50),
+                            },
+                        ),
+                        request,
+                    )
+                    .await
+            } else {
+                request.await
+            };
+            assert_eq!(status.as_u16(), 503);
+            assert_eq!(error, "temporarily_unavailable");
+            assert!(
+                !db.collection::<mongodb::bson::Document>(crate::models::session::COLLECTION_NAME)
+                    .find_one(doc! {"_id":issued.session_id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get_bool("revoked")
+                    .unwrap()
+            );
+        }
+    }
+
     async fn refresh_grant_error(state: &AppState, refresh_token: &str) -> (StatusCode, String) {
         let response = token(
             State(state.clone()),
@@ -7083,5 +7128,25 @@ mod credential_debug_tests {
         let revoke: RevokeRequest = serde_json::from_value(value).unwrap();
         assert!(!format!("{introspect:?}").contains(secret));
         assert!(!format!("{revoke:?}").contains(secret));
+    }
+    #[test]
+    fn refresh_transients_are_temporarily_unavailable_and_definitive_grants_stay_invalid_grant() {
+        for error in [
+            AppError::Conflict(crate::services::token_service::ROTATION_CONFLICT_MESSAGE.into()),
+            AppError::OAuthAuthorityUnavailable,
+            crate::services::transaction_service::indeterminate_commit(),
+        ] {
+            let mapped = refresh_token_grant_error(error);
+            assert_eq!(mapped.oauth_status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(mapped.oauth_error_code(), "temporarily_unavailable");
+        }
+        for error in [
+            crate::services::consent_service::grant_changed(),
+            AppError::Unauthorized("Session has ended".into()),
+            AppError::TokenExpired,
+        ] {
+            let mapped = refresh_token_grant_error(error);
+            assert_eq!(mapped.oauth_error_code(), "invalid_grant");
+        }
     }
 }

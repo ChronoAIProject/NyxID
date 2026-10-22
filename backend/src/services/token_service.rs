@@ -55,6 +55,23 @@ pub struct IssuedSession {
     pub session_id: String,
 }
 
+pub const ROTATION_CONFLICT_MESSAGE: &str = "Refresh token was concurrently rotated, please retry";
+
+pub fn is_rotation_conflict(error: &AppError) -> bool {
+    matches!(error, AppError::Conflict(message) if message == ROTATION_CONFLICT_MESSAGE)
+}
+
+fn rotation_conflict() -> AppError {
+    AppError::Conflict(ROTATION_CONFLICT_MESSAGE.into())
+}
+
+enum ReplacementChain {
+    Active(Box<RefreshToken>),
+    MissingLink,
+    Terminal,
+    DepthExhausted,
+}
+
 enum RefreshTokenDisposition {
     Rotate(RefreshToken),
     Reuse(RefreshToken),
@@ -65,13 +82,13 @@ async fn follow_active_replacement_chain(
     first_replacement_id: &str,
     user_id: &str,
     request_jti: &str,
-) -> AppResult<Option<RefreshToken>> {
+) -> AppResult<ReplacementChain> {
     let mut current_id = first_replacement_id.to_string();
 
     for depth in 0..MAX_REPLACEMENT_CHAIN_DEPTH {
         let candidate = db
             .collection::<RefreshToken>(REFRESH_TOKENS)
-            .find_one(doc! { "_id": &current_id })
+            .find_one(doc! { "_id": &current_id, "user_id": user_id })
             .await?;
 
         match candidate {
@@ -83,9 +100,11 @@ async fn follow_active_replacement_chain(
                     chain_depth = depth,
                     "Refresh token retry resolved to active replacement token"
                 );
-                return Ok(Some(r));
+                return Ok(ReplacementChain::Active(Box::new(r)));
             }
+            Some(r) if r.expires_at <= Utc::now() => return Ok(ReplacementChain::Terminal),
             Some(RefreshToken {
+                revoked: true,
                 replaced_by: Some(next_id),
                 ..
             }) => {
@@ -97,29 +116,42 @@ async fn follow_active_replacement_chain(
                 );
                 current_id = next_id;
             }
-            _ => return Ok(None),
+            None => return Ok(ReplacementChain::MissingLink),
+            _ => return Ok(ReplacementChain::Terminal),
         }
     }
 
-    Ok(None)
+    Ok(ReplacementChain::DepthExhausted)
 }
 
-async fn touch_session_last_active(
+async fn slide_session(
     db: &mongodb::Database,
-    session_id: Option<&str>,
-    now: chrono::DateTime<Utc>,
+    token: &RefreshToken,
+    mut transaction: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<()> {
-    if let Some(sid) = session_id {
-        db.collection::<Session>(SESSIONS)
-            .update_one(
-                doc! { "_id": sid },
-                doc! { "$set": {
-                    "last_active_at": bson::DateTime::from_chrono(now),
-                }},
-            )
-            .await?;
+    if token.client_id != Uuid::nil().to_string() {
+        return Ok(());
     }
-
+    let Some(sid) = token.session_id.as_deref() else {
+        return Ok(());
+    };
+    let sessions = db.collection::<Session>(SESSIONS);
+    let update = sessions.update_one(
+        super::session_authority::authenticated(doc! {
+            "_id": sid, "user_id": &token.user_id, "revoked": false,
+            "$expr": {"$gt": ["$expires_at", "$$NOW"]},
+        }),
+        doc! {"$max": {"expires_at": bson::DateTime::from_chrono(token.expires_at)},
+        "$set": {"last_active_at": bson::DateTime::from_chrono(Utc::now())}},
+    );
+    let result = if let Some(tx) = transaction.as_mut() {
+        update.session(&mut **tx).await?
+    } else {
+        update.await?
+    };
+    if result.matched_count == 0 {
+        return Err(super::session_authority::session_end_error(db, sid, &token.user_id).await);
+    }
     Ok(())
 }
 
@@ -343,7 +375,9 @@ pub async fn prepare_session_tokens_with_assurance(
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
-    let now = Utc::now();
+    let now = chrono::DateTime::from_timestamp(Utc::now().timestamp(), 0)
+        .expect("current timestamp is representable");
+    let refresh_expires = now + Duration::seconds(config.jwt_refresh_ttl_secs);
     let session = Session {
         purpose: Some(crate::models::session::SessionPurpose::Authenticated),
         mfa_method: None,
@@ -353,7 +387,7 @@ pub async fn prepare_session_tokens_with_assurance(
         token_hash: hash_token(&generate_random_token()),
         ip_address: ip_address.map(str::to_owned),
         user_agent: user_agent.map(str::to_owned),
-        expires_at: now + Duration::seconds(SESSION_TTL_SECS),
+        expires_at: (now + Duration::seconds(SESSION_TTL_SECS)).max(refresh_expires),
         revoked: false,
         created_at: now,
         last_active_at: now,
@@ -378,10 +412,9 @@ pub async fn prepare_session_tokens_with_assurance(
 
     // Generate refresh token
     let (refresh_token_jwt, refresh_jti) =
-        jwt::generate_refresh_token(jwt_keys, config, &user_uuid)?;
+        jwt::generate_refresh_token_at(jwt_keys, config, &user_uuid, now)?;
 
     let refresh_id = Uuid::new_v4().to_string();
-    let refresh_expires = now + Duration::seconds(config.jwt_refresh_ttl_secs);
 
     // Persist refresh token metadata
     let new_refresh = RefreshToken {
@@ -595,7 +628,9 @@ pub async fn refresh_tokens(
                 }))
                 .await?;
             let Some(live) = live else {
-                return Err(AppError::Unauthorized("Session expired or revoked".into()));
+                return Err(
+                    super::session_authority::session_end_error(db, id, &stored.user_id).await,
+                );
             };
             if user.mfa_enabled && !live.mfa_assured {
                 super::session_authority::reject_unassured(
@@ -779,8 +814,11 @@ pub async fn refresh_tokens(
                 )
                 .await?
                 {
-                    Some(token) => RefreshTokenDisposition::Reuse(token),
-                    None => {
+                    ReplacementChain::Active(token) => RefreshTokenDisposition::Reuse(*token),
+                    ReplacementChain::MissingLink if stored.revoked_at.is_some() => {
+                        return Err(rotation_conflict());
+                    }
+                    _ => {
                         // Chain exhausted without finding a valid token.
                         // This is actual token reuse -- revoke the session.
                         tracing::warn!(
@@ -827,6 +865,9 @@ pub async fn refresh_tokens(
             }
         }
     } else {
+        if stored.expires_at <= Utc::now() {
+            return Err(AppError::Unauthorized("Refresh token has expired".into()));
+        }
         RefreshTokenDisposition::Rotate(stored)
     };
 
@@ -852,7 +893,8 @@ pub async fn refresh_tokens(
     let user_id = Uuid::parse_str(&user_id_str)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in refresh token: {e}")))?;
     let session_id = active_token.session_id.clone();
-    let now = Utc::now();
+    let now = chrono::DateTime::from_timestamp(Utc::now().timestamp(), 0)
+        .expect("current timestamp is representable");
 
     // Resolve RBAC data and inject into the refreshed access token. OAuth
     // refresh-token rows persist the originally granted scope; legacy and
@@ -921,7 +963,7 @@ pub async fn refresh_tokens(
             active_token.protected_consent.as_ref(),
         )
         .await?;
-        touch_session_last_active(db, session_id.as_deref(), now).await?;
+        slide_session(db, &active_token, None).await?;
         return build_reused_refresh_response(
             jwt_keys,
             config,
@@ -933,79 +975,10 @@ pub async fn refresh_tokens(
     }
 
     // Issue new refresh token (rotation)
-    let (new_refresh_jwt, new_jti) = jwt::generate_refresh_token(jwt_keys, config, &user_id)?;
+    let (new_refresh_jwt, new_jti) =
+        jwt::generate_refresh_token_at(jwt_keys, config, &user_id, now)?;
     let new_refresh_id = Uuid::new_v4().to_string();
     let refresh_expires = now + Duration::seconds(config.jwt_refresh_ttl_secs);
-
-    // Atomically revoke the active refresh token using find_one_and_update
-    // with a "revoked: false" guard. This prevents two concurrent rotation
-    // requests from both succeeding (only the first CAS wins).
-    let revoked = db
-        .collection::<RefreshToken>(REFRESH_TOKENS)
-        .find_one_and_update(
-            doc! { "_id": &active_token.id, "revoked": false },
-            doc! { "$set": {
-                "revoked": true,
-                "revoked_at": bson::DateTime::from_chrono(now),
-                "replaced_by": &new_refresh_id,
-            }},
-        )
-        .await?;
-
-    if revoked.is_none() {
-        if legacy_upgrade {
-            return Err(super::consent_service::grant_changed());
-        }
-        // Another concurrent request rotated this token after we loaded it.
-        // Recover the new active replacement token and return it so clients
-        // converge on the same cookie value instead of logging out.
-        let current = db
-            .collection::<RefreshToken>(REFRESH_TOKENS)
-            .find_one(doc! { "_id": &active_token.id })
-            .await?;
-
-        if let Some(current_token) = current
-            && let Some(first_replacement_id) = current_token.replaced_by.as_deref()
-            && let Some(recovered) = follow_active_replacement_chain(
-                db,
-                first_replacement_id,
-                &active_token.user_id,
-                &active_token.jti,
-            )
-            .await?
-        {
-            tracing::info!(
-                user_id = %active_token.user_id,
-                jti = %active_token.jti,
-                replacement_id = %recovered.id,
-                "Concurrent refresh rotation resolved to active replacement token"
-            );
-            if recovered.protected_consent != active_token.protected_consent {
-                return Err(super::consent_service::grant_changed());
-            }
-            super::consent_service::fence_protected_reference(
-                db,
-                &active_token.user_id,
-                &active_token.client_id,
-                scope,
-                active_token.protected_consent.as_ref(),
-            )
-            .await?;
-            touch_session_last_active(db, session_id.as_deref(), now).await?;
-            return build_reused_refresh_response(
-                jwt_keys,
-                config,
-                &user_id,
-                &recovered,
-                new_access,
-                token_resource_scope.resource_uris,
-            );
-        }
-
-        return Err(AppError::Conflict(
-            "Refresh token was concurrently rotated, please retry".to_string(),
-        ));
-    }
 
     // Persist new refresh token
     let new_refresh = RefreshToken {
@@ -1026,11 +999,25 @@ pub async fn refresh_tokens(
         created_at: now,
     };
 
-    db.collection::<RefreshToken>(REFRESH_TOKENS)
-        .insert_one(&new_refresh)
-        .await?;
+    let rotated = rotate_refresh(db, &active_token, &new_refresh).await?;
+    if !rotated {
+        if legacy_upgrade {
+            return Err(super::consent_service::grant_changed());
+        }
+        // A fresh read through the normal grace path rechecks all authority and
+        // returns the winner's actual expiry. A definite CAS loss has no writes.
+        return Box::pin(refresh_tokens(
+            db,
+            config,
+            jwt_keys,
+            refresh_token_str,
+            mcp_sessions,
+            requested_resources,
+        ))
+        .await;
+    }
 
-    if let Err(error) = super::consent_service::fence_protected_reference(
+    if let Err(error) = post_commit_consent_fence(
         db,
         &active_token.user_id,
         &active_token.client_id,
@@ -1039,10 +1026,12 @@ pub async fn refresh_tokens(
     )
     .await
     {
-        super::oauth_service::revoke_issued_refresh(db, &new_refresh.jti).await?;
-        return Err(error);
+        if super::consent_service::is_definitive_authority_denial(&error) {
+            super::oauth_service::revoke_issued_refresh(db, &new_refresh.jti).await?;
+            return Err(error);
+        }
+        return Err(AppError::OAuthAuthorityUnavailable);
     }
-    touch_session_last_active(db, session_id.as_deref(), now).await?;
 
     // Reuse the existing session token rather than generating a new orphan token.
     // The session cookie does not need to change on token refresh.
@@ -1055,6 +1044,66 @@ pub async fn refresh_tokens(
         resource_uris: token_resource_scope.resource_uris,
     })
 }
+
+async fn rotate_refresh(
+    db: &mongodb::Database,
+    active_token: &RefreshToken,
+    new_refresh: &RefreshToken,
+) -> AppResult<bool> {
+    let context = (db.clone(), active_token.clone(), new_refresh.clone());
+    super::transaction_service::run_db_only(db, &context, |tx, context| {
+        Box::pin(async move {
+            let (db, active, successor) = context;
+            let changed = db
+                .collection::<RefreshToken>(REFRESH_TOKENS)
+                .update_one(
+                    doc! {"_id": &active.id, "revoked": false},
+                    doc! {"$set": {"revoked": true,
+                    "revoked_at": bson::DateTime::from_chrono(successor.created_at),
+                    "replaced_by": &successor.id}},
+                )
+                .session(&mut *tx)
+                .await?;
+            if changed.matched_count == 0 {
+                return Ok(false);
+            }
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .insert_one(successor)
+                .session(&mut *tx)
+                .await?;
+            slide_session(db, successor, Some(tx)).await?;
+            Ok(true)
+        })
+    })
+    .await
+    .map_err(|error| match error {
+        AppError::Internal(_) => AppError::OAuthAuthorityUnavailable,
+        other => other,
+    })
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static POST_COMMIT_FAILURE: std::cell::RefCell<Option<AppError>>;
+}
+
+async fn post_commit_consent_fence(
+    db: &mongodb::Database,
+    user: &str,
+    client: &str,
+    scope: &str,
+    reference: Option<&crate::models::consent::ProtectedConsentRef>,
+) -> AppResult<()> {
+    #[cfg(test)]
+    if let Ok(Some(error)) = POST_COMMIT_FAILURE.try_with(|fault| fault.borrow_mut().take()) {
+        return Err(error);
+    }
+    super::consent_service::fence_protected_reference(db, user, client, scope, reference).await
+}
+
+#[cfg(test)]
+#[path = "token_service_refresh_tests.rs"]
+pub(crate) mod refresh_tests;
 
 /// Revoke a session and all its associated refresh tokens.
 ///

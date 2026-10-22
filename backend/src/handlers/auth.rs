@@ -951,7 +951,11 @@ pub async fn refresh(
         Some(&state.mcp_sessions),
         None,
     )
-    .await?;
+    .await
+    .map_err(|error| match error {
+        AppError::DatabaseError(_) | AppError::Internal(_) => AppError::OAuthAuthorityUnavailable,
+        other => other,
+    })?;
 
     // Telemetry: auth.token_refreshed. Pre-auth path (no AuthUser),
     // so we decode the newly-issued access token to get the user id.
@@ -1635,4 +1639,81 @@ fn auth_dto_debug_never_discloses_credentials_but_wire_format_is_preserved() {
         serde_json::to_value(response).unwrap()["access_token"],
         secret
     );
+}
+
+#[cfg(test)]
+mod refresh_outcome_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+    use mongodb::bson::doc;
+    #[tokio::test]
+    async fn refresh_handler_distinguishes_rotation_conflict_from_indeterminate_failure() {
+        for indeterminate in [false, true] {
+            let (db, config, _, issued) =
+                crate::services::token_service::refresh_tests::fixture().await;
+            let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
+            if !indeterminate {
+                db.collection::<mongodb::bson::Document>(crate::models::refresh_token::COLLECTION_NAME).update_one(doc!{"session_id":&issued.session_id},doc!{"$set":{
+                    "revoked":true,"revoked_at":mongodb::bson::DateTime::now(),"replaced_by":"missing-successor"}}).await.unwrap();
+            }
+            let request = refresh(
+                State(state),
+                HeaderMap::new(),
+                Some(Json(RefreshRequest {
+                    refresh_token: Some(issued.refresh_token),
+                })),
+            );
+            let result = if indeterminate {
+                crate::services::service_history::transaction::COMMIT_RESPONSE_LOSS
+                    .scope(
+                        std::cell::RefCell::new(
+                            crate::services::service_history::transaction::CommitResponseLoss {
+                                remaining: usize::MAX,
+                                attempts: 0,
+                                budget: std::time::Duration::from_millis(50),
+                            },
+                        ),
+                        request,
+                    )
+                    .await
+            } else {
+                request.await
+            };
+            let response = result.err().unwrap().into_response();
+            assert_eq!(
+                response.status().as_u16(),
+                if indeterminate { 503 } else { 409 }
+            );
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if !indeterminate {
+                assert!(
+                    body["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains(token_service::ROTATION_CONFLICT_MESSAGE)
+                );
+            }
+            assert_eq!(
+                db.collection::<mongodb::bson::Document>(
+                    crate::models::refresh_token::COLLECTION_NAME
+                )
+                .count_documents(doc! {"revoked":false})
+                .await
+                .unwrap(),
+                u64::from(indeterminate)
+            );
+            assert!(
+                !db.collection::<mongodb::bson::Document>(crate::models::session::COLLECTION_NAME)
+                    .find_one(doc! {"_id":issued.session_id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get_bool("revoked")
+                    .unwrap()
+            );
+        }
+    }
 }

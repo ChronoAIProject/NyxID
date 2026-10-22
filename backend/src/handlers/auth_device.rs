@@ -1421,6 +1421,10 @@ mod tests {
             .expect("query browser session")
             .expect("browser session");
         assert!(!browser_session.revoked);
+        assert_eq!(
+            (browser_session.expires_at - browser_session.created_at).num_seconds(),
+            crate::services::token_service::SESSION_TTL_SECS
+        );
         assert_eq!(browser_session.ip_address.as_deref(), Some("127.0.0.1"));
         assert_eq!(
             browser_session.user_agent.as_deref(),

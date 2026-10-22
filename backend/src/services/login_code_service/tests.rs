@@ -321,6 +321,7 @@ async fn issuer_revocation_blocks_initial_and_refreshed_access_at_authentication
         protected_status(&state, &tokens.access_token).await,
         axum::http::StatusCode::OK
     );
+    state.db.collection::<Session>(SESSIONS).update_one(doc!{"_id":&tokens.session_id},doc!{"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(1))}}).await.unwrap();
     let refreshed = token_service::refresh_tokens(
         &state.db,
         &state.config,
@@ -335,6 +336,23 @@ async fn issuer_revocation_blocks_initial_and_refreshed_access_at_authentication
         protected_status(&state, &refreshed.access_token).await,
         axum::http::StatusCode::OK
     );
+    let session = state
+        .db
+        .collection::<Session>(SESSIONS)
+        .find_one(doc! {"_id":&tokens.session_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let refresh = state
+        .db
+        .collection::<crate::models::refresh_token::RefreshToken>(
+            crate::models::refresh_token::COLLECTION_NAME,
+        )
+        .find_one(doc! {"session_id":&tokens.session_id,"revoked":false})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.expires_at, refresh.expires_at);
     revoke(&state.db, &actor, &code.id, Some(&state.mcp_sessions))
         .await
         .unwrap();

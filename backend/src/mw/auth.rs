@@ -1356,9 +1356,9 @@ impl FromRequestParts<AppState> for AuthUser {
                                 "expires_at": {"$gt": bson::DateTime::from_chrono(chrono::Utc::now())}
                             })).await?;
                             let Some(live) = live else {
-                                return Err(AppError::Unauthorized(
-                                    "Session expired or revoked".into(),
-                                ));
+                                return Err(crate::services::session_authority::session_end_error(
+                                    &state.db, &id.to_string(), &user_id_str,
+                                ).await);
                             };
                             if user.mfa_enabled && !live.mfa_assured {
                                 Box::pin(crate::services::session_authority::reject_unassured(&state.db, &user_id_str, Some(&id.to_string()), "bearer", request_ip.as_deref(), request_ua.as_deref())).await?;
@@ -4803,6 +4803,13 @@ mod tests {
 #[cfg(test)]
 mod curation_purpose_regressions {
     use super::*;
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+        routing::get,
+    };
+    use tower::ServiceExt;
 
     #[test]
     fn general_service_accounts_keep_the_existing_purpose_route_projection() {
@@ -4832,6 +4839,161 @@ mod curation_purpose_regressions {
                 "{path}"
             );
         }
+    }
+    #[tokio::test]
+    async fn sessions_route_distinguishes_revoked_expired_deleted_and_ineligible_sessions() {
+        use crate::models::session::COLLECTION_NAME as SESSIONS;
+        use crate::services::token_service::refresh_tests::fixture;
+        for (kind, text) in [
+            ("revoked", "Session has been revoked"),
+            ("expired", "Session has expired"),
+            ("deleted", "Session has ended"),
+            ("pending", "Session has ended"),
+            ("unknown", "Session has ended"),
+            ("owner", "Session has ended"),
+        ] {
+            let (db, config, _, issued) = fixture().await;
+            let collection = db.collection::<bson::Document>(SESSIONS);
+            match kind {
+                "deleted" => {
+                    collection
+                        .delete_one(doc! {"_id":&issued.session_id})
+                        .await
+                        .unwrap();
+                }
+                "revoked" => {
+                    collection
+                        .update_one(
+                            doc! {"_id":&issued.session_id},
+                            doc! {"$set":{"revoked":true}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                "expired" => {
+                    collection.update_one(doc! {"_id":&issued.session_id},doc! {"$set":{"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::seconds(1))}}).await.unwrap();
+                }
+                "owner" => {
+                    collection
+                        .update_one(
+                            doc! {"_id":&issued.session_id},
+                            doc! {"$set":{"user_id":Uuid::new_v4().to_string()}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                _ => {
+                    collection.update_one(doc! {"_id":&issued.session_id},doc! {"$set":{"purpose":if kind=="pending" {"mfa_pending"}else{"unknown"}}}).await.unwrap();
+                }
+            }
+            let state = crate::test_utils::test_app_state_with_config(db, config);
+            let response = Router::new()
+                .route(
+                    "/api/v1/sessions",
+                    get(crate::handlers::sessions::list_sessions),
+                )
+                .with_state(state)
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/sessions")
+                        .header(
+                            header::AUTHORIZATION,
+                            format!("Bearer {}", issued.access_token),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{kind}");
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["message"], format!("Unauthorized: {text}"), "{kind}");
+        }
+    }
+    #[tokio::test]
+    async fn expired_access_jwt_is_rejected_before_the_session_diagnosis() {
+        let (db, mut config, _, issued) =
+            crate::services::token_service::refresh_tests::fixture().await;
+        config.jwt_access_ttl_secs = -120;
+        let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
+        let owner = db
+            .collection::<crate::models::session::Session>(crate::models::session::COLLECTION_NAME)
+            .find_one(doc! {"_id":&issued.session_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .user_id;
+        let token = jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &Uuid::parse_str(&owner).unwrap(),
+            "openid",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let response = Router::new()
+            .route(
+                "/api/v1/sessions",
+                get(crate::handlers::sessions::list_sessions),
+            )
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/sessions")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "token_expired");
+    }
+
+    #[tokio::test]
+    async fn live_session_on_bearer_diagnostic_reread_returns_retryable_server_error() {
+        let (db, config, _, issued) =
+            crate::services::token_service::refresh_tests::fixture().await;
+        db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &issued.session_id},
+                doc! {"$set": {"expires_at": bson::DateTime::from_chrono(
+                chrono::Utc::now() - chrono::Duration::seconds(1))}},
+            )
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state_with_config(db, config);
+        let request = Router::new()
+            .route(
+                "/api/v1/sessions",
+                get(crate::handlers::sessions::list_sessions),
+            )
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/sessions")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", issued.access_token),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            );
+        let response = crate::services::session_authority::RESTORE_BEFORE_END_READ
+            .scope(true, request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "oauth_authority_unavailable");
     }
 }
 

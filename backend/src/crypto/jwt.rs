@@ -885,7 +885,17 @@ pub fn generate_refresh_token(
     config: &AppConfig,
     user_id: &Uuid,
 ) -> Result<(String, String), AppError> {
-    let now = Utc::now().timestamp();
+    generate_refresh_token_at(keys, config, user_id, Utc::now())
+}
+
+/// Issue a refresh JWT from the same instant used by its durable authority.
+pub fn generate_refresh_token_at(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    issued_at: chrono::DateTime<Utc>,
+) -> Result<(String, String), AppError> {
+    let now = issued_at.timestamp();
     let jti = Uuid::new_v4().to_string();
 
     let claims = Claims {

@@ -318,6 +318,19 @@ pub async fn fence_protected_reference(
     Ok(())
 }
 
+/// Only definite denials retire a committed successor. Availability failures
+/// retain the chain so a retry can revalidate live consent before delivery.
+pub fn is_definitive_authority_denial(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::Conflict(_)
+            | AppError::Unauthorized(_)
+            | AppError::Forbidden(_)
+            | AppError::NotFound(_)
+            | AppError::AuthenticationFailed(_)
+    )
+}
+
 pub fn grant_changed() -> AppError {
     AppError::Conflict(
         "Service access changed or expired. Restart authorization to review the current grant."
@@ -879,5 +892,26 @@ mod tests {
             .await
             .unwrap();
         assert!(empty.is_empty());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn definitive_authority_denials_exclude_transient_read_write_and_commit_failures() {
+    for error in [
+        grant_changed(),
+        AppError::Unauthorized("denied".into()),
+        AppError::Forbidden("denied".into()),
+        AppError::NotFound("grant".into()),
+        AppError::AuthenticationFailed("denied".into()),
+    ] {
+        assert!(is_definitive_authority_denial(&error));
+    }
+    for error in [
+        AppError::OAuthAuthorityUnavailable,
+        AppError::Internal("majority write".into()),
+        AppError::DatabaseError(std::io::Error::other("authority read failed").into()),
+    ] {
+        assert!(!is_definitive_authority_denial(&error));
     }
 }
