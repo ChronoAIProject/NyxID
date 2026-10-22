@@ -1,0 +1,313 @@
+name: Backend Test Suite
+
+# Compile once per build mode, then partition execution across isolated runners.
+# This reduces elapsed time without increasing CPU or MongoDB contention within
+# a runner. Normal and coverage builds intentionally keep their existing package
+# selection and cfg(coverage) differences.
+on:
+  workflow_call:
+    inputs:
+      coverage:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  # The execution matrix below must contain exactly SHARD_COUNT shards.
+  SHARD_COUNT: 4
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # libtest runs each #[tokio::test] body on a 2 MiB thread by default. Debug
+  # builds keep a slot for every temporary of a long async test on that stack
+  # (the saved-reply journey test alone pins ~430 KiB plus ~400 KiB of fixture
+  # setup frames), and x86_64 frames exceeded 2 MiB after #1981. Production is
+  # unaffected: release builds reuse slots and tasks live on the heap.
+  RUST_MIN_STACK: 8388608
+  LLVM_PROFILE_FILE_NAME: nyxid-%4m.profraw
+  NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
+
+jobs:
+  build:
+    name: Build test archive
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
+          key: ${{ inputs.coverage && 'coverage-backend' || 'backend' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
+      - name: Check RCI backend boundary
+        if: '!inputs.coverage'
+        run: bash scripts/check-rci-backend-boundary.sh
+      # MongoDB starts only on execution runners, leaving compiler memory free.
+      - name: Build ordinary test archive
+        if: '!inputs.coverage'
+        run: >-
+          python3 .github/scripts/ci_resources.py backend-build
+          cargo nextest archive -p nyxid -p nyxid-service-adapters
+          --archive-file backend-tests.tar.zst
+      - name: Build instrumented test archive
+        if: inputs.coverage
+        run: >-
+          python3 .github/scripts/ci_resources.py coverage-build
+          cargo llvm-cov nextest-archive --package nyxid
+          --archive-file backend-tests.tar.zst
+      - name: Record full test inventory
+        env:
+          LLVM_PROFILE_FILE: ${{ runner.temp }}/list-%p.profraw
+        run: >-
+          cargo nextest list --archive-file backend-tests.tar.zst
+          --profile ci --message-format json > test-inventory.json
+      - name: Record build runner OS identity
+        run: python3 .github/scripts/coverage_identity.py --record build-identity.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage-build' || 'backend-test-build' }}-archive
+          path: backend-tests.tar.zst
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage-build' || 'backend-test-build' }}-inventory
+          path: |
+            test-inventory.json
+            build-identity.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload build resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.coverage && 'resources-coverage-backend-build' || 'resources-backend-test-build' }}
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
+
+  run:
+    name: Test shard ${{ matrix.shard }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Must agree with SHARD_COUNT; partitioning and verification share it.
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: ${{ inputs.coverage && 'llvm-tools-preview' || '' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: ${{ inputs.coverage && 'cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146' || 'cargo-nextest@0.9.146' }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage-build' || 'backend-test-build' }}-archive
+      - name: Start transaction-capable MongoDB
+        run: bash .github/scripts/start-test-mongodb.sh
+      # Keep the current num-cpus budget and exclusive-test overrides. Each
+      # runner has its own database; no shared MongoDB or extra test threads.
+      - name: Run ordinary tests
+        id: ordinary-tests
+        if: '!inputs.coverage'
+        run: >-
+          python3 .github/scripts/ci_resources.py backend-test
+          cargo nextest run --archive-file backend-tests.tar.zst
+          --workspace-remap "$GITHUB_WORKSPACE" --profile ci
+          --partition hash:${{ matrix.shard }}/$SHARD_COUNT --test-threads num-cpus
+      - name: Run instrumented tests
+        id: coverage-tests
+        if: inputs.coverage
+        run: |
+          # Pinned nextest requires this extraction destination to exist on a
+          # fresh runner; archive execution must not depend on a prior build.
+          mkdir -p target/llvm-cov-target
+          python3 .github/scripts/ci_resources.py coverage-test \
+            cargo llvm-cov nextest --archive-file backend-tests.tar.zst \
+            --workspace-remap "$GITHUB_WORKSPACE" --profile ci \
+            --partition hash:${{ matrix.shard }}/$SHARD_COUNT --test-threads num-cpus --no-report
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
+      - name: Stage shard evidence
+        if: always()
+        env:
+          TEST_OUTCOME: ${{ inputs.coverage && steps.coverage-tests.outcome || steps.ordinary-tests.outcome }}
+        run: |
+          mkdir -p shard-evidence
+          if [ ! -f target/nextest/ci/junit.xml ]; then
+            if [ "$TEST_OUTCOME" = success ]; then
+              echo '::error::Successful nextest run did not produce junit.xml'
+              exit 1
+            fi
+            echo 'No junit.xml: preserve the earlier setup or execution failure.'
+            exit 0
+          fi
+          cp target/nextest/ci/junit.xml shard-evidence/junit.xml
+          if [ '${{ inputs.coverage }}' = 'true' ]; then
+            python3 .github/scripts/coverage_identity.py --record shard-evidence/identity.json
+            cp target/llvm-cov-target/*.profraw shard-evidence/
+          fi
+      - name: Upload shard evidence
+        if: always() && hashFiles('shard-evidence/junit.xml') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-${{ matrix.shard }}
+          path: shard-evidence/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload test resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-${{ inputs.coverage && 'coverage-backend' || 'backend-test' }}-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
+
+  report:
+    name: Verify complete suite
+    needs: [build, run]
+    if: always() && !cancelled() && needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage-build' || 'backend-test-build' }}-inventory
+      - uses: actions/download-artifact@v4
+        if: inputs.coverage
+        with:
+          name: backend-coverage-build-archive
+      # Never merge-multiple here: LLVM's pooled filenames repeat per runner.
+      # Preserve missing-evidence failures until the execution-result check and
+      # inventory verifier can report the failed shard or missing directory.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-1
+          path: results/shard-1
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-2
+          path: results/shard-2
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-3
+          path: results/shard-3
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-4
+          path: results/shard-4
+      - name: Require every execution job to pass
+        env:
+          SHARD_RESULT: ${{ needs.run.result }}
+        run: test "$SHARD_RESULT" = success
+      - name: Verify full ordinary test inventory
+        if: '!inputs.coverage'
+        run: python3 .github/scripts/backend_shards.py test-inventory.json results --count "$SHARD_COUNT"
+      - name: Verify inventory and stage all coverage counters
+        if: inputs.coverage
+        run: >-
+          python3 .github/scripts/backend_shards.py test-inventory.json results
+          --count "$SHARD_COUNT" --profiles target/llvm-cov-target
+      - name: Publish test summary
+        if: always()
+        uses: test-summary/action@v2.6
+        with:
+          paths: results/*/junit.xml
+          show: fail
+      - name: Upload backend test results
+        if: always() && !inputs.coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-backend
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+      - uses: dtolnay/rust-toolchain@1.98.1
+        if: inputs.coverage
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        if: inputs.coverage
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      # Merge raw counters against the single instrumented archive. Averaging
+      # per-shard percentages would lose cross-shard coverage and is forbidden.
+      - name: Export head coverage
+        if: inputs.coverage
+        run: |
+          # report reads archive metadata but does not extract object files.
+          # Restore the original instrumented objects beside the merged counters.
+          tar --zstd -xf backend-tests.tar.zst -C target/llvm-cov-target
+          cargo llvm-cov report --nextest-archive-file backend-tests.tar.zst --package nyxid --lcov --output-path coverage-backend.lcov
+          cargo llvm-cov report --nextest-archive-file backend-tests.tar.zst --package nyxid --json --summary-only --output-path coverage-backend.raw.json
+          python3 .github/scripts/coverage_summary.py backend "Backend (nyxid)" 73 coverage-backend.raw.json coverage-backend.json
+      - name: Identify coverage measurement inputs
+        if: inputs.coverage
+        id: coverage-identity
+        run: >-
+          python3 .github/scripts/coverage_identity.py --require-identities
+          build-identity.json results/shard-1/identity.json
+          results/shard-2/identity.json results/shard-3/identity.json
+          results/shard-4/identity.json
+          --record coverage-backend.identity.json
+      - name: Prepare reusable base report
+        if: inputs.coverage && github.event_name != 'pull_request'
+        run: cp coverage-backend.raw.json coverage-backend.base.json
+      - name: Publish exact-commit coverage baseline
+        if: inputs.coverage && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage-baseline
+          path: |
+            coverage-backend.base.json
+            coverage-backend.identity.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Cache reusable base report
+        if: inputs.coverage && github.event_name != 'pull_request' && steps.coverage-identity.outputs.reusable == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: coverage-backend.base.json
+          key: coverage-backend-base-v2-${{ github.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
+      - name: Enforce coverage gate (head)
+        if: inputs.coverage
+        run: cargo llvm-cov report --nextest-archive-file backend-tests.tar.zst --package nyxid --fail-under-lines 73
+      - name: Upload coverage artifact
+        if: always() && inputs.coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event_name == 'pull_request' && 'backend-coverage-head' || 'coverage-backend' }}
+          path: |
+            coverage-backend.lcov
+            coverage-backend.json
+          if-no-files-found: warn

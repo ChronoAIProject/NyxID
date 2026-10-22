@@ -345,6 +345,47 @@ pub(crate) async fn connect_transaction_test_database_with_command_handler(
     db
 }
 
+/// Wait, within the shared readiness budget, until majority-acknowledged
+/// writes and linearizable reads on this database answer within 100 ms.
+///
+/// Tests that exercise production admission gates (the 250 ms analytics
+/// dispatch transaction, the 200 ms linearizable consent read) assert those
+/// deadlines as written. A CI runner can start such a test while MongoDB is
+/// still stalled on its own journal flushes and the per-test database drop
+/// backlog, which no nextest slot reservation prevents. This establishes the
+/// healthy-server precondition first; the measured call still runs once
+/// against the unchanged production bounds.
+pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
+    const BUDGET: Duration = Duration::from_secs(90);
+    const RESPONSIVE: Duration = Duration::from_millis(100);
+    let started = std::time::Instant::now();
+    let probes = db.collection::<Document>("__readiness");
+    loop {
+        let id = Uuid::new_v4().to_string();
+        let probe = std::time::Instant::now();
+        let write = probes
+            .insert_one(doc! {"_id": &id})
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .await;
+        let read = probes
+            .find_one(doc! {"_id": &id})
+            .read_concern(mongodb::options::ReadConcern::linearizable())
+            .await;
+        let elapsed = probe.elapsed();
+        if write.is_ok() && matches!(read, Ok(Some(_))) && elapsed <= RESPONSIVE {
+            return;
+        }
+        assert!(
+            started.elapsed() < BUDGET,
+            "MongoDB majority write + linearizable read were not responsive within \
+             {RESPONSIVE:?} for {BUDGET:?} (last probe took {elapsed:?}; write ok={}, read ok={})",
+            write.is_ok(),
+            read.is_ok()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 async fn assert_transaction_test_topology(db: &mongodb::Database) {
     let hello = db
         .run_command(doc! { "hello": 1 })

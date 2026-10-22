@@ -43,6 +43,7 @@ static PUBLIC_SENDS: Semaphore = Semaphore::const_new(4);
 
 #[cfg(test)]
 tokio::task_local! {
+    pub(crate) static TEST_BEFORE_NOTICE_SNAPSHOT: Arc<tokio::sync::Barrier>;
     static TEST_CONTROL_CAPACITY: Arc<Semaphore>;
 }
 
@@ -460,6 +461,12 @@ pub(crate) async fn render_personal(
     if ids.is_none()
         && let Some(saved) = snapshot
     {
+        #[cfg(test)]
+        if session.is_none()
+            && let Ok(barrier) = TEST_BEFORE_NOTICE_SNAPSHOT.try_with(Arc::clone)
+        {
+            barrier.wait().await;
+        }
         let ids: Vec<_> = cards.iter().map(|card| card.id.as_str()).collect();
         pin_notice_card_ids(
             &state.db,
