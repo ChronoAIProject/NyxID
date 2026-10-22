@@ -289,60 +289,108 @@ async fn expire(
     }).await.map_err(transactions::map_transaction_error)
 }
 
-pub async fn suspend(db: &Database, owner: &str, channel: &str, reason: &str) -> AppResult<()> {
-    let db = db.clone();
-    let owner = owner.to_owned();
-    let channel = channel.to_owned();
-    let reason = reason.to_owned();
-    let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
-        let work:AppResult<()>=Box::pin(async {
-            db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&channel,"user_id":&owner},
-                doc! {"$inc":{"follow_capacity_revision":1}}).session(&mut *session).await?;
-            db.collection::<NyxbotThread>(THREADS).update_many(doc! {"channel_id":&channel,"user_id":&owner,
-                "record_scope":SCOPE,"follow_state":{"$in":["active","opening"]}},
-                doc! {"$set":{"follow_state":"unavailable","follow_stop_reason":&reason,"follow_stopped_at":bson::DateTime::now()},"$inc":{"follow_revision":1}})
-                .session(&mut *session).await?;
-            Ok(())
-        }).await;
-        transactions::transaction_result(work)
-    }).await.map_err(transactions::map_transaction_error)
+pub async fn suspend_in_session(
+    db: &Database,
+    owner: &str,
+    channel: &str,
+    reason: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    db.collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id":channel,"user_id":owner},
+            doc! {"$inc":{"follow_capacity_revision":1}},
+        )
+        .session(&mut *session)
+        .await?;
+    db.collection::<NyxbotThread>(THREADS).update_many(doc! {"channel_id":channel,"user_id":owner,
+        "record_scope":SCOPE,"follow_state":{"$in":["active","opening"]}},
+        doc! {"$set":{"follow_state":"unavailable","follow_stop_reason":reason,"follow_stopped_at":bson::DateTime::now()},"$inc":{"follow_revision":1}})
+        .session(&mut *session).await?;
+    Ok(())
 }
 
-pub async fn carry_over(
+pub struct CarryOverCounts {
+    pub moved: u64,
+    pub kept_conflicting: u64,
+}
+
+pub async fn carry_over_in_session(
     db: &Database,
     owner: &str,
     from: &str,
     to: &str,
     changed: bool,
-) -> AppResult<()> {
-    let db = db.clone();
-    let owner = owner.to_owned();
-    let from = from.to_owned();
-    let to = to.to_owned();
-    let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
-        let work:AppResult<()>=Box::pin(async {
-            let old=db.collection::<NyxbotChannel>(CHANNELS).find_one_and_update(doc! {"_id":&from,"user_id":&owner},
-                doc! {"$inc":{"follow_capacity_revision":1}}).session(&mut *session).await?.ok_or_else(not_found)?;
-            db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&to,"user_id":&owner},
-                doc! {"$set":{"follow_binding_generation":old.follow_binding_generation+i64::from(changed)},"$inc":{"follow_capacity_revision":1}}).session(&mut *session).await?;
-            let rows=db.collection::<NyxbotThread>(THREADS);
-            if changed {
-                rows.update_many(doc! {"channel_id":&from,"user_id":&owner,"agent_id":bson::Bson::Null,"record_scope":{"$ne":SCOPE}},
-                    doc! {"$set":{"conversation_id":bson::Bson::Null}}).session(&mut *session).await?;
-                rows.update_many(doc! {"channel_id":&from,"user_id":&owner,"record_scope":SCOPE},
-                    doc! {"$set":{"follow_state":"stopped","follow_stop_reason":"agent_changed"},"$inc":{"follow_revision":1}}).session(&mut *session).await?;
+    session: &mut ClientSession,
+) -> AppResult<CarryOverCounts> {
+    let old = db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one_and_update(
+            doc! {"_id":from,"user_id":owner},
+            doc! {"$inc":{"follow_capacity_revision":1}},
+        )
+        .session(&mut *session)
+        .await?
+        .ok_or_else(not_found)?;
+    db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":to,"user_id":owner},
+        doc! {"$set":{"follow_binding_generation":old.follow_binding_generation+i64::from(changed)},"$inc":{"follow_capacity_revision":1}}).session(&mut *session).await?;
+    let rows = db.collection::<NyxbotThread>(THREADS);
+    if changed {
+        rows.update_many(doc! {"channel_id":from,"user_id":owner,"agent_id":bson::Bson::Null,"record_scope":{"$ne":SCOPE}},
+            doc! {"$set":{"conversation_id":bson::Bson::Null}}).session(&mut *session).await?;
+        rows.update_many(doc! {"channel_id":from,"user_id":owner,"record_scope":SCOPE},
+            doc! {"$set":{"follow_state":"stopped","follow_stop_reason":"agent_changed","follow_stopped_at":bson::DateTime::now()},"$inc":{"follow_revision":1}}).session(&mut *session).await?;
+    }
+    let stable = doc! {"$not":{"$regex":"^conv_"}};
+    let documents = db.collection::<bson::Document>(THREADS);
+    let target: Vec<bson::Document> = documents
+        .find(doc! {"channel_id":to,"partition":&stable})
+        .projection(doc! {"partition":1,"_id":0})
+        .session(&mut *session)
+        .await?
+        .stream(&mut *session)
+        .try_collect()
+        .await?;
+    let target: std::collections::HashSet<&str> = target
+        .iter()
+        .filter_map(|row| row.get_str("partition").ok())
+        .collect();
+    let source: Vec<bson::Document> = documents
+        .find(doc! {"channel_id":from,"user_id":owner,"partition":&stable})
+        .projection(doc! {"partition":1,"_id":0})
+        .session(&mut *session)
+        .await?
+        .stream(&mut *session)
+        .try_collect()
+        .await?;
+    let mut partitions = Vec::new();
+    let mut kept_conflicting = 0;
+    for row in &source {
+        if let Ok(partition) = row.get_str("partition") {
+            if target.contains(partition) {
+                kept_conflicting += 1;
+            } else {
+                partitions.push(partition);
             }
-            let stable=doc! {"$not":{"$regex":"^conv_"}};
-            rows.update_many(doc! {"channel_id":&from,"user_id":&owner,"partition":&stable},doc! {"$set":{"channel_id":&to}}).session(&mut *session).await?;
-            db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
-                .update_many(doc! {"user_id":&owner,"channel.nyxbot_channel_id":&from,"channel.partition":stable},
-                    doc! {"$set":{"channel.nyxbot_channel_id":&to}}).session(&mut *session).await?;
-            Ok(())
-        }).await;
-        transactions::transaction_result(work)
-    }).await.map_err(transactions::map_transaction_error)
+        }
+    }
+    let moved = rows
+        .update_many(
+            doc! {"channel_id":from,"user_id":owner,"partition":{"$in":&partitions}},
+            doc! {"$set":{"channel_id":to}},
+        )
+        .session(&mut *session)
+        .await?
+        .modified_count;
+    for field in ["channel", "reply_channel"] {
+        db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .update_many(doc! {"user_id":owner,format!("{field}.nyxbot_channel_id"):from,format!("{field}.partition"): {"$in":&partitions}},
+                doc! {"$set":{format!("{field}.nyxbot_channel_id"):to}}).session(&mut *session).await?;
+    }
+    Ok(CarryOverCounts {
+        moved,
+        kept_conflicting,
+    })
 }
 
 pub async fn release_agent(db: &Database, owner: &str, agent: &str) -> AppResult<()> {

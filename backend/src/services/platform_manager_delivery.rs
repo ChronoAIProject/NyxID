@@ -43,6 +43,7 @@ static PUBLIC_SENDS: Semaphore = Semaphore::const_new(4);
 
 #[cfg(test)]
 tokio::task_local! {
+    pub(crate) static TEST_BEFORE_NOTICE_SNAPSHOT: Arc<tokio::sync::Barrier>;
     static TEST_CONTROL_CAPACITY: Arc<Semaphore>;
 }
 
@@ -431,11 +432,19 @@ pub(crate) async fn render_personal(
     if ids.is_none()
         && let Some(saved) = snapshot
     {
+        #[cfg(test)]
+        if session.is_none()
+            && let Ok(barrier) = TEST_BEFORE_NOTICE_SNAPSHOT.try_with(Arc::clone)
+        {
+            barrier.wait().await;
+        }
         let ids: Vec<_> = cards.iter().map(|card| card.id.as_str()).collect();
+        // Concurrent renderers may pin the same plan. Accept that exact
+        // snapshot again, but never overwrite a different renderer's plan.
         let update = deliveries.update_one(
             doc! {"_id":saved.get_str("_id").map_err(|_| refused())?,
-            "notice_card_ids":{"$exists":false}},
-            doc! {"$set":{"notice_card_ids":ids}},
+            "$or":[{"notice_card_ids":{"$exists":false}}, {"notice_card_ids":&ids}]},
+            doc! {"$set":{"notice_card_ids":&ids}},
         );
         let changed = match session {
             Some(tx) => update.session(tx).await?,

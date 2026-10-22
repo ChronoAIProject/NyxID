@@ -229,3 +229,5 @@ pub mod credit_service_limit;
 pub mod oauth_delegation_authority;
 
 pub mod platform_help;
+
+pub mod nyxbot_gateway_release;
