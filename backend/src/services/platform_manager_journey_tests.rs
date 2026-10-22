@@ -873,153 +873,155 @@ async fn status_changed_before_send_is_refused_and_other_sender_stays_logged_out
     assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
 }
 
-#[tokio::test]
-async fn telegram_personal_link_saved_reply_web_history_and_unlink_journey() {
-    let j = Journey::new().await;
-    // An unlinked update keeps its original fixed audience after subsequent consent.
-    let old = j.update(2, "before linking", false);
-    j.webhook(&old).await;
-    j.link().await;
-    j.webhook(&old).await;
-    assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
-    let before_link = j
-        .state
-        .db
-        .collection::<PlatformManagerIngress>(INGRESS)
-        .find_one(doc! {"update_id":2_i64})
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        before_link.audience,
-        IngressAudience::Fixed { .. }
-    ));
-    let update = j.update(
-        12,
-        "Please use this deliberately forwarded ordinary text",
-        true,
-    );
-    j.webhook(&update).await;
-    j.webhook(&update).await;
-    let (destination, reply, saved) = j.saved().await;
-    assert_eq!(saved.text, "Retained personal answer");
-    let web = engine::messages(&j.state.db, &j.owner, &reply.turn.conversation_id, 50, None)
-        .await
-        .unwrap();
-    assert!(web.iter().any(|m| m.id == saved.id));
-    assert!(
-        web.iter()
-            .any(|m| m.role == "user" && m.text.contains("forwarded ordinary text"))
-    );
-    assert!(
-        engine::list(&j.state.db, &j.owner, 50, None, None)
+#[test]
+fn telegram_personal_link_saved_reply_web_history_and_unlink_journey() {
+    crate::test_utils::run_native_journey_test("telegram_personal_link_saved_reply", || async {
+        let j = Journey::new().await;
+        // An unlinked update keeps its original fixed audience after subsequent consent.
+        let old = j.update(2, "before linking", false);
+        j.webhook(&old).await;
+        j.link().await;
+        j.webhook(&old).await;
+        assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+        let before_link = j
+            .state
+            .db
+            .collection::<PlatformManagerIngress>(INGRESS)
+            .find_one(doc! {"update_id":2_i64})
             .await
             .unwrap()
-            .iter()
-            .any(|thread| thread.id == reply.turn.conversation_id)
-    );
-    assert!(
-        engine::messages(
-            &j.state.db,
-            &uuid::Uuid::new_v4().to_string(),
-            &reply.turn.conversation_id,
-            50,
-            None
-        )
+            .unwrap();
+        assert!(matches!(
+            before_link.audience,
+            IngressAudience::Fixed { .. }
+        ));
+        let update = j.update(
+            12,
+            "Please use this deliberately forwarded ordinary text",
+            true,
+        );
+        j.webhook(&update).await;
+        j.webhook(&update).await;
+        let (destination, reply, saved) = j.saved().await;
+        assert_eq!(saved.text, "Retained personal answer");
+        let web = engine::messages(&j.state.db, &j.owner, &reply.turn.conversation_id, 50, None)
+            .await
+            .unwrap();
+        assert!(web.iter().any(|m| m.id == saved.id));
+        assert!(
+            web.iter()
+                .any(|m| m.role == "user" && m.text.contains("forwarded ordinary text"))
+        );
+        assert!(
+            engine::list(&j.state.db, &j.owner, 50, None, None)
+                .await
+                .unwrap()
+                .iter()
+                .any(|thread| thread.id == reply.turn.conversation_id)
+        );
+        assert!(
+            engine::messages(
+                &j.state.db,
+                &uuid::Uuid::new_v4().to_string(),
+                &reply.turn.conversation_id,
+                50,
+                None
+            )
+            .await
+            .is_err()
+        );
+        let body = delivery::render_saved(&saved, &j.state.config.frontend_url);
+        let reference = DeliveryRef::Reply(reply.clone());
+        let (a, b) = tokio::join!(
+            j.producers.transport.deliver_platform_reply(
+                &j.state.db,
+                &destination,
+                &reference,
+                ReplyContent::Text(body.clone())
+            ),
+            j.producers.transport.deliver_platform_reply(
+                &j.state.db,
+                &destination,
+                &reference,
+                ReplyContent::Text(body.clone())
+            )
+        );
+        assert!(
+            a.is_ok() && b.is_ok(),
+            "concurrent reply deliveries failed: first={a:?}, second={b:?}"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if j.sends().await.iter().any(|s| {
+                    s["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Retained personal answer")
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
         .await
-        .is_err()
-    );
-    let body = delivery::render_saved(&saved, &j.state.config.frontend_url);
-    let reference = DeliveryRef::Reply(reply.clone());
-    let (a, b) = tokio::join!(
-        j.producers.transport.deliver_platform_reply(
-            &j.state.db,
-            &destination,
-            &reference,
-            ReplyContent::Text(body.clone())
-        ),
-        j.producers.transport.deliver_platform_reply(
-            &j.state.db,
-            &destination,
-            &reference,
-            ReplyContent::Text(body.clone())
-        )
-    );
-    assert!(
-        a.is_ok() && b.is_ok(),
-        "concurrent reply deliveries failed: first={a:?}, second={b:?}"
-    );
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if j.sends().await.iter().any(|s| {
+        .unwrap();
+        let sends = j.sends().await;
+        let private: Vec<_> = sends
+            .iter()
+            .filter(|s| {
                 s["text"]
                     .as_str()
                     .unwrap()
                     .contains("Retained personal answer")
-            }) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let sends = j.sends().await;
-    let private: Vec<_> = sends
-        .iter()
-        .filter(|s| {
-            s["text"]
+            })
+            .collect();
+        assert_eq!(private.len(), 1);
+        assert_eq!(private[0]["chat_id"], 700);
+        assert_eq!(private[0]["protect_content"], true);
+        assert!(
+            !private[0]["text"]
                 .as_str()
                 .unwrap()
-                .contains("Retained personal answer")
-        })
-        .collect();
-    assert_eq!(private.len(), 1);
-    assert_eq!(private[0]["chat_id"], 700);
-    assert_eq!(private[0]["protect_content"], true);
-    assert!(
-        !private[0]["text"]
-            .as_str()
-            .unwrap()
-            .contains(&format!("?c={}", reply.turn.conversation_id))
-    );
-    assert_eq!(j.egress.0.load(Ordering::SeqCst), 1);
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    j.webhook(&j.update(13, "/unlink", false)).await;
-    let binding = j
-        .state
-        .db
-        .collection::<PlatformPersonalBinding>(
-            crate::models::platform_personal_binding::COLLECTION_NAME,
-        )
-        .find_one(doc! {"platform_config_id":&j.profile.id})
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(binding.state, PersonalBindingState::Revoked);
-    assert!(
-        engine::messages(&j.state.db, &j.owner, &reply.turn.conversation_id, 50, None)
+                .contains(&format!("?c={}", reply.turn.conversation_id))
+        );
+        assert_eq!(j.egress.0.load(Ordering::SeqCst), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        j.webhook(&j.update(13, "/unlink", false)).await;
+        let binding = j
+            .state
+            .db
+            .collection::<PlatformPersonalBinding>(
+                crate::models::platform_personal_binding::COLLECTION_NAME,
+            )
+            .find_one(doc! {"platform_config_id":&j.profile.id})
             .await
             .unwrap()
-            .iter()
-            .any(|m| m.id == saved.id)
-    );
-    j.webhook(&j.update(14, "after unlink", false)).await;
-    assert_eq!(j.egress.0.load(Ordering::SeqCst), 1);
-    let metadata = j
-        .state
-        .db
-        .collection::<Document>(crate::models::platform_manager_delivery::COLLECTION_NAME)
-        .find_one(doc! {"reference.reply_id":&saved.id})
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        !metadata.contains_key("body")
-            && !metadata.contains_key("text")
-            && !metadata.contains_key("token")
-    );
-    j.state.db.drop().await.unwrap();
+            .unwrap();
+        assert_eq!(binding.state, PersonalBindingState::Revoked);
+        assert!(
+            engine::messages(&j.state.db, &j.owner, &reply.turn.conversation_id, 50, None)
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.id == saved.id)
+        );
+        j.webhook(&j.update(14, "after unlink", false)).await;
+        assert_eq!(j.egress.0.load(Ordering::SeqCst), 1);
+        let metadata = j
+            .state
+            .db
+            .collection::<Document>(crate::models::platform_manager_delivery::COLLECTION_NAME)
+            .find_one(doc! {"reference.reply_id":&saved.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !metadata.contains_key("body")
+                && !metadata.contains_key("text")
+                && !metadata.contains_key("token")
+        );
+        j.state.db.drop().await.unwrap();
+    });
 }
 
 #[tokio::test]
