@@ -11,9 +11,6 @@ fn config() -> WorkspaceConfig {
 #[test]
 fn workspace_rejects_invalid_queries_and_duplicate_panels() {
     assert!(validate(&config()).is_ok());
-    let mut models = config();
-    models.draft.panels[0].breakdown = "model".into();
-    assert!(validate(&models).is_ok());
     let mut invalid = config();
     invalid.draft.filters.period = "custom".into();
     assert!(validate(&invalid).is_err());
@@ -321,10 +318,10 @@ async fn workspace_handlers_enforce_admin_writes_and_usage_reader_reads() {
 }
 
 #[test]
-fn nyxbot_internal_model_breakdown_does_not_expand_saved_workspace_contract() {
+fn model_breakdown_is_valid_without_accepting_nyxbot_model_filters() {
     let mut value = config();
     value.draft.panels[0].breakdown = "model".into();
-    assert!(validate(&value).is_err());
+    assert!(validate(&value).is_ok());
     let mut json = serde_json::to_value(config()).unwrap();
     json["draft"]["filters"]["model"] = serde_json::json!("alias");
     assert!(serde_json::from_value::<WorkspaceConfig>(json).is_err());
