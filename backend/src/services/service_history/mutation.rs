@@ -78,14 +78,16 @@ pub fn collection<T: Send + Sync>(db: &Database, name: &str) -> Collection<T> {
     }
 }
 
-/// Usage timestamps are deliberately a single operational write. No caller-supplied
-/// fields or update document can bypass the journal through this helper.
+/// Usage is deliberately a single operational write. Keep `updated_at` for edits:
+/// credential replacement and encrypted-record migration fence on it, so a
+/// background usage touch must not invalidate their exact-source predicate.
+/// No caller-supplied fields can bypass the journal through this helper.
 pub async fn touch_credential_usage(db: &Database, key_id: &str) -> mongodb::error::Result<()> {
     let now = bson::DateTime::now();
     db.collection::<Document>("user_api_keys")
         .update_one(
             doc! { "_id": key_id },
-            doc! { "$set": { "last_used_at": now, "updated_at": now } },
+            doc! { "$max": { "last_used_at": now } },
         )
         .await?;
     Ok(())
