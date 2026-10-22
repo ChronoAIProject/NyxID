@@ -36,11 +36,12 @@ const SESSION_SKEW_SECS: i64 = 60;
 
 const TOKEN_DIR_NAME: &str = ".nyxid";
 const PROFILES_DIR_NAME: &str = "profiles";
-const TOKEN_FILE_NAME: &str = "access_token";
-const REFRESH_TOKEN_FILE_NAME: &str = "refresh_token";
+pub(crate) const TOKEN_FILE_NAME: &str = "access_token";
+pub(crate) const REFRESH_TOKEN_FILE_NAME: &str = "refresh_token";
+pub(crate) const LOGIN_GENERATION_FILE_NAME: &str = "login_generation";
 const REFRESH_LOCK_FILE_NAME: &str = ".refresh.lock";
-const BASE_URL_FILE_NAME: &str = "base_url";
-const USER_ID_FILE_NAME: &str = "user_id";
+pub(crate) const BASE_URL_FILE_NAME: &str = "base_url";
+pub(crate) const USER_ID_FILE_NAME: &str = "user_id";
 const CALLBACK_TIMEOUT_SECS: u64 = 120;
 
 /// Extract the `sub` claim (NyxID user UUID) from a JWT access token.
@@ -59,10 +60,18 @@ pub fn jwt_claim_string_from_token(token: &str, claim: &str) -> Option<String> {
 }
 
 pub fn jwt_exp_from_token(token: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    jwt_timestamp_from_token(token, "exp")
+}
+
+pub(crate) fn jwt_iat_from_token(token: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    jwt_timestamp_from_token(token, "iat")
+}
+
+fn jwt_timestamp_from_token(token: &str, claim: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let payload_b64 = token.split('.').nth(1)?;
     let decoded = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
     let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-    let exp = json.get("exp")?.as_i64()?;
+    let exp = json.get(claim)?.as_i64()?;
     chrono::DateTime::from_timestamp(exp, 0)
 }
 
@@ -206,7 +215,7 @@ fn replace_login_files(profile: Option<&str>, write: impl FnOnce() -> Result<()>
     let _lock = acquire_refresh_lock(profile)?;
     clear_login_credentials(profile)?;
     write_token_file(
-        &token_dir_for_profile(profile)?.join("login_generation"),
+        &token_dir_for_profile(profile)?.join(LOGIN_GENERATION_FILE_NAME),
         &uuid::Uuid::new_v4().to_string(),
     )?;
     let result = write();
@@ -217,36 +226,120 @@ fn replace_login_files(profile: Option<&str>, write: impl FnOnce() -> Result<()>
 }
 
 pub(crate) fn login_generation(profile: Option<&str>) -> Option<String> {
-    std::fs::read_to_string(
-        token_dir_for_profile(profile)
-            .ok()?
-            .join("login_generation"),
-    )
-    .ok()
+    read_login_generation(profile).ok().flatten()
+}
+
+fn read_login_generation(profile: Option<&str>) -> Result<Option<String>> {
+    read_profile_file(profile, LOGIN_GENERATION_FILE_NAME)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProfileDestinationError {
+    #[error("Invalid profile destination; supply a valid HTTP(S) base URL")]
+    Invalid,
+    #[error(
+        "Profile destination changed or differs from --base-url. Re-run the command with the intended profile."
+    )]
+    Mismatch,
 }
 
 pub(crate) fn validate_profile_destination(profile: Option<&str>, destination: &str) -> Result<()> {
-    if let Some(saved) = read_profile_file(profile, BASE_URL_FILE_NAME)?
-        && login_exchange::normalized_destination(&saved)?
-            != login_exchange::normalized_destination(destination)?
-    {
-        bail!(
-            "Profile destination changed or differs from --base-url. Re-run the command with the intended profile."
-        );
+    let destination = login_exchange::normalized_destination(destination)
+        .map_err(|_| ProfileDestinationError::Invalid)?;
+    if let Some(saved) = read_profile_file(profile, BASE_URL_FILE_NAME)? {
+        let saved = login_exchange::normalized_destination(&saved)
+            .map_err(|_| ProfileDestinationError::Invalid)?;
+        if saved != destination {
+            return Err(ProfileDestinationError::Mismatch.into());
+        }
     }
     Ok(())
+}
+
+pub(crate) struct SavedProfileSnapshot {
+    pub agent: bool,
+    pub access: Option<String>,
+    pub refresh: Option<String>,
+    pub generation: Option<String>,
+    pub destination: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ProfileSnapshotError {
+    pub code: &'static str,
+    pub exit: i32,
+    pub cause: anyhow::Error,
+}
+
+impl From<anyhow::Error> for ProfileSnapshotError {
+    fn from(cause: anyhow::Error) -> Self {
+        let (code, exit) = if cause.is::<ProfileLockTimeout>() {
+            ("profile_lock_timeout", 4)
+        } else if cause.is::<ProfileDestinationError>() {
+            ("profile_destination_mismatch", 1)
+        } else {
+            ("profile_storage_error", 1)
+        };
+        Self { code, exit, cause }
+    }
+}
+
+/// Capture only saved-profile authority while holding the same lock as renewal
+/// and login replacement. Credential overrides are intentionally not resolved.
+pub(crate) async fn snapshot_saved_profile(
+    auth: &AuthArgs,
+) -> std::result::Result<SavedProfileSnapshot, ProfileSnapshotError> {
+    let profile = auth.profile.as_deref();
+    let _lock = acquire_refresh_lock_async(profile).await?;
+    let agent = agent_key::read_auth_kind(profile)? == agent_key::AuthKind::AgentKey;
+    let access = read_profile_file(
+        profile,
+        if agent {
+            agent_key::TOKEN_FILE
+        } else {
+            TOKEN_FILE_NAME
+        },
+    )?;
+    let refresh = read_profile_file(profile, REFRESH_TOKEN_FILE_NAME)?;
+    let generation = read_login_generation(profile)?;
+    let destination = auth
+        .base_url
+        .clone()
+        .or(read_profile_file(profile, BASE_URL_FILE_NAME)?);
+    if let Some(destination) = &destination {
+        validate_profile_destination(profile, destination)?;
+    }
+    Ok(SavedProfileSnapshot {
+        agent,
+        access,
+        refresh,
+        generation,
+        destination,
+    })
+}
+
+fn resolved_refresh_destination(auth: &AuthArgs) -> Result<String> {
+    let destination = auth.resolved_base_url()?;
+    validate_profile_destination(auth.profile.as_deref(), &destination).map_err(|error| {
+        if error.is::<ProfileDestinationError>() {
+            error
+        } else {
+            RefreshUnavailable(format!("Session storage is unavailable: {error}")).into()
+        }
+    })?;
+    Ok(destination)
 }
 
 fn clear_login_credentials(profile: Option<&str>) -> Result<()> {
     let dir = token_dir_for_profile(profile)?;
     let mut failure = None;
     for name in [
-        "token",
+        agent_key::TOKEN_FILE,
         TOKEN_FILE_NAME,
         REFRESH_TOKEN_FILE_NAME,
         USER_ID_FILE_NAME,
-        "agent_key.json",
-        "auth_kind",
+        agent_key::METADATA_FILE,
+        agent_key::AUTH_KIND_FILE,
     ] {
         if let Err(error) = std::fs::remove_file(dir.join(name))
             && error.kind() != std::io::ErrorKind::NotFound
@@ -493,6 +586,7 @@ enum SessionRefresh {
     /// connectivity message rather than prompt for a login that also needs
     /// the network.
     Network(anyhow::Error),
+    Configuration(anyhow::Error),
 }
 
 /// Validate the saved session BEFORE a command does any user-visible work
@@ -517,10 +611,9 @@ pub async fn ensure_session(auth: &AuthArgs) -> Result<()> {
 
     let profile = auth.profile.as_deref();
 
-    if read_profile_file(profile, "auth_kind")
+    if agent_key::read_auth_kind(profile)
         .map_err(|error| RefreshUnavailable(format!("Session storage is unavailable: {error}")))?
-        .as_deref()
-        == Some("agent_key")
+        == agent_key::AuthKind::AgentKey
     {
         return Ok(());
     }
@@ -545,6 +638,7 @@ pub async fn ensure_session(auth: &AuthArgs) -> Result<()> {
     // Access token expired -> one silent refresh attempt.
     match refresh_saved_session(auth).await {
         SessionRefresh::Refreshed => Ok(()),
+        SessionRefresh::Configuration(error) => Err(error),
         SessionRefresh::Rejected(rejection) => {
             handle_dead_session(auth, DeadSessionReason::Rejected(rejection)).await
         }
@@ -618,9 +712,20 @@ impl RefreshRejection {
             RefreshRejectionReason::TokenExpired => {
                 "Your session has expired (the refresh token reached its lifetime).".to_string()
             }
-            RefreshRejectionReason::SessionExpired => "Your session has expired on the server.".into(),
-            RefreshRejectionReason::SessionEnded => "Your session is no longer valid on the server (it ended for a reason the server did not report: expiry, revocation, or removal).".into(),
-            RefreshRejectionReason::Revoked => "Your session was revoked on the server (for example a stale copy of the refresh token was reused, the session was signed out, or the account's sessions were reset).".into(),
+            RefreshRejectionReason::SessionExpired => {
+                "Your session has expired on the server.".into()
+            }
+            RefreshRejectionReason::SessionEnded => concat!(
+                "Your session is no longer valid on the server (it ended for a reason ",
+                "the server did not report: expiry, revocation, or removal)."
+            )
+            .into(),
+            RefreshRejectionReason::Revoked => concat!(
+                "Your session was revoked on the server (for example a stale copy of ",
+                "the refresh token was reused, the session was signed out, or the ",
+                "account's sessions were reset)."
+            )
+            .into(),
             RefreshRejectionReason::NotFound => {
                 "Your session has expired and no usable refresh token is saved.".to_string()
             }
@@ -910,14 +1015,48 @@ impl RefreshPersistence {
             return Ok(());
         };
         match self.stage {
-            PersistenceStage::Nothing => Err(RefreshUnavailable(format!(
-                "The session renewed but its new refresh token could not be saved: {error}. Fix storage and immediately run `nyxid session refresh`; recovery is best effort within the server's rotation grace window. Ordinary commands will not repair this while the old access token is still fresh."
-            )).into()),
-            PersistenceStage::Refresh if requires_saved_access => Err(RefreshUnavailable(format!(
-                "The renewed refresh token was saved, but the new access token could not be saved: {error}"
-            )).into()),
-            PersistenceStage::Refresh => { eprintln!("Warning: the renewed refresh token was saved, but the new access token could not be saved: {error}. This operation uses the in-memory access token."); Ok(()) },
-            _ => { eprintln!("Warning: renewed credentials were saved, but profile metadata could not be saved: {error}"); Ok(()) },
+            PersistenceStage::Nothing => {
+                let message = format!(
+                    concat!(
+                        "The session renewed but its new refresh token could not be saved: {}. ",
+                        "Fix storage and immediately run `nyxid session refresh`; recovery is ",
+                        "best effort within the server's rotation grace window. Ordinary commands ",
+                        "will not repair this while the old access token is still fresh."
+                    ),
+                    error
+                );
+                Err(RefreshUnavailable(message).into())
+            }
+            PersistenceStage::Refresh if requires_saved_access => {
+                let message = format!(
+                    concat!(
+                        "The renewed refresh token was saved, but the new access token ",
+                        "could not be saved: {}"
+                    ),
+                    error
+                );
+                Err(RefreshUnavailable(message).into())
+            }
+            PersistenceStage::Refresh => {
+                eprintln!(
+                    concat!(
+                        "Warning: the renewed refresh token was saved, but the new access token ",
+                        "could not be saved: {}. This operation uses the in-memory access token."
+                    ),
+                    error
+                );
+                Ok(())
+            }
+            _ => {
+                eprintln!(
+                    concat!(
+                        "Warning: renewed credentials were saved, but profile metadata ",
+                        "could not be saved: {}"
+                    ),
+                    error
+                );
+                Ok(())
+            }
         }
     }
 }
@@ -928,13 +1067,14 @@ pub(crate) enum InFlightRefreshOutcome {
     Refreshed(String),
     Rejected(RefreshRejection),
     Unavailable(anyhow::Error),
+    Configuration(anyhow::Error),
 }
 
 impl InFlightRefreshOutcome {
     pub(crate) fn access_token(self) -> Result<Option<String>> {
         match self {
             Self::Skipped(reason) => {
-                let _ = reason;
+                tracing::debug!(reason, "Session refresh skipped");
                 Ok(None)
             }
             Self::Adopted(token) | Self::Refreshed(token) => Ok(Some(token)),
@@ -944,6 +1084,7 @@ impl InFlightRefreshOutcome {
             }
             .into()),
             Self::Unavailable(error) => Err(RefreshUnavailable(error.to_string()).into()),
+            Self::Configuration(error) => Err(error),
         }
     }
 }
@@ -964,27 +1105,24 @@ pub(crate) async fn refresh_captured_session(
         Ok(lock) => lock,
         Err(error) => return InFlightRefreshOutcome::Unavailable(error),
     };
-    let provenance = (|| -> Result<bool> {
-        let current_generation = read_profile_file(profile, "login_generation")?;
-        let saved = read_profile_file(profile, BASE_URL_FILE_NAME)?;
-        Ok(current_generation.as_deref() == generation
-            && saved
-                .map(|saved| -> Result<bool> {
-                    Ok(login_exchange::normalized_destination(&saved)?
-                        == login_exchange::normalized_destination(destination)?)
-                })
-                .transpose()?
-                .unwrap_or(true))
-    })();
-    let matches = match provenance {
-        Ok(matches) => matches,
+    let current_generation = match read_login_generation(profile) {
+        Ok(generation) => generation,
         Err(error) => return InFlightRefreshOutcome::Unavailable(error),
     };
-    if !matches {
+    if let Err(error) = validate_profile_destination(profile, destination) {
+        return match error.downcast_ref::<ProfileDestinationError>() {
+            Some(ProfileDestinationError::Mismatch) => {
+                InFlightRefreshOutcome::Skipped("login_or_destination_changed")
+            }
+            Some(ProfileDestinationError::Invalid) => InFlightRefreshOutcome::Configuration(error),
+            None => InFlightRefreshOutcome::Unavailable(error),
+        };
+    }
+    if current_generation.as_deref() != generation {
         return InFlightRefreshOutcome::Skipped("login_or_destination_changed");
     }
-    match read_profile_file(profile, "auth_kind") {
-        Ok(kind) if kind.as_deref() == Some("agent_key") => {
+    match agent_key::read_auth_kind(profile) {
+        Ok(agent_key::AuthKind::AgentKey) => {
             return InFlightRefreshOutcome::Skipped("agent_key");
         }
         Err(error) => return InFlightRefreshOutcome::Unavailable(error),
@@ -1039,15 +1177,13 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
         Ok(lock) => lock,
         Err(error) => return SessionRefresh::Network(error),
     };
-    let base_url = match auth.resolved_base_url().and_then(|base| {
-        validate_profile_destination(profile, &base)?;
-        Ok(base)
-    }) {
+    let base_url = match resolved_refresh_destination(auth) {
         Ok(base) => base,
-        Err(error) => return SessionRefresh::Network(error),
+        Err(error) if error.is::<RefreshUnavailable>() => return SessionRefresh::Network(error),
+        Err(error) => return SessionRefresh::Configuration(error),
     };
-    match read_profile_file(profile, "auth_kind") {
-        Ok(kind) if kind.as_deref() == Some("agent_key") => return SessionRefresh::Refreshed,
+    match agent_key::read_auth_kind(profile) {
+        Ok(agent_key::AuthKind::AgentKey) => return SessionRefresh::Refreshed,
         Err(error) => return SessionRefresh::Network(error),
         _ => {}
     }
@@ -1115,10 +1251,9 @@ pub async fn force_refresh_session(auth: &AuthArgs) -> Result<RefreshReport> {
     let _lock = acquire_refresh_lock_async(profile)
         .await
         .map_err(|_| RefreshUnavailable("Cannot lock this profile; retry later".into()))?;
-    if read_profile_file(profile, "auth_kind")
+    if agent_key::read_auth_kind(profile)
         .map_err(|error| RefreshUnavailable(format!("Session storage is unavailable: {error}")))?
-        .as_deref()
-        == Some("agent_key")
+        == agent_key::AuthKind::AgentKey
     {
         return Err(anyhow::Error::new(ReauthRequired {
             code: "agent_key_does_not_refresh",
@@ -1143,15 +1278,7 @@ pub async fn force_refresh_session(auth: &AuthArgs) -> Result<RefreshReport> {
                 .to_string(),
         }));
     }
-    let base_url = auth
-        .resolved_base_url()
-        .and_then(|base| {
-            validate_profile_destination(profile, &base)?;
-            Ok(base)
-        })
-        .map_err(|error| {
-            RefreshUnavailable(format!("Session destination is unavailable: {error}"))
-        })?;
+    let base_url = resolved_refresh_destination(auth)?;
     let client = build_credential_http_client_for_url(profile, &base_url)?;
     match exchange_refresh_token(&client, &base_url, &refresh_token).await {
         RefreshExchange::Renewed {
@@ -1192,20 +1319,58 @@ pub struct RefreshReport {
 /// Cross-process advisory lock for token rotation on one profile.
 pub(crate) struct RefreshLock(#[allow(dead_code)] std::fs::File);
 
-pub(crate) fn acquire_refresh_lock(profile: Option<&str>) -> Result<RefreshLock> {
-    try_refresh_lock(profile)?.ok_or_else(|| anyhow!("Profile refresh lock is busy; retry later"))
+#[derive(Debug, thiserror::Error)]
+#[error("Profile refresh lock timed out; retry later")]
+pub(crate) struct ProfileLockTimeout;
+
+const PROFILE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(65);
+const PROFILE_LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_PROFILE_LOCK_TIMEOUT: std::time::Duration;
 }
 
-pub(crate) async fn acquire_refresh_lock_async(profile: Option<&str>) -> Result<RefreshLock> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(65);
+fn profile_lock_timeout() -> std::time::Duration {
+    #[cfg(test)]
+    if let Ok(timeout) = TEST_PROFILE_LOCK_TIMEOUT.try_with(|timeout| *timeout) {
+        return timeout;
+    }
+    PROFILE_LOCK_TIMEOUT
+}
+
+pub(crate) fn acquire_refresh_lock(profile: Option<&str>) -> Result<RefreshLock> {
+    acquire_refresh_lock_with_timeout(profile, profile_lock_timeout())
+}
+
+fn acquire_refresh_lock_with_timeout(
+    profile: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<RefreshLock> {
+    let deadline = std::time::Instant::now() + timeout;
     loop {
         if let Some(lock) = try_refresh_lock(profile)? {
             return Ok(lock);
         }
-        if tokio::time::Instant::now() >= deadline {
-            bail!("Profile refresh lock timed out; retry later");
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(ProfileLockTimeout.into());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        std::thread::sleep(PROFILE_LOCK_POLL_INTERVAL.min(remaining));
+    }
+}
+
+pub(crate) async fn acquire_refresh_lock_async(profile: Option<&str>) -> Result<RefreshLock> {
+    let deadline = tokio::time::Instant::now() + profile_lock_timeout();
+    loop {
+        if let Some(lock) = try_refresh_lock(profile)? {
+            return Ok(lock);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(ProfileLockTimeout.into());
+        }
+        tokio::time::sleep(PROFILE_LOCK_POLL_INTERVAL.min(remaining)).await;
     }
 }
 

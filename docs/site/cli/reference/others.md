@@ -138,7 +138,10 @@ and destination under one lock. It ignores `--access-token`, `--access-token-env
 `credential_overrides_ignored` when present. It sends zero refresh requests and
 makes at most one 10-second `/sessions` lookup using the captured, locally valid
 access token. It never prompts for login. JSON is one envelope on every exit,
-including local storage errors and login-required results.
+including local storage errors and login-required results. Table output renders a
+human-readable field/value view with an action for any error. Invalid or mismatched
+refresh destinations are configuration errors (exit 1), rather than retryable
+refresh failures.
 Local diagnostics also work before a destination has been configured. If an
 otherwise eligible server lookup has no saved or explicit destination, it reports
 `server_check: unavailable` with `unavailable_reason: profile_destination_missing`.
@@ -189,7 +192,9 @@ preserving the saved login for a retry after storage is repaired.
 | `not_logged_in` | 3 | No saved access credential for an ordinary session command. Run `nyxid login`. |
 | `agent_key_does_not_refresh` | 3 | Agent Key profiles do not renew account sessions; authorize with `nyxid login --agent-key`. |
 | `refresh_unavailable` | 4 | Network/timeout, rotation conflict, indeterminate response/commit, lock, or credential storage failure. Retry; this does not diagnose session expiry. |
-| `profile_storage_error` | 1 | `session status` could not capture profile storage/destination. Fix storage or profile configuration. |
+| `profile_storage_error` | 1 | `session status` could not read profile storage. Fix storage and retry. |
+| `profile_destination_mismatch` | 1 | `session status` found an invalid destination or a destination that differs from the saved profile. Use the intended profile and a valid matching base URL. |
+| `profile_lock_timeout` | 4 | `session status` timed out waiting for another operation on the profile. Retry after that operation completes. |
 
 Compatibility for the 0.74.0 fix:
 

@@ -538,3 +538,116 @@ pub(crate) fn replace_login(
 ) -> Result<()> {
     replace_login_files(profile, write)
 }
+
+#[test]
+fn synchronous_profile_lock_waits_for_a_holder_then_succeeds() {
+    let _home = Home::new();
+    let holder = acquire_refresh_lock(None).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(holder);
+    });
+    let started = std::time::Instant::now();
+    let acquired = acquire_refresh_lock(None).unwrap();
+    assert!(started.elapsed() >= std::time::Duration::from_millis(150));
+    drop(acquired);
+    release.join().unwrap();
+}
+
+#[test]
+fn synchronous_profile_lock_reports_a_bounded_timeout() {
+    let _home = Home::new();
+    let _holder = acquire_refresh_lock(None).unwrap();
+    let result = acquire_refresh_lock_with_timeout(None, std::time::Duration::from_millis(50));
+    let error = result
+        .err()
+        .expect("the holder still owns the profile lock");
+    assert!(error.is::<ProfileLockTimeout>());
+    assert_eq!(
+        error.to_string(),
+        "Profile refresh lock timed out; retry later"
+    );
+}
+
+#[test]
+fn destination_configuration_errors_are_not_retryable_refresh_failures() {
+    let _home = Home::new();
+    runtime().block_on(async {
+        let server = MockServer::start().await;
+        Mock::given(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let mut auth = args(&server.uri());
+        seed(&auth, &jwt(1), &jwt(Utc::now().timestamp() + 3600));
+        for invalid in [false, true] {
+            auth.base_url = Some(if invalid {
+                "not a URL".into()
+            } else {
+                "https://another.example".into()
+            });
+            let error = ensure_session(&auth).await.unwrap_err();
+            assert!(error.is::<ProfileDestinationError>());
+            assert!(!error.is::<RefreshUnavailable>());
+            let error = force_refresh_session(&auth).await.unwrap_err();
+            assert!(error.is::<ProfileDestinationError>());
+            assert!(!error.is::<RefreshUnavailable>());
+            let outcome = refresh_captured_session(
+                &reqwest::Client::new(),
+                auth.profile.as_deref(),
+                auth.base_url.as_deref().unwrap(),
+                None,
+                "old-access",
+                true,
+            )
+            .await;
+            if invalid {
+                let error = outcome.access_token().unwrap_err();
+                assert!(error.is::<ProfileDestinationError>());
+                assert!(!error.is::<RefreshUnavailable>());
+            } else {
+                assert!(matches!(
+                    outcome,
+                    InFlightRefreshOutcome::Skipped("login_or_destination_changed")
+                ));
+            }
+        }
+        auth.base_url = Some(server.uri());
+        save_base_url_for(auth.profile.as_deref(), "invalid saved URL").unwrap();
+        let error = force_refresh_session(&auth).await.unwrap_err();
+        assert!(error.is::<ProfileDestinationError>());
+        server.verify().await;
+    });
+}
+
+#[test]
+fn saved_profile_helpers_share_auth_kind_destination_and_jwt_timestamps() {
+    let _home = Home::new();
+    runtime().block_on(async {
+        let auth = args("https://nyxid.example/");
+        seed(&auth, &jwt(1), &jwt(604801));
+        let snapshot = snapshot_saved_profile(&auth).await.unwrap();
+        assert!(!snapshot.agent);
+        assert_eq!(
+            jwt_iat_from_token(snapshot.refresh.as_deref().unwrap())
+                .unwrap()
+                .timestamp(),
+            1
+        );
+        assert!(jwt_iat_from_token("opaque").is_none());
+        assert!(
+            validate_profile_destination(auth.profile.as_deref(), "https://nyxid.example").is_ok()
+        );
+        let dir = token_dir_for_profile(auth.profile.as_deref()).unwrap();
+        std::fs::write(dir.join(agent_key::AUTH_KIND_FILE), "agent_key").unwrap();
+        std::fs::write(dir.join(agent_key::TOKEN_FILE), "agent-credential").unwrap();
+        let snapshot = snapshot_saved_profile(&auth).await.unwrap();
+        assert!(snapshot.agent);
+        assert_eq!(snapshot.access.as_deref(), Some("agent-credential"));
+        std::fs::write(dir.join(agent_key::AUTH_KIND_FILE), [0xff]).unwrap();
+        assert!(agent_key::read_auth_kind(auth.profile.as_deref()).is_err());
+        let error = snapshot_saved_profile(&auth).await.err().unwrap();
+        assert_eq!(error.code, "profile_storage_error");
+    });
+}

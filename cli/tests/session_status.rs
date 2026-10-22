@@ -61,3 +61,52 @@ async fn status_process_prints_one_json_envelope_on_exit_three_and_never_refresh
     assert_eq!(report["credential_overrides_ignored"], true);
     assert!(!String::from_utf8_lossy(&output.stderr).contains("refresh_token_expired"));
 }
+
+#[test]
+fn status_table_process_prints_a_human_readable_view_without_json() {
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_nyxid"))
+        .args(["session", "status", "--output", "table"])
+        .env("HOME", home.path())
+        .env_remove("NYXID_URL")
+        .env("NYXID_TELEMETRY", "off")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    let table = String::from_utf8(output.stderr).unwrap();
+    assert!(table.contains("Profile"));
+    assert!(table.contains("no_credentials"));
+    assert!(table.contains("refresh_token_not_found"));
+    assert!(table.contains("Run `nyxid login`"));
+    assert!(!table.contains("\"local_state\":"));
+}
+
+#[test]
+fn status_configuration_failure_prints_one_json_envelope_with_exit_one() {
+    for destination in ["https://different.example", "invalid URL"] {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".nyxid");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("base_url"), "https://saved.example").unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_nyxid"))
+            .args([
+                "session",
+                "status",
+                "--output",
+                "json",
+                "--base-url",
+                destination,
+            ])
+            .env("HOME", home.path())
+            .env_remove("NYXID_URL")
+            .env("NYXID_TELEMETRY", "off")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["error"], "profile_destination_mismatch");
+        assert_eq!(report["local_state"], "configuration_error");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("profile_destination_mismatch"));
+    }
+}

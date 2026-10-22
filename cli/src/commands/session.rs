@@ -100,7 +100,7 @@ async fn run_status(auth: &crate::cli::AuthArgs) -> Result<()> {
     let (report, exit) = saved_status(auth).await;
     match auth.output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
-        OutputFormat::Table => eprintln!("{}", serde_json::to_string_pretty(&report)?),
+        OutputFormat::Table => eprintln!("{}", render_status_table(&report)),
     }
     if exit == 0 {
         Ok(())
@@ -109,12 +109,37 @@ async fn run_status(auth: &crate::cli::AuthArgs) -> Result<()> {
     }
 }
 
-fn strict_read(dir: &std::path::Path, name: &str) -> Result<Option<String>> {
-    match std::fs::read_to_string(dir.join(name)) {
-        Ok(value) => Ok((!value.trim().is_empty()).then(|| value.trim().to_owned())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
+fn render_status_table(report: &Value) -> String {
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL_CONDENSED);
+    table.set_header(["Field", "Value"]);
+    for (label, key) in [
+        ("Profile", "profile"),
+        ("Auth kind", "auth_kind"),
+        ("Local state", "local_state"),
+        ("Access expiry", "access_expires_at"),
+        ("Refresh issued", "refresh_issued_at"),
+        ("Refresh expiry", "refresh_expires_at"),
+        ("Server check", "server_check"),
+        ("Session expiry", "session_expires_at"),
+        ("Renew by", "renew_by"),
+        ("Renew by source", "renew_by_source"),
+        ("Renewal usability", "renewal"),
+        ("Error", "error"),
+    ] {
+        table.add_row([label, report[key].as_str().unwrap_or("-")]);
     }
+    let action = match report["error"].as_str() {
+        Some("profile_lock_timeout") => "Retry after the other profile operation completes.",
+        Some("profile_destination_mismatch") => {
+            "Use the intended profile and a valid matching --base-url."
+        }
+        Some("profile_storage_error") => "Fix profile storage, then retry.",
+        Some(_) => "Run `nyxid login` to restore this saved session.",
+        None => "Refresh usability was not tested. Renew before the reported deadline.",
+    };
+    table.add_row(["Action", action]);
+    table.to_string()
 }
 
 pub(crate) async fn saved_status(auth: &crate::cli::AuthArgs) -> (Value, i32) {
@@ -130,38 +155,25 @@ pub(crate) async fn saved_status(auth: &crate::cli::AuthArgs) -> (Value, i32) {
         "credential_overrides_ignored": auth.access_token_env != "NYXID_ACCESS_TOKEN"
             || crate::auth::resolve_access_token_override(auth).is_some(),
     });
-    let snapshot = async {
-        let _lock = crate::auth::acquire_refresh_lock_async(auth.profile.as_deref()).await?;
-        let dir = crate::auth::token_dir_for_profile(auth.profile.as_deref())?;
-        let kind = strict_read(&dir, "auth_kind")?;
-        let agent = kind.as_deref() == Some("agent_key");
-        let access = strict_read(&dir, if agent { "token" } else { "access_token" })?;
-        let refresh = strict_read(&dir, "refresh_token")?;
-        let generation = strict_read(&dir, "login_generation")?;
-        let saved_destination = strict_read(&dir, "base_url")?;
-        let destination = auth.base_url.clone().or_else(|| saved_destination.clone());
-        if let Some(destination) = &destination {
-            crate::auth::login_exchange::normalized_destination(destination)?;
-        }
-        if let Some(saved) = &saved_destination {
-            anyhow::ensure!(
-                crate::auth::login_exchange::normalized_destination(saved)?
-                    == crate::auth::login_exchange::normalized_destination(
-                        destination
-                            .as_deref()
-                            .expect("saved destination is captured")
-                    )?,
-                "Profile destination differs"
-            );
-        }
-        Ok::<_, anyhow::Error>((agent, access, refresh, generation, destination))
-    }
-    .await;
-    let (agent, access, refresh, _generation, destination) = match snapshot {
-        Ok(value) => value,
-        Err(_) => {
-            report["error"] = "profile_storage_error".into();
-            return (report, 1);
+    let crate::auth::SavedProfileSnapshot {
+        agent,
+        access,
+        refresh,
+        generation: _generation,
+        destination,
+    } = match crate::auth::snapshot_saved_profile(auth).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            report["error"] = error.code.into();
+            report["message"] = error.cause.to_string().into();
+            report["local_state"] = match error.code {
+                "profile_destination_mismatch" => "configuration_error",
+                "profile_lock_timeout" => "unavailable",
+                _ => "storage_error",
+            }
+            .into();
+            report["skip_reason"] = report["local_state"].clone();
+            return (report, error.exit);
         }
     };
     if agent {
@@ -179,14 +191,7 @@ pub(crate) async fn saved_status(auth: &crate::cli::AuthArgs) -> (Value, i32) {
     .into();
     let access_exp = access.as_deref().and_then(jwt_exp_from_token);
     let refresh_exp = refresh.as_deref().and_then(jwt_exp_from_token);
-    let issued = refresh.as_deref().and_then(|token| {
-        use base64::Engine;
-        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(token.split('.').nth(1)?)
-            .ok()?;
-        let body: Value = serde_json::from_slice(&decoded).ok()?;
-        chrono::DateTime::from_timestamp(body["iat"].as_i64()?, 0)
-    });
+    let issued = refresh.as_deref().and_then(crate::auth::jwt_iat_from_token);
     let expired = refresh_exp.map(|expiry| expiry <= chrono::Utc::now());
     report["access_expires_at"] = serde_json::json!(access_exp);
     report["refresh_expires_at"] = serde_json::json!(refresh_exp);
@@ -455,6 +460,80 @@ mod status_tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{header, path},
     };
+    #[test]
+    fn status_distinguishes_destination_storage_and_lock_errors() {
+        let _home = Home::new();
+        runtime().block_on(async {
+            let mut auth = args("https://requested.example");
+            let profile = auth.profile.as_deref();
+            let dir = crate::auth::token_dir_for_profile(profile).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(crate::auth::BASE_URL_FILE_NAME),
+                "https://saved.example",
+            )
+            .unwrap();
+            let (report, exit) = saved_status(&auth).await;
+            assert_eq!(exit, 1);
+            assert_eq!(report["error"], "profile_destination_mismatch");
+            assert_eq!(report["local_state"], "configuration_error");
+
+            auth.base_url = Some("invalid URL".into());
+            let (report, exit) = saved_status(&auth).await;
+            assert_eq!(exit, 1);
+            assert_eq!(report["error"], "profile_destination_mismatch");
+
+            auth.base_url = Some("https://saved.example".into());
+            std::fs::create_dir(dir.join(crate::auth::agent_key::AUTH_KIND_FILE)).unwrap();
+            let (report, exit) = saved_status(&auth).await;
+            assert_eq!(exit, 1);
+            assert_eq!(report["error"], "profile_storage_error");
+            std::fs::remove_dir(dir.join(crate::auth::agent_key::AUTH_KIND_FILE)).unwrap();
+
+            let _holder = crate::auth::acquire_refresh_lock(profile).unwrap();
+            let (report, exit) = crate::auth::TEST_PROFILE_LOCK_TIMEOUT
+                .scope(std::time::Duration::from_millis(50), saved_status(&auth))
+                .await;
+            assert_eq!(exit, 4);
+            assert_eq!(report["error"], "profile_lock_timeout");
+            assert_eq!(report["local_state"], "unavailable");
+        });
+    }
+
+    #[test]
+    fn status_table_renders_fields_deadlines_and_recovery_action() {
+        let report = serde_json::json!({
+            "profile": "work", "auth_kind": "session", "local_state": "ok",
+            "access_expires_at": "2026-11-01T00:00:00Z",
+            "refresh_expires_at": "2026-11-07T00:00:00Z",
+            "server_check": "verified", "session_expires_at": "2026-11-30T00:00:00Z",
+            "renew_by": "2026-11-07T00:00:00Z",
+            "renew_by_source": "local_refresh_and_server_session", "renewal": "unknown"
+        });
+        let table = render_status_table(&report);
+        for expected in [
+            "Profile",
+            "work",
+            "Auth kind",
+            "session",
+            "Local state",
+            "Access expiry",
+            "Refresh expiry",
+            "Server check",
+            "verified",
+            "Session expiry",
+            "Renew by",
+            "local_refresh_and_server_session",
+            "Refresh usability was not tested",
+        ] {
+            assert!(table.contains(expected), "missing {expected}: {table}");
+        }
+        assert!(!table.contains("\"profile\":"));
+        let report = serde_json::json!({ "error": "profile_lock_timeout" });
+        let table = render_status_table(&report);
+        assert!(table.contains("Retry after the other profile operation completes"));
+    }
+
     #[test]
     fn saved_status_decision_table_and_cross_products_never_refresh() {
         let _home = Home::new();
