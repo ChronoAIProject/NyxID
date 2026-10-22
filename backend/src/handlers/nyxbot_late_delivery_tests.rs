@@ -762,6 +762,7 @@ async fn checking_notice_arrives_after_five_seconds_without_consuming_final_answ
     turn.asked_from = Some(origin.clone());
     turn.channel_event_id = Some(f.event.id.clone());
     turn.external_check_started = true;
+    let began = std::time::Instant::now();
     turn.started_at = Utc::now();
     f.event.turn_id = Some(turn.turn_id.clone());
     f.state
@@ -788,7 +789,6 @@ async fn checking_notice_arrives_after_five_seconds_without_consuming_final_answ
         f.state.clone(),
         crate::test_utils::test_auth_user(OWNER),
     );
-    let began = std::time::Instant::now();
     let task = tokio_util::task::AbortOnDropHandle::new(egress.checking_notice(&row).unwrap());
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(f.gateway.received_requests().await.unwrap().is_empty());
