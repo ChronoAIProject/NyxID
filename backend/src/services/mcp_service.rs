@@ -59,6 +59,18 @@ pub enum McpToolSource {
 }
 
 impl McpToolSource {
+    pub fn catalog_id(&self) -> Option<&str> {
+        match self {
+            Self::Platform {
+                downstream_service_id,
+            } => Some(downstream_service_id),
+            Self::UserManaged {
+                catalog_service_id, ..
+            } => catalog_service_id.as_deref(),
+            Self::Internal => None,
+        }
+    }
+
     pub fn is_user_service(&self) -> bool {
         matches!(self, McpToolSource::UserManaged { .. })
     }
@@ -821,6 +833,11 @@ pub enum NodeScope<'a> {
 pub enum ServiceScope<'a> {
     Unrestricted,
     Allowed(&'a [String]),
+    /// Keep connection and catalog grants in their distinct identity namespaces.
+    Granted {
+        user_service_ids: &'a [String],
+        platform_service_ids: &'a [String],
+    },
     /// All reachable connections, with these exact identities preferred when
     /// a slug collision is resolved.
     Preferring(&'a [String]),
@@ -838,6 +855,16 @@ impl ServiceScope<'_> {
             ServiceScope::Allowed(ids) => {
                 service.source.is_user_service() && ids.iter().any(|id| id == &service.service_id)
             }
+            ServiceScope::Granted {
+                user_service_ids,
+                platform_service_ids,
+            } => match &service.source {
+                McpToolSource::UserManaged { .. } => user_service_ids.contains(&service.service_id),
+                McpToolSource::Platform { .. } => {
+                    platform_service_ids.contains(&service.service_id)
+                }
+                McpToolSource::Internal => false,
+            },
             ServiceScope::Preferring(_) => true,
             ServiceScope::Organization { access } => matches!(
                 &service.source,
@@ -851,7 +878,9 @@ impl ServiceScope<'_> {
     fn is_restricted(&self) -> bool {
         matches!(
             self,
-            ServiceScope::Allowed(_) | ServiceScope::Organization { .. }
+            ServiceScope::Allowed(_)
+                | ServiceScope::Granted { .. }
+                | ServiceScope::Organization { .. }
         )
     }
 
@@ -859,6 +888,9 @@ impl ServiceScope<'_> {
         match self {
             ServiceScope::Unrestricted | ServiceScope::Preferring(_) => true,
             ServiceScope::Allowed(ids) => ids.iter().any(|id| id == &service.id),
+            ServiceScope::Granted {
+                user_service_ids, ..
+            } => user_service_ids.contains(&service.id),
             ServiceScope::Organization { access } => {
                 service.user_id == access.owner() && access.allows_service(service)
             }
@@ -3928,6 +3960,19 @@ impl PreparedProxyCall {
         }))
     }
 
+    /// Binds the final materialized request without persisting its contents.
+    pub(crate) fn guest_digest(&self, service: &str, endpoint: &McpToolEndpoint) -> String {
+        use sha2::{Digest, Sha256};
+        canonical_sha256(serde_json::json!({
+            "service": service, "endpoint": endpoint.endpoint_id,
+            "contract": endpoint_contract_digest(endpoint),
+            "method": self.method.as_str(), "path": self.path, "query": self.query,
+            "headers": self.parameter_headers, "server_headers": self.server_owned_headers,
+            "content_type": self.body_content_type,
+            "body": hex::encode(Sha256::digest(self.body.as_deref().unwrap_or_default())),
+        }))
+    }
+
     pub fn operation_descriptor(&self) -> operation_descriptor::OperationDescriptor {
         let mut descriptor = operation_descriptor::build_mcp_descriptor(
             self.method.as_str(),
@@ -5074,7 +5119,11 @@ pub fn execute_tool_response<'a>(
         if let Some(scopes) = exec_ctx.operation_scopes {
             prepared.authorize_agent_operations(scopes, service, endpoint)?;
         }
-        let http_client = if scoped_execution(exec_ctx, service) {
+        let http_client = if exec_ctx
+            .assistant_chat
+            .is_some_and(|chat| chat.guest_policy_enabled())
+            || scoped_execution(exec_ctx, service)
+        {
             proxy_service::no_redirect_http_client()
         } else {
             http_client
@@ -5576,15 +5625,18 @@ async fn execute_tool_resolved_inner(
             )?;
         }
     }
-    let http_client = if scoped_execution(exec_ctx, service)
-        && super::resource_adapter::source(
-            service,
-            endpoint,
-            &target,
-            node_route.is_some(),
-            catalog_service_slug,
-        )
-        .is_none()
+    let http_client = if exec_ctx
+        .assistant_chat
+        .is_some_and(|chat| chat.guest_policy_enabled())
+        || (scoped_execution(exec_ctx, service)
+            && super::resource_adapter::source(
+                service,
+                endpoint,
+                &target,
+                node_route.is_some(),
+                catalog_service_slug,
+            )
+            .is_none())
     {
         proxy_service::no_redirect_http_client()
     } else {
@@ -6138,7 +6190,7 @@ async fn execute_tool_resolved_inner(
                 &path,
                 &delegated,
             )?;
-            let prepared = proxy_service::prepare_node_request(
+            let mut prepared = proxy_service::prepare_node_request(
                 &target,
                 &path,
                 query.as_deref(),
@@ -6148,6 +6200,10 @@ async fn execute_tool_resolved_inner(
                 exec_ctx.caller_token,
                 &server_owned_headers,
             )?;
+            if assistant_chat.as_ref().is_some_and(|chat| chat.guest_policy_enabled()) {
+                prepared.headers.retain(|(name, _)| !name.eq_ignore_ascii_case(super::node_ws_manager::GUEST_NO_REDIRECT_HEADER));
+                prepared.headers.push((super::node_ws_manager::GUEST_NO_REDIRECT_HEADER.into(), "1".into()));
+            }
             let node_request = NodeProxyRequest {
                 target_id: target.target_id.clone(),
                 request_id: uuid::Uuid::new_v4().to_string(),
@@ -6187,6 +6243,9 @@ async fn execute_tool_resolved_inner(
                     None
                 };
 
+                if assistant_chat.as_ref().is_some_and(|chat| chat.guest_policy_enabled()) {
+                    node_ws_manager.require_guest_no_redirect(nid).await?;
+                }
                 if target.target_id.is_some() {
                     node_ws_manager
                         .require_http_signature_v2(nid, signing_secret.is_some())
@@ -9406,10 +9465,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn guest_policy_service_scope_keeps_connection_and_catalog_grants_separate() {
+        let mut platform = make_service("catalog", "Platform", "platform", vec![]);
+        let mut connection = make_service("connection", "Connection", "connection", vec![]);
+        connection.source = McpToolSource::UserManaged {
+            user_service_id: "connection".into(),
+            catalog_service_id: Some("catalog".into()),
+            effective_owner_id: "owner".into(),
+            node_id: None,
+            has_server_credential: true,
+        };
+        let user_ids = vec!["connection".into()];
+        let catalog_ids = vec!["catalog".into()];
+        let scope = ServiceScope::Granted {
+            user_service_ids: &user_ids,
+            platform_service_ids: &catalog_ids,
+        };
+        assert!(scope.is_restricted());
+        assert!(scope.permits(&connection));
+        assert!(scope.permits(&platform));
+        platform.service_id = "connection".into();
+        connection.service_id = "catalog".into();
+        assert!(!scope.permits(&platform));
+        assert!(!scope.permits(&connection));
+        platform.source = McpToolSource::Internal;
+        platform.service_id = "catalog".into();
+        assert!(!scope.permits(&platform));
+    }
+
     fn test_chat(
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            guest_policy: Default::default(),
             channel_adapter_origin: None,
             invocation_controlled: false,
             invocation_id: None,

@@ -1215,8 +1215,12 @@ starts a fresh session. Ordinary continuations on the same session do not repeat
 those events and decisions.
 
 Owner-to-guest **and guest-to-owner** transitions start fresh sessions. Guest
-stable instructions include guest policy, but no owner memory, skills or machine
-guidance. Guest input excludes decisions, pending owner events, roster, other
+policy metadata is never appended to stable instructions. With the policy OFF
+(the default), saved `share_skills` has no effect and skill guidance/preloads stay
+private. With both `guest_policy.enabled` and `share_skills` true, guests receive
+the specialist's skill guidance and selected preloads; those instruction bytes
+change the fingerprint. Owner memory and machine guidance remain private.
+Guest input excludes decisions, pending owner events, roster, other
 threads and voice results; the sender note is visible every turn, including a
 resumed guest session. A guest recap contains only channel user/assistant messages
 that the chat already saw, never private app or event messages. Consecutive guest

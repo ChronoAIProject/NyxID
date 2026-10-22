@@ -144,3 +144,43 @@ the shared authorization and cancellation checks.
 For HTTP request/response fields, bounded reply limits, and the mandatory
 rollout and recovery contract, see the
 [owner CLI/API reference](https://github.com/ChronoAIProject/NyxID/blob/main/docs/chat/09-owner-cli-api.md).
+
+
+## Configure specialist guest access
+
+```bash
+nyxid nyxbot guest-access show researcher --output json
+nyxid nyxbot guest-access set @researcher --preset owner-like
+nyxid nyxbot guest-access set SPECIALIST_ID --enabled true --default read --escalation ask-owner \
+  --share-skills false --service github=use --service slack=default
+```
+
+An agent can be selected by ID, name or `@handle`; ambiguous names fail. Commands
+use the selected first-party human profile without credential fallback. Organization specialists reject guest-policy writes. Table output shows the effective policy
+and each granted service's access/source; JSON returns the server view.
+
+`--default read|use` covers existing and future grants without an override; `all`
+is only a named `--service SLUG=all` override. Repeat `--service SLUG=read|use|all|default`
+to change levels; `default` clears an override. The `owner-like` preset enables the policy with use,
+ask-owner and shared skills; explicit flags override preset values. Empty updates
+and duplicate service names fail.
+
+Ask-owner suspends a foreground MCP service call for one explicit decision. It
+never uses or creates reusable grants, and cannot widen an operation allowlist.
+Guests retain no memory, authoring, machines, SSH or account-tool authority.
+Guest policy applies to personal specialists. Organization specialists do not
+answer guests and return that server message (HTTP 403) for guest-setting writes.
+With the policy ON and ask-owner selected, raw proxy/LLM escalation and durable
+async watches return `guest_escalation_unavailable` (12104). Policy-ON WebSockets require `all` and all
+existing scope/approval gates; read/use return 12104 with ask-owner, or the legacy
+scope refusal with refuse. Upgrade every backend replica before
+enabling the policy on any specialist.
+
+Guest policy is OFF by default. `--enabled true|false` selects the behavior without
+erasing saved settings. OFF keeps legacy per-service levels (missing = use),
+refusals, redirects, WebSockets and private skills. Changing other flags never
+implicitly enables it. `--preset owner-like` explicitly enables the policy; an
+explicit `--enabled false` overrides the preset. `show` and JSON output distinguish
+saved `guest_policy` from `effective_guest_policy`. Upgrade all API, execution and
+approval replicas before enabling any specialist; node upgrades are required only
+for policy-ON guest HTTP.

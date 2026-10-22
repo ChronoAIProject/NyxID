@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
+  assistantGuestAccessViewSchema,
+  type AssistantGuestPolicyPatch,
   nyxAgentChannelThreadListSchema,
   nyxAgentChannelThreadStoppedSchema,
   assistantAgentCreatedSchema,
@@ -63,6 +65,24 @@ export const nyxBotApi = {
   /** Replaces a specialist's grants. */
   async setGrants(id: string, body: AssistantAgentGrantsRequest, authorityGuard?: () => void) {
     await assistantJson(`${agentPath(id)}/grants`, { method: "PUT", body, authorityGuard });
+  },
+  async guestAccess(id: string) {
+    return assistantGuestAccessViewSchema.parse(
+      await assistantJson(`${agentPath(id)}/guest-access`),
+    );
+  },
+  async setGuestAccess(
+    id: string,
+    body: AssistantGuestPolicyPatch,
+    authorityGuard?: () => void,
+  ) {
+    return assistantGuestAccessViewSchema.parse(
+      await assistantJson(`${agentPath(id)}/guest-access`, {
+        method: "PATCH",
+        body,
+        authorityGuard,
+      }),
+    );
   },
   async destroyAgent(id: string) {
     return assistantAgentDestroyedSchema.parse(

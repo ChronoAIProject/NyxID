@@ -105,3 +105,22 @@ describe("toAssistantApprovalEntry", () => {
     expect(entry.block.body).toBe('{"repo":"nyxid"}');
   });
 });
+
+it("marks a guest request and refuses remembered authority even on a grant-mode row", () => {
+  const guest = {
+    platform: "telegram",
+    chat_title: "Shared chat",
+    sender_name: "Visitor",
+    agent_name: "researcher",
+  };
+  const entry = toAssistantApprovalEntry(
+    request({ approval_mode: "grant", guest }),
+    86400,
+  );
+  expect(entry.block.approval_mode).toBe("per_request");
+  expect(entry.block.grant_duration_sec).toBeNull();
+  expect(entry.block.body).toContain(
+    "Guest request: Visitor via telegram in Shared chat",
+  );
+  expect(entry.block.guest).toEqual(guest);
+});

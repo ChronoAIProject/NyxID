@@ -126,6 +126,26 @@ beforeEach(() => {
 });
 
 describe("ApprovalHistoryPage", () => {
+  it.each([0, 1])("marks guest requests and confirms a single use on approval surface %i", async (surface) => {
+    fixtures.requests = [makeRequest({
+      approval_mode: "grant",
+      guest: { platform: "telegram", chat_title: "Project chat", sender_name: "Guest", agent_name: "researcher" },
+    })];
+    fixtures.total = 1;
+    render(<ApprovalHistoryPage />);
+    expect(screen.getAllByText("Guest request: Guest via telegram in Project chat · researcher")).toHaveLength(2);
+    expect(screen.queryByText("coding-agent")).not.toBeInTheDocument();
+    const triggers = screen.getAllByRole("button", { name: "Approve" });
+    expect(triggers).toHaveLength(2);
+    await userEvent.click(triggers[surface]!);
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("This approval applies only to the current request.");
+    expect(dialog).not.toHaveTextContent("reusable approval grant");
+    expect(within(dialog).queryByRole("combobox")).not.toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    expect(mockDecideMutateAsync).toHaveBeenCalledWith({ requestId: "req-1", approved: true });
+  });
+
   it("can discover a new request after an empty page and refresh its expiry", async () => {
     const view = render(<ApprovalHistoryPage />);
     expect(screen.getByText("No Approval Requests")).toBeInTheDocument();

@@ -5,6 +5,7 @@ import {
   assistantGroupMessagesSchema,
   assistantGroupPostedSchema,
   assistantGroupSchema,
+  assistantGuestAccessViewSchema,
   type AssistantGroup,
 } from "@/schemas/assistant-nyxagent";
 
@@ -269,4 +270,50 @@ describe("NyxAgent fixture agent display name and persona", () => {
     const nyx = await call("PATCH", `/agents/${nyxbot}`, { display_name: "Nyx" });
     expect(nyx.body).toMatchObject({ name: "NyxBot", display_name: "Nyx" });
   });
+});
+
+
+it("guest policy fixtures preserve explicit levels, clear defaults, and survive reload", async () => {
+  const { researcher, nyxbot } = await agentIds();
+  const endpoint = `/agents/${researcher}/guest-access`;
+  expect((await call("PATCH", `/agents/${nyxbot}/guest-access`, { default_access: "read" })).status).toBe(400);
+  expect((await call("PATCH", endpoint, { default_access: "all" })).status).toBe(400);
+  expect((await call("PATCH", endpoint, { services: { ungranted: "all" } })).status).toBe(400);
+  const updated = await call("PATCH", endpoint, {
+    enabled: true, default_access: "read", escalation: "ask_owner", share_skills: true,
+    services: { github: "use" },
+  });
+  const view = assistantGuestAccessViewSchema.parse(updated.body);
+  expect(view.services.github).toEqual({ access: "use", source: "explicit" });
+  fixture = new NyxAgentHttpFixtures();
+  expect((await call("GET", endpoint)).body).toEqual(updated.body);
+  const cleared = await call("PATCH", endpoint, { services: { github: "default" } });
+  expect(assistantGuestAccessViewSchema.parse(cleared.body)).toMatchObject({
+    guest_policy: { default_access: "read", escalation: "ask_owner", share_skills: true },
+    services: { github: { access: "read", source: "default" } },
+  });
+});
+
+it("grants fixtures clear explicit guest levels in the grants request", async () => {
+  const { researcher } = await agentIds();
+  const grants = `/agents/${researcher}/grants`;
+  expect((await call("PUT", grants, { services: ["github"], account_read: false, guest_access: { github: "all" } })).status).toBe(200);
+  expect((await call("PUT", grants, { services: ["github"], account_read: false, guest_access: { github: "default" } })).status).toBe(200);
+  const view = assistantGuestAccessViewSchema.parse((await call("GET", `/agents/${researcher}/guest-access`)).body);
+  expect(view.services.github).toEqual({ access: "use", source: "default" });
+});
+
+it("guest policy fixture distinguishes dormant saved and effective settings", async () => {
+  const { researcher } = await agentIds();
+  const endpoint = `/agents/${researcher}/guest-access`;
+  const updated = assistantGuestAccessViewSchema.parse((await call("PATCH", endpoint, {
+    default_access: "read", escalation: "ask_owner", share_skills: true,
+  })).body);
+  expect(updated.guest_policy).toEqual({ enabled: false, default_access: "read", escalation: "ask_owner", share_skills: true });
+  expect(updated.effective_guest_policy).toEqual({ enabled: false, default_access: "use", escalation: "refuse", share_skills: false });
+  expect(updated.services.github?.access).toBe("use");
+  const enabled = assistantGuestAccessViewSchema.parse((await call("PATCH", endpoint, { enabled: true })).body);
+  expect(enabled.services.github?.access).toBe("read");
+  expect(enabled.effective_guest_policy).toEqual(enabled.guest_policy);
+  expect(assistantGuestAccessViewSchema.parse((await call("PATCH", endpoint, { share_skills: false })).body).guest_policy.enabled).toBe(true);
 });

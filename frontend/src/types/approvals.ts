@@ -53,7 +53,15 @@ export interface TelegramDisconnectResponse {
   readonly message: string;
 }
 
+export interface GuestApprovalContext {
+  readonly platform: string;
+  readonly chat_title: string;
+  readonly sender_name: string;
+  readonly agent_name: string;
+}
+
 export interface ApprovalRequestItem {
+  readonly guest?: GuestApprovalContext | null;
   readonly id: string;
   readonly service_name: string;
   readonly service_slug: string;

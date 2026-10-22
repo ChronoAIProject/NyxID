@@ -351,17 +351,21 @@ pub fn schema(name: &str) -> Value {
             vec!["subagent", "service_id", "selection"],
         ),
         "set_guest_access" => (
-            json!({"subagent": subagent,
+            json!({
+                "enabled": {"type": "boolean", "description": "Enable the specialist guest policy; OFF preserves legacy guest access and keeps other settings dormant"},
+                "default": {"type": "string", "enum": ["read", "use"], "description": "Default for all current and future granted services without an override"},
+                "escalation": {"type": "string", "enum": ["refuse", "ask_owner"], "description": "Ask the owner to approve each beyond-level or approval-gated guest service call once"},
+                "share_skills": {"type": "boolean", "description": "Share skill guidance and selected preloads; never memory or authoring"},"subagent": subagent,
                 "services": {"type": "array", "maxItems": 32, "items": string(200),
                     "description": "The specialist's services (slugs or IDs); omit for all \
                     of them (read or use only)"},
-                "access": {"type": "string", "enum": ["read", "use", "all"],
+                "access": {"type": "string", "enum": ["read", "use", "all", "default"],
                     "description": "read: guests only look things up; use (the default): \
                     guests look things up, create and act (send, turn on), but never change or \
                     delete what exists (edit a sheet, doc, page or event, delete a file); all: \
                     guests may do everything the specialist may, editing and deleting \
                     included"}}),
-            vec!["subagent", "access"],
+            vec!["subagent"],
         ),
         "decide_permission" => (
             json!({
@@ -623,7 +627,7 @@ pub(crate) fn description(name: &str) -> &'static str {
         }
         "list_subagents" => {
             "List your specialists with status, grants, what guests may do with each service \
-            (guest_access) and pending requests."
+            (guest_access), their defaults, escalation and shared skills (guest_policy), and pending requests."
         }
         "read_subagent" => "Read a specialist's recent home-thread messages (bounded excerpts).",
         "grant_subagent" => {
@@ -679,9 +683,11 @@ pub(crate) fn description(name: &str) -> &'static str {
             \"let the group edit the office sheet\" (all) or \"guests may only look things up\" \
             (read). The default, use, lets guests look things up, create and act, but never \
             change or delete what exists; all (edit and delete too) is set service by \
-            service. Operations the \
-            user put behind approval stay the user's at every level. Only services granted to \
-            the specialist; the rest come back in not_set."
+            service. Set default (read/use) for current and future services without overrides; \
+            access=default clears named overrides. enabled=true activates the policy; OFF keeps legacy guest behavior and saved settings dormant. escalation=ask_owner flags beyond-level and \
+            approval-gated service calls for a single-use owner decision. share_skills includes \
+            guidance and selected preloads, never memory or authoring. Only granted services; \
+            non-service owner tools are never escalated."
         }
         "decide_permission" => {
             "Allow or deny a specialist's pending permission request. Allow only what fulfils \
@@ -866,6 +872,23 @@ pub fn validate(name: &str, args: &Value) -> AppResult<()> {
     for (key, value) in object {
         let spec = properties.get(key).ok_or_else(invalid)?;
         if !matches_spec(value, spec) {
+            if name == "set_guest_access" {
+                let choices = spec["enum"]
+                    .as_array()
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" or ")
+                    })
+                    .or_else(|| (spec["type"] == "boolean").then(|| "true or false".to_owned()));
+                if let Some(choices) = choices {
+                    return Err(AppError::ValidationError(format!(
+                        "Invalid {key}; use {choices}"
+                    )));
+                }
+            }
             return Err(invalid());
         }
     }
@@ -958,6 +981,44 @@ fn matches_spec_type(value: &Value, spec: &Value, kind: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_policy_schema_allows_defaults_and_named_override_clearing() {
+        let spec = schema("set_guest_access");
+        assert_eq!(spec["required"], json!(["subagent"]));
+        assert_eq!(
+            spec["properties"]["default"]["enum"],
+            json!(["read", "use"])
+        );
+        assert_eq!(
+            spec["properties"]["escalation"]["enum"],
+            json!(["refuse", "ask_owner"])
+        );
+        assert_eq!(spec["properties"]["share_skills"]["type"], "boolean");
+        assert_eq!(
+            spec["properties"]["access"]["enum"],
+            json!(["read", "use", "all", "default"])
+        );
+    }
+
+    #[test]
+    fn guest_policy_validation_reports_the_invalid_field_before_dispatch() {
+        for (field, value, expected) in [
+            ("default", json!("all"), "read or use"),
+            ("escalation", json!("invalid"), "refuse or ask_owner"),
+            ("access", json!("invalid"), "read or use or all or default"),
+            ("share_skills", json!("true"), "true or false"),
+            ("enabled", json!("true"), "true or false"),
+        ] {
+            let error = validate(
+                "set_guest_access",
+                &json!({"subagent":"helper", field:value}),
+            )
+            .unwrap_err();
+            assert!(matches!(error, AppError::ValidationError(message)
+                if message == format!("Invalid {field}; use {expected}")));
+        }
+    }
 
     #[test]
     fn machine_capabilities_schema_accepts_optional_modes_and_login_selection() {

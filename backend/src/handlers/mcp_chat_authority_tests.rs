@@ -1439,6 +1439,8 @@ async fn mark_guest(f: &Fixture, guest: bool) {
 #[tokio::test]
 async fn nyxbot_guest_turns_call_no_tools() {
     let f = orchestrator_fixture("chat_mcp_guest_nyxbot").await;
+    f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(doc! {"_id": &f.chat.agent_id}, doc! {"$set": {"guest_policy": {"enabled":true,"default_access":"use", "escalation":"ask_owner", "share_skills":true}}}).await.unwrap();
     mark_guest(&f, true).await;
     let auth = authenticate(&f).await;
     assert!(auth.chat.as_ref().unwrap().guest);
@@ -1472,12 +1474,13 @@ async fn nyxbot_guest_turns_call_no_tools() {
     assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
 }
 
-/// A specialist's turn for someone other than the owner only discovers and
-/// reads: account, team, memory, connection and Oracle tools and every
-/// service change are refused, whichever way they are called.
+/// Specialist guests retain no account, team, memory, connection, Oracle or
+/// SSH authority even when service escalation and shared skills are enabled.
 #[tokio::test]
 async fn specialist_guest_turns_never_use_owner_tools_or_ssh() {
     let f = fixture("chat_mcp_guest").await;
+    f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(doc! {"_id": &f.chat.agent_id}, doc! {"$set": {"guest_policy": {"enabled":true,"default_access":"use", "escalation":"ask_owner", "share_skills":true}}}).await.unwrap();
     mark_guest(&f, true).await;
     let auth = authenticate(&f).await;
     assert!(auth.chat.as_ref().unwrap().guest);
@@ -1489,7 +1492,20 @@ async fn specialist_guest_turns_never_use_owner_tools_or_ssh() {
         ),
         ("nyxid__post_to_chat", json!({"chat_id": "c", "text": "hi"})),
         ("nyx__connect_service", json!({"service": "github"})),
+        ("nyx__wait_for_connection", json!({"link_id": "link"})),
         ("nyx__oracle_pools", json!({})),
+        ("nyx__oracle_ask", json!({"pool": "pool", "prompt": "work"})),
+        ("nyx__machine_list", json!({})),
+        (
+            "nyx__machine_exec",
+            json!({"machine": "machine", "command": "ls"}),
+        ),
+        ("nyx__saved_logins", json!({})),
+        (
+            "nyx__machine_fill_login",
+            json!({"machine": "machine", "login": "login"}),
+        ),
+        ("nyx__ssh_exec", json!({"service": "ssh", "command": "ls"})),
     ] {
         let refused = result(direct_call(&f, &auth, name, args).await, true).await;
         assert_eq!(refused["error"], "owner_only", "{name}: {refused}");
@@ -1548,8 +1564,8 @@ async fn specialist_guest_turns_never_use_owner_tools_or_ssh() {
 
 /// A specialist's guest turns use its granted services as far as the owner
 /// lets guests (read, use without changing or deleting, or all), refused before anything
-/// is sent, and never ask the owner to approve or run on the owner's
-/// approvals: a guest's request would look like the owner's.
+/// is sent. The legacy/default policy never asks the owner to approve or
+/// runs on the owner's reusable approvals.
 #[tokio::test]
 async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them() {
     let f = fixture("chat_mcp_guest_calls").await;
@@ -5182,4 +5198,1999 @@ async fn invocation_cancel_during_approval_wait_denies_direct_meta_and_http_disp
         server.abort();
         f.state.db.drop().await.unwrap();
     }
+}
+
+async fn guest_policy_fixture(
+    name: &str,
+) -> (
+    Fixture,
+    String,
+    String,
+    Arc<AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    let f = fixture(name).await;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let app = Router::new().route(
+        "/{*path}",
+        any(move |uri: axum::http::Uri| {
+            count.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if uri.path() == "/redirect" || uri.query() == Some("guest_redirect=1") {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [("location", "/redirect-followed")],
+                        "",
+                    )
+                        .into_response()
+                } else {
+                    Json(json!({"ok":true})).into_response()
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "guest-policy",
+        &format!("http://{}", listener.local_addr().unwrap()),
+    )
+    .await;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    crate::services::assistant_team_service::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        crate::services::assistant_team_service::GrantChange::Add(
+            crate::models::assistant_agent::AgentGrants {
+                service_ids: vec![service.clone()],
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    crate::services::notification_service::get_or_create_channel(&f.state.db, &f.owner)
+        .await
+        .unwrap();
+    f.state.db.collection::<bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
+        .update_one(doc! {"user_id": &f.owner}, doc! {"$set": {"approval_required": false, "approval_timeout_secs": 10_i32}, "$setOnInsert":{"_id": uuid::Uuid::new_v4().to_string(), "telegram_enabled": false, "push_enabled": false}}).upsert(true).await.unwrap();
+    f.state.db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id": &f.row.id}, doc! {"$set": {"guest_turn": true, "channel": {
+            "nyxbot_channel_id": "guest-channel", "partition":"guest-thread", "platform":"telegram"
+        }}}).await.unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {"guest_policy.enabled": true}},
+        )
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let services = load_all_services_for_meta_tools(&f.state, &auth)
+        .await
+        .unwrap();
+    let selected = services.iter().find(|s| s.service_id == service).unwrap();
+    let tool = format!("{}__{}", selected.service_slug, selected.endpoints[0].name);
+    (f, service, tool, hits, server)
+}
+
+async fn next_guest_request(f: &Fixture) -> crate::models::approval_request::ApprovalRequest {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(request) = f
+                .state
+                .db
+                .collection::<crate::models::approval_request::ApprovalRequest>(
+                    crate::models::approval_request::COLLECTION_NAME,
+                )
+                .find_one(doc! {"guest.conversation_id": &f.row.id, "status":"pending"})
+                .await
+                .unwrap()
+            {
+                break request;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("guest approval was created")
+}
+
+/// UUID proxy routes address the catalog; the granted connection has a separate ID.
+async fn guest_connection_catalog(f: &Fixture, connection: &str) -> String {
+    let row = f
+        .state
+        .db
+        .collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": connection})
+        .await
+        .unwrap()
+        .unwrap();
+    let endpoint = f
+        .state
+        .db
+        .collection::<crate::models::user_endpoint::UserEndpoint>(
+            crate::models::user_endpoint::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": &row.endpoint_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    catalog.id = uuid::Uuid::new_v4().to_string();
+    catalog.slug.clone_from(&row.slug);
+    catalog.base_url = endpoint.url;
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": connection},
+            doc! {"$set": {"catalog_service_id": &catalog.id}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_endpoint::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.endpoint_id},
+            doc! {"$set": {"catalog_service_id": &catalog.id}},
+        )
+        .await
+        .unwrap();
+    catalog.id
+}
+
+async fn guest_catalog_endpoints(f: &Fixture, catalog_id: &str) {
+    use crate::models::service_endpoint::ServiceEndpoint;
+    for (name, method) in [
+        ("read", "GET"),
+        ("create", "POST"),
+        ("change", "PATCH"),
+        ("delete", "DELETE"),
+    ] {
+        let row: ServiceEndpoint = bson::from_document(
+            doc! {"_id":uuid::Uuid::new_v4().to_string(),"service_id":catalog_id,
+            "name":name,"method":method,"path":"/one","is_active":true,"publication":"published",
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()},
+        )
+        .unwrap();
+        f.state
+            .db
+            .collection(crate::models::service_endpoint::COLLECTION_NAME)
+            .insert_one(row)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn guest_policy_raw_approval_preserves_legacy_refusal_and_marks_unavailable_escalation() {
+    use crate::errors::AppError;
+    use crate::services::agent_operation_scope_service::check_guest_approval;
+    use crate::services::approval_service::ApprovalOutcome;
+    let f = boxed_chat_fixture("guest_raw_approval").await;
+    mark_guest(&f, true).await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$unset": {"guest_policy": ""}},
+        )
+        .await
+        .unwrap();
+    for ask_owner in [false, true] {
+        if ask_owner {
+            f.state
+                .db
+                .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id": &f.chat.agent_id},
+                    doc! {"$set": {"guest_policy.enabled": true, "guest_policy.escalation": "ask_owner"}},
+                )
+                .await
+                .unwrap();
+        }
+        let auth = authenticate(&f).await;
+        let chat = auth.chat.as_ref().unwrap();
+        for outcome in [
+            ApprovalOutcome::Allowed { required: true },
+            ApprovalOutcome::Denied,
+        ] {
+            let error = check_guest_approval(true, Some(chat), &outcome).unwrap_err();
+            if ask_owner {
+                assert!(matches!(error, AppError::GuestEscalationUnavailable));
+            } else {
+                assert!(matches!(error, AppError::ApiKeyScopeForbidden(_)));
+            }
+            check_guest_approval(false, Some(chat), &outcome).unwrap();
+        }
+        check_guest_approval(
+            true,
+            Some(chat),
+            &ApprovalOutcome::Allowed { required: false },
+        )
+        .unwrap();
+    }
+    assert!(matches!(
+        check_guest_approval(true, None, &ApprovalOutcome::Denied),
+        Err(AppError::ApiKeyScopeForbidden(_))
+    ));
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+async fn decide_next_guest(
+    f: &Fixture,
+    approved: bool,
+    expire: bool,
+) -> crate::models::approval_request::ApprovalRequest {
+    let request = next_guest_request(f).await;
+    assert!(request.guest.is_some());
+    assert_eq!(
+        request.approval_mode,
+        crate::models::service_approval_config::ApprovalMode::PerRequest
+    );
+    assert!(
+        !request
+            .requester_label
+            .as_deref()
+            .unwrap()
+            .contains("owner's")
+    );
+    assert!(
+        crate::services::guest_approval_service::require_decider(
+            &f.state.db,
+            &request,
+            &uuid::Uuid::new_v4().to_string()
+        )
+        .await
+        .is_err()
+    );
+    // Sharing the owner's user_id never gives a guest's thread key a human decision.
+    use tower::ServiceExt;
+    let credential = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+    let response = private
+        .with_state(f.state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/approvals/requests/{}/decide", request.id))
+                .header("x-api-key", credential.raw_key.as_str())
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"approved":true}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    assert_eq!(
+        approval_service::get_request(&f.state.db, &request.id)
+            .await
+            .unwrap()
+            .status,
+        "pending"
+    );
+    if expire {
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &request.id},
+                doc! {"$set":{"status":"expired"}},
+            )
+            .await
+            .unwrap();
+    } else {
+        approval_service::process_decision(
+            &f.state.db,
+            &f.state.config,
+            &f.state.http_client,
+            None,
+            None,
+            &request.id,
+            approved,
+            None,
+            None,
+            "web",
+        )
+        .await
+        .unwrap();
+    }
+    request
+}
+
+#[tokio::test]
+async fn guest_policy_service_matrix_and_single_use_explicit_decisions() {
+    let (f, service, tool, hits, server) = guest_policy_fixture("guest_policy_matrix").await;
+    let mut expected_hits = 0;
+    for level in ["read", "use", "all"] {
+        for escalation in ["refuse", "ask_owner"] {
+            f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                .update_one(doc! {"_id": &f.chat.agent_id}, doc! {"$set": {
+                    format!("guest_access.{service}"): level,
+                    "guest_policy": {"enabled":true,"default_access":"use", "escalation":escalation,"share_skills":false},
+                    "access_mode_override":"autopilot"
+                }}).await.unwrap();
+            for method in ["GET", "POST", "PATCH", "DELETE"] {
+                let beyond = match level {
+                    "read" => method != "GET",
+                    "use" => matches!(method, "PATCH" | "DELETE"),
+                    _ => false,
+                };
+                let auth = authenticate(&f).await;
+                let args = json!({"method":method,"path":"/one","body":{"exact":"one"}});
+                if beyond && escalation == "ask_owner" {
+                    let (response, request) = tokio::join!(
+                        Box::pin(call(&f, &auth, &tool, args)),
+                        decide_next_guest(&f, true, false)
+                    );
+                    result(response, false).await;
+                    let decided = approval_service::get_request(&f.state.db, &request.id)
+                        .await
+                        .unwrap();
+                    assert!(decided.guest.unwrap().consumed);
+                    expected_hits += 1;
+                } else {
+                    let response = call(&f, &auth, &tool, args).await;
+                    result(response, beyond).await;
+                    if !beyond {
+                        expected_hits += 1;
+                    }
+                }
+                assert_eq!(
+                    hits.load(Ordering::SeqCst),
+                    expected_hits,
+                    "{level} {escalation} {method}"
+                );
+            }
+        }
+    }
+    // An identical second call requires its own decision and does not reuse the first.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {format!("guest_access.{service}"):"read"}},
+        )
+        .await
+        .unwrap();
+    for expired in [false, true] {
+        let auth = authenticate(&f).await;
+        let (response, request) = tokio::join!(
+            Box::pin(call(
+                &f,
+                &auth,
+                &tool,
+                json!({"method":"DELETE","path":"/one","body":{"exact":"one"}})
+            )),
+            decide_next_guest(&f, false, expired)
+        );
+        let refusal = result(response, true).await;
+        assert_eq!(refusal["error"], "guest_owner_declined");
+        assert!(
+            !approval_service::get_request(&f.state.db, &request.id)
+                .await
+                .unwrap()
+                .guest
+                .unwrap()
+                .consumed
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), expected_hits);
+    }
+    let auth = authenticate(&f).await;
+    let refusal = result(
+        call(
+            &f,
+            &auth,
+            &tool,
+            json!({"method":"POST","path":"/one","body":{"_method":"DELETE"}}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(refusal["error"], "owner_only");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::approval_grant::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_policy_uncertain_wait_keeps_the_one_pending_lease() {
+    let (f, service, tool, hits, server) = guest_policy_fixture("guest_uncertain_wait").await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {
+                format!("guest_access.{service}"): "read", "guest_policy.enabled": true, "guest_policy.escalation": "ask_owner"
+            }},
+        )
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let disrupt_poll = async {
+        let request = next_guest_request(&f).await;
+        // A persisted pending row survives a read failure during the wait.
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &request.id},
+                doc! {"$set": {"guest.consumed": "invalid"}},
+            )
+            .await
+            .unwrap();
+    };
+    let (response, ()) = tokio::join!(
+        call(&f, &auth, &tool, json!({"method":"DELETE", "path":"/one"})),
+        disrupt_poll
+    );
+    assert_eq!(
+        result(response, true).await["error"],
+        "guest_approval_unavailable"
+    );
+    let second = call(&f, &auth, &tool, json!({"method":"DELETE", "path":"/one"})).await;
+    assert_eq!(
+        result(second, true).await["error"],
+        "guest_escalation_limited"
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+            .count_documents(doc! {"guest.conversation_id": &f.row.id, "status":"pending"})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_policy_approval_gates_and_owner_grants_never_authorize_guests() {
+    use crate::models::service_approval_config::ApprovalMode;
+    let (f, service, tool, hits, server) = guest_policy_fixture("guest_policy_owner_grants").await;
+    f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(doc! {"_id": &f.chat.agent_id}, doc! {"$set": {format!("guest_access.{service}"):"all", "guest_policy.escalation":"ask_owner", "access_mode_override":"autopilot"}}).await.unwrap();
+    approval_service::set_service_approval_config(
+        &f.state.db,
+        &f.owner,
+        &service,
+        "guest-policy",
+        Some(true),
+        Some(&ApprovalMode::Grant),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let now = chrono::Utc::now();
+    f.state
+        .db
+        .collection::<crate::models::approval_grant::ApprovalGrant>(
+            crate::models::approval_grant::COLLECTION_NAME,
+        )
+        .insert_one(crate::models::approval_grant::ApprovalGrant {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: f.owner.clone(),
+            service_id: service.clone(),
+            service_name: "guest-policy".into(),
+            requester_type: "api_key".into(),
+            requester_id: f.row.credential_api_key_id.clone(),
+            requester_label: None,
+            approval_request_id: "owner-grant".into(),
+            scope: None,
+            granted_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+            revoked: false,
+            org_scoped: false,
+        })
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let auth = authenticate(&f).await;
+        let (response, request) = tokio::join!(
+            Box::pin(call(
+                &f,
+                &auth,
+                &tool,
+                json!({"method":"GET","path":"/exact"})
+            )),
+            decide_next_guest(&f, true, false)
+        );
+        result(response, false).await;
+        assert!(
+            approval_service::process_decision(
+                &f.state.db,
+                &f.state.config,
+                &f.state.http_client,
+                None,
+                None,
+                &request.id,
+                true,
+                Some(3600),
+                None,
+                "web"
+            )
+            .await
+            .is_err()
+        );
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::approval_grant::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+/// Exercise the public transport entry points; scopes remain a separate hard fence.
+#[tokio::test]
+async fn guest_policy_redirects_never_execute_another_operation() {
+    use tower::ServiceExt;
+    let (f, connection, tool, hits, server) = guest_policy_fixture("guest_redirects").await;
+    f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(doc! {"_id": &f.chat.agent_id}, doc! {"$set": {"guest_policy.default_access":"read", "guest_policy.escalation":"ask_owner"}}).await.unwrap();
+    for enabled in [false, true] {
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &f.chat.agent_id},
+                doc! {"$set": {"guest_policy.enabled": enabled, "guest_policy.share_skills":true}},
+            )
+            .await
+            .unwrap();
+        for meta in [false, true] {
+            let auth = authenticate(&f).await;
+            let before = hits.load(Ordering::SeqCst);
+            let args = json!({"method":"GET","path":"/redirect"});
+            let response = if meta {
+                call(&f, &auth, &tool, args).await
+            } else {
+                direct_call(&f, &auth, &tool, args).await
+            };
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            assert_eq!(
+                hits.load(Ordering::SeqCst) - before,
+                if enabled { 1 } else { 2 }
+            );
+            if !enabled {
+                continue;
+            }
+            let before = hits.load(Ordering::SeqCst);
+            let pending = async {
+                let args = json!({"method":"DELETE","path":"/redirect"});
+                if meta {
+                    call(&f, &auth, &tool, args).await
+                } else {
+                    direct_call(&f, &auth, &tool, args).await
+                }
+            };
+            let (_, request) = tokio::join!(pending, decide_next_guest(&f, true, false));
+            assert!(
+                approval_service::get_request(&f.state.db, &request.id)
+                    .await
+                    .unwrap()
+                    .guest
+                    .unwrap()
+                    .consumed
+            );
+            assert_eq!(
+                hits.load(Ordering::SeqCst) - before,
+                if enabled { 1 } else { 2 }
+            );
+        }
+        let catalog_id = guest_connection_catalog(&f, &connection).await;
+        let credential = credentials::load_for_conversation(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.owner,
+            &f.row.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+        let mounted = private.with_state(f.state.clone());
+        for uri in [
+            format!("/api/v1/proxy/{catalog_id}/redirect"),
+            format!("/api/v1/proxy/{catalog_id}/redirect?_nyxid_via={connection}"),
+            "/api/v1/proxy/s/guest-policy/redirect".into(),
+            format!("/api/v1/proxy/s/guest-policy/redirect?_nyxid_via={connection}"),
+        ] {
+            let before = hits.load(Ordering::SeqCst);
+            let response = mounted
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(uri)
+                        .header("x-api-key", credential.raw_key.as_str())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if enabled {
+                    axum::http::StatusCode::TEMPORARY_REDIRECT
+                } else {
+                    axum::http::StatusCode::OK
+                }
+            );
+            assert_eq!(
+                hits.load(Ordering::SeqCst) - before,
+                if enabled { 1 } else { 2 }
+            );
+        }
+    }
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+async fn guest_policy_transport_allowlist_matrix_case(kind: &str, enabled: bool) {
+    use crate::models::{
+        assistant_agent::AgentGrants, downstream_service::DownstreamService,
+        service_endpoint::ServiceEndpoint,
+    };
+    use tower::ServiceExt;
+    let (mut f, connection, generic_tool, hits, server) =
+        guest_policy_fixture(&format!("guest_transport_{kind}")).await;
+    let connection_catalog = if matches!(
+        kind,
+        "user_catalog" | "user_catalog_default" | "user_scoped"
+    ) {
+        Some(guest_connection_catalog(&f, &connection).await)
+    } else {
+        None
+    };
+    let node_responder = if kind.starts_with("user_node") {
+        use crate::services::{
+            node_service,
+            node_ws_manager::{NodeOutboundMessage, NodeProxyResponse},
+        };
+        f.state.config.node_owner_lease_ttl_secs = 3600;
+        let (_, token, _) =
+            node_service::create_registration_token(&f.state.db, &f.owner, "guest-node", 10, 3600)
+                .await
+                .unwrap();
+        let (node, _, _) =
+            node_service::register_node(&f.state.db, &f.state.encryption_keys, &token, None)
+                .await
+                .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        crate::test_utils::register_test_node_connection(&f.state, &node.id, tx).await;
+        f.state.node_ws_manager.record_capabilities(
+            &node.id,
+            &crate::services::node_ws_manager::NodeCapabilitiesMsg {
+                http_guest_no_redirect: enabled,
+                ..Default::default()
+            },
+        );
+        f.state
+            .node_ws_manager
+            .mark_status_update_received(&node.id);
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &connection},
+                doc! {"$set": {"node_id": &node.id}},
+            )
+            .await
+            .unwrap();
+        let manager = f.state.node_ws_manager.clone();
+        let count = hits.clone();
+        Some(tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                let NodeOutboundMessage::Text(text) = message else {
+                    panic!("expected a node proxy request")
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(request["type"], "proxy_request");
+                if enabled {
+                    assert_eq!(request["headers"]["x-nyxid-guest-no-redirect"], "1");
+                } else {
+                    assert!(request["headers"]["x-nyxid-guest-no-redirect"].is_null());
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+                manager.deliver_proxy_response(
+                    &node.id,
+                    NodeProxyResponse {
+                        request_id: request["request_id"].as_str().unwrap().into(),
+                        status: 200,
+                        headers: vec![],
+                        body: br#"{"ok":true}"#.to_vec(),
+                    },
+                );
+            }
+        }))
+    } else {
+        None
+    };
+    let user_service = f
+        .state
+        .db
+        .collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": &connection})
+        .await
+        .unwrap()
+        .unwrap();
+    let endpoint = f
+        .state
+        .db
+        .collection::<crate::models::user_endpoint::UserEndpoint>(
+            crate::models::user_endpoint::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": &user_service.endpoint_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let platform = matches!(
+        kind,
+        "platform" | "platform_default" | "tool" | "tool_scoped" | "platform_scoped"
+    );
+    let service_id = if platform {
+        let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+        catalog.slug = "guest-platform".into();
+        catalog.base_url = endpoint.url.clone();
+        if kind.starts_with("tool") {
+            catalog.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
+        }
+        f.state
+            .db
+            .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        guest_catalog_endpoints(&f, &catalog.id).await;
+        crate::services::assistant_team_service::set_grants(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            crate::services::assistant_team_service::GrantChange::Add(AgentGrants {
+                platform_service_ids: vec![catalog.id.clone()],
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        catalog.id
+    } else {
+        connection.clone()
+    };
+    if let Some(catalog) = &connection_catalog {
+        guest_catalog_endpoints(&f, catalog).await;
+    }
+    let proxy_id = if platform {
+        Some(service_id.as_str())
+    } else {
+        connection_catalog.as_deref()
+    };
+    let typed = proxy_id.is_some();
+    if kind.ends_with("scoped") {
+        use crate::models::agent_operation_scope::OperationSelection;
+        crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+        let endpoints: Vec<ServiceEndpoint> = f
+            .state
+            .db
+            .collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
+            .find(doc! {"service_id":proxy_id.unwrap_or(&service_id)})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let selection = OperationSelection {
+            expected_revision: 0,
+            all_operations: false,
+            endpoint_ids: endpoints.into_iter().map(|row| row.id).collect(),
+            rules: if typed {
+                vec![]
+            } else {
+                ["GET", "POST", "PATCH", "DELETE"]
+                    .into_iter()
+                    .map(
+                        |method| crate::models::downstream_service::ProxyOperationRule {
+                            method: method.into(),
+                            path_template: "/one".into(),
+                            ..Default::default()
+                        },
+                    )
+                    .collect()
+            },
+            contract_digest: None,
+            inputs: Default::default(),
+        };
+        crate::services::agent_operation_scope_service::set(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            &service_id,
+            &selection,
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let credential = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+    let mounted = private.with_state(f.state.clone());
+    for level in ["read", "use", "all"] {
+        for escalation in ["refuse", "ask_owner"] {
+            f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                    .update_one(doc! {"_id":&f.chat.agent_id}, doc! {"$set":{format!("guest_access.{service_id}"):level,
+                        "guest_policy": {"enabled":enabled,"default_access":"read","escalation":escalation,"share_skills":true}}}).await.unwrap();
+            if kind.ends_with("default") && level != "all" {
+                f.state
+                    .db
+                    .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id": &f.chat.agent_id},
+                        doc! {"$set": {"guest_access": {}, "guest_policy.default_access":level}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            for (method, operation) in [
+                ("GET", "read"),
+                ("POST", "create"),
+                ("PATCH", "change"),
+                ("DELETE", "delete"),
+            ] {
+                let effective_level = if !enabled && kind.ends_with("default") && level != "all" {
+                    "use"
+                } else {
+                    level
+                };
+                let beyond = effective_level == "read" && method != "GET"
+                    || effective_level == "use" && matches!(method, "PATCH" | "DELETE");
+                let tool = if platform {
+                    format!("guest-platform__{operation}")
+                } else if typed {
+                    format!("guest-policy__{operation}")
+                } else {
+                    generic_tool.clone()
+                };
+                for meta in [false, true] {
+                    let auth = authenticate(&f).await;
+                    let args = if typed {
+                        json!({})
+                    } else {
+                        json!({"method":method,"path":"/one"})
+                    };
+                    let before = hits.load(Ordering::SeqCst);
+                    let future = async {
+                        if meta {
+                            call(&f, &auth, &tool, args).await
+                        } else {
+                            direct_call(&f, &auth, &tool, args).await
+                        }
+                    };
+                    if beyond && enabled && escalation == "ask_owner" {
+                        let (response, _) =
+                            tokio::join!(future, decide_next_guest(&f, true, false));
+                        result(response, false).await;
+                    } else {
+                        result(future.await, beyond).await;
+                    }
+                    assert_eq!(
+                        hits.load(Ordering::SeqCst) - before,
+                        usize::from(!beyond || enabled && escalation == "ask_owner"),
+                        "{kind} MCP meta={meta} {level} {escalation} {method}"
+                    );
+                }
+                let slug = if platform {
+                    "guest-platform"
+                } else {
+                    "guest-policy"
+                };
+                let mut uris = vec![format!("/api/v1/proxy/s/{slug}/one")];
+                if let Some(proxy_id) = proxy_id {
+                    uris.push(format!("/api/v1/proxy/{proxy_id}/one"));
+                    if !platform {
+                        uris.push(format!(
+                            "/api/v1/proxy/{proxy_id}/one?_nyxid_via={service_id}"
+                        ));
+                    }
+                }
+                if !platform {
+                    uris.push(format!(
+                        "/api/v1/proxy/s/{slug}/one?_nyxid_via={service_id}"
+                    ));
+                }
+                for uri in uris {
+                    let before = hits.load(Ordering::SeqCst);
+                    let response = mounted
+                        .clone()
+                        .oneshot(
+                            axum::http::Request::builder()
+                                .method(method)
+                                .uri(&uri)
+                                .header("x-api-key", credential.raw_key.as_str())
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let status = response.status();
+                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        status.is_success(),
+                        !beyond,
+                        "{kind} {uri} {level} {escalation} {method}: {}",
+                        String::from_utf8_lossy(&bytes)
+                    );
+                    if beyond && enabled && escalation == "ask_owner" {
+                        assert_eq!(
+                            serde_json::from_slice::<Value>(&bytes).unwrap()["error_code"],
+                            12104
+                        );
+                    }
+                    assert_eq!(hits.load(Ordering::SeqCst) - before, usize::from(!beyond));
+                }
+            }
+        }
+    }
+    if kind.ends_with("scoped") {
+        let before = hits.load(Ordering::SeqCst);
+        let response = mounted
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(if let Some(proxy_id) = proxy_id {
+                        format!("/api/v1/proxy/{proxy_id}/outside")
+                    } else {
+                        "/api/v1/proxy/s/guest-policy/outside".into()
+                    })
+                    .header("x-api-key", credential.raw_key.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(hits.load(Ordering::SeqCst), before);
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+                .count_documents(doc! {"status":"pending"})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    // Only all permits arbitrary frames. Scoped streams still fail the scope gate.
+    for level in ["read", "use", "all"] {
+        for escalation in ["refuse", "ask_owner"] {
+            f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                    .update_one(doc! {"_id": &f.chat.agent_id}, doc! {"$set": {format!("guest_access.{service_id}"):level, "guest_policy.escalation":escalation}}).await.unwrap();
+            let slug = if platform {
+                "guest-platform"
+            } else {
+                "guest-policy"
+            };
+            let mut uris = vec![format!("/api/v1/proxy/s/{slug}/one")];
+            if let Some(proxy_id) = proxy_id {
+                uris.push(format!("/api/v1/proxy/{proxy_id}/one"));
+            }
+            for uri in uris {
+                let response = mounted
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(uri)
+                            .header("x-api-key", credential.raw_key.as_str())
+                            .header("connection", "upgrade")
+                            .header("upgrade", "websocket")
+                            .header("sec-websocket-version", "13")
+                            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                if (!enabled || level == "all") && !kind.ends_with("scoped") {
+                    // oneshot has no Hyper OnUpgrade; reaching extraction proves
+                    // both direct and node admission passed the guest boundary.
+                    assert_eq!(status, axum::http::StatusCode::UPGRADE_REQUIRED);
+                    assert_eq!(bytes.as_ref(), b"WebSocket request couldn't be upgraded since no upgrade state was present");
+                } else {
+                    let code = serde_json::from_slice::<Value>(&bytes).unwrap()["error_code"]
+                        .as_u64()
+                        .unwrap();
+                    assert_eq!(
+                        code,
+                        if enabled && level != "all" && escalation == "ask_owner" {
+                            12104
+                        } else {
+                            9000
+                        },
+                        "{kind} {level} {escalation}: scoped streams cannot widen authority"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::approval_grant::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    if let Some(responder) = node_responder {
+        responder.abort();
+    }
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+// Each allowlist kind has its own test so the full matrix stays within CI's
+// per-test timeout while retaining every level, escalation and transport cell.
+macro_rules! guest_transport_case {
+    ($name:ident, $kind:literal) => {
+        #[tokio::test]
+        async fn $name() {
+            for enabled in [false, true] {
+                Box::pin(guest_policy_transport_allowlist_matrix_case($kind, enabled)).await;
+            }
+        }
+    };
+}
+guest_transport_case!(
+    guest_policy_transport_allowlist_matrix_user_generic,
+    "user_generic"
+);
+guest_transport_case!(
+    guest_policy_transport_allowlist_matrix_user_default,
+    "user_default"
+);
+guest_transport_case!(
+    guest_policy_transport_allowlist_matrix_user_catalog,
+    "user_catalog"
+);
+guest_transport_case!(
+    guest_policy_transport_allowlist_matrix_user_catalog_default,
+    "user_catalog_default"
+);
+guest_transport_case!(
+    guest_policy_transport_allowlist_matrix_platform_default,
+    "platform_default"
+);
+guest_transport_case!(
+    guest_policy_transport_allowlist_matrix_user_node,
+    "user_node"
+);
+guest_transport_case!(
+    guest_policy_transport_allowlist_matrix_user_node_scoped,
+    "user_node_scoped"
+);
+guest_transport_case!(guest_policy_transport_allowlist_matrix_platform, "platform");
+guest_transport_case!(guest_policy_transport_allowlist_matrix_tool, "tool");
+guest_transport_case!(
+    guest_policy_transport_allowlist_matrix_tool_scoped,
+    "tool_scoped"
+);
+guest_transport_case!(
+    guest_policy_transport_allowlist_matrix_user_scoped,
+    "user_scoped"
+);
+guest_transport_case!(
+    guest_policy_transport_allowlist_matrix_platform_scoped,
+    "platform_scoped"
+);
+
+#[tokio::test]
+async fn guest_policy_llm_gateway_connection_and_catalog_levels() {
+    use crate::models::{downstream_service::DownstreamService, provider_config::ProviderConfig};
+    use tower::ServiceExt;
+    let (f, connection, _, hits, server) = guest_policy_fixture("guest_policy_llm").await;
+    let user_service = f
+        .state
+        .db
+        .collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&connection})
+        .await
+        .unwrap()
+        .unwrap();
+    let endpoint = f
+        .state
+        .db
+        .collection::<crate::models::user_endpoint::UserEndpoint>(
+            crate::models::user_endpoint::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&user_service.endpoint_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let now = bson::DateTime::now();
+    let provider: ProviderConfig=bson::from_document(doc!{"_id":&provider_id,"slug":"openai","name":"Guest fixture provider","provider_type":"api_key","is_active":true,"created_by":&f.owner,"created_at":now,"updated_at":now}).unwrap();
+    f.state
+        .db
+        .collection::<ProviderConfig>(crate::models::provider_config::COLLECTION_NAME)
+        .insert_one(provider)
+        .await
+        .unwrap();
+    let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    catalog.id = uuid::Uuid::new_v4().to_string();
+    catalog.slug = "llm-openai".into();
+    catalog.base_url = endpoint.url;
+    catalog.provider_config_id = Some(provider_id);
+    f.state
+        .db
+        .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&connection},
+            doc! {"$set":{"catalog_service_id":&catalog.id}},
+        )
+        .await
+        .unwrap();
+    let credential = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+    let mounted = private.with_state(f.state.clone());
+    for enabled in [false, true] {
+        for (kind, level_id) in [
+            ("connection", &connection),
+            ("catalog_fallback", &catalog.id),
+            ("platform_only", &catalog.id),
+        ] {
+            crate::services::assistant_team_service::set_grants(
+                &f.state.db,
+                &f.owner,
+                &f.chat.agent_id,
+                crate::services::assistant_team_service::GrantChange::Replace {
+                    grants: crate::models::assistant_agent::AgentGrants {
+                        service_ids: if kind == "platform_only" {
+                            vec![]
+                        } else {
+                            vec![connection.clone()]
+                        },
+                        platform_service_ids: if kind == "platform_only" {
+                            vec![catalog.id.clone()]
+                        } else {
+                            vec![]
+                        },
+                        ..Default::default()
+                    },
+                    guests: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+            for level in ["read", "use", "all"] {
+                for escalation in ["refuse", "ask_owner"] {
+                    f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                    .update_one(doc!{"_id":&f.chat.agent_id},doc!{"$set":{"guest_access":{level_id:level},"guest_policy":{"enabled":enabled,"default_access":"read","escalation":escalation,"share_skills":true}}}).await.unwrap();
+                    for uri in [
+                        "/api/v1/llm/openai/v1/chat/completions",
+                        "/api/v1/llm/gateway/v1/chat/completions",
+                    ] {
+                        let before = hits.load(Ordering::SeqCst);
+                        let response=mounted.clone().oneshot(axum::http::Request::builder().method("POST").uri(uri).header("x-api-key",credential.raw_key.as_str()).header("content-type","application/json")
+                        .body(Body::from(json!({"model":"gpt-fixture","messages":[{"role":"user","content":"test"}]}).to_string())).unwrap()).await.unwrap();
+                        let status = response.status();
+                        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            status.is_success(),
+                            level != "read",
+                            "{uri} {kind} {level_id} {level} {escalation}: {}",
+                            String::from_utf8_lossy(&body)
+                        );
+                        assert_eq!(
+                            hits.load(Ordering::SeqCst) - before,
+                            usize::from(level != "read")
+                        );
+                        if enabled && level == "read" && escalation == "ask_owner" {
+                            assert_eq!(
+                                serde_json::from_slice::<Value>(&body).unwrap()["error_code"],
+                                12104
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        for uri in [
+            "/api/v1/llm/openai/v1/chat/completions?guest_redirect=1",
+            "/api/v1/llm/gateway/v1/chat/completions?guest_redirect=1",
+        ] {
+            let before = hits.load(Ordering::SeqCst);
+            let response = mounted.clone().oneshot(axum::http::Request::builder().method("POST").uri(uri)
+            .header("x-api-key", credential.raw_key.as_str()).header("content-type", "application/json")
+            .body(Body::from(json!({"model":"gpt-fixture","messages":[{"role":"user","content":"test"}]}).to_string())).unwrap()).await.unwrap();
+            assert_eq!(
+                response.status(),
+                if enabled {
+                    axum::http::StatusCode::TEMPORARY_REDIRECT
+                } else {
+                    axum::http::StatusCode::OK
+                }
+            );
+            assert_eq!(
+                hits.load(Ordering::SeqCst) - before,
+                if enabled { 1 } else { 2 }
+            );
+        }
+    }
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_policy_consent_revalidates_grants_policy_destination_and_turn() {
+    for drift in [
+        "grant",
+        "policy",
+        "disabled",
+        "destination",
+        "turn",
+        "key",
+        "agent_scope",
+        "key_scope",
+        "key_services",
+        "key_nodes",
+        "endpoint_policy",
+        "generation",
+        "consumed",
+    ] {
+        let (f, mut service, mut tool, hits, server) =
+            guest_policy_fixture(&format!("guest_drift_{drift}")).await;
+        let metadata_drift = matches!(drift, "endpoint_policy" | "generation");
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        if metadata_drift {
+            let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+            catalog.slug = "guest-metadata".into();
+            service = catalog.id.clone();
+            f.state
+                .db
+                .collection(crate::models::downstream_service::COLLECTION_NAME)
+                .insert_one(catalog)
+                .await
+                .unwrap();
+            let endpoint: crate::models::service_endpoint::ServiceEndpoint = bson::from_document(doc! {
+                "_id": &endpoint_id, "service_id": &service, "name": "delete", "method": "DELETE", "path": "/one",
+                "is_active": true, "publication": "published", "risk": "read", "operation_generation": 1_i64,
+                "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
+            }).unwrap();
+            f.state
+                .db
+                .collection(crate::models::service_endpoint::COLLECTION_NAME)
+                .insert_one(endpoint)
+                .await
+                .unwrap();
+            crate::services::assistant_team_service::set_grants(
+                &f.state.db,
+                &f.owner,
+                &f.chat.agent_id,
+                crate::services::assistant_team_service::GrantChange::Add(
+                    crate::models::assistant_agent::AgentGrants {
+                        platform_service_ids: vec![service.clone()],
+                        ..Default::default()
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+            tool = "guest-metadata__delete".into();
+        }
+        f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(doc! {"_id": &f.chat.agent_id}, doc! {"$set": {"guest_policy.default_access":"read", "guest_policy.escalation":"ask_owner"}}).await.unwrap();
+        let auth = authenticate(&f).await;
+        let decision = async {
+            let request = next_guest_request(&f).await;
+            match drift {
+                "consumed" => {
+                    f.state
+                        .db
+                        .collection::<bson::Document>(
+                            crate::models::approval_request::COLLECTION_NAME,
+                        )
+                        .update_one(
+                            doc! {"_id": &request.id},
+                            doc! {"$set": {"guest.consumed": true}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                "endpoint_policy" | "generation" => {
+                    let fields = if drift == "endpoint_policy" {
+                        doc! {"risk": "write"}
+                    } else {
+                        doc! {"operation_generation": 2_i64}
+                    };
+                    f.state
+                        .db
+                        .collection::<bson::Document>(
+                            crate::models::service_endpoint::COLLECTION_NAME,
+                        )
+                        .update_one(doc! {"_id": &endpoint_id}, doc! {"$set": fields})
+                        .await
+                        .unwrap();
+                }
+                "grant" => {
+                    crate::services::assistant_team_service::set_grants(
+                        &f.state.db,
+                        &f.owner,
+                        &f.chat.agent_id,
+                        crate::services::assistant_team_service::GrantChange::Replace {
+                            grants: Default::default(),
+                            guests: Default::default(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                "disabled" => {
+                    f.state
+                        .db
+                        .collection::<bson::Document>(
+                            crate::models::assistant_agent::COLLECTION_NAME,
+                        )
+                        .update_one(
+                            doc! {"_id": &f.chat.agent_id},
+                            doc! {"$set": {"guest_policy.enabled":false}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                "policy" => {
+                    f.state
+                        .db
+                        .collection::<bson::Document>(
+                            crate::models::assistant_agent::COLLECTION_NAME,
+                        )
+                        .update_one(
+                            doc! {"_id": &f.chat.agent_id},
+                            doc! {"$set": {"guest_policy.escalation":"refuse"}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                "destination" => {
+                    let row = f
+                        .state
+                        .db
+                        .collection::<crate::models::user_service::UserService>(
+                            crate::models::user_service::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {"_id": &service})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    f.state
+                        .db
+                        .collection::<bson::Document>(crate::models::user_endpoint::COLLECTION_NAME)
+                        .update_one(
+                            doc! {"_id": row.endpoint_id},
+                            doc! {"$set": {"url":"https://changed.example.invalid"}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                "agent_scope" | "key_scope" => {
+                    let (collection, id, field) = if drift == "agent_scope" {
+                        (
+                            crate::models::assistant_agent::COLLECTION_NAME,
+                            &f.chat.agent_id,
+                            "operation_scopes",
+                        )
+                    } else {
+                        (
+                            crate::models::api_key::COLLECTION_NAME,
+                            &f.chat.api_key_id,
+                            "assistant_operation_scopes",
+                        )
+                    };
+                    f.state.db.collection::<bson::Document>(collection).update_one(
+                        doc! {"_id": id},
+                        doc! {"$set": {format!("{field}.{service}"): {"revision":1_i64, "catalog_service_id":bson::Bson::Null, "operations":[]}}},
+                    ).await.unwrap();
+                }
+                "key_services" | "key_nodes" => {
+                    let fields = if drift == "key_services" {
+                        doc! {"allow_all_services":false, "allowed_service_ids":[]}
+                    } else {
+                        doc! {"allow_all_nodes":false, "allowed_node_ids":[]}
+                    };
+                    f.state
+                        .db
+                        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+                        .update_one(doc! {"_id": &f.chat.api_key_id}, doc! {"$set":fields})
+                        .await
+                        .unwrap();
+                }
+                "key" => {
+                    f.state
+                        .db
+                        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+                        .update_one(
+                            doc! {"_id": &f.chat.api_key_id},
+                            doc! {"$set": {"is_active":false}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                "turn" => {
+                    f.state
+                        .db
+                        .collection::<bson::Document>(
+                            crate::models::assistant_conversation::COLLECTION_NAME,
+                        )
+                        .update_one(
+                            doc! {"_id": &f.row.id},
+                            doc! {"$set": {"active_turn.stop_requested":true}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            approval_service::process_decision(
+                &f.state.db,
+                &f.state.config,
+                &f.state.http_client,
+                None,
+                None,
+                &request.id,
+                true,
+                None,
+                None,
+                "web",
+            )
+            .await
+            .unwrap();
+            request.id
+        };
+        let (response, id) = tokio::join!(
+            call(
+                &f,
+                &auth,
+                &tool,
+                if metadata_drift {
+                    json!({})
+                } else {
+                    json!({"method":"DELETE","path":"/one"})
+                }
+            ),
+            decision
+        );
+        result(response, true).await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "{drift} cannot reach upstream"
+        );
+        let budget = f.state.db.collection::<crate::models::assistant_guest_escalation_budget::AssistantGuestEscalationBudget>(crate::models::assistant_guest_escalation_budget::COLLECTION_NAME)
+            .find_one(doc! {"_id": &f.chat.agent_id}).await.unwrap().unwrap();
+        assert!(
+            budget.pending.is_empty(),
+            "{drift} is a known completed approval"
+        );
+        assert_eq!(
+            approval_service::get_request(&f.state.db, &id)
+                .await
+                .unwrap()
+                .guest
+                .unwrap()
+                .consumed,
+            drift == "consumed"
+        );
+        server.abort();
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn guest_policy_failed_consume_write_keeps_lease_until_deadline() {
+    let (f, service, tool, hits, server) = guest_policy_fixture("guest_failed_consume").await;
+    f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(doc! {"_id": &f.chat.agent_id}, doc! {"$set": {format!("guest_access.{service}"):"read", "guest_policy.escalation":"ask_owner"}}).await.unwrap();
+    let auth = authenticate(&f).await;
+    let decide = async {
+        let request = next_guest_request(&f).await;
+        // Reject only the final consume write in this isolated fixture database.
+        f.state
+            .db
+            .run_command(
+                doc! {"collMod": crate::models::approval_request::COLLECTION_NAME,
+                "validator": {"guest.consumed": {"$ne": true}}},
+            )
+            .await
+            .unwrap();
+        approval_service::process_decision(
+            &f.state.db,
+            &f.state.config,
+            &f.state.http_client,
+            None,
+            None,
+            &request.id,
+            true,
+            None,
+            None,
+            "web",
+        )
+        .await
+        .unwrap();
+    };
+    let (response, ()) = tokio::join!(
+        call(&f, &auth, &tool, json!({"method":"DELETE", "path":"/one"})),
+        decide
+    );
+    assert_eq!(
+        result(response, true).await["error"],
+        "guest_approval_unavailable"
+    );
+    let budget = f.state.db.collection::<crate::models::assistant_guest_escalation_budget::AssistantGuestEscalationBudget>(crate::models::assistant_guest_escalation_budget::COLLECTION_NAME)
+        .find_one(doc! {"_id": &f.chat.agent_id}).await.unwrap().unwrap();
+    assert_eq!(budget.pending.len(), 1);
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_policy_approval_uses_authenticated_requester_identity() {
+    let (f, service, tool, hits, server) = guest_policy_fixture("guest_approval_identity").await;
+    f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(doc! {"_id": &f.chat.agent_id}, doc! {"$set": {format!("guest_access.{service}"):"read", "guest_policy.escalation":"ask_owner"}}).await.unwrap();
+    let mut auth = authenticate(&f).await;
+    auth.acting_client_id = Some("authenticated-requester-distinct-from-thread-key".into());
+    let (response, request) = tokio::join!(
+        call(&f, &auth, &tool, json!({"method":"DELETE", "path":"/one"})),
+        decide_next_guest(&f, true, false)
+    );
+    result(response, false).await;
+    assert_eq!(
+        request.requester_type,
+        auth.approval_requester_type().unwrap()
+    );
+    assert_eq!(request.requester_id, auth.approval_requester_id());
+    assert_ne!(request.requester_id, f.chat.api_key_id);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_policy_all_websocket_upgrades_and_exchanges_frames_direct_and_via_node() {
+    use crate::services::{node_service, node_ws_manager::NodeOutboundMessage};
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    for via_node in [false, true] {
+        let (mut f, service, _, _, server) = guest_policy_fixture(if via_node {
+            "guest_ws_node"
+        } else {
+            "guest_ws_direct"
+        })
+        .await;
+        let upstream = Router::new().route(
+            "/guest-ws",
+            axum::routing::get(|ws: axum::extract::WebSocketUpgrade| async {
+                ws.on_upgrade(|mut socket| async move {
+                    if let Some(Ok(message)) = socket.recv().await {
+                        socket.send(message).await.unwrap();
+                    }
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let upstream = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let connection = f
+            .state
+            .db
+            .collection::<crate::models::user_service::UserService>(
+                crate::models::user_service::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": &service})
+            .await
+            .unwrap()
+            .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::user_endpoint::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &connection.endpoint_id},
+                doc! {"$set":{"url":url}},
+            )
+            .await
+            .unwrap();
+        let responder = if via_node {
+            f.state.config.node_owner_lease_ttl_secs = 3600;
+            let (_, token, _) = node_service::create_registration_token(
+                &f.state.db,
+                &f.owner,
+                "guest-ws-node",
+                10,
+                3600,
+            )
+            .await
+            .unwrap();
+            let (node, _, _) =
+                node_service::register_node(&f.state.db, &f.state.encryption_keys, &token, None)
+                    .await
+                    .unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            crate::test_utils::register_test_node_connection(&f.state, &node.id, tx).await;
+            f.state
+                .node_ws_manager
+                .mark_status_update_received(&node.id);
+            f.state
+                .db
+                .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+                .update_one(doc! {"_id": &service}, doc! {"$set":{"node_id": &node.id}})
+                .await
+                .unwrap();
+            let manager = f.state.node_ws_manager.clone();
+            Some(tokio::spawn(async move {
+                while let Some(NodeOutboundMessage::Text(text)) = rx.recv().await {
+                    let message: Value = serde_json::from_str(&text).unwrap();
+                    let session = message["session_id"].as_str().unwrap();
+                    match message["type"].as_str().unwrap() {
+                        "ws_proxy_open" => {
+                            manager.deliver_ws_proxy_opened(&node.id, session, None);
+                        }
+                        "ws_proxy_text" => manager.deliver_ws_proxy_text(
+                            &node.id,
+                            session,
+                            message["data"].as_str().unwrap().into(),
+                        ),
+                        "ws_proxy_close" => {}
+                        _ => panic!("unexpected node WS message"),
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+        let credential = credentials::load_for_conversation(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.owner,
+            &f.row.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let state = f.state.clone();
+        let proxy = tokio::spawn(async move {
+            axum::serve(listener, private.with_state(state))
+                .await
+                .unwrap()
+        });
+        for (enabled, level) in [
+            (false, "read"),
+            (false, "use"),
+            (false, "all"),
+            (true, "all"),
+        ] {
+            for escalation in ["refuse", "ask_owner"] {
+                f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                .update_one(doc! {"_id": &f.chat.agent_id}, doc! {"$set":{format!("guest_access.{service}"):level, "guest_policy.enabled":enabled, "guest_policy.default_access":"read", "guest_policy.share_skills":true, "guest_policy.escalation":escalation}}).await.unwrap();
+                let mut request = format!("ws://{address}/api/v1/proxy/s/guest-policy/guest-ws")
+                    .into_client_request()
+                    .unwrap();
+                request
+                    .headers_mut()
+                    .insert("x-api-key", credential.raw_key.as_str().parse().unwrap());
+                let (mut socket, response) =
+                    tokio_tungstenite::connect_async(request).await.unwrap();
+                assert_eq!(response.status(), 101);
+                socket
+                    .send(Message::Text("approved all-level stream".into()))
+                    .await
+                    .unwrap();
+                let echoed =
+                    tokio::time::timeout(std::time::Duration::from_secs(10), socket.next())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(echoed, Message::Text("approved all-level stream".into()));
+                socket.close(None).await.unwrap();
+            }
+        }
+        proxy.abort();
+        upstream.abort();
+        server.abort();
+        if let Some(responder) = responder {
+            responder.abort();
+        }
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn guest_policy_off_keeps_main_catalog_lookup_and_denial_bodies() {
+    use crate::models::service_approval_config::{ApprovalEffect, ApprovalMode};
+    let (f, service, tool, hits, server) = guest_policy_fixture("guest_off_lookup").await;
+    let catalog = guest_connection_catalog(&f, &service).await;
+    use tower::ServiceExt;
+    let credential = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+    let mounted = private.with_state(f.state.clone());
+    for catalog_level in ["read", "all"] {
+        f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(doc! {"_id": &f.chat.agent_id}, doc! {"$set": {"guest_access": {&catalog:catalog_level}, "guest_policy": {"enabled":false,"default_access":"read","escalation":"ask_owner","share_skills":true}}}).await.unwrap();
+        // Raw HTTP preserves main's catalog fallback even though MCP never had it.
+        for method in ["GET", "POST", "DELETE"] {
+            let allowed = catalog_level == "all" || method == "GET";
+            for uri in [
+                format!("/api/v1/proxy/{catalog}/one"),
+                format!("/api/v1/proxy/{catalog}/one?_nyxid_via={service}"),
+                "/api/v1/proxy/s/guest-policy/one".to_owned(),
+            ] {
+                let before = hits.load(Ordering::SeqCst);
+                let response = mounted
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .header("x-api-key", credential.raw_key.as_str())
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status().is_success(), allowed);
+                if !allowed {
+                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&bytes).unwrap()["error_code"],
+                        9000
+                    );
+                }
+                assert_eq!(hits.load(Ordering::SeqCst) - before, usize::from(allowed));
+            }
+        }
+        let summaries = crate::services::assistant_team_service::summaries(
+            &f.state.db,
+            &f.owner,
+            false,
+            false,
+            0,
+        )
+        .await
+        .unwrap();
+        let summary = summaries
+            .iter()
+            .find(|agent| agent.id == f.chat.agent_id)
+            .unwrap();
+        assert_eq!(summary.guest_access["guest-policy"], "use");
+        assert!(!summary.guest_policy.enabled);
+        assert_eq!(summary.effective_guest_policy, Default::default());
+        for meta in [false, true] {
+            let auth = authenticate(&f).await;
+            for (method, error) in [("POST", false), ("DELETE", true)] {
+                let before = hits.load(Ordering::SeqCst);
+                let args = json!({"method":method,"path":"/one"});
+                let response = if meta {
+                    call(&f, &auth, &tool, args).await
+                } else {
+                    direct_call(&f, &auth, &tool, args).await
+                };
+                let value = result(response, error).await;
+                if error {
+                    assert_eq!(
+                        value,
+                        crate::services::assistant_acknowledgement_service::guest_service_refusal(
+                            "guest-policy",
+                            GuestAccess::Use
+                        )
+                    );
+                }
+                assert_eq!(hits.load(Ordering::SeqCst) - before, usize::from(!error));
+            }
+        }
+    }
+    for (effect, expected) in [
+        (
+            ApprovalEffect::Deny,
+            "Operation denied by approval policy".to_owned(),
+        ),
+        (
+            ApprovalEffect::RequireApproval,
+            crate::services::assistant_acknowledgement_service::guest_refusal().to_string(),
+        ),
+    ] {
+        approval_service::set_service_approval_config(
+            &f.state.db,
+            &f.owner,
+            &service,
+            "guest-policy",
+            Some(true),
+            Some(&ApprovalMode::PerRequest),
+            Some(&[]),
+            Some(&effect),
+        )
+        .await
+        .unwrap();
+        for meta in [false, true] {
+            let auth = authenticate(&f).await;
+            let args = json!({"method":"POST","path":"/one"});
+            let response = if meta {
+                call(&f, &auth, &tool, args).await
+            } else {
+                direct_call(&f, &auth, &tool, args).await
+            };
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(envelope["result"]["isError"], true);
+            assert_eq!(envelope["result"]["content"][0]["text"], expected);
+        }
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_policy_off_preserves_main_discovery_shadowing() {
+    let (f, connection, _, _, server) = guest_policy_fixture("guest_off_discovery").await;
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.slug = "guest-policy".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    guest_catalog_endpoints(&f, &catalog.id).await;
+    crate::services::assistant_team_service::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        crate::services::assistant_team_service::GrantChange::Replace {
+            grants: crate::models::assistant_agent::AgentGrants {
+                platform_service_ids: vec![catalog.id.clone()],
+                ..Default::default()
+            },
+            guests: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    for enabled in [false, true] {
+        f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(doc! {"_id": &f.chat.agent_id},doc! {"$set": {"guest_policy": {"enabled":enabled,"default_access":"read","escalation":"ask_owner","share_skills":true}}}).await.unwrap();
+        let auth = authenticate(&f).await;
+        let services = load_all_services_for_meta_tools(&f.state, &auth)
+            .await
+            .unwrap();
+        assert!(!services.iter().any(|s| s.service_id == connection));
+        assert_eq!(services.iter().any(|s| s.service_id == catalog.id), enabled);
+        if !enabled {
+            assert!(matches!(
+                mcp_service_scope(&auth),
+                mcp_service::ServiceScope::Preferring(_)
+            ));
+        } else {
+            assert!(matches!(
+                mcp_service_scope(&auth),
+                mcp_service::ServiceScope::Granted { .. }
+            ));
+        }
+    }
+    server.abort();
+    f.state.db.drop().await.unwrap();
 }

@@ -207,6 +207,7 @@ async fn local_session_info_prefers_exact_socket_capabilities() {
         &node_id,
         &crate::services::node_ws_manager::NodeCapabilitiesMsg {
             http_signature_v2: false,
+            http_guest_no_redirect: false,
             proxy_upload_v1: false,
             http_cancellation: false,
             remote_credential_crypto_v1: true,
@@ -870,6 +871,7 @@ async fn workspace_remote_node_dispatch_gates_persisted_capability_and_preserves
         &fixture.node_id,
         &NodeCapabilitiesMsg {
             http_signature_v2: true,
+            http_guest_no_redirect: true,
             proxy_upload_v1: true,
             http_cancellation: false,
             ..Default::default()
@@ -880,6 +882,7 @@ async fn workspace_remote_node_dispatch_gates_persisted_capability_and_preserves
         &fence,
         NodeCapabilitiesFlags {
             http_signature_v2: true,
+            http_guest_no_redirect: true,
             proxy_upload_v1: true,
             http_cancellation: false,
             ..Default::default()
@@ -896,6 +899,14 @@ async fn workspace_remote_node_dispatch_gates_persisted_capability_and_preserves
             .await
             .capabilities
             .http_signature_v2
+    );
+    assert!(
+        fixture
+            .caller_dispatch
+            .session_info(&fixture.node_id)
+            .await
+            .capabilities
+            .http_guest_no_redirect
     );
     let dispatch = fixture.caller_dispatch.clone();
     let node_id = fixture.node_id.clone();

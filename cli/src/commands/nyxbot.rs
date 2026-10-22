@@ -27,6 +27,11 @@ pub enum NyxbotCommands {
     Cancel(InvocationArgs),
     /// Discover owned agents and specialist IDs
     Agents(AuthArgs),
+    /// Inspect or set a specialist's policy for guests in every chat
+    GuestAccess {
+        #[command(subcommand)]
+        command: GuestAccessCommands,
+    },
     /// List conversations, optionally filtered by agent
     Conversations {
         #[arg(long)]
@@ -51,6 +56,175 @@ pub enum NyxbotCommands {
     /// Discover available model IDs
     Models(AuthArgs),
 }
+#[derive(Subcommand)]
+pub enum GuestAccessCommands {
+    /// Show the guest default, escalation, skill sharing and per-service levels
+    Show {
+        /// Specialist ID or @name
+        agent: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Set guest policy for every chat of a personal specialist
+    Set(GuestAccessSet),
+}
+
+#[derive(Args)]
+pub struct GuestAccessSet {
+    /// Specialist ID or @name
+    agent: String,
+    /// Enable the guest policy; false preserves legacy behavior and saved settings
+    #[arg(long, action = clap::ArgAction::Set, value_name = "true|false")]
+    enabled: Option<bool>,
+    /// Default for services without an override: read only, or use (read/create/act)
+    #[arg(long, value_parser = ["read", "use"])]
+    default: Option<String>,
+    /// Refuse beyond-level calls, or ask-owner for a single-use foreground MCP approval
+    #[arg(long, value_parser = ["refuse", "ask-owner"])]
+    escalation: Option<String>,
+    /// Share selected skill guidance with guests; memory and authoring remain private
+    #[arg(long, action = clap::ArgAction::Set, value_name = "true|false")]
+    share_skills: Option<bool>,
+    /// Repeatable override: read, use, all (also change/delete), or default (clear override)
+    #[arg(long, value_parser = parse_guest_service, value_name = "SLUG=read|use|all|default")]
+    service: Vec<String>,
+    /// owner-like enables the policy with use, ask-owner and shared skills; explicit flags override it
+    #[arg(long, value_parser = ["owner-like"])]
+    preset: Option<String>,
+    #[command(flatten)]
+    auth: AuthArgs,
+}
+
+fn parse_guest_service(value: &str) -> std::result::Result<String, String> {
+    let Some((name, level)) = value.split_once('=') else {
+        return Err("Use SLUG=read|use|all|default".into());
+    };
+    if name.trim().is_empty()
+        || name.len() > 200
+        || !matches!(level, "read" | "use" | "all" | "default")
+    {
+        return Err("Use SLUG=read|use|all|default".into());
+    }
+    Ok(value.into())
+}
+
+fn guest_patch(args: &GuestAccessSet) -> Result<Value> {
+    let mut patch = if args.preset.is_some() {
+        json!({"enabled": true, "default_access": "use", "escalation": "ask_owner", "share_skills": true})
+    } else {
+        json!({})
+    };
+    if let Some(value) = args.enabled {
+        patch["enabled"] = json!(value);
+    }
+    if let Some(value) = &args.default {
+        patch["default_access"] = json!(value);
+    }
+    if let Some(value) = &args.escalation {
+        patch["escalation"] = json!(value.replace('-', "_"));
+    }
+    if let Some(value) = args.share_skills {
+        patch["share_skills"] = json!(value);
+    }
+    let mut services = serde_json::Map::new();
+    for value in &args.service {
+        parse_guest_service(value).map_err(anyhow::Error::msg)?;
+        let (name, level) = value.split_once('=').context("Invalid service level")?;
+        if services.insert(name.trim().into(), json!(level)).is_some() {
+            bail!("Duplicate service override: {name}");
+        }
+    }
+    if !services.is_empty() {
+        patch["services"] = json!(services);
+    }
+    if patch.as_object().is_none_or(|p| p.is_empty()) {
+        bail!("Choose a policy setting, --service or --preset owner-like");
+    }
+    Ok(patch)
+}
+
+fn select_guest_agent(agents: &Value, target: &str) -> Result<String> {
+    let target = target.trim_start_matches('@');
+    let rows = agents["agents"].as_array().context("Invalid agent list")?;
+    let matches: Vec<_> = rows
+        .iter()
+        .filter(|a| {
+            a["id"] == target
+                || a["name"]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(target))
+        })
+        .filter(|a| a["kind"] == "specialist" && a["status"] != "destroyed")
+        .collect();
+    if matches.len() != 1 {
+        bail!("Expected one live specialist matching {target}; use nyxid nyxbot agents for IDs");
+    }
+    Ok(matches[0]["id"]
+        .as_str()
+        .context("Invalid specialist ID")?
+        .into())
+}
+
+fn render_guest_access(value: &Value, output: OutputFormat) -> Result<String> {
+    if matches!(output, OutputFormat::Json) {
+        return render_discovery(value, output);
+    }
+    let policy = &value["guest_policy"];
+    let mut text = format!(
+        "Specialist: {}\nGuest policy: {}\nSaved default: {}\nSaved escalation: {}\nSaved share skills: {}\nEffective default: {}\nEffective escalation: {}\nEffective share skills: {}\n\nSERVICE\tACCESS\tSOURCE\n",
+        value["agent_id"].as_str().unwrap_or(""),
+        if policy["enabled"].as_bool().unwrap_or(false) {
+            "on"
+        } else {
+            "off (legacy)"
+        },
+        policy["default_access"].as_str().unwrap_or("use"),
+        policy["escalation"].as_str().unwrap_or("refuse"),
+        policy["share_skills"].as_bool().unwrap_or(false),
+        value["effective_guest_policy"]["default_access"]
+            .as_str()
+            .unwrap_or("use"),
+        value["effective_guest_policy"]["escalation"]
+            .as_str()
+            .unwrap_or("refuse"),
+        value["effective_guest_policy"]["share_skills"]
+            .as_bool()
+            .unwrap_or(false)
+    );
+    if let Some(services) = value["services"].as_object() {
+        for (service, level) in services {
+            text.push_str(&format!(
+                "{}\t{}\t{}\n",
+                service,
+                level["access"].as_str().unwrap_or(""),
+                level["source"].as_str().unwrap_or("")
+            ));
+        }
+    }
+    Ok(terminal_text(&text))
+}
+
+async fn guest_access(command: GuestAccessCommands) -> Result<()> {
+    let (target, auth, patch) = match command {
+        GuestAccessCommands::Show { agent, auth } => (agent, auth, None),
+        GuestAccessCommands::Set(args) => {
+            let patch = guest_patch(&args)?;
+            (args.agent, args.auth, Some(patch))
+        }
+    };
+    let mut api = ApiClient::from_auth(&auth)?;
+    let agents: Value = api.get(&format!("{ROOT}/agents")).await?;
+    let id = select_guest_agent(&agents, &target)?;
+    let path = format!("{ROOT}/agents/{}/guest-access", urlencoding::encode(&id));
+    let value: Value = if let Some(patch) = patch {
+        api.patch(&path, &patch).await?
+    } else {
+        api.get(&path).await?
+    };
+    println!("{}", render_guest_access(&value, auth.output)?);
+    Ok(())
+}
+
 #[derive(Args)]
 #[command(group(clap::ArgGroup::new("input").required(true).args(["text","file"])))]
 pub struct RunArgs {
@@ -624,6 +798,7 @@ pub async fn run(command: NyxbotCommands) -> Result<()> {
         }
         NyxbotCommands::Show(args) => inspect(args, false).await,
         NyxbotCommands::Cancel(args) => inspect(args, true).await,
+        NyxbotCommands::GuestAccess { command } => guest_access(command).await,
         NyxbotCommands::Agents(auth) => discovery(auth, format!("{ROOT}/agents")).await,
         NyxbotCommands::Models(auth) => discovery(auth, format!("{ROOT}/models")).await,
         NyxbotCommands::Conversations {

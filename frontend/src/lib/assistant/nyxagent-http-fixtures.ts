@@ -7,9 +7,12 @@ import {
   ASSISTANT_AGENT_PERSONA_MAX,
   ASSISTANT_GROUP_MAX_MEMBERS,
   ASSISTANT_GROUP_NAME_MAX,
+  assistantGuestPolicyPatchSchema,
   type AssistantAgent,
   type AssistantAgentKind,
   type AssistantAgentMemoryNote,
+  type AssistantGuestAccess,
+  type AssistantGuestPolicy,
   type AssistantGroup,
   type AssistantGroupMessage,
   type NyxAgentAcknowledgement,
@@ -73,6 +76,8 @@ interface AgentRecord {
   created_by: "user" | "nyxbot";
   services: string[];
   account_read: boolean;
+  guest_policy?: AssistantGuestPolicy;
+  guest_access?: Record<string, AssistantGuestAccess>;
   memory: AssistantAgentMemoryNote[];
   home_conversation_id: string | null;
   created_at: string;
@@ -388,7 +393,21 @@ export class NyxAgentHttpFixtures {
           : "idle",
       services: agent.services,
       account_read: agent.account_read,
-      guest_access: Object.fromEntries(agent.services.map((slug) => [slug, "use" as const])),
+      guest_policy: agent.guest_policy ?? {
+        enabled: false,
+        default_access: "use",
+        escalation: "refuse",
+        share_skills: false,
+      },
+      effective_guest_policy: agent.guest_policy?.enabled ? agent.guest_policy : { enabled: false, default_access: "use", escalation: "refuse", share_skills: false },
+      guest_access_explicit: agent.guest_access ?? {},
+      guest_access: Object.fromEntries(
+        agent.services.map((slug) => [
+          slug,
+          agent.guest_access?.[slug] ??
+            (agent.guest_policy?.enabled ? agent.guest_policy.default_access : "use"),
+        ]),
+      ),
       pending_requests,
       last_reply: reply
         ? { seq: reply.seq, status: reply.status, text: reply.text, created_at: reply.created_at }
@@ -646,7 +665,7 @@ export class NyxAgentHttpFixtures {
   }
 
   private agentsRoute(url: URL, method: string, body: () => Record<string, unknown>) {
-    const match = /^\/assistant\/nyxagent\/agents(?:\/([\w-]+))?(?:\/(grants|destroy|memory)(?:\/([\w-]+))?)?$/.exec(
+    const match = /^\/assistant\/nyxagent\/agents(?:\/([\w-]+))?(?:\/(grants|guest-access|destroy|memory)(?:\/([\w-]+))?)?$/.exec(
       url.pathname,
     );
     if (!match) return undefined;
@@ -663,12 +682,67 @@ export class NyxAgentHttpFixtures {
     }
     const agent = this.agents.find((row) => row.id === id);
     if (!agent) return failure(404, "Agent not found");
+    if (action === "guest-access") {
+      if (agent.kind === "nyxbot")
+        return failure(400, "NyxBot has no guest service access");
+      if (agent.destroyed_at) return failure(409, "That agent was destroyed");
+      if (method === "PATCH") {
+        const parsed = assistantGuestPolicyPatchSchema.safeParse(body());
+        if (!parsed.success) return failure(400, "Invalid guest policy");
+        const { services, ...policy } = parsed.data;
+        if (
+          Object.keys(services ?? {}).some(
+            (slug) => !agent.services.includes(slug),
+          )
+        ) {
+          return failure(400, "Service is not granted");
+        }
+        agent.guest_policy = {
+          enabled: false,
+          default_access: "use",
+          escalation: "refuse",
+          share_skills: false,
+          ...agent.guest_policy,
+          ...policy,
+        };
+        agent.guest_access ??= {};
+        for (const [slug, level] of Object.entries(services ?? {})) {
+          if (level === "default") delete agent.guest_access[slug];
+          else agent.guest_access[slug] = level;
+        }
+        this.save();
+      } else if (method !== "GET") return undefined;
+      const view = this.agentView(agent);
+      return json({
+        agent_id: agent.id,
+        guest_policy: view.guest_policy,
+        effective_guest_policy: view.effective_guest_policy,
+        services: Object.fromEntries(
+          agent.services.map((slug) => [
+            slug,
+            {
+              access: view.guest_access[slug],
+              source: agent.guest_access?.[slug] ? "explicit" : "default",
+            },
+          ]),
+        ),
+      });
+    }
     if (action === "grants" && method === "PUT") {
       if (agent.kind === "nyxbot") return failure(400, "NyxBot has full access");
       if (agent.destroyed_at) return failure(409, "That agent was destroyed");
-      const update = body() as { services: string[]; account_read: boolean };
+      const update = body() as {
+        services: string[];
+        account_read: boolean;
+        guest_access?: Record<string, AssistantGuestAccess | "default">;
+      };
       agent.services = [...new Set(update.services)];
       agent.account_read = update.account_read;
+      const levels: Record<string, AssistantGuestAccess> = {};
+      for (const [slug, level] of Object.entries({ ...agent.guest_access, ...update.guest_access })) {
+        if (agent.services.includes(slug) && level !== "default") levels[slug] = level;
+      }
+      agent.guest_access = levels;
       this.save();
       return json({ id: agent.id, services: agent.services, account_read: agent.account_read });
     }

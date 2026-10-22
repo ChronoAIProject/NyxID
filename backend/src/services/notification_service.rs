@@ -725,9 +725,13 @@ pub async fn send_approval_notification(
         let bot_token = config.telegram_bot_token.as_deref();
 
         if let Some(bot_token) = bot_token {
-            let requester_label = request
-                .requester_label
+            let guest_label = request
+                .guest
+                .as_ref()
+                .map(super::guest_approval_service::display_label);
+            let requester_label = guest_label
                 .as_deref()
+                .or(request.requester_label.as_deref())
                 .unwrap_or(&request.requester_type);
 
             match telegram_service::send_approval_message(
@@ -793,13 +797,22 @@ pub async fn send_approval_notification(
         // Push title/body switch when the request is org-scoped so admins
         // can distinguish an org decision from a personal one from the
         // lock-screen preview alone.
-        let (push_title, push_body_owned): (&str, Option<String>) = match effective_org_name {
-            Some(name) => (
-                "Org Approval Required",
-                Some(format!("{name} admins: a service is requesting access")),
-            ),
-            None => ("Approval Required", None),
-        };
+        let (push_title, push_body_owned): (&str, Option<String>) =
+            if let Some(guest) = &request.guest {
+                data.insert("guest".into(), "true".into());
+                (
+                    "Guest Approval Required",
+                    Some(super::guest_approval_service::display_label(guest)),
+                )
+            } else {
+                match effective_org_name {
+                    Some(name) => (
+                        "Org Approval Required",
+                        Some(format!("{name} admins: a service is requesting access")),
+                    ),
+                    None => ("Approval Required", None),
+                }
+            };
         let push_body: &str = push_body_owned
             .as_deref()
             .unwrap_or("A service is requesting access");

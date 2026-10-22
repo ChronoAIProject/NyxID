@@ -479,14 +479,21 @@ pub(crate) async fn preload_for_turn(
         .filter(|chat| {
             chat.turn_live
                 && !chat.turn_stopped
-                && !chat.guest
+                && (!chat.guest || agent.shares_guest_skills())
                 && chat.agent_id == agent.id
                 && chat.conversation_id == row.id
                 && chat.turn_id.as_deref()
                     == row.active_turn.as_ref().map(|turn| turn.turn_id.as_str())
         })
         .ok_or_else(|| {
-            AppError::Forbidden("Live owner turn required for skill preloading".into())
+            AppError::Forbidden(
+                if row.guest_turn && agent.shares_guest_skills() {
+                    "Live authorized turn required for skill preloading"
+                } else {
+                    "Live owner turn required for skill preloading"
+                }
+                .into(),
+            )
         })?;
     Ok(crate::services::agent_skill_preload::instructions(
         &Reader {
@@ -1018,6 +1025,7 @@ mod tests {
         guest: bool,
     ) -> ChatAuthority {
         ChatAuthority {
+            guest_policy: Default::default(),
             channel_adapter_origin: None,
             invocation_controlled: false,
             invocation_id: None,

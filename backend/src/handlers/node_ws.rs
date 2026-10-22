@@ -3081,6 +3081,7 @@ mod tests {
             Some("0.7.1-test".to_string()),
             Some(NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                http_guest_no_redirect: false,
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
@@ -3204,6 +3205,7 @@ mod tests {
             None,
             Some(NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                http_guest_no_redirect: false,
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,

@@ -164,9 +164,7 @@ pub async fn reserve_with_arguments(
     args: &Value,
 ) -> AppResult<AsyncServiceOperation> {
     if chat.guest {
-        return Err(AppError::Forbidden(
-            "Guests cannot create async watches".into(),
-        ));
+        return Err(guest_refusal(db, chat).await);
     }
     let contract = endpoint.async_operation.clone().ok_or_else(invalid)?;
     validate_endpoints(&contract, service, endpoint)?;
@@ -225,6 +223,30 @@ pub async fn reserve_with_arguments(
     }).await.map_err(transactions::map_transaction_error)?;
     audit(db_ref_for_audit, &watch, "registered", None);
     Ok(watch)
+}
+
+/// Async guests always refuse; only a verified ask-owner specialist uses 12104.
+/// Missing or unreadable policy retains the legacy refusal without authorizing work.
+pub(crate) async fn guest_refusal(
+    db: &Database,
+    chat: &super::assistant_acknowledgement_service::ChatAuthority,
+) -> AppError {
+    if !chat.guest_policy_enabled() {
+        return AppError::Forbidden("Guests cannot create async watches".into());
+    }
+    if super::assistant_team_service::agent(db, &chat.user_id, &chat.agent_id)
+        .await
+        .is_ok_and(|agent| {
+            !agent.is_nyxbot()
+                && agent.guest_policy.enabled
+                && agent.guest_policy.escalation
+                    == crate::models::assistant_agent::GuestEscalation::AskOwner
+        })
+    {
+        AppError::GuestEscalationUnavailable
+    } else {
+        AppError::Forbidden("Guests cannot create async watches".into())
+    }
 }
 
 pub async fn submitted(

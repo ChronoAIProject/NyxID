@@ -630,6 +630,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        guest_policy: Default::default(),
         channel_adapter_origin: None,
         invocation_controlled: false,
         invocation_id: None,
@@ -661,6 +662,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     .await;
     assert!(refused);
     let guest = ChatAuthority {
+        guest_policy: Default::default(),
         invocation_controlled: false,
         invocation_id: None,
         report_to: None,

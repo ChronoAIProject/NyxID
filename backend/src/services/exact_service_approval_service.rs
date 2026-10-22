@@ -2302,6 +2302,7 @@ mod tests {
             .map(|value| value.request_key.clone())
             .unwrap_or_else(|| format!("generic-{id}"));
         ApprovalRequest {
+            guest: None,
             assistant_group: None,
             id: id.to_string(),
             user_id: "user-alpha".to_string(),
@@ -2357,6 +2358,8 @@ mod tests {
             "client-alpha",
             None,
             approval_service::ApprovalRequestOperation {
+                guest: None,
+                guest_deadline: None,
                 assistant_group: None,
                 operation_summary: "write".to_string(),
                 action_description: None,

@@ -504,6 +504,9 @@ pub async fn check_approval(
 /// mint an org-scoped grant on approval (see ChronoAIProject/NyxID#364).
 #[derive(Clone, Debug)]
 pub struct ApprovalRequestOperation {
+    pub guest: Option<crate::models::approval_request::GuestApprovalContext>,
+    /// Exact expiry of the guest admission lease, shared by the persisted request.
+    pub guest_deadline: Option<chrono::DateTime<Utc>>,
     pub assistant_group: Option<crate::models::approval_request::GroupApprovalBinding>,
     pub operation_summary: String,
     pub action_description: Option<String>,
@@ -517,6 +520,8 @@ pub struct ApprovalRequestOperation {
 impl ApprovalRequestOperation {
     pub fn from_descriptor(descriptor: &OperationDescriptor, grant_scope: Option<String>) -> Self {
         Self {
+            guest: None,
+            guest_deadline: None,
             assistant_group: None,
             operation_summary: descriptor.operation_summary(),
             action_description: Some(descriptor.summary.clone()),
@@ -554,6 +559,11 @@ pub async fn create_approval_request(
     notify_user_ids: Vec<String>,
     from_org_policy: bool,
 ) -> AppResult<ApprovalRequest> {
+    let approval_mode = if operation.guest.is_some() {
+        ApprovalMode::PerRequest
+    } else {
+        approval_mode
+    };
     let notify_user_ids = if let Some(group) = &operation.assistant_group {
         vec![group.actor_user_id.clone()]
     } else if notify_user_ids.is_empty() {
@@ -632,9 +642,17 @@ pub async fn create_approval_request(
         }
 
         let now = Utc::now();
-        let expires_at = now + Duration::seconds(i64::from(timeout_secs));
+        let expires_at = if operation.guest.is_some() {
+            operation
+                .guest_deadline
+                .filter(|deadline| *deadline > now)
+                .ok_or_else(|| AppError::Forbidden("guest_owner_declined".into()))?
+        } else {
+            now + Duration::seconds(i64::from(timeout_secs))
+        };
 
         let request = ApprovalRequest {
+            guest: operation.guest.clone(),
             assistant_group: operation.assistant_group.clone(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
@@ -871,6 +889,7 @@ pub async fn create_tool_approval_request(
     let action_description = tool_arguments.map(|args| format!("{tool_name}({args})"));
 
     let request = ApprovalRequest {
+        guest: None,
         assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
@@ -1012,6 +1031,11 @@ pub(crate) async fn process_decision_with_access(
         )
         .await?;
     }
+    if current.guest.is_some() && duration_sec.is_some() {
+        return Err(AppError::ValidationError(
+            "Guest approvals authorize one request only".into(),
+        ));
+    }
     let now = Utc::now();
     let new_status = if approved { "approved" } else { "rejected" };
     let collection = db.collection::<ApprovalRequest>(REQUESTS);
@@ -1030,6 +1054,7 @@ pub(crate) async fn process_decision_with_access(
             doc! {
                 "_id": request_id,
                 "status": "pending",
+                "$or": [{"guest": bson::Bson::Null}, {"expires_at": {"$gt": bson::DateTime::from_chrono(now)}}],
             },
             doc! {
                 "$set": update_set
@@ -1116,7 +1141,7 @@ pub(crate) async fn process_decision_with_access(
     // is the org itself (no channel row) -- `get_or_create_channel` creates a
     // default row whose `grant_expiry_days` is the system default, so the
     // expiry computation still works.
-    if approved && updated.approval_mode == ApprovalMode::Grant {
+    if approved && updated.guest.is_none() && updated.approval_mode == ApprovalMode::Grant {
         let channel = notification_service::get_or_create_channel(db, &updated.user_id).await?;
         let grant_expiry = resolve_grant_expiry(now, duration_sec, channel.grant_expiry_days);
 
@@ -1165,7 +1190,9 @@ pub(crate) async fn process_decision_with_access(
 }
 
 fn requires_legacy_grant_mode_recheck(request: &ApprovalRequest) -> bool {
-    request.approval_mode == ApprovalMode::Grant && request.grant_scope.is_none()
+    request.guest.is_none()
+        && request.approval_mode == ApprovalMode::Grant
+        && request.grant_scope.is_none()
 }
 
 fn is_idempotent_replay(
@@ -2565,14 +2592,14 @@ mod tests {
                     ApprovalOutcome::Allowed { required: false }
                 ));
                 crate::services::agent_operation_scope_service::check_guest_approval(
-                    true, &outcome,
+                    true, None, &outcome,
                 )
                 .unwrap();
             } else {
                 assert!(matches!(outcome, ApprovalOutcome::NeedsApproval(_)));
                 assert!(
                     crate::services::agent_operation_scope_service::check_guest_approval(
-                        true, &outcome
+                        true, None, &outcome
                     )
                     .is_err()
                 );
@@ -2720,6 +2747,7 @@ mod tests {
     fn make_request(id: &str, status: &str) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            guest: None,
             assistant_group: None,
             id: id.to_string(),
             user_id: "user-1".to_string(),
@@ -3747,6 +3775,7 @@ mod tests {
     ) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            guest: None,
             assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),

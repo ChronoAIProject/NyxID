@@ -3994,6 +3994,15 @@ async fn execute_resolved_proxy_inner<'a>(
             resolved_user_service_id.as_deref(),
             &operation_target_id,
         );
+    if is_ws_upgrade_request(&request) {
+        crate::services::agent_operation_scope_service::check_guest_websocket(
+            &state.db,
+            auth_user.assistant_chat.as_deref(),
+            operation_scope_id,
+            operation_catalog_id,
+        )
+        .await?;
+    }
     crate::services::key_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     let operation_scoped = crate::services::agent_operation_scope_service::is_scoped(
         &auth_user.assistant_operation_scopes,
@@ -4354,6 +4363,11 @@ async fn execute_resolved_proxy_inner<'a>(
     )
     .await?;
 
+    let guest_policy_enabled = auth_user
+        .assistant_chat
+        .as_deref()
+        .is_some_and(|chat| chat.guest_policy_enabled());
+
     proxy_service::validate_ifttt_request(
         &target,
         &method,
@@ -4519,6 +4533,7 @@ async fn execute_resolved_proxy_inner<'a>(
 
     crate::services::agent_operation_scope_service::check_guest_approval(
         operation_guest,
+        auth_user.assistant_chat.as_deref(),
         &approval_outcome,
     )?;
     let durable_candidate = scheduled_api_key_id.is_some();
@@ -5356,7 +5371,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     path,
                     &delegated,
                 )?;
-                let prepared = proxy_service::prepare_node_request(
+                let mut prepared = proxy_service::prepare_node_request(
                     &target,
                     path,
                     query.as_deref(),
@@ -5366,6 +5381,17 @@ async fn execute_resolved_proxy_inner<'a>(
                     caller_token.as_deref(),
                     &extra_outbound_headers,
                 )?;
+                if guest_policy_enabled {
+                    prepared.headers.retain(|(name, _)| {
+                        !name.eq_ignore_ascii_case(
+                            crate::services::node_ws_manager::GUEST_NO_REDIRECT_HEADER,
+                        )
+                    });
+                    prepared.headers.push((
+                        crate::services::node_ws_manager::GUEST_NO_REDIRECT_HEADER.into(),
+                        "1".into(),
+                    ));
+                }
                 let node_location_context = AsyncLocationContext::new(
                     &target.base_url,
                     &prepared.path,
@@ -5447,6 +5473,12 @@ async fn execute_resolved_proxy_inner<'a>(
                         None
                     };
 
+                    if guest_policy_enabled {
+                        state
+                            .node_ws_manager
+                            .require_guest_no_redirect(node_id)
+                            .await?;
+                    }
                     if target.target_id.is_some()
                         && let Err(error) = state
                             .node_ws_manager
@@ -6646,7 +6678,8 @@ async fn execute_resolved_proxy_inner<'a>(
             let downstream_result = until_client_disconnect(
                 &downstream_cancellation,
                 Box::pin(proxy_service::forward_request_with_resource_proof(
-                    if is_pool_attempt
+                    if guest_policy_enabled
+                        || is_pool_attempt
                         || operation_scoped
                         || permission_ingress.is_some()
                         || target.service.offering_kind

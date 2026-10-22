@@ -77,6 +77,8 @@ pub struct NodeConnectionOwner {
     #[serde(default, skip_serializing_if = "is_false")]
     pub http_signature_v2: bool,
     #[serde(default)]
+    pub http_guest_no_redirect: bool,
+    #[serde(default)]
     pub proxy_upload_v1: bool,
     pub instance_name: String,
     pub generation_id: String,
@@ -106,6 +108,7 @@ impl fmt::Debug for NodeConnectionOwner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NodeConnectionOwner")
             .field("http_signature_v2", &self.http_signature_v2)
+            .field("http_guest_no_redirect", &self.http_guest_no_redirect)
             .field("http_cancellation", &self.http_cancellation)
             .field("instance_name", &self.instance_name)
             .field("generation_id", &self.generation_id)
@@ -364,6 +367,7 @@ mod tests {
         let now = Utc::now();
         let owner = NodeConnectionOwner {
             http_signature_v2: false,
+            http_guest_no_redirect: false,
             proxy_upload_v1: false,
             http_cancellation: false,
             instance_name: "backend-0".to_string(),
