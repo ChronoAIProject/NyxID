@@ -483,7 +483,7 @@ async fn ranking_is_paged_in_mongo_and_all_metrics_and_lanes_remain_visible() {
 }
 
 #[tokio::test]
-async fn handler_allows_admin_and_operator_and_rejects_regular_users() {
+async fn handler_allows_admin_operator_and_usage_viewer_and_rejects_regular_users() {
     let db = connect_test_database("admin_usage_auth")
         .await
         .expect("MongoDB required");
@@ -491,25 +491,32 @@ async fn handler_allows_admin_and_operator_and_rejects_regular_users() {
         .await
         .unwrap();
     let state = test_app_state(db.clone());
-    for (admin, operator) in [(false, false), (true, false), (false, true)] {
+    let usage_viewer = db
+        .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+        .find_one(doc! { "slug": crate::models::role::USAGE_VIEWER_ROLE_SLUG })
+        .await
+        .unwrap()
+        .expect("seeded Usage Viewer role")
+        .id;
+    for (admin, operator, viewer) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
         let uid = uuid::Uuid::new_v4().to_string();
         let mut user = test_user(&uid, UserType::Person);
         user.is_admin = admin;
         user.is_operator = operator;
-        let role = if admin {
-            "admin"
-        } else if operator {
-            "operator"
-        } else {
-            "user"
-        };
         let roles = crate::services::role_service::get_platform_role_ids(&db)
             .await
             .unwrap();
-        if role == "admin" {
+        if admin {
             user.role_ids.push(roles.admin);
-        } else if role == "operator" {
+        } else if operator {
             user.role_ids.push(roles.operator);
+        } else if viewer {
+            user.role_ids.push(usage_viewer.clone());
         }
         db.collection::<crate::models::user::User>("users")
             .insert_one(user)
@@ -528,12 +535,12 @@ async fn handler_allows_admin_and_operator_and_rejects_regular_users() {
             axum::extract::Query(query()),
         )
         .await;
-        if admin || operator {
+        if admin || operator || viewer {
             assert_eq!(nyxbot_result.unwrap().0.totals.requests, 0);
         } else {
             assert!(matches!(nyxbot_result, Err(AppError::Forbidden(_))));
         }
-        if admin || operator {
+        if admin || operator || viewer {
             assert_eq!(result.unwrap().0.totals.requests, 0);
         } else {
             assert!(matches!(result, Err(AppError::Forbidden(_))));

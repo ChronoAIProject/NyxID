@@ -66,7 +66,7 @@ pub async fn analytics(
     auth: AuthUser,
     Query(query): Query<AnalyticsQuery>,
 ) -> AppResult<Json<AnalyticsResponse>> {
-    super::admin_helpers::require_admin_or_operator(&state, &auth, "admin.assistant.analytics")
+    super::admin_helpers::require_admin_usage_read(&state, &auth, "admin.assistant.analytics")
         .await?;
     let now = Utc::now();
     let (from, to) = query.window(now)?;
@@ -84,13 +84,13 @@ pub async fn analytics(
     }))
 }
 
-/// Kept behind the assistant admin/operator guard, independently of Usage Viewer.
+/// Same read access as the rest of Usage, including the Usage Viewer role.
 pub async fn model_usage(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(query): Query<crate::services::admin_usage_service::AdminUsageQuery>,
 ) -> AppResult<Json<crate::services::admin_usage_service::nyxbot::Response>> {
-    super::admin_helpers::require_admin_or_operator(&state, &auth, "admin.assistant.model_usage")
+    super::admin_helpers::require_admin_usage_read(&state, &auth, "admin.assistant.model_usage")
         .await?;
     Ok(Json(
         crate::services::admin_usage_service::nyxbot::get(&state.db, query.validate(Utc::now())?)

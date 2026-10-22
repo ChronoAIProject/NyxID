@@ -1139,7 +1139,7 @@ const adminUsageRoute = createRoute({
   validateSearch: usagePageSearch,
   beforeLoad: ({ search, location }) => {
     const { user, isLoading } = useAuthStore.getState();
-    if (!isLoading && search.tab === "nyxbot" && !hasAdminRead(user)) {
+    if (!isLoading && search.tab === "nyxbot" && !canReadAdminUsage(user)) {
       throw redirect({ to: "/admin/usage", search: { ...search, tab: "dashboard" }, replace: true });
     }
     const params = new URLSearchParams(location.searchStr);

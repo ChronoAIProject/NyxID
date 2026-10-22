@@ -230,7 +230,7 @@ test("feedback remains useful when activity fails, with an honest empty helpful 
   ).toBeVisible();
 });
 
-test("usage viewers cannot see the NyxBot tab or request assistant data", async ({
+test("usage viewers see the full NyxBot tab", async ({
   page,
 }) => {
   await setup(page);
@@ -254,14 +254,27 @@ test("usage viewers cannot see the NyxBot tab or request assistant data", async 
       assistantRequests.push(request.url());
   });
   await page.goto("/admin/usage?tab=nyxbot");
-  await expect(page).toHaveURL(/tab=dashboard/);
-  await expect(
-    page.getByRole("tab", { name: "Dashboard", exact: true }),
-  ).toBeVisible();
+  await expect(page).toHaveURL(/tab=nyxbot/);
+  for (const name of ["Dashboard", "List"])
+    await expect(page.getByRole("tab", { name, exact: true })).toBeVisible();
   await expect(
     page.getByRole("tab", { name: "NyxBot", exact: true }),
-  ).toHaveCount(0);
-  expect(assistantRequests).toEqual([]);
+  ).toHaveAttribute("aria-selected", "true");
+  for (const name of [
+    "Cost and billing by model",
+    "Session activity",
+    "Feedback over time",
+  ])
+    await expect(page.getByRole("heading", { name })).toBeVisible();
+  await expect(
+    page.getByText("Found the right document", { exact: false }),
+  ).toBeVisible();
+  for (const endpoint of ["model-usage", "analytics", "feedback"])
+    expect(
+      assistantRequests.some((url) =>
+        url.includes(`/admin/assistant/${endpoint}?`),
+      ),
+    ).toBe(true);
 });
 
 test("model trends, exact credits and keyboard drilldown share the date/model filter", async ({
