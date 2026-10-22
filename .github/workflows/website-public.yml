@@ -2,7 +2,7 @@ name: Website public artifact
 on:
   push:
     branches: ['codex/website-a-delivery']
-    paths: ['frontend/**', 'docs/site/**', '.github/workflows/website-public.yml']
+    paths: ['frontend/**', 'docs/site/**', 'cli/src/wizard/**', '.github/workflows/website-public.yml']
   workflow_dispatch:
 permissions:
   contents: read
