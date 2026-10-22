@@ -1,0 +1,46 @@
+{
+  "onlineEntries": [
+    {
+      "href": "/login?code=QA-INVITE&return_to=%2Fkeys&utm_source=qa",
+      "label": "登录"
+    },
+    {
+      "href": "/register?code=QA-INVITE&return_to=%2Fkeys&utm_source=qa",
+      "label": "注册"
+    },
+    {
+      "href": "/register?code=QA-INVITE&return_to=%2Fkeys&utm_source=qa",
+      "label": "注册"
+    }
+  ],
+  "onlineLogin": {
+    "url": "https://nyx.chrono-ai.fun/login?code=QA-INVITE&return_to=%2Fkeys&utm_source=qa",
+    "buttons": [
+      "Continue with Google",
+      "Continue with GitHub",
+      "Continue with Apple",
+      "Continue with the NyxID app",
+      "Sign up",
+      "No Thanks",
+      "Allow"
+    ]
+  },
+  "afterNavigation": {
+    "url": "http://127.0.0.1:4180/solutions?lang=zh&code=QA-INVITE&return_to=%2Fkeys&utm_source=qa",
+    "loginHref": "/login?lang=zh&code=QA-INVITE&return_to=%2Fkeys&utm_source=qa"
+  },
+  "localLogin": {
+    "url": "http://127.0.0.1:4181/login?lang=zh&code=QA-INVITE&return_to=%2Fkeys&utm_source=qa",
+    "buttons": [
+      "Continue with Google",
+      "Continue with GitHub",
+      "Continue with Apple",
+      "Continue with the NyxID app",
+      "Sign up",
+      "No Thanks",
+      "Allow"
+    ],
+    "backend": "https://nyx-api.chrono-ai.fun (public config reads only)"
+  },
+  "note": "Unauthenticated entry only. The offline-backend preview showed an error; the production-backed public configuration preview exposes the same four methods. No sign-in, OAuth consent, registration or mutation performed."
+}

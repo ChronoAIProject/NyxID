@@ -60,6 +60,18 @@ class PolicyInputs(unittest.TestCase):
             "https://oauth.telegram.org",
         })
 
+    def test_generated_public_locations_use_complete_policy_at_custom_output(self):
+        template = Path(__file__).parents[1].joinpath("nginx.conf.template").read_text()
+        files = policy.render({}, template, Path("/tmp/custom-policy"), Path("/tmp/custom-dist"),
+                              Path("/tmp/custom-dist/legal-cache.conf"),
+                              public_routing="location = /security { include @@STATIC_HEADERS@@; }")
+        self.assertIn(f'include "{Path("/tmp/custom-policy/spa-headers.conf").resolve()}";', files["public-routing.conf"])
+        self.assertIn(f'include "{Path("/tmp/custom-policy/public-routing.conf").resolve()}";', files["default.conf"])
+        self.assertIn(f'include "{Path("/tmp/custom-dist/public-routing-maps.conf").resolve()}";', files["default.conf"])
+        self.assertNotIn("@@", "".join(files.values()))
+        self.assertNotIn("$nyxid_referrer_policy", "".join(files.values()))
+        self.assertNotIn("location = /privacy", files["default.conf"])
+
     @staticmethod
     def render(env):
         template = Path(__file__).parents[1].joinpath("nginx.conf.template").read_text()

@@ -36,6 +36,9 @@ FROM nginxinc/nginx-unprivileged:1.27-alpine
 
 # Copy the built SPA
 COPY --from=builder /build/frontend/dist /usr/share/nginx/html
+COPY --from=builder /build/frontend/dist/public-routing-maps.conf /etc/nginx/public-routing-maps.conf
+COPY --from=builder /build/frontend/dist/public-routing.conf /etc/nginx/public-routing.conf
+
 COPY --from=builder /build/frontend/dist/legal-cache.conf /etc/nginx/legal-cache.conf
 
 # The renderer validates origin-only inputs and emits complete nginx 1.27

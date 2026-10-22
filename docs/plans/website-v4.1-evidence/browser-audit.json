@@ -1,0 +1,670 @@
+[
+  {
+    "background": "rgb(13, 13, 13)",
+    "canvases": [
+      {
+        "lightLevel": "0.450",
+        "lightPosition": "0.431",
+        "renderState": "ready"
+      }
+    ],
+    "height": 720,
+    "scene": {
+      "sceneId": "id-j9i8xs86gmmvlt19u82z6q",
+      "scenePaused": "false",
+      "sceneState": "ready"
+    },
+    "theme": "dark",
+    "url": "http://127.0.0.1:4180/?lang=zh",
+    "wall": {
+      "columns": "175.664px 175.664px 175.672px 175.664px 175.664px 175.672px",
+      "count": 24,
+      "gap": "10px",
+      "items": [
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Notion"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Slack"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "GitHub"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Linear"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Google Sheets"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Gmail"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Google Calendar"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Google Drive"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Asana"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Box"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Jira"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Zoom"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Dropbox"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "HubSpot"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "ClickUp"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Google Docs"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Airtable"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Microsoft Outlook (Mail & Calendar)"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Stripe"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Microsoft OneDrive"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Calendly"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Figma"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Microsoft Teams"
+        },
+        {
+          "animation": "none",
+          "height": 58,
+          "name": "Intercom"
+        }
+      ]
+    },
+    "width": 1280
+  },
+  {
+    "check": "gradient-time-1",
+    "time": 1792117956523,
+    "background": "repeating-linear-gradient(90deg, rgb(166, 114, 251) -65.4%, rgb(215, 199, 255) 1.26%, rgb(157, 122, 248) 67.93%, rgb(166, 114, 251) 134.6%)",
+    "style": "--gt-gradient: repeating-linear-gradient(90deg, #A672FB -65.40%, #D7C7FF 1.26%, #9D7AF8 67.93%, #A672FB 134.60%); --gt-border: 1.5px; --gt-glow: 0;"
+  },
+  {
+    "check": "cta-near",
+    "canvases": [
+      {
+        "lightLevel": "0.907",
+        "lightPosition": "0.051",
+        "renderState": "ready"
+      },
+      {
+        "lightLevel": "0.450",
+        "lightPosition": "0.429",
+        "renderState": "ready"
+      }
+    ],
+    "gradient": "--gt-gradient: repeating-linear-gradient(90deg, #A672FB -60.06%, #D7C7FF 6.61%, #9D7AF8 73.27%, #A672FB 139.94%); --gt-border: 1.5px; --gt-glow: 0;"
+  },
+  {
+    "check": "cta-rest",
+    "canvases": [
+      {
+        "lightLevel": "0.533",
+        "lightPosition": "0.380",
+        "renderState": "ready"
+      },
+      {
+        "lightLevel": "0.450",
+        "lightPosition": "0.429",
+        "renderState": "ready"
+      }
+    ]
+  },
+  {
+    "check": "mobile-zh",
+    "height": 844,
+    "login": [
+      {
+        "display": "none",
+        "href": "/login?lang=zh",
+        "tab": 0
+      },
+      {
+        "display": "none",
+        "href": "/login?lang=zh",
+        "tab": 0
+      }
+    ],
+    "scrollWidth": 382,
+    "theme": "dark",
+    "url": "http://127.0.0.1:4180/?lang=zh",
+    "wall": {
+      "columns": "158px 158px",
+      "count": 24,
+      "gap": "10px",
+      "heights": [
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58,
+        58
+      ]
+    },
+    "width": 390
+  },
+  {
+    "check": "mobile-zh-menu",
+    "display": "flex",
+    "href": "/login?lang=zh&code=website-qa&return_to=%2Fservices%3Ftab%3Dkeys&utm_source=website-qa",
+    "tab": 0
+  },
+  {
+    "check": "mobile-zh-login-enter",
+    "url": "http://127.0.0.1:4180/login?lang=zh&code=website-qa&return_to=%2Fservices%3Ftab%3Dkeys&utm_source=website-qa",
+    "decorations": 0
+  },
+  {
+    "check": "mobile-en",
+    "height": 844,
+    "scrollWidth": 382,
+    "theme": "dark",
+    "wallColumns": "158px 158px",
+    "width": 390
+  },
+  {
+    "check": "mobile-en-menu",
+    "display": "flex",
+    "href": "/login?lang=en&code=website-qa&return_to=%2Fservices%3Ftab%3Dkeys&utm_source=website-qa",
+    "tab": 0
+  },
+  {
+    "check": "mobile-en-login-enter",
+    "url": "http://127.0.0.1:4180/login?lang=en&code=website-qa&return_to=%2Fservices%3Ftab%3Dkeys&utm_source=website-qa",
+    "decorations": 0
+  },
+  {
+    "check": "solutions-filter",
+    "hiddenDecorations": 0,
+    "visible": [
+      "\n  Most popular\n  Restaurant managerTakes table bookings in Teleg",
+      "\n  Hospitality\n  Appointment bookerOffers open slots, books the r",
+      "Describe your own“When someone asks for a quote, collect their ad"
+    ]
+  },
+  {
+    "check": "spotlight-focus",
+    "decoration": "--spotlight-card-surface: #111111; --spotlight-card-border: rgba(255, 255, 255, 0.08); --spotlight-card-shadow: 0 24px 48px -24px rgba(0, 0, 0, 0.6);",
+    "focused": true,
+    "href": "/solutions/restaurant-manager?lang=en",
+    "layers": 1,
+    "outline": "solid"
+  },
+  {
+    "check": "spotlight-output",
+    "opacity": "0.1"
+  },
+  {
+    "check": "custom-card",
+    "align": "center",
+    "border": "dashed",
+    "href": "/nyxbot?lang=en",
+    "justify": "center",
+    "text": "Describe your own“When someone asks for a quote, collect their address and email it to me.”Ask NyxBot"
+  },
+  {
+    "check": "route",
+    "buttons": 2,
+    "cards": 4,
+    "forbidden": 0,
+    "heading": "Just ask.NyxBot handles it.",
+    "lang": "en",
+    "overflow": false,
+    "reveals": 0,
+    "route": "/nyxbot",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 1,
+    "cards": 3,
+    "forbidden": 0,
+    "heading": "How NyxID connects AIto your world, safely.",
+    "lang": "en",
+    "overflow": false,
+    "reveals": 1,
+    "route": "/how-it-works",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 2,
+    "cards": 4,
+    "forbidden": 0,
+    "heading": "Already use an AI agent?Plug it into NyxID.",
+    "lang": "en",
+    "overflow": false,
+    "reveals": 1,
+    "route": "/agents",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 1,
+    "cards": 6,
+    "forbidden": 0,
+    "heading": "Guides, stories & updates",
+    "lang": "en",
+    "overflow": false,
+    "reveals": 6,
+    "route": "/blog",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 2,
+    "cards": 0,
+    "forbidden": 0,
+    "heading": "Platform prices.No markup.",
+    "lang": "en",
+    "overflow": false,
+    "reveals": 0,
+    "route": "/pricing",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 1,
+    "cards": 0,
+    "forbidden": 0,
+    "heading": "Your passwords neverreach the AI.",
+    "lang": "en",
+    "overflow": false,
+    "reveals": 0,
+    "route": "/security",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 1,
+    "cards": 0,
+    "forbidden": 0,
+    "heading": "Connect the toolsyou already use.",
+    "lang": "en",
+    "overflow": false,
+    "reveals": 0,
+    "route": "/integrations",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 2,
+    "cards": 3,
+    "forbidden": 0,
+    "heading": "Restaurant manager",
+    "lang": "en",
+    "overflow": false,
+    "reveals": 0,
+    "route": "/solutions/restaurant-manager",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 2,
+    "cards": 10,
+    "forbidden": 0,
+    "heading": "你的助手要做什么？",
+    "lang": "zh-CN",
+    "overflow": false,
+    "reveals": 0,
+    "route": "/solutions",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 2,
+    "cards": 4,
+    "forbidden": 0,
+    "heading": "直接开口，NyxBot 来办。",
+    "lang": "zh-CN",
+    "overflow": false,
+    "reveals": 0,
+    "route": "/nyxbot",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 1,
+    "cards": 3,
+    "forbidden": 0,
+    "heading": "NyxID 如何把 AI安全地连接到你的世界",
+    "lang": "zh-CN",
+    "overflow": false,
+    "reveals": 1,
+    "route": "/how-it-works",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 2,
+    "cards": 4,
+    "forbidden": 0,
+    "heading": "已经在用 AI 智能体？把它接入 NyxID。",
+    "lang": "zh-CN",
+    "overflow": false,
+    "reveals": 1,
+    "route": "/agents",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 1,
+    "cards": 6,
+    "forbidden": 0,
+    "heading": "指南、故事与更新",
+    "lang": "zh-CN",
+    "overflow": false,
+    "reveals": 6,
+    "route": "/blog",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 2,
+    "cards": 0,
+    "forbidden": 0,
+    "heading": "平台原价，零加价。",
+    "lang": "zh-CN",
+    "overflow": false,
+    "reveals": 0,
+    "route": "/pricing",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 1,
+    "cards": 0,
+    "forbidden": 0,
+    "heading": "你的密码，永远不会交给 AI。",
+    "lang": "zh-CN",
+    "overflow": false,
+    "reveals": 0,
+    "route": "/security",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 1,
+    "cards": 0,
+    "forbidden": 0,
+    "heading": "连接你已经在用的工具。",
+    "lang": "zh-CN",
+    "overflow": false,
+    "reveals": 0,
+    "route": "/integrations",
+    "theme": "dark"
+  },
+  {
+    "check": "route",
+    "buttons": 1,
+    "cards": 3,
+    "forbidden": 0,
+    "heading": "限权密钥：只给智能体它需要的权限",
+    "lang": "zh-CN",
+    "overflow": false,
+    "reveals": 4,
+    "route": "/blog/scoped-keys",
+    "theme": "dark"
+  },
+  {
+    "check": "sidebar",
+    "lang": "zh",
+    "demo": 0,
+    "client": 189,
+    "icons": [
+      13,
+      13,
+      13,
+      13,
+      13
+    ],
+    "scroll": 189,
+    "text": "助手NyxBot餐厅经理新新闻聚合后台文员回访队列",
+    "width": 190
+  },
+  {
+    "check": "sidebar",
+    "lang": "zh",
+    "demo": 1,
+    "client": 189,
+    "icons": [
+      13,
+      13,
+      13,
+      13,
+      13
+    ],
+    "scroll": 189,
+    "text": "助手NyxBot餐厅经理新闻聚合新后台文员回访队列",
+    "width": 190
+  },
+  {
+    "check": "sidebar",
+    "lang": "zh",
+    "demo": 2,
+    "client": 189,
+    "icons": [
+      13,
+      13,
+      13,
+      13,
+      13
+    ],
+    "scroll": 189,
+    "text": "助手NyxBot餐厅经理新闻聚合后台文员新回访队列",
+    "width": 190
+  },
+  {
+    "check": "sidebar",
+    "lang": "zh",
+    "demo": 3,
+    "client": 189,
+    "icons": [
+      13,
+      13,
+      13,
+      13,
+      13
+    ],
+    "scroll": 189,
+    "text": "助手NyxBot餐厅经理新闻聚合后台文员回访队列新",
+    "width": 190
+  },
+  {
+    "check": "sidebar",
+    "lang": "en",
+    "demo": 0,
+    "client": 189,
+    "icons": [
+      13,
+      13,
+      13,
+      13,
+      13
+    ],
+    "scroll": 189,
+    "text": "AgentsNyxBotRestaurant managernewNews aggregatorBack-office clerkCallback queue",
+    "width": 190
+  },
+  {
+    "check": "sidebar",
+    "lang": "en",
+    "demo": 1,
+    "client": 189,
+    "icons": [
+      13,
+      13,
+      13,
+      13,
+      13
+    ],
+    "scroll": 189,
+    "text": "AgentsNyxBotRestaurant managerNews aggregatornewBack-office clerkCallback queue",
+    "width": 190
+  },
+  {
+    "check": "sidebar",
+    "lang": "en",
+    "demo": 2,
+    "client": 189,
+    "icons": [
+      13,
+      13,
+      13,
+      13,
+      13
+    ],
+    "scroll": 189,
+    "text": "AgentsNyxBotRestaurant managerNews aggregatorBack-office clerknewCallback queue",
+    "width": 190
+  },
+  {
+    "check": "sidebar",
+    "lang": "en",
+    "demo": 3,
+    "client": 189,
+    "icons": [
+      13,
+      13,
+      13,
+      13,
+      13
+    ],
+    "scroll": 189,
+    "text": "AgentsNyxBotRestaurant managerNews aggregatorBack-office clerkCallback queuenew",
+    "width": 190
+  },
+  {
+    "check": "hero-offscreen",
+    "ctaCanvases": 0,
+    "gradient": false,
+    "reveal": [
+      {
+        "filter": "none",
+        "opacity": "0.72"
+      }
+    ],
+    "scene": {
+      "sceneId": "id-7ifzb0iz9kaj58p3i46d4j",
+      "scenePaused": "true",
+      "sceneState": "ready"
+    },
+    "scrollY": 1496.5
+  },
+  {
+    "check": "hero-resume",
+    "gradient": true,
+    "scene": {
+      "sceneId": "id-7ifzb0iz9kaj58p3i46d4j",
+      "scenePaused": "false",
+      "sceneState": "ready"
+    },
+    "scrollY": 0
+  },
+  {
+    "check": "fade-enter",
+    "filter": "none",
+    "opacity": "0.8004",
+    "top": 184.5390625
+  },
+  {
+    "check": "fade-complete",
+    "filter": "none",
+    "opacity": "1"
+  },
+  {
+    "check": "fade-return",
+    "filter": "none",
+    "opacity": "1"
+  }
+]

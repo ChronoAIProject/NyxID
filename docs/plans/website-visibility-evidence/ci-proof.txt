@@ -1,0 +1,9 @@
+2026-10-21T09:36:37.8499635Z  Test Files  30 passed (30)
+2026-10-21T09:36:37.8500365Z       Tests  232 passed (232)
+2026-10-21T09:37:24.5584676Z Public artifact gate passed: 90 pages.
+2026-10-21T09:37:24.5585884Z Public release proof: {"sourceCommit":"fd00726ec086ed5cf3d8ad19a20e88a00555a2b0","contentRevision":"49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1","pages":90,"status":"pass"}
+2026-10-21T09:37:29.5931545Z Public HTTP gate passed: 219 serial checks.
+2026-10-21T09:37:29.6340919Z Public log privacy gate passed: request and referrer queries omitted.
+2026-10-21T09:37:49.0032531Z Running 10 tests using 1 worker
+2026-10-21T09:38:01.9216026Z   10 passed (13.0s)
+2026-10-21T09:38:03.6865831Z SHA256 digest of uploaded artifact zip is d0f0bc5adb532428f9022061a9a8b896540a3527d1fcd69d057d1917c57fad32

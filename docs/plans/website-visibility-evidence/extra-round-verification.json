@@ -1,0 +1,206 @@
+{
+  "schemaVersion": 1,
+  "checkedAtUtc": "2026-10-21T13:51:20.120539+00:00",
+  "repository": "aelf-hzz780/NyxID",
+  "branch": "codex/website-a-delivery",
+  "baselineHead": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+  "sourceCommit": "9c54de6c630b6e32fc9602ba5bbb9acbb0d39c16",
+  "formalAcceptance": {
+    "round1": "FAIL",
+    "round2": "FAIL",
+    "additionalRoundsAuthorized": 1,
+    "round3": "pending"
+  },
+  "workflowRun": "https://github.com/aelf-hzz780/NyxID/actions/runs/39610188716",
+  "workflowConclusion": "success",
+  "execution": "Default job completed before the dependent single-solution fixture job; each browser job used one worker and no retries.",
+  "defaultDelivery": {
+    "sourceCommit": "9c54de6c630b6e32fc9602ba5bbb9acbb0d39c16",
+    "contentRevision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+    "configRevision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+    "configuration": {
+      "blogMenu": false,
+      "newsletter": null,
+      "contactChat": null,
+      "footerStatus": null,
+      "solutions": {}
+    },
+    "visibility": {
+      "blogMenu": false,
+      "newsletter": false,
+      "contactChat": false,
+      "footerStatus": false,
+      "solutions": []
+    },
+    "kind": "off",
+    "artifactDigest": "sha256:ea3d31433143004a79eefb6f8e338f5df31f7db413e5deb9195e0f8cb0c2586b",
+    "digestVerified": true,
+    "hashesRecomputed": true,
+    "pages": 90,
+    "browserStats": {
+      "startTime": "2026-10-21T13:46:05.519Z",
+      "duration": 21514.774,
+      "expected": 10,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "httpChecks": 219,
+    "lab": {
+      "kind": "lab",
+      "path": "/security",
+      "reducedMotion": true,
+      "fieldCwvStatus": "not-measured",
+      "resources": 73,
+      "transferBytes": 560301,
+      "decodedBytes": 1881388,
+      "lcp": 436,
+      "cls": 1.9480672397878434,
+      "limitations": "Single CI browser at takeover; cross-origin transfer sizes may be unavailable. Not field CWV or an LCP/CLS pass assertion."
+    },
+    "jobId": 119257290465,
+    "artifact": "https://github.com/aelf-hzz780/NyxID/actions/runs/39610188716/artifacts/12350049039",
+    "tests": 245,
+    "testFiles": 31,
+    "productionDelivery": true
+  },
+  "singleSolutionWiringFixture": {
+    "sourceCommit": "9c54de6c630b6e32fc9602ba5bbb9acbb0d39c16",
+    "contentRevision": "36fef752a19c00ab60bc6b9e2a59c0f320d4d7bb257b7b3f4e0f505694d93b5b",
+    "configRevision": "dae178b5d7afc1c3e71fc7b485ca3f7ac1002a4e432f40e942a174f595c62839",
+    "configuration": {
+      "blogMenu": false,
+      "newsletter": null,
+      "contactChat": null,
+      "footerStatus": null,
+      "solutions": {
+        "help-desk": "/assistant?setup=help-desk&draft=hello+world"
+      }
+    },
+    "visibility": {
+      "blogMenu": false,
+      "newsletter": false,
+      "contactChat": false,
+      "footerStatus": false,
+      "solutions": [
+        "help-desk"
+      ]
+    },
+    "kind": "on",
+    "artifactDigest": "sha256:04d43e2dcad8f63e75c4f997dee37e5d7632cb0c1ad514ab2fea251c90cff634",
+    "digestVerified": true,
+    "hashesRecomputed": true,
+    "pages": 90,
+    "browserStats": {
+      "startTime": "2026-10-21T13:48:49.799Z",
+      "duration": 9037.666000000001,
+      "expected": 2,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "fixture": {
+      "kind": "single-solution-wiring-fixture",
+      "productionDelivery": false,
+      "realTaskAccepted": false,
+      "sourceCommit": "9c54de6c630b6e32fc9602ba5bbb9acbb0d39c16",
+      "contentRevision": "36fef752a19c00ab60bc6b9e2a59c0f320d4d7bb257b7b3f4e0f505694d93b5b",
+      "configRevision": "dae178b5d7afc1c3e71fc7b485ca3f7ac1002a4e432f40e942a174f595c62839",
+      "configuration": {
+        "blogMenu": false,
+        "newsletter": null,
+        "contactChat": null,
+        "footerStatus": null,
+        "solutions": {
+          "help-desk": "/assistant?setup=help-desk&draft=hello+world"
+        }
+      },
+      "browserStats": {
+        "startTime": "2026-10-21T13:48:49.799Z",
+        "duration": 9037.666000000001,
+        "expected": 2,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      }
+    },
+    "jobId": 119259294390,
+    "artifact": "https://github.com/aelf-hzz780/NyxID/actions/runs/39610188716/artifacts/12350586533",
+    "productionDelivery": false,
+    "realTaskAccepted": false,
+    "browserCoverage": [
+      "enabled href pathname and decoded return_to",
+      "CTA to Login/Register",
+      "fragment start to Login/Register",
+      "real /start to Login/Register",
+      "top-level invite prefill and selected target preserved"
+    ]
+  },
+  "repairs": [
+    {
+      "id": "V-F02",
+      "commit": "c0ba120e8",
+      "status": "engineering-fixed",
+      "evidence": "Actual registered appRouter /start beforeLoad regression; shared solutionStartHref; two targets, top-level invite, configured return, closed/no-t fallbacks. Browser exercises real /start, fragment and CTA."
+    },
+    {
+      "id": "V-F04",
+      "commit": "16a70cefe",
+      "status": "engineering-fixed",
+      "evidence": "Enabled browser assertion parses /login pathname and return_to; actual targeted on build/browser passed exactly 2 tests without skip/flaky/unexpected."
+    },
+    {
+      "id": "fixture-review-finding",
+      "commit": "9c54de6c6",
+      "status": "engineering-fixed",
+      "evidence": "Valid PublicConfig fixture includes mandatory fields, empty providers, invite requirement/email auth and no telemetry; real Login/Register browser routes passed."
+    }
+  ],
+  "localVerification": {
+    "red": "Actual /start handler tests: 2 failed, 5 passed before fix",
+    "green": "6 files / 53 serial tests after fix",
+    "typescript": "tsc -b --noEmit passed",
+    "localFullBuildBrowser": "not run"
+  },
+  "readOnlyReview": {
+    "agents": 2,
+    "finding": "Incomplete public config would crash real AuthFlow in fixture",
+    "resolution": "Valid fixture contract, then final default and on-fixture CI passed"
+  },
+  "supersededRun": {
+    "id": 39609940633,
+    "source": "16a70cefe2ed9a163ab6c384de7e02eaaf4c325b",
+    "conclusion": "cancelled",
+    "reason": "Superseded by valid public-config fixture correction"
+  },
+  "round2FailureArchive": {
+    "checks.json": "68f9440eaa441eca9e8d00d1e6d704bbb088bddf1fdb99af9f2a2e0a4b2a860d",
+    "findings.json": "fdb5c925d06d6eaf7688ff9454d306f57ed4562a180df508411a8e38a765622a",
+    "independent-probe.cjs": "48dc7d9ad27d0633e2d8a3ef3fde7d75d1e2f4424c0f6ac3a531940a5d9a722c",
+    "independent-probe.json": "cd8442e9fd8357214a989eaf11344dd38b389f25a14b8415d070906abe832e1c",
+    "report.md": "5338d9887f2bf4f632b0a865618fd4943dc49a66a3e393022db6680036fc5259"
+  },
+  "priorRound1FailureArchive": "round1-independent-failure (preserved unchanged)",
+  "labInterpretation": "Single default-package lab sample only; high CLS remains a separate concern. No performance/field-CWV or increment-regression conclusion.",
+  "notRun": [
+    "formal authorized round-three independent acceptance",
+    "live account/OAuth/MFA end-to-end",
+    "real Newsletter delivery/confirmation/unsubscribe/abuse controls",
+    "public Chat quota/rate-limit acceptance",
+    "live public Status acceptance",
+    "real operational solution configuration/authorization/task",
+    "other enabled feature or full viewport matrices",
+    "whole-artifact mixed HTML/JS browser test",
+    "new article approval",
+    "deployment/merge/organization PR",
+    "field CWV"
+  ],
+  "preserved": [
+    "default four switches off; empty solutions",
+    "Blog menu-only hiding with Footer/direct routes/SEO retained",
+    "ordinary auth/dashboard defaults and trusted-return implementation unchanged",
+    "Status/Contact/Newsletter/bundle marker implementation unchanged",
+    "both formal FAIL histories retained",
+    "main visual files and prior untracked assets untouched/unstaged"
+  ]
+}

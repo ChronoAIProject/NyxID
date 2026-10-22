@@ -1,0 +1,653 @@
+// Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
+// Run: node scripts/website-a/generate.mjs <baseline.html>
+import { SiteLink } from "../../site-link";
+import { VisualLink } from "../../visuals/elements";
+import { SolutionActivation } from "../../solution-activation";
+import { useWebsite } from "../../website-context";
+export default function SolutionsBackOfficeClerkPage() {
+  const s = useWebsite();
+  void s;
+  return (
+    <>
+      {"\n"}
+      <section
+        className="hero glowbg"
+        style={{
+          textAlign: "left",
+          paddingBottom: "64px",
+          position: "relative",
+        }}
+      >
+        {"\n  "}
+        <div className="wrap split">
+          {"\n    "}
+          <div>
+            {"\n      "}
+            <div className="crumbs">
+              <SiteLink href={s.siteHref("/solutions")}>{"方案"}</SiteLink>
+              <span>{"/"}</span>
+              <span>{"运营"}</span>
+            </div>
+            {"\n      "}
+            <div className="ic lg g">
+              <svg className="i" viewBox="0 0 24 24">
+                <rect x="2" y="3" width="20" height="14" rx="2"></rect>
+                <path d="M8 21h8M12 17v4"></path>
+              </svg>
+            </div>
+            {"\n      "}
+            <h1
+              className="h1"
+              style={{ fontSize: "var(--fs-h1)", marginTop: "20px" }}
+            >
+              {"后台文员"}
+            </h1>
+            {"\n      "}
+            <p className="lead" style={{ margin: "16px 0 0" }}>
+              {
+                "登录没有 API 的供应商和预订后台，补货、下载发票并归档，在你的电脑或托管虚拟机上完成。"
+              }
+            </p>
+            {"\n      "}
+            <p
+              style={{ marginTop: "14px", fontWeight: "600", fontSize: "17px" }}
+            >
+              {"你能点的，助手也能点。"}
+            </p>
+            {"\n      "}
+            <div
+              style={{
+                display: "flex",
+                gap: "10px",
+                flexWrap: "wrap",
+                marginTop: "28px",
+              }}
+            >
+              <SolutionActivation />
+              <SiteLink className="btn lg" href={s.siteHref("/how-it-works")}>
+                {"工作原理"}
+              </SiteLink>
+            </div>
+            {"\n      "}
+            <div className="pills" style={{ marginTop: "20px" }}>
+              <span className="badge b-ok">{"● Telegram"}</span>
+              <span className="badge b-ro">{"● 电脑"}</span>
+              <span className="badge b-m">{"电脑 · 浏览器"}</span>
+              <span className="badge b-m">{"电脑 · 文件"}</span>
+              <span className="badge b-m">{"Google 表格"}</span>
+              <span className="badge b-m">{"电脑 · 结账"}</span>
+              <span className="badge b-m">{"电脑 · 命令行"}</span>
+            </div>
+            {"\n    "}
+          </div>
+          {"\n    "}
+          <div className="desk mock">
+            {"\n  "}
+            <div className="tb">
+              <i></i>
+              <i></i>
+              <i></i>
+              <span style={{ marginLeft: "8px" }}>{"Mac mini · 实时桌面"}</span>
+              <span className="live">{"NyxBot 正在操作"}</span>
+            </div>
+            {"\n  "}
+            <div className="addr">
+              <svg className="i" viewBox="0 0 24 24">
+                <rect x="3" y="11" width="18" height="11" rx="2"></rect>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+              </svg>
+              {"portal.freshfarms.example/orders/new"}
+            </div>
+            {"\n  "}
+            <div className="pg">
+              <h4>{"Fresh Farms · 新订单"}</h4>
+              {"\n    "}
+              <div className="line">
+                <span>{"罗马番茄（箱）"}</span>
+                <span>{"× 12"}</span>
+                <span>{"$186.00"}</span>
+              </div>
+              <div className="line">
+                <span>{"罗勒（把）"}</span>
+                <span>{"× 6"}</span>
+                <span>{"$21.00"}</span>
+              </div>
+              <div className="line">
+                <span>{"配送 · 周四上午"}</span>
+                <span></span>
+                <span>{"免费"}</span>
+              </div>
+              {"\n    "}
+              <div className="tot">
+                <b>{"合计 $207.00"}</b>
+                <span className="btn p sm">{"下单"}</span>
+              </div>
+              {"\n  "}
+            </div>
+            {"\n  "}
+            <svg className="cursor" viewBox="0 0 24 24">
+              <path
+                d="M4 3l7.07 17 2.51-7.39L21 10.07z"
+                fill="currentColor"
+              ></path>
+            </svg>
+            {"\n  "}
+            <div className="foot">
+              <span>
+                <svg className="i" viewBox="0 0 24 24">
+                  <circle cx="7.5" cy="15.5" r="5.5"></circle>
+                  <path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"></path>
+                </svg>
+                {" 已填入保存的登录 · 密码对 AI 隐藏"}
+              </span>
+              <span className="btn sm">{"接管"}</span>
+            </div>
+            {"\n"}
+          </div>
+          {"\n  "}
+        </div>
+        {"\n"}
+      </section>
+      {"\n"}
+      <section className="s">
+        <div className="wrap split">
+          <div>
+            <div className="over v">{"聊天中"}</div>
+            <h2 className="h2" style={{ marginTop: "10px" }}>
+              {"你在 Telegram 里说，它在电脑上做。"}
+            </h2>
+          </div>
+          <div className="phone">
+            <div className="ph-h">
+              <div className="av">
+                <svg className="i" viewBox="0 0 24 24">
+                  <rect x="2" y="3" width="20" height="14" rx="2"></rect>
+                  <path d="M8 21h8M12 17v4"></path>
+                </svg>
+              </div>
+              <div>
+                <b style={{ fontSize: "14px" }}>{"后台文员"}</b>
+                <div className="small" style={{ fontSize: "11.5px" }}>
+                  {"Telegram · 助手"}
+                </div>
+              </div>
+            </div>
+            <div className="msgs">
+              <div className="m in">{"番茄快没了，去 Fresh Farms 补货。"}</div>
+              <div className="m tool">
+                {"✓ 已打开 Fresh Farms 后台 · Mac mini"}
+              </div>
+              <div className="m tool">{"✓ 已用保存的登录信息登录"}</div>
+              <div className="m out">
+                {"购物车已备好：番茄 12 箱，186 美元。确认下单吗？"}
+              </div>
+              <div className="m in">{"确认"}</div>
+              <div className="m tool">{"✓ 已下单 · 发票已保存"}</div>
+            </div>
+          </div>
+        </div>
+      </section>
+      {"\n"}
+      <section className="s">
+        <div className="wrap">
+          {"\n  "}
+          <div className="over v">{"运行方式"}</div>
+          <h2 className="h2" style={{ margin: "10px 0 32px" }}>
+            {"从收到消息到完成"}
+          </h2>
+          {"\n  "}
+          <div className="flow">
+            <div className="fn ">
+              <div className="k">{"触发"}</div>
+              <b>{"你提出或库存不足时"}</b>
+              {"Telegram 或定时"}
+            </div>
+            <div className="fn ">
+              <div className="k">{"助手"}</div>
+              <b>{"规划操作步骤"}</b>
+              {"哪个网站、订什么"}
+            </div>
+            <div className="fn ">
+              <div className="k">{"执行"}</div>
+              <b>{"使用浏览器"}</b>
+              {"在你的电脑或托管虚拟机上"}
+            </div>
+            <div className="fn gate">
+              <div className="k">{"需你确认"}</div>
+              <b>{"提交前"}</b>
+              {"卡片上显示订单金额"}
+            </div>
+            <div className="fn ">
+              <div className="k">{"结果"}</div>
+              <b>{"已下单"}</b>
+              {"发票归档，表格已更新"}
+            </div>
+          </div>
+          {"\n"}
+        </div>
+      </section>
+      {"\n"}
+      <section className="s">
+        <div className="wrap split">
+          {"\n  "}
+          <div>
+            <div className="over v">{"默认安全"}</div>
+            <h2 className="h2" style={{ marginTop: "10px" }}>
+              {"它被允许做什么"}
+            </h2>
+            <p className="lead" style={{ marginTop: "14px" }}>
+              {"这些权限已经预设好。上线前可以修改，之后也能一键调整。"}
+            </p>
+            {"\n  "}
+            <div
+              style={{
+                display: "flex",
+                gap: "8px",
+                flexWrap: "wrap",
+                marginTop: "22px",
+              }}
+            >
+              <span className="badge b-ok">{"允许"}</span>
+              <span className="badge b-ro">{"只读"}</span>
+              <span className="badge b-ask">{"先问我"}</span>
+              <span className="badge b-no">{"禁止"}</span>
+            </div>
+            {"\n  "}
+            <SiteLink
+              className="more"
+              style={{ marginTop: "22px" }}
+              href={s.siteHref("/security")}
+            >
+              {"了解权限如何运作 "}
+              <svg className="i" viewBox="0 0 24 24">
+                <path d="M5 12h14M12 5l7 7-7 7"></path>
+              </svg>
+            </SiteLink>
+          </div>
+          {"\n  "}
+          <div className="perm-card">
+            <div className="pc-h">
+              <div>
+                <b>{"后台文员"}</b>
+                <div className="small">{"这个助手能做什么"}</div>
+              </div>
+              <span className="badge b-v">
+                <svg className="i" viewBox="0 0 24 24">
+                  <circle cx="7.5" cy="15.5" r="5.5"></circle>
+                  <path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"></path>
+                </svg>
+                {" 限权密钥"}
+              </span>
+            </div>
+            <div className="prow">
+              <span className="gl" style={{ background: "#4A1FD4" }}>
+                {"PC"}
+              </span>
+              <div>
+                {"电脑 · 浏览器"}
+                <small>{"用已保存的登录使用后台"}</small>
+              </div>
+              <span className="badge b-ok">{"允许"}</span>
+            </div>
+            <div className="prow">
+              <span className="gl" style={{ background: "#4A1FD4" }}>
+                {"PC"}
+              </span>
+              <div>
+                {"电脑 · 文件"}
+                <small>{"把发票存到文件夹"}</small>
+              </div>
+              <span className="badge b-ok">{"允许"}</span>
+            </div>
+            <div className="prow">
+              <span className="gl" style={{ background: "#0F9D58" }}>
+                {"SH"}
+              </span>
+              <div>
+                {"Google 表格"}
+                <small>{"更新库存表"}</small>
+              </div>
+              <span className="badge b-ok">{"允许"}</span>
+            </div>
+            <div className="prow">
+              <span className="gl" style={{ background: "#4A1FD4" }}>
+                {"PC"}
+              </span>
+              <div>
+                {"电脑 · 结账"}
+                <small>{"提交订单"}</small>
+              </div>
+              <span className="badge b-ask">{"先问我"}</span>
+            </div>
+            <div className="prow">
+              <span className="gl" style={{ background: "#4A1FD4" }}>
+                {"PC"}
+              </span>
+              <div>
+                {"电脑 · 命令行"}
+                <small>{"运行命令"}</small>
+              </div>
+              <span className="badge b-no">{"禁止"}</span>
+            </div>
+            <div className="small" style={{ marginTop: "12px" }}>
+              {"底层原理：带有操作范围和审批模式的 NyxID Agent Key。"}
+            </div>
+          </div>
+          {"\n"}
+        </div>
+      </section>
+      {"\n"}
+      <section className="s">
+        <div className="wrap split">
+          {"\n  "}
+          <div>
+            <div className="over v">{"设置"}</div>
+            <h2 className="h2" style={{ marginTop: "10px" }}>
+              {"你只需填写几项信息"}
+            </h2>
+            <p className="lead" style={{ marginTop: "14px" }}>
+              {"用大白话回答即可。之后在聊天中告诉 NyxBot 就能随时修改。"}
+            </p>
+          </div>
+          {"\n  "}
+          <div className="card">
+            <ul className="checks">
+              <li>
+                <span className="ck">{"1"}</span>
+                <div>
+                  <b>{"使用哪台机器：你的电脑或托管虚拟机"}</b>
+                </div>
+              </li>
+              <li>
+                <span className="ck">{"2"}</span>
+                <div>
+                  <b>{"它可以使用的网站和已保存登录"}</b>
+                </div>
+              </li>
+              <li>
+                <span className="ck">{"3"}</span>
+                <div>
+                  <b>{"发票存放文件夹"}</b>
+                </div>
+              </li>
+              <li>
+                <span className="ck">{"4"}</span>
+                <div>
+                  <b>{"每笔订单的消费上限"}</b>
+                </div>
+              </li>
+            </ul>
+          </div>
+          {"\n"}
+        </div>
+      </section>
+      {"\n"}
+      <section className="s">
+        <div className="wrap">
+          <div className="over v">{"价格"}</div>
+          <h2 className="h2" style={{ margin: "10px 0 28px" }}>
+            {"费用说明"}
+          </h2>
+          {"\n  "}
+          <div className="grid g2">
+            {"\n    "}
+            <div className="card">
+              <span className="badge b-ok">{"● 用量"}</span>
+              <h3 style={{ fontSize: "var(--fs-h3)", margin: "14px 0 6px" }}>
+                {"平台原价"}
+              </h3>
+              <p className="sub" style={{ fontSize: "14.5px" }}>
+                {
+                  "此方案按各服务的收费计费：电脑 · 浏览器、电脑 · 文件、Google 表格、电脑 · 结账以及 AI 模型，零加价。早期体验期间网络费用由我们承担。"
+                }
+              </p>
+              <SiteLink
+                className="more"
+                style={{ marginTop: "12px" }}
+                href={s.siteHref("/pricing")}
+              >
+                {"价格说明 "}
+                <svg className="i" viewBox="0 0 24 24">
+                  <path d="M5 12h14M12 5l7 7-7 7"></path>
+                </svg>
+              </SiteLink>
+            </div>
+            {"\n    "}
+            <div className="card">
+              <span className="badge b-m">{"企业"}</span>
+              <h3 style={{ fontSize: "var(--fs-h3)", margin: "14px 0 6px" }}>
+                {"定制套餐"}
+              </h3>
+              <p className="sub" style={{ fontSize: "14.5px" }}>
+                {
+                  "规模化运行后台文员？我们会根据你的用量、部署和支持需求定制套餐。"
+                }
+              </p>
+              <SiteLink
+                className="more"
+                style={{ marginTop: "12px" }}
+                href={s.siteHref("/contact?topic=bundle")}
+              >
+                {"联系我们 "}
+                <svg className="i" viewBox="0 0 24 24">
+                  <path d="M5 12h14M12 5l7 7-7 7"></path>
+                </svg>
+              </SiteLink>
+            </div>
+            {"\n  "}
+          </div>
+          {"\n"}
+        </div>
+      </section>
+      {"\n"}
+      <section className="s">
+        <div className="wrap" style={{ maxWidth: "860px" }}>
+          <div className="over v">{"常见问题"}</div>
+          <h2 className="h2" style={{ margin: "10px 0 18px" }}>
+            {"关于此方案"}
+          </h2>
+          <details>
+            <summary>{"AI 能看到我的后台密码吗？"}</summary>
+            <p>
+              {
+                "不能。已保存的登录信息经过加密，只会直接填入指定网站，AI 永远看不到。"
+              }
+            </p>
+          </details>
+          <details>
+            <summary>{"我能看到它在做什么吗？"}</summary>
+            <p>{"可以。在浏览器中打开实时桌面，随时可以接管。"}</p>
+          </details>
+          <details>
+            <summary>{"用我自己的电脑安全吗？"}</summary>
+            <p>
+              {
+                "电脑访问默认关闭，浏览器、文件、命令行需要你逐项开启。如需更强隔离，可使用 NyxID 容器或托管虚拟机。"
+              }
+            </p>
+          </details>
+        </div>
+      </section>
+      {"\n"}
+      <section className="s">
+        <div className="wrap">
+          <div className="sechead">
+            <h2 className="h2">{"相关方案"}</h2>
+            <SiteLink className="btn" href={s.siteHref("/solutions")}>
+              {"全部方案 "}
+              <svg className="i" viewBox="0 0 24 24">
+                <path d="M5 12h14M12 5l7 7-7 7"></path>
+              </svg>
+            </SiteLink>
+          </div>
+          <div className="grid g3">
+            <VisualLink
+              className="card sol feat"
+              href={s.siteHref("/solutions/restaurant-manager")}
+              effect="card"
+            >
+              {"\n  "}
+              <div className="top">
+                <div className="ic">
+                  <svg className="i" viewBox="0 0 24 24">
+                    <path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2"></path>
+                    <path d="M7 2v20"></path>
+                    <path d="M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7"></path>
+                  </svg>
+                </div>
+                <span className="badge b-v">{"最受欢迎"}</span>
+              </div>
+              {"\n  "}
+              <h3>{"餐厅经理"}</h3>
+              <p>
+                {"在 Telegram 上接受订位，查看你的日历，记录忌口并发送提醒。"}
+              </p>
+              {"\n  "}
+              <div className="tags">
+                <span className="badge b-ok">{"● Telegram"}</span>
+              </div>
+              {"\n  "}
+              <div className="small" style={{ fontSize: "12px" }}>
+                {"平台原价 · 零加价"}
+              </div>
+              {"\n  "}
+              <div className="foot">
+                <span>
+                  <svg className="i" viewBox="0 0 24 24">
+                    <rect x="3" y="11" width="18" height="11" rx="2"></rect>
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                  </svg>
+                  {"禁止：收取订金"}
+                </span>
+                <span className="more">
+                  {"查看 "}
+                  <svg className="i" viewBox="0 0 24 24">
+                    <path d="M5 12h14M12 5l7 7-7 7"></path>
+                  </svg>
+                </span>
+              </div>
+            </VisualLink>
+            <VisualLink
+              className="card sol "
+              href={s.siteHref("/solutions/help-desk")}
+              effect="card"
+            >
+              {"\n  "}
+              <div className="top">
+                <div className="ic">
+                  <svg className="i" viewBox="0 0 24 24">
+                    <path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"></path>
+                  </svg>
+                </div>
+                <span className="badge b-m">{"客户支持"}</span>
+              </div>
+              {"\n  "}
+              <h3>{"24 小时客服"}</h3>
+              <p>
+                {"随时回答订单、配送和政策问题，把棘手的问题转给你的团队。"}
+              </p>
+              {"\n  "}
+              <div className="tags">
+                <span className="badge b-ok">{"● Telegram"}</span>
+                <span className="badge b-ok">{"● X"}</span>
+              </div>
+              {"\n  "}
+              <div className="small" style={{ fontSize: "12px" }}>
+                {"平台原价 · 零加价"}
+              </div>
+              {"\n  "}
+              <div className="foot">
+                <span>
+                  <svg className="i" viewBox="0 0 24 24">
+                    <rect x="3" y="11" width="18" height="11" rx="2"></rect>
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                  </svg>
+                  {"禁止：办理退款"}
+                </span>
+                <span className="more">
+                  {"查看 "}
+                  <svg className="i" viewBox="0 0 24 24">
+                    <path d="M5 12h14M12 5l7 7-7 7"></path>
+                  </svg>
+                </span>
+              </div>
+            </VisualLink>
+            <VisualLink
+              className="card sol "
+              href={s.siteHref("/solutions/appointment-booker")}
+              effect="card"
+            >
+              {"\n  "}
+              <div className="top">
+                <div className="ic">
+                  <svg className="i" viewBox="0 0 24 24">
+                    <circle cx="6" cy="6" r="3"></circle>
+                    <circle cx="6" cy="18" r="3"></circle>
+                    <path d="M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12"></path>
+                  </svg>
+                </div>
+                <span className="badge b-m">{"餐饮与服务"}</span>
+              </div>
+              {"\n  "}
+              <h3>{"预约助手"}</h3>
+              <p>{"提供可预约时段，约到合适的人员，改期需经你确认。"}</p>
+              {"\n  "}
+              <div className="tags">
+                <span className="badge b-ok">{"● Telegram"}</span>
+              </div>
+              {"\n  "}
+              <div className="small" style={{ fontSize: "12px" }}>
+                {"平台原价 · 零加价"}
+              </div>
+              {"\n  "}
+              <div className="foot">
+                <span>
+                  <svg className="i" viewBox="0 0 24 24">
+                    <rect x="3" y="11" width="18" height="11" rx="2"></rect>
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                  </svg>
+                  {"禁止：调整预约"}
+                </span>
+                <span className="more">
+                  {"查看 "}
+                  <svg className="i" viewBox="0 0 24 24">
+                    <path d="M5 12h14M12 5l7 7-7 7"></path>
+                  </svg>
+                </span>
+              </div>
+            </VisualLink>
+          </div>
+        </div>
+      </section>
+      {"\n"}
+      <section className="s">
+        <div className="wrap">
+          <div className="band">
+            <h2 className="h2">{"试用后台文员"}</h2>
+            <p style={{ opacity: ".88", marginTop: "12px", fontSize: "17px" }}>
+              {"几分钟完成设置，随时可以关闭。"}
+            </p>
+            <div
+              style={{
+                display: "flex",
+                gap: "12px",
+                justifyContent: "center",
+                flexWrap: "wrap",
+                marginTop: "28px",
+                position: "relative",
+                zIndex: "1",
+              }}
+            >
+              <SiteLink className="btn lg" href={s.authHref("register")}>
+                {"开始使用"}
+              </SiteLink>
+              <SiteLink className="btn lg gh" href={s.siteHref("/solutions")}>
+                {"浏览方案"}
+              </SiteLink>
+            </div>
+          </div>
+        </div>
+      </section>
+    </>
+  );
+}

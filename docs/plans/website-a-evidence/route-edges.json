@@ -1,0 +1,27 @@
+[
+  {
+    "path": "/solutions/not-a-solution",
+    "heading": "Page not found",
+    "url": "http://127.0.0.1:4180/solutions/not-a-solution?lang=en"
+  },
+  {
+    "path": "/not-a-website-page",
+    "heading": "Page not found",
+    "url": "http://127.0.0.1:4180/not-a-website-page?lang=en"
+  },
+  {
+    "path": "/blog/push-approvals-walkthrough",
+    "heading": "Push approvals: a 90-second walkthrough",
+    "url": "http://127.0.0.1:4180/blog/push-approvals-walkthrough?lang=en"
+  },
+  {
+    "path": "legacy #/start",
+    "url": "http://127.0.0.1:4180/register?code=QA-INVITE",
+    "heading": "Create your account"
+  },
+  {
+    "path": "#beta",
+    "height": 720,
+    "top": -0.0859375
+  }
+]

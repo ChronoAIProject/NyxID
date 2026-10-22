@@ -278,3 +278,22 @@ describe("Feature flag admin route boundary", () => {
     ).rejects.toMatchObject({ options: { to: "/dashboard" } });
   });
 });
+
+it("keeps the existing authenticated homepage redirect and leaves public visitors on the website", () => {
+  const home = Object.values(router.routesById).find(route => route.id === "/");
+  if (!home?.options.beforeLoad) throw new Error("Homepage guard missing");
+  useAuthStore.setState({ isAuthenticated: true, isLoading: false });
+  expect(() => home.options.beforeLoad!({} as never)).toThrowError(
+    expect.objectContaining({ options: expect.objectContaining({ to: "/dashboard" }) }),
+  );
+  useAuthStore.setState({ isAuthenticated: false, isLoading: false });
+  expect(home.options.beforeLoad({} as never)).toBeUndefined();
+  useAuthStore.setState({ isAuthenticated: true, isLoading: true });
+  expect(home.options.beforeLoad({} as never)).toBeUndefined();
+});
+
+it("registers the website and solution pages without replacing the auth or docs routes", () => {
+  for (const path of ["/nyxbot", "/solutions", "/solutions/$slug", "/how-it-works", "/security", "/agents", "/integrations", "/pricing", "/contact", "/login", "/register", "/nyxbot/onboarding", "/docs/$"]) {
+    expect(Object.values(router.routesById).some(route => route.fullPath === path)).toBe(true);
+  }
+});

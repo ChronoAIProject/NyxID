@@ -34,6 +34,7 @@ map $upstream_http_permissions_policy $nyxid_proxy_permissions {
 }
 
 include @@LEGAL_CACHE@@;
+include @@PUBLIC_MAPS@@;
 
 server {
     listen @@PORT@@;
@@ -155,42 +156,13 @@ server {
         try_files $uri =404;
     }
 
-    # Stable content hashes let clients reuse unchanged pages after their
-    # 24-hour freshness window, even when unrelated deployments occur.
-    location = /privacy {
-        default_type text/html;
-        etag off;
-        if_modified_since off;
-        if ($request_method !~ ^(GET|HEAD)$) { return 405; }
-        if ($http_if_none_match = $nyxid_legal_etag) { return 304; }
-        add_header ETag $nyxid_legal_etag;
-        add_header Cache-Control "public, max-age=86400, must-revalidate";
-        include @@STATIC_HEADERS@@;
-        try_files /privacy.html =404;
-    }
+    # Generated canonical pages, reading mirrors and explicit application routes.
+    include @@PUBLIC_ROUTING@@;
 
-    location = /terms {
-        default_type text/html;
-        etag off;
-        if_modified_since off;
-        if ($request_method !~ ^(GET|HEAD)$) { return 405; }
-        if ($http_if_none_match = $nyxid_legal_etag) { return 304; }
-        add_header ETag $nyxid_legal_etag;
-        add_header Cache-Control "public, max-age=86400, must-revalidate";
-        include @@STATIC_HEADERS@@;
-        try_files /terms.html =404;
-    }
-
-    # SPA fallback -- serve index.html for all non-file routes.
-    # Do NOT add `$uri/`: the build mirrors `docs/site/**` into `public/docs/`,
-    # so a real `/docs/` directory exists. With `$uri/`, a request to `/docs`
-    # matches that directory and nginx 301-redirects to `/docs/`, leaking the
-    # internal :8080 listen port into the Location URL and never reaching the
-    # SPA router. Real doc assets (`/docs/*.md`, `/docs/search-index.json`) are
-    # still served by the `$uri` match; client routes fall through to index.html.
+    # Unknown paths receive a real 404 rather than an application-shell fallback.
     location / {
         add_header Cache-Control "no-cache" always;
         include @@STATIC_HEADERS@@;
-        try_files $uri /index.html;
+        try_files $uri =404;
     }
 }

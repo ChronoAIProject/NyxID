@@ -1,0 +1,253 @@
+{
+  "sourceCommit": "58a45da9735cc6ce442a17ef501f5fea3e484789",
+  "runId": 39717322160,
+  "runUrl": "https://github.com/aelf-hzz780/NyxID/actions/runs/39717322160",
+  "runConclusion": "success",
+  "completedAt": "2026-10-22T03:42:40Z",
+  "jobs": [
+    {
+      "id": 119622452645,
+      "name": "public-artifact",
+      "conclusion": "success",
+      "url": "https://github.com/aelf-hzz780/NyxID/actions/runs/39717322160/job/119622452645"
+    },
+    {
+      "id": 119623588907,
+      "name": "Single solution on fixture (not delivery)",
+      "conclusion": "success",
+      "url": "https://github.com/aelf-hzz780/NyxID/actions/runs/39717322160/job/119623588907"
+    },
+    {
+      "id": 119624347687,
+      "name": "Rebuild committed CLI wizard",
+      "conclusion": "success",
+      "url": "https://github.com/aelf-hzz780/NyxID/actions/runs/39717322160/job/119624347687"
+    },
+    {
+      "id": 119624817459,
+      "name": "Verify committed CLI wizard freshness",
+      "conclusion": "success",
+      "url": "https://github.com/aelf-hzz780/NyxID/actions/runs/39717322160/job/119624817459"
+    }
+  ],
+  "artifacts": [
+    {
+      "id": 12399965752,
+      "name": "website-public-58a45da9735cc6ce442a17ef501f5fea3e484789",
+      "digest": "sha256:cb5d2e7ce73884ec1bede746eb7431f6359881049e5c46304f15345a7a375190",
+      "url": "https://github.com/aelf-hzz780/NyxID/actions/runs/39717322160/artifacts/12399965752"
+    },
+    {
+      "id": 12399304163,
+      "name": "website-solution-fixture-58a45da9735cc6ce442a17ef501f5fea3e484789",
+      "digest": "sha256:10056819f10d57c382a4673f392cc5fd7ea666e7a02e14a61a25f03f1b4fe636",
+      "url": "https://github.com/aelf-hzz780/NyxID/actions/runs/39717322160/artifacts/12399304163"
+    },
+    {
+      "id": 12399199884,
+      "name": "wizard-regenerated-58a45da9735cc6ce442a17ef501f5fea3e484789",
+      "digest": "sha256:833e4fb1ad2f926e1835285e73914cb111cf2380cdc3dd3cceaff3edf602af56",
+      "url": "https://github.com/aelf-hzz780/NyxID/actions/runs/39717322160/artifacts/12399199884"
+    }
+  ],
+  "checks": {
+    "nginxPolicyTests": 6,
+    "unitTestFiles": 38,
+    "unitTests": 338,
+    "publicPages": 91,
+    "httpChecks": 227,
+    "defaultBrowserChecks": 10,
+    "onFixtureBrowserChecks": 2,
+    "authoritativeWizardCommand": "cargo test -p nyxid-cli --test wizard_bundle_freshness",
+    "authoritativeWizardTests": 1,
+    "authoritativeWizardFailures": 0
+  },
+  "notRun": [
+    "Full repository cargo test/npm test suites",
+    "Merged-version live account/OAuth/MFA/provider flows",
+    "Merged-version owner visual acceptance",
+    "Production operational solution acceptance",
+    "Field Core Web Vitals"
+  ],
+  "isolation": {
+    "localHeavyBuild": false,
+    "localCargo": false,
+    "live4180Touched": false,
+    "originalCheckoutHead": "acd7e381d595ade5598f0a2b3742fb406b857a59"
+  },
+  "defaultArtifact": {
+    "sourceCommit": "58a45da9735cc6ce442a17ef501f5fea3e484789",
+    "contentRevision": "0a9ed22cebf599d2e0fd6e0afa072824f04cd86d1de11626dce41a9f11c1b420",
+    "configRevision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+    "configuration": {
+      "blogMenu": false,
+      "newsletter": null,
+      "contactChat": null,
+      "footerStatus": null,
+      "solutions": {}
+    },
+    "visibility": {
+      "blogMenu": false,
+      "newsletter": false,
+      "contactChat": false,
+      "footerStatus": false,
+      "solutions": []
+    },
+    "kind": "off",
+    "artifactDigest": "sha256:cb5d2e7ce73884ec1bede746eb7431f6359881049e5c46304f15345a7a375190",
+    "digestVerified": true,
+    "hashesRecomputed": true,
+    "pages": 91,
+    "browserStats": {
+      "startTime": "2026-10-22T03:35:02.479Z",
+      "duration": 18388.515,
+      "expected": 10,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "httpChecks": 227,
+    "lab": {
+      "kind": "lab",
+      "path": "/security",
+      "reducedMotion": true,
+      "fieldCwvStatus": "not-measured",
+      "resources": 76,
+      "transferBytes": 506180,
+      "decodedBytes": 1714742,
+      "lcp": 416,
+      "cls": 1.5217294424109988,
+      "limitations": "Single CI browser at takeover; cross-origin transfer sizes may be unavailable. Not field CWV or an LCP/CLS pass assertion."
+    }
+  },
+  "onFixtureArtifact": {
+    "sourceCommit": "58a45da9735cc6ce442a17ef501f5fea3e484789",
+    "contentRevision": "04fbe1807d7274d98055e8d8bf0718c5f11c2f410fa9540a8907416b3b5bb108",
+    "configRevision": "dae178b5d7afc1c3e71fc7b485ca3f7ac1002a4e432f40e942a174f595c62839",
+    "configuration": {
+      "blogMenu": false,
+      "newsletter": null,
+      "contactChat": null,
+      "footerStatus": null,
+      "solutions": {
+        "help-desk": "/assistant?setup=help-desk&draft=hello+world"
+      }
+    },
+    "visibility": {
+      "blogMenu": false,
+      "newsletter": false,
+      "contactChat": false,
+      "footerStatus": false,
+      "solutions": [
+        "help-desk"
+      ]
+    },
+    "kind": "on",
+    "artifactDigest": "sha256:10056819f10d57c382a4673f392cc5fd7ea666e7a02e14a61a25f03f1b4fe636",
+    "digestVerified": true,
+    "hashesRecomputed": true,
+    "pages": 91,
+    "browserStats": {
+      "startTime": "2026-10-22T03:37:49.231Z",
+      "duration": 7402.728,
+      "expected": 2,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "fixture": {
+      "kind": "single-solution-wiring-fixture",
+      "productionDelivery": false,
+      "realTaskAccepted": false,
+      "sourceCommit": "58a45da9735cc6ce442a17ef501f5fea3e484789",
+      "contentRevision": "04fbe1807d7274d98055e8d8bf0718c5f11c2f410fa9540a8907416b3b5bb108",
+      "configRevision": "dae178b5d7afc1c3e71fc7b485ca3f7ac1002a4e432f40e942a174f595c62839",
+      "configuration": {
+        "blogMenu": false,
+        "newsletter": null,
+        "contactChat": null,
+        "footerStatus": null,
+        "solutions": {
+          "help-desk": "/assistant?setup=help-desk&draft=hello+world"
+        }
+      },
+      "browserStats": {
+        "startTime": "2026-10-22T03:37:49.231Z",
+        "duration": 7402.728,
+        "expected": 2,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      }
+    }
+  },
+  "wizardArtifact": {
+    "sourceCommit": "58a45da9735cc6ce442a17ef501f5fea3e484789",
+    "artifactDigest": "sha256:833e4fb1ad2f926e1835285e73914cb111cf2380cdc3dd3cceaff3edf602af56",
+    "digestVerified": true,
+    "sourceClosureHash": "8be48051a5b3f4ac469466fc5cf1e6922722ec35c8354ef60acaaf251acf7356",
+    "manifestEntries": 178,
+    "sourceClosureHashMatchesCommitted": true,
+    "files": [
+      {
+        "path": "cli/src/wizard/assets/index.html",
+        "sha256": "a586eb38fd3dbf1e0a8fcc44968953a17e401132b0938fce20223c5eb5cb05e1",
+        "identicalToCommitted": true
+      },
+      {
+        "path": "cli/src/wizard/assets/favicon.ico",
+        "sha256": "047cb5dea2b351b1a452b3539b1c8544f36d6fd4d519897f2ce5861cdbafb7b0",
+        "identicalToCommitted": true
+      },
+      {
+        "path": "cli/src/wizard/assets/nyxid-coloured-logo.svg",
+        "sha256": "6fd0c555629089fb4253083c26fccb3e2ec22e340351a0654080607673a10a40",
+        "identicalToCommitted": true
+      },
+      {
+        "path": "cli/src/wizard/assets/nyxid-coloured-logo-dark.svg",
+        "sha256": "8274955ecf9404d02ac66bc84eae77caa50b7a265baeb4198b657e5da13eb47f",
+        "identicalToCommitted": true
+      },
+      {
+        "path": "cli/src/wizard/assets/nyxid-wordmark.svg",
+        "sha256": "6fd0c555629089fb4253083c26fccb3e2ec22e340351a0654080607673a10a40",
+        "identicalToCommitted": true
+      },
+      {
+        "path": "cli/src/wizard/assets/nyxid-app-icon.svg",
+        "sha256": "5d298f408ca908af6814aceca4e7e1ece08eb7413ae8739dc074a3195c6b6657",
+        "identicalToCommitted": true
+      },
+      {
+        "path": "cli/src/wizard/assets/fonts/OFL.txt",
+        "sha256": "a3e5cdd67d4571dd0a24fcc968de0efde7ae97ef752daf0906e4767619dd7231",
+        "identicalToCommitted": true
+      },
+      {
+        "path": "cli/src/wizard/assets/fonts/dm-serif-display-400.woff2",
+        "sha256": "f273cf2c9ce9bc7d6b0f4fcb8aee72f8cf5a249991308b6a144217e0760c5d3f",
+        "identicalToCommitted": true
+      },
+      {
+        "path": "cli/src/wizard/bundle-meta/index.manifest",
+        "sha256": "a52063c3c344fcc743ac392f7d13160014d37d8517363a906a8f402c1831e6c8",
+        "identicalToCommitted": true
+      },
+      {
+        "path": "cli/src/wizard/bundle-meta/index.hash",
+        "sha256": "56db9846537ad68a13dc5a6f10d7969ad60fa5156a04737085235404bb1ef12b",
+        "identicalToCommitted": true
+      }
+    ],
+    "htmlByteIdentityIsNotFreshnessContract": true
+  },
+  "authorAudit": {
+    "reverseObjectAuditCount": 43,
+    "allOriginalCommitBytesRecovered": true,
+    "featureOnlyCommitsAtEngineeringSource": 47,
+    "allFeatureAuthorAndCommitterNames": "Richard.Huang",
+    "email": "huangzongzhe@MacBook-Pro.local",
+    "sourceCommit": "58a45da9735cc6ce442a17ef501f5fea3e484789"
+  }
+}

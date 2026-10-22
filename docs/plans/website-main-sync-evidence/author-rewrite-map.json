@@ -1,0 +1,788 @@
+{
+  "scope": "43 feature-only commits; upstream reachable commits excluded",
+  "oldTip": "811e3c206054d8ab27bfe9f37fce850e1ccc9fe7",
+  "newTip": "b277ef7d6cca0187839f6174be4546294286bcf4",
+  "upstream": "cefb3e674a2a4364cf5e42c897d9c22659bcbce0",
+  "backupRef": "refs/backup/website-before-richard-20261022",
+  "remoteLeaseExpectedOldSha": "811e3c206054d8ab27bfe9f37fce850e1ccc9fe7",
+  "allTreesAndMessagesIdentical": true,
+  "emailsAndTimestampsPreserved": true,
+  "repositoryUserName": "Richard.Huang",
+  "repositoryUserEmail": "huangzongzhe@MacBook-Pro.local",
+  "commits": [
+    {
+      "old": "a0ae2b3f3bf3908387978c3ca2067344f36b6c46",
+      "new": "0725ffebfa7237e5b9ddabda1ab5ed3058202b12",
+      "tree": "a0e19e74be13f2c5100ecf44ef8c5cc56dc93ec6",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "feat(website): ✨ deliver approved NyxID website A"
+    },
+    {
+      "old": "b36d2a1464354f2f58cf02a037d50b6f640ecb33",
+      "new": "08bd52034c06e94a97b7812f62cecd0fd4c06e76",
+      "tree": "aae3a924e17c33f355da3d39c483fd9fe547d9a8",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "docs(website): 📝 record PR blocker and acceptance handoff"
+    },
+    {
+      "old": "22c5df89fea2876ad7192af1273b3be704e82ba0",
+      "new": "2281bcfaf574d5f2ae1d2b6d255b404ad43bb029",
+      "tree": "f2ad22b70b6d6620cc29dd557f85a331aaaa7e5d",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "📝 docs(website): clarify fork delivery and manual upstream PR"
+    },
+    {
+      "old": "1ac8a28675603279499fb1205790ca4bd67c4fa0",
+      "new": "dd4dae115a92fe2857b0574bdabcece838c6d634",
+      "tree": "7f864fa4a25a5d18bd5aafeb82bfb251404dd76d",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🐛 fix(website): address first acceptance findings"
+    },
+    {
+      "old": "5de5ff19f8347b09604221ce260089e1b5a1c6e1",
+      "new": "8cce09c00a154ab7c35f30079c5d861caa031f8a",
+      "tree": "3c065349cfc79acb224057b3b228d37f105de6b6",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "📝 docs(website): record independent acceptance of fixes"
+    },
+    {
+      "old": "33bb6fe4646d65b172aec0f233ec3cdc8932cca9",
+      "new": "65bff3037e803c21761712414307dfc314270614",
+      "tree": "e457091d5eabdfc2df65b3fe7d50109c26489c40",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "✨ feat(website): integrate approved v4.1 visuals and independent dark theme"
+    },
+    {
+      "old": "1cb7ca6e877c0c258a51f6b24eedfb23db8215ff",
+      "new": "373828191559254816d2032ad03018058ce8324b",
+      "tree": "78ae426e216056d380b6e0c64a5cdfa9cdec05bf",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🎨 fix(website): align home emphasis with brand gradient"
+    },
+    {
+      "old": "01f573ba2543c495b830b8974d4bd62958aec963",
+      "new": "1c6b52064bc356fb0b9026e310219b72c2ebe681",
+      "tree": "59b5e07094c44cf4df8772eca75edef929ee5e97",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "✨ feat(website): restore contact UI pending delivery integration"
+    },
+    {
+      "old": "a2423b4f053d3a43c960d5ef535ebedae93184fa",
+      "new": "e33737771f764e586e4b9d3d9b2353398b1e2ab4",
+      "tree": "c25aade22dab2962735bf66e6ddae265d30f5d0f",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🎨 fix(website): finish contact layout and narrow-screen styling"
+    },
+    {
+      "old": "4ed6b651e474cb9629a472bb32a41ed8069793f1",
+      "new": "d796f5874230f14b1868bbe1e9edce11b6116de8",
+      "tree": "e3688aee7d3f9417f2281d1a929b12a5ef97ad1d",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🐛 fix(website): correct gradient edges and compose contact email drafts"
+    },
+    {
+      "old": "942a64b2d9af35aea01448c1ba6c3a62697472a2",
+      "new": "0f71f5ebb3be10a57283689c9bd736815d776355",
+      "tree": "320ef852926b8e5a8552485fba164490492588eb",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🐛 fix(website): preserve auth context and restore navigation state"
+    },
+    {
+      "old": "33cb551ba61a431e7c6a2db0ba658e2a8c084ed9",
+      "new": "e10ad7f87e8fb1dee2408dd4c66a56f49c968d53",
+      "tree": "5aa6cbdf238028fc3b3d1a9eb62b43861a781087",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "✨ feat(website): enforce approved publication and unavailable solution boundaries"
+    },
+    {
+      "old": "f18b0cfc4098ed2ccbb301e15f3c6743769820f4",
+      "new": "92c0538ef5eec1416bbdf0fee023f10a743e7b7c",
+      "tree": "7cbbff3987d4db54ee564d51933ced8ecff382cf",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "✨ feat(website): add hydratable public pages and persistent bilingual navigation"
+    },
+    {
+      "old": "b70de2d0ce6f6c0503b8aa23881e6617093bc16f",
+      "new": "f1dd9b7718ea95be15778109b2a5821653994837",
+      "tree": "dea6a1d35e83289ac143e2eb2a08aae5ea03282a",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "✨ feat(website): publish static HTML and Markdown with HTTP release gates"
+    },
+    {
+      "old": "6976914490cbce8c33a87048fdd8d2a583613de9",
+      "new": "ba6ae5b2fdedbe759bc8c082c18986f1550156b6",
+      "tree": "e436f8a1d39bf72fe978ef06a47d73b47a5b0326",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🐛 fix(website): exclude prototype article chunks and retain localized demos"
+    },
+    {
+      "old": "53f9584653bbb49b545697248009cf4b67740b2a",
+      "new": "55c819cf9b8056577e015b57a075f01ee54eb77b",
+      "tree": "4d3fc426bf8679a80aa9cd23e0c7521d510b24f4",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🧪 test(website): package validated artifacts and check authenticated public routes"
+    },
+    {
+      "old": "7aa338ad85aafeecbc3880c201c74bbc2abc3d83",
+      "new": "9679242c1399091bb8a4757204813e9a6de17a6b",
+      "tree": "5a3a1f9e60f10268a938a5537df8281e84bf1ebb",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🐛 fix(website): preserve router SSR boundaries during hydration"
+    },
+    {
+      "old": "5fc812e9df18da1d1c2b9538535c6c4f57840813",
+      "new": "430480db8be3104d01d66baeb19faae4fc427569",
+      "tree": "46feeba1562e4f4ca14f863d64a87ac5abf50e83",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🔒 fix(website): omit visitor queries from public access logs"
+    },
+    {
+      "old": "b8dfa7bdfaac47137ef4d533bf9bec524741221c",
+      "new": "6c640055660ca259df95f4bca9aed9f932d54050",
+      "tree": "c149cc1e92d13e66b06b0fcef382242d91b22c90",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "📝 docs(website): record verified delivery and measurement protocol"
+    },
+    {
+      "old": "0f213232e219fbc73daaf402e4ccb194ab92b992",
+      "new": "9b41e12cdd696d9525b3014b37b11546e0db20a6",
+      "tree": "c0132cdaa2cf03c5d4ae8439d7650a3b232d62aa",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🐛 fix(website): protect contact submission and recover public navigation"
+    },
+    {
+      "old": "e6bb020c84a327650061fabfdb7bc71d41c9e471",
+      "new": "c076d7dc2628eb72f4acb0d639720a7716690ac8",
+      "tree": "41f528767db177ce0079b5fa036e8d54a537dcfa",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🐛 fix(website): retain approved panels and valid Markdown card links"
+    },
+    {
+      "old": "a6dd64490757b01ce0664c5707911f8af013ea63",
+      "new": "412cf9302295f703fcc79f4c21b9c793f0594c11",
+      "tree": "57d3762a4f7d8bc3076e8629d5e22e27b3b9ff42",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "📝 docs(website): make search and AI measurement sampling executable"
+    },
+    {
+      "old": "bd6580039e0a6a1f1b6b272374f0298dad8ef12c",
+      "new": "253bfa2c68faf3e2679ced9aca7444ba4fe6ede7",
+      "tree": "f5096e393128484cccdce804cba9fa951c2c0eed",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🐛 fix(website): keep the mobile menu open during initial route resolution"
+    },
+    {
+      "old": "644d380f3208bad34f16a7a7d00adf2442be24ba",
+      "new": "d0baa68a9e718125525db8c03059383cda81b8c1",
+      "tree": "6b424235ce020d71f8d076bae7e4585b42c53f52",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🧪 test(website): use real browser media settings and valid recovery fixtures"
+    },
+    {
+      "old": "01ae02df63ec740f61c6bf2a7c8f4bad038c7300",
+      "new": "74ab3e8f7ab9288893ccc09825018f7bdd42eeb1",
+      "tree": "3366bbb806e68526a1ea3785d8a0f0a10cc75f12",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🧪 test(website): wait for hydrated document after explicit asset retry"
+    },
+    {
+      "old": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "new": "90c77015d4f4789380998315aaf736ff8cc4fc5d",
+      "tree": "adaa4f8f781fc61b3b6e692772f32b0b2e783506",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "📝 docs(website): hand off verified round-one remediation evidence"
+    },
+    {
+      "old": "325068a8d1cae04a8b1cb9343ab7ea2f1a6a9fed",
+      "new": "6bf50b23a6b626b325432526a1d359e63124a651",
+      "tree": "f20f7b675c19459a57c64ebf726ee5e76f7fd973",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "✨ feat(website): retain deferred features behind publication switches"
+    },
+    {
+      "old": "46b3a5a7810493380a21b210d63e2a429a394fe6",
+      "new": "53501fe02a1fddcf167c139d18a04fabfb7ce33a",
+      "tree": "48d663e1fcdfe360496f40c89cf9db997f652aed",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🧪 test(website): bind visibility to public artifacts and hydration"
+    },
+    {
+      "old": "cbdcaa53e55739c21ca4a90426ee3df561ca634e",
+      "new": "88a1cff3b28967211d249564cec4b870f0870c2e",
+      "tree": "8982b01b0cafb5392eb0b37a842b050f259900ac",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "📝 docs(website): clarify temporary hiding and configurable restoration"
+    },
+    {
+      "old": "72500d639c8d0b323b713bcea947ef8d33481897",
+      "new": "b80141965d7594f9caf20f14bfb2c82761a3553b",
+      "tree": "7c5bf578b9cecf68da92548e28d311aba91e2f00",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🐛 fix(website): retain Blog navigation context when restored"
+    },
+    {
+      "old": "fd00726ec086ed5cf3d8ad19a20e88a00555a2b0",
+      "new": "d6d976611f6e9451279881f04b0cdb7ddac4cd97",
+      "tree": "b9663ef65ecb22f55ada7ad3b801a68e3243d386",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🔒 fix(website): reject homepage variants for public status links"
+    },
+    {
+      "old": "ed91d302ff560388315b6cc1149491bb9d5beb95",
+      "new": "a51e2d4e831ffee6668d6d763d27dad8444c4a08",
+      "tree": "f03a1940ef728d34c3f03bb8bd041eb179aa63df",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "📝 docs(website): record verified visibility release and restoration steps"
+    },
+    {
+      "old": "3ceb5cf2e75c4f468164ac89922bcf4eabbd4e08",
+      "new": "e706c0c3e480dbe09323d3c46a44247512b48293",
+      "tree": "b21b8647830a8a061ebac4cf10d7b6e5cfda0784",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🐛 fix(website): reject localized home aliases as status pages"
+    },
+    {
+      "old": "4dcb10f45c405aedd598a2008d285e65d67761f0",
+      "new": "405ba7019b4a901738761576486672bb8bdb3ee1",
+      "tree": "7220ca7bf7d17f0dddf7487c2d2da16331d221d2",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🐛 fix(website): preserve solution invitations through trusted auth handoff"
+    },
+    {
+      "old": "714eaabd2258c40bc8c3d72a079c18e4c356578c",
+      "new": "eca24c632db2b79376feda3acdef26c4a0b57cad",
+      "tree": "fb5c7eea784c2e82bd94a5f43a45a36ad1baa26b",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🧪 fix(website): detect disabled feature markers in template literals"
+    },
+    {
+      "old": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "new": "7e4250a8faac5f505b843da5e2195cede3f6a822",
+      "tree": "44c0be28a7377ac7b17b42fe7c1e5c6409284ec9",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🔒 fix(website): normalize encoded and repeated-slash status aliases"
+    },
+    {
+      "old": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "new": "d18a523f030a0d733062048119c091c10364c827",
+      "tree": "d081039d6676ded92ddf28fee7cb66b2af32868a",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "📝 docs(website): preserve independent failure and verify targeted repairs"
+    },
+    {
+      "old": "c0ba120e8ab5da4d57d2cd693023046931e75075",
+      "new": "08f3d5874ef64a8816a15fd2b7ac1bf7e873fd93",
+      "tree": "2e369249856c76198cd4d4fc81596f0d126130f1",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🐛 fix(website): share solution auth handoff with the real start route"
+    },
+    {
+      "old": "16a70cefe2ed9a163ab6c384de7e02eaaf4c325b",
+      "new": "200ce4faf5e43282073f2adf511ff84c7b7d490f",
+      "tree": "8783640bfe7362b01a0285f5ac48d52e055b7daa",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🧪 fix(website): validate enabled solution auth links in isolated CI"
+    },
+    {
+      "old": "9c54de6c630b6e32fc9602ba5bbb9acbb0d39c16",
+      "new": "c292f09ef9e7d892116a44e6d661c15aa8749a68",
+      "tree": "36e7c72cb353f3116398d37743521cac68d18895",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🧪 fix(website): provide valid public config for auth browser fixtures"
+    },
+    {
+      "old": "d91be379b0ffd126923e61070a5c969d9631bb92",
+      "new": "5343622b609bc788f895240cf9f39e5d6898aecd",
+      "tree": "d5418057050d88f75d3714ad407925fab42aa934",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "📝 docs(website): retain both failures and verify default and enabled fixtures"
+    },
+    {
+      "old": "acd7e381d595ade5598f0a2b3742fb406b857a59",
+      "new": "3b0a4762937a08f7a199b1e3386aa54864176c02",
+      "tree": "7e731f3023d6b9f81a53dcf013fc96c15524f335",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "💄 fix(website): center header language switch labels"
+    },
+    {
+      "old": "811e3c206054d8ab27bfe9f37fce850e1ccc9fe7",
+      "new": "b277ef7d6cca0187839f6174be4546294286bcf4",
+      "tree": "a4ec0ce6aab77d65ea321a802318f51399e00962",
+      "identities": {
+        "author": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        },
+        "committer": {
+          "oldName": "黄宗哲",
+          "newName": "Richard.Huang",
+          "email": "huangzongzhe@MacBook-Pro.local"
+        }
+      },
+      "subject": "🔀 chore(website): merge upstream main with public routing and security policies"
+    }
+  ]
+}

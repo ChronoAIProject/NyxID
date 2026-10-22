@@ -1,0 +1,1 @@
+trial_id,question_id,brand_group,intent,locale,mode,platform_category,platform_name,visible_model_version,repeat_id,started_at_utc,region,login_state,new_session,memory_off,search_setting,prompt,answer_evidence,source_urls,citation,brand_mention,recommendation,fact_correct,availability_correct,boundary_correct,traceable_citation,error_type,status,blocked_reason
