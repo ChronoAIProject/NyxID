@@ -2,6 +2,9 @@
 
 NyxID's optional product analytics uses authenticated account UUIDs. It is separate from security audit, billing, essential operational records and push delivery. Those records do not depend on product-analytics consent. Implemented controls and outstanding erasure work are described in [the implemented controls document](SECURITY_REMEDIATION_W1_W4.md); this document describes the current source contract.
 
+Nyxbot failures use `nyxbot.error` through the same authenticated relay. See
+[Nyxbot error telemetry](NYXBOT_ERROR_TELEMETRY.md) for codes and coverage.
+
 ## Permission and dispatch
 
 An account's `profile_config.analytics` is default off. An authenticated first-party human can read or change it with `GET` or `PUT /api/v1/users/me/preferences/analytics`. A mutation includes its expected `account_id`; the server checks it against the authenticated subject before writing. Each explicit choice stores the server's policy version (`"1"`) and a database-generated change time, and receives a new random revision even when the boolean is unchanged. Older records without a policy version retain an unknown version; the server does not invent a historical acknowledgement. Responses are `no-store`.
