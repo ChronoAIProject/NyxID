@@ -183,7 +183,7 @@ const authLayout = createRoute({
         window.location.assign(trusted);
         return;
       }
-      throw redirect({ to: "/dashboard" });
+      throw redirect({ to: "/assistant" });
     }
   },
   component: AuthLayout,
@@ -465,14 +465,13 @@ const dashboardLayout = createRoute({
     }
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (!isAuthenticated && !isLoading) {
-      // Preserve the deep link (e.g. `/orgs/join/<nonce>`) so sign-in can
+      // Preserve the requested route (e.g. `/dashboard` or `/orgs/join/<nonce>`) so sign-in can
       // resume it. `onLoginSubmit` in auth-flow.tsx and the backend
       // social-login `return_to` cookie both accept an absolute URL on
-      // this origin. For plain `/dashboard` there's nothing useful to
-      // preserve, so fall through to the bare redirect.
+      // this origin. Only the root uses the default post-login destination.
       preserveTelegramClaimForLogin();
       const returnPath = `${location.pathname}${location.searchStr}`;
-      if (returnPath !== "/" && returnPath !== "/dashboard") {
+      if (returnPath !== "/") {
         const returnTo = `${window.location.origin}${returnPath}`;
         window.location.assign(
           `/login?return_to=${encodeURIComponent(returnTo)}`,
@@ -497,7 +496,7 @@ const landingRoute = createRoute({
     }
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (isAuthenticated && !isLoading) {
-      throw redirect({ to: "/dashboard" });
+      throw redirect({ to: "/assistant" });
     }
   },
   component: LandingPage,

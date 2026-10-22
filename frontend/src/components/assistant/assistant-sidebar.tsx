@@ -59,6 +59,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAssistantWorkspaceCounts } from "@/hooks/use-assistant-workspace";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
@@ -605,6 +607,7 @@ export function AssistantSidebar({
   const { current: accountPanel } = useAccountPanel();
   const user = useAuthStore((state) => state.user);
   const counts = useAssistantWorkspaceCounts();
+  const workspacePreview = useFeature(FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW);
   const pluginsActive = activeView === "plugins";
   const approvalsActive = activeView === "approvals";
   const [deleteTarget, setDeleteTarget] = useState<Conversation | undefined>();
@@ -766,15 +769,17 @@ export function AssistantSidebar({
           />
           <span className="truncate">Plugins</span>
         </Link>
-        <ComingSoonItem
-          icon={FileText}
-          label="Artifacts"
-          trailing={
-            <span className="font-mono text-9 text-text-tertiary">
-              {counts.data?.artifacts ?? 0}
-            </span>
-          }
-        />
+        {workspacePreview ? (
+          <ComingSoonItem
+            icon={FileText}
+            label="Artifacts"
+            trailing={
+              <span className="font-mono text-9 text-text-tertiary">
+                {counts.data?.artifacts ?? 0}
+              </span>
+            }
+          />
+        ) : null}
         <Link
           to="/assistant/approvals"
           aria-current={approvalsActive ? "page" : undefined}
@@ -794,7 +799,9 @@ export function AssistantSidebar({
             </span>
           )}
         </Link>
-        <ComingSoonItem icon={Activity} label="Activity" />
+        {workspacePreview ? (
+          <ComingSoonItem icon={Activity} label="Activity" />
+        ) : null}
       </div>
 
       {notice ? (

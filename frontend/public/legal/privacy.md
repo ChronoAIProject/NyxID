@@ -1,21 +1,21 @@
 ---
 title: Privacy Policy
-effective_date: 2026-10-19
+effective_date: 2026-10-23
 ---
 
 # Privacy Policy
 
-**Effective date: 2026-10-19**
+**Effective date: 2026-10-23**
 
 ## 1. Introduction
 
-NyxID ("we", "our", "the Service") is an identity and access management platform with a web dashboard and a mobile authenticator app. This Privacy Policy explains how we collect, use, store, and protect personal information across both surfaces.
+NyxID ("the Service"), operated by ChronoAI Pte. Ltd. ("we", "our"), provides identity and access management, credential proxying and hosted AI assistant features, including NyxBot. This Privacy Policy describes personal information handled through our hosted web service, mobile app, CLI and connected features, including assistant conversations, automations and linked messaging channels.
 
-By using NyxID, you agree to the collection and use of information in accordance with this policy.
+If you use a self-hosted deployment, its operator determines the deployment's configuration, providers and operational data handling; ask that operator for its applicable privacy information. Third-party services you connect also have their own terms and privacy policies. This notice explains processing; optional analytics permission and service or channel authorisations are separate choices. See also our [Terms of Use](/terms).
 
 ## 2. Information We Collect
 
-We collect the minimum data necessary to provide secure authentication and approval services.
+The information processed depends on the features you use and their configuration.
 
 **Account information**
 
@@ -27,7 +27,8 @@ We collect the minimum data necessary to provide secure authentication and appro
 
 - Session token hashes and refresh-token JTI/revocation metadata on the server; authentication tokens in platform-protected Expo SecureStore on mobile. Some short-lived delivery protocols temporarily retain encrypted credentials for one-time delivery.
 - Multi-factor authentication (MFA) secrets (encrypted at rest)
-- OAuth provider tokens when you connect third-party accounts (Google, GitHub, Apple)
+- Social sign-in profile information and provider identifiers; OAuth tokens, API keys and other credentials when you connect services
+- Service and organisation memberships, agent permissions, consent and channel-link records needed to determine authorised access
 
 **Device information (mobile)**
 
@@ -36,6 +37,21 @@ We collect the minimum data necessary to provide secure authentication and appro
 **Usage data**
 
 - Approval decisions (approve/deny/revoke), timestamps, and idempotency keys for security audit trails
+- Service, model and operation usage, metered quantities, credit movements, billing identities and payment or checkout references when billing is enabled
+
+**Assistant and automation content**
+
+- Messages, replies, conversation titles, group messages, saved agent instructions and memory notes, and working-context summaries used to continue conversations
+- Uploaded files and images, display filenames, extracted document text and generated tool images; enabled channel-media features can import supported files from verified owner messages
+- Tool activity, action confirmations, automation instructions and execution status, and results retained for asynchronous work
+- Voice audio processed for an enabled voice feature, transcripts saved in the conversation, and voice session or usage metadata
+- Reply feedback, including optional comments, for review by authorised service administrators, operators and users with permission to read administrative usage reports, including Usage Viewers
+
+**Linked channels and other hosted features**
+
+- Messaging-platform, bot, sender, conversation and message identifiers; delivery and account-link status; bot credentials and verification material where needed
+- Message content and supported attachments when routed to an assistant or another connected runtime. NyxID's basic channel relay stores routing and delivery metadata; assistant features can separately retain the conversation content
+- Oracle task prompts, responses and generated files when you use a browser-model pool, and encrypted webhook payloads when retained webhook replay is configured
 
 **Technical data**
 
@@ -55,20 +71,28 @@ Servers receive technical metadata with HTTPS requests for security and audit. O
 - Enforce security policies (rate limiting, anomaly detection)
 - Send transactional emails (verification, password reset)
 - Maintain security audit logs for compliance and abuse prevention
+- Run requested assistant tasks, retain conversation history and memory, retrieve relevant content from permitted services, and execute configured automations or machine actions
+- Carry messages and supported media between NyxID, linked messaging platforms and the assistant or runtime used for the conversation
+- Process voice interactions and save their transcripts where supported
+- Measure billable usage, apply allowances and credits, and manage checkout, payment and billing records
+- Review submitted reply feedback and investigate failures
 
 ## 4. Data Storage & Security
 
 NyxID stores account data in MongoDB. Dedicated OAuth-token, MFA-secret and API-credential fields use application-layer AES-256 encryption. Passwords use Argon2id with per-user salts; session tokens are hashed rather than reversibly encrypted. Newly saved configured default request-header values are encrypted at rest. Values saved before this protection was enabled are protected when the operator migrates them. Database/storage encryption and backup protections depend on the deployment.
 
-Production deployments should use HTTPS; the deployment operator configures this protection. Tokens use RS256 digital signatures. NyxID supports changing signing keys with an overlap period during which tokens signed with retained keys can still be verified. It also supports changing encryption keys in stages and migrating stored encrypted data. Keys must be kept while they are needed to read stored data or verify existing audit and billing records. The service operator decides the key-rotation schedule and when old keys can be retired.
+Assistant file payloads, extracted upload text, tool-image payloads and stored per-conversation agent credentials use application-layer encryption. This does not mean that every assistant record is encrypted at that layer: conversation text, titles, memory notes, working-context summaries and feedback are stored as application data in the database. Content may contain personal information you or a connected service supply. Authorisation controls restrict access; these features do not provide end-to-end encryption that prevents the hosted service from processing the content.
+
+Production deployments should use HTTPS; the deployment operator configures this protection. NyxID-issued JWTs use RS256 digital signatures. NyxID supports changing signing keys with an overlap period during which tokens signed with retained keys can still be verified. It also supports changing encryption keys in stages and migrating stored encrypted data. Keys must be kept while they are needed to read stored data or verify existing audit and billing records. The service operator decides the key-rotation schedule and when old keys can be retired.
 
 On mobile, authentication tokens use the OS-provided secure storage (iOS Keychain via Expo SecureStore, Android EncryptedSharedPreferences).
 
 ## 5. Data Sharing and Sub-processors
 
-We do **not** sell, rent, or trade your personal information. We share data only in the following cases:
+We do **not** sell, rent, or trade your personal information. Data can be shared in the following circumstances:
 
-- **With your consent:** when you authorize a third-party service via OAuth/OIDC
+- **Providing the Service:** with the infrastructure, assistant, model, communications and billing services needed for an enabled feature
+- **Your instructions and authorisations:** with connected services, agent runtimes and messaging recipients used by your requests, configured automations or authorised agents, including OAuth/OIDC connections
 - **Legal obligations:** when required by law, regulation, or valid legal process
 - **Security:** to prevent fraud or protect the rights and safety of our users
 
@@ -77,15 +101,22 @@ We do **not** sell, rent, or trade your personal information. We share data only
 Depending on enabled features and operator configuration, data can reach:
 
 - Product analytics services: optional events, a pseudonymous account identifier and filtered event metadata, only with analytics permission as described in section 8. The shipped integration is PostHog, when enabled. Its built-in host is the US ingestion endpoint; self-hosters can configure a different host for their own analytics project.
-- Email, SMS and push-delivery services: delivery addresses or device tokens and the messages or notifications needed for the enabled feature. Configured push integrations include Firebase Cloud Messaging and Apple Push Notification service.
+- Email, SMS and push-delivery services: delivery addresses, phone numbers or device tokens and the messages or notifications needed for the enabled feature. Supported integrations include Firebase Cloud Messaging, Apple Push Notification service and Twilio SMS; email delivery uses the operator's configured mail service.
 - Providers you connect: account identifiers, authorization credentials, messages or request content needed for the connection or operation you initiate.
-- Assistant, model and voice services: conversation content, tool context, prompts, audio and related content needed for the feature you choose to use. When enabled or configured, integrations include the NyxAgent assistant engine or Aevatar broker, and model/voice services such as OpenAI and xAI, including connections using an operator-configured key.
+- Assistant, model and voice services: prompts, relevant conversation history, instructions, memory, tool context, attachments or extracted text, audio and related content needed for the feature. Depending on the configured path, this can include the NyxAgent assistant engine, Aevatar broker, and model/voice providers such as OpenAI and xAI. Some services use your connection; others use an operator-configured platform connection. Model and tool responses can become part of a saved NyxID conversation.
+- Messaging platforms and channel gateways: sender and chat identifiers, message text, supported media and routing information for linked bots or conversations. Supported paths include Telegram, Discord, Slack, Lark/Feishu, WhatsApp and X, and an Agent Event Gateway where configured. Recipients in a shared conversation can see messages sent there. Linking personal access to a shared bot requires browser account review and confirmation in that same private chat; a website sign-in alone does not link it. Disconnecting a channel ends that link's authority but does not recall messages already delivered.
 - Billing and payment services: billing identities, usage, checkout and payment references when billing is enabled. Configured integrations include Lago, which may be self-hosted, and payment integrations such as Stripe.
 - Hosting, database, storage and key-management services managed by the operator: the application data and key-management requests needed to run the deployment.
 
-The providers used depend on your deployment and enabled features. User-connected third parties have their own policies. The deployment's sub-processor register and processing regions are available from [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun). You can also ask that address about the deployment's retention and cross-border transfer arrangements.
+This inventory describes supported data flows, not a claim that every listed service is enabled or acts as our sub-processor. A provider engaged to process hosted-service data on our behalf may be a sub-processor; a service you connect or a messaging platform may process data under its own policies. The software's integration list does not establish a provider's contractual role, current processing region, retention period or training practices. Contact [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun) for the hosted deployment's current provider and sub-processor information, processing regions, retention and cross-border transfer arrangements. For a self-hosted deployment, request those details from its operator.
 
 ## 6. Data Retention
+
+**Conversations and feature content.** Saved assistant messages, memory and working context are not governed by the upload expiry period. Conversation deletion removes that conversation's locally stored messages and attachments through its cleanup path; an agent's saved memory is separate from a single conversation and can be managed separately. Upload retention is configurable by the operator. Software defaults are 24 hours for unbound uploads, 30 days for bound user images and documents, and the conversation lifetime for tool-generated images. Operators can change these periods or select deletion of user images after a turn. Expiry makes a payload unavailable and background cleanup removes stored payloads; message text, attachment descriptions or expiry markers can remain. These defaults are not a promise of the hosted deployment's current settings or an exact physical-deletion deadline.
+
+Oracle task content and retained webhook payloads use their configured feature retention periods. Content already sent to a model, messaging platform, connected service or other recipient is subject to that recipient's handling and retention. Deleting NyxID history, disconnecting a channel or stopping a task does not establish deletion of those external copies or undo an action already performed.
+
+**Account deletion and retained records.**
 
 Account data is retained while the account is active. Account-deletion requests receive an immediate acceptance response once the required checks pass, and account access is revoked at acceptance. Local data removal continues in the background. If a request needs more preparation or another issue must be resolved first, access continues until the request can be accepted.
 
@@ -112,7 +143,7 @@ Available settings cover profile changes, account deletion and connection/approv
 
 ## 8. Cookies, Local Storage, and Telemetry
 
-**Web:** NyxID uses HTTP-only secure cookies for session management and browser local storage to persist authentication state.
+**Web:** NyxID uses HTTP-only session cookies and browser storage for authentication state and settings. Secure-cookie and HTTPS protection depend on deployment configuration. Some public pages load fonts from Google Fonts, which causes the browser to contact Google and disclose the technical request metadata needed to fetch them. These font requests are separate from optional product analytics.
 
 **Mobile:** The app stores authentication tokens and push token references using Expo SecureStore and platform-protected local storage. The app does not use tracking cookies, advertising identifiers, or cross-app tracking.
 
@@ -126,7 +157,7 @@ Self-hosters of NyxID can run with analytics disabled by default, or point at th
 
 ## 9. Children's Privacy
 
-NyxID is not intended for use by children under 16 (or the applicable minimum age in your jurisdiction). We do not knowingly collect personal information from children. If you believe a child has provided data to us, please contact us for immediate removal.
+The Terms of Use require users to be at least 18 years old. NyxID is not intended for children. If you believe a child has provided personal information to us, contact us to request review and removal, subject to the retention and deletion limits in section 6.
 
 ## 10. Changes to This Policy
 
