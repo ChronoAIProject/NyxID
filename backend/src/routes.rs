@@ -3,6 +3,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::HeaderName,
     middleware,
+    response::IntoResponse,
     routing::{delete, get, patch, post, put},
 };
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
@@ -528,6 +529,18 @@ fn oauth_public_cors() -> CorsLayer {
             axum::http::header::ACCEPT,
             HeaderName::from_static("dpop"),
         ]))
+}
+
+/// NyxID's built-in oracle relay is permanently retired. Every consumer and
+/// worker route under `/api/v1/oracle` answers 410 `oracle_retired` before any
+/// handler runs, so a caller that still has the old API wired in learns there
+/// is nothing to retry. The routes stay registered: the billing route
+/// inventory, the auth layers and the handler modules are unchanged.
+async fn retire_builtin_oracle(
+    _request: axum::extract::Request,
+    _next: middleware::Next,
+) -> axum::response::Response {
+    crate::errors::AppError::OracleRetired.into_response()
 }
 
 /// Build two routers: (public OAuth / .well-known, private API).
@@ -2408,7 +2421,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .nest("/connections", connection_routes)
         .nest("/providers", provider_routes)
         .nest("/nodes", node_registration_routes)
-        .nest("/oracle", oracle_consumer_routes)
+        .nest(
+            "/oracle",
+            oracle_consumer_routes.layer(middleware::from_fn(retire_builtin_oracle)),
+        )
         .nest("/connect-links", connect_link_routes)
         .nest("/channel-connect-links", channel_connect_link_routes)
         .nest("/triggers", trigger_routes)
@@ -3396,7 +3412,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                     post(handlers::oracle_worker::submit_transcript),
                 )
                 .route("/pin-conv-url", post(handlers::oracle_worker::pin_conv_url))
-                .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+                .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
+                .layer(middleware::from_fn(retire_builtin_oracle)),
         )
         // NyxBot as the Agent Event Gateway's `nyxbot` provider, and NyxID's
         // direct relay receiver for NyxBot channels. Authenticated inside each
@@ -3518,6 +3535,43 @@ mod retirement_tests {
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
         }
         db.drop().await.unwrap();
+    }
+
+    /// Worker routes authenticate inside their handlers, so an anonymous call
+    /// proves the retirement layer runs first. Consumer routes sit behind the
+    /// JWT layer; a signed-in service account proves the same for them.
+    #[tokio::test]
+    async fn builtin_oracle_routes_answer_410_oracle_retired() {
+        let f = crate::handlers::curation_tests::fixture("oracle_retired_routes", false).await;
+        let (_, private) = build_router_with_state(f.state.clone());
+        let app = private.with_state(f.state.clone());
+        let bearer = crate::handlers::curation_tests::token(&f, None).await;
+        for (method, path, auth) in [
+            ("GET", "/api/v1/oracle/worker/task?worker=w1", false),
+            ("POST", "/api/v1/oracle/worker/heartbeat", false),
+            ("GET", "/api/v1/oracle/pools", true),
+            ("POST", "/api/v1/oracle/pools/chatgpt-pro/tasks", true),
+            ("GET", "/api/v1/oracle/tasks/t1", true),
+            ("GET", "/api/v1/oracle/sessions", true),
+        ] {
+            let mut builder = Request::builder().method(method).uri(path);
+            if auth {
+                builder = builder.header("authorization", format!("Bearer {bearer}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(builder.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::GONE, "{method} {path}");
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["error"], "oracle_retired", "{method} {path}");
+            assert_eq!(payload["error_code"], 11099, "{method} {path}");
+        }
+        f.state.db.drop().await.unwrap();
     }
 }
 
