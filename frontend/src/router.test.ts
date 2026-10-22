@@ -217,13 +217,18 @@ describe("NyxBot usage tab", () => {
     expect(validate({ tab: "nyxbot" })).toMatchObject({ tab: "nyxbot" });
     expect(validate({ tab: "unknown" })).toMatchObject({ tab: "dashboard" });
   });
-  it.each(["admin", "operator", "user"] as const)("gates NyxBot for %s", async (role) => {
-    useAuthStore.setState({ isLoading: false, user: { ...catalogUser, role, is_admin: role === "admin", is_operator: role === "operator", capabilities: { read_admin_usage: true } } });
+  it.each([
+    ["admin", false, true],
+    ["operator", false, true],
+    ["user", true, true],
+    ["user", false, false],
+  ] as const)("gates NyxBot for %s with usage read %s", async (role, readUsage, allowed) => {
+    useAuthStore.setState({ isLoading: false, user: { ...catalogUser, role, is_admin: role === "admin", is_operator: role === "operator", capabilities: { read_admin_usage: readUsage } } });
     const guard = route.options.beforeLoad!;
     const context = { search: { tab: "nyxbot" }, location: { searchStr: "?tab=nyxbot" } } as never;
     const result = Promise.resolve().then(() => guard(context));
-    if (role === "user") await expect(result).rejects.toMatchObject({ options: { to: "/admin/usage", search: { tab: "dashboard" }, replace: true } });
-    else await expect(result).resolves.toBeUndefined();
+    if (allowed) await expect(result).resolves.toBeUndefined();
+    else await expect(result).rejects.toMatchObject({ options: { to: "/admin/usage", search: { tab: "dashboard" }, replace: true } });
   });
 });
 

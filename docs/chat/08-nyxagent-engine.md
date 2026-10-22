@@ -1765,7 +1765,8 @@ prompt and reply text are never logged. Audit events
 ids plus `previous_vote`, `change`, `has_comment`, `agent_id`, `agent_kind`,
 `model`, `error_code` and `tool_errors`.
 
-Admins and operators read `GET /api/v1/admin/assistant/feedback` with RFC3339
+Admins, operators and `nyxid:admin:usage:read` holders (Usage Viewer) read
+`GET /api/v1/admin/assistant/feedback` with RFC3339
 `from`/`to`, `vote`, `model`, `agent_kind`, `has_error=true` and a
 `(created_at,_id)` cursor (`feedback_cursor_invalid` when malformed). Responses
 hold per-day counts and up to 100 recent rows with their comment and context;
@@ -1776,8 +1777,10 @@ never included.
 ### Admin NyxBot activity
 
 Studio **Usage → NyxBot** separates assistant activity and feedback from the
-billing Dashboard and List. It is available to admins and operators; the broader
-usage-read permission does not grant assistant analytics or feedback access.
+billing Dashboard and List. It has the same read access as the rest of Usage:
+admins, operators, and holders of the `nyxid:admin:usage:read` permission (for
+example the seeded Usage Viewer role), who see its analytics, model usage and
+feedback, including comments.
 
 `GET /api/v1/admin/assistant/analytics` accepts RFC3339 `from` and `to`, defaults
 to the last seven days, and rejects non-positive windows or windows longer than
