@@ -178,6 +178,14 @@ never message, upload, memory or credential content.
 Existing group routes and management tools accept the B3a organization selector
 (ID, slug or unambiguous name). Personal NyxBot may manage authorized groups but
 MUST NOT post into or follow organization groups; channel links are unsupported.
+Attempting to link an organization specialist to a channel bot or chat is
+refused with HTTP 403 `forbidden`, error code 1002, and
+`details.reason: "organization_agent_channel_unsupported"`. Native tools return
+`error: "organization_agent_channel_unsupported"` with the same message and
+fixed recovery instructions. Link the bot or chat to NyxBot or one of the
+owner's personal specialists instead. From the owner's own chat, NyxBot can
+delegate to the organization specialist with `nyxid__message_subagent` using
+`org-slug/agent-name`; guest messages are never delegated to that specialist.
 Keep `assistant:org-agents` off while deploying, including when upgrading from
 B3a, then enable it only after every auth/proxy/MCP/worker replica is upgraded.
 Old group routes fail closed through actor/owner equality, but B3a binaries do

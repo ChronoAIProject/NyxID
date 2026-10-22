@@ -381,7 +381,8 @@ async fn denial_guidance_scope_failures_do_not_claim_wrong_credential_type() {
     }
     let generic = AppError::Forbidden("Resource permission denied".into()).response_body();
     assert!(generic.details.is_none());
-    // Existing assistant tool callers retain their fixed denial copy too.
+    // Assistant tool callers receive identical server-authored rendering for
+    // guided and unguided denials; HTTP-only guidance metadata stays hidden.
     let old = crate::services::assistant_account_tools::error_result(AppError::Forbidden(
         "Missing scope".into(),
     ));
@@ -389,6 +390,8 @@ async fn denial_guidance_scope_failures_do_not_claim_wrong_credential_type() {
         AppError::insufficient_scope("Missing scope"),
     );
     assert_eq!(old.value, guided.value);
+    assert_eq!(old.value["message"], "Missing scope");
+    assert!(old.value.get("instructions").is_none());
 }
 
 #[test]

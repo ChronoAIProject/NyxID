@@ -110,8 +110,10 @@ export function ChannelBotsManager({
   const [connectTargets, setConnectTargets] = useState<Record<string, string>>({});
   const [error, setError] = useState<string>();
   const nyxbot = nyxBotOf(agents);
-  // Only live agents can receive a bot.
-  const targets = agents.filter((row) => row.status !== "destroyed");
+  // Only live personal agents can receive bots or chats; organization specialists are private.
+  const targets = agents.filter(
+    (row) => row.status !== "destroyed" && row.owner_kind !== "org",
+  );
   const agentOf = (row: NyxAgentChannelAgent) => row.agent_id ?? nyxbot?.id;
   const connected = (channels.data ?? []).filter(
     (row) => !agent || agentOf(row) === agent.id,

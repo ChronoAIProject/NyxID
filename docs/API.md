@@ -8809,6 +8809,9 @@ See the [owner CLI/API reference](chat/09-owner-cli-api.md) for the full
 request/response schema, lifecycle, limits, and rollout contract, and the
 [CLI reference](site/cli/reference/nyxbot.md) for terminal examples.
 
+NyxBot channel link and chat override targets follow the organization-agent
+boundary and recovery contract in [ORG_AGENTS.md](ORG_AGENTS.md).
+
 ## Assistant voice and dictation
 
 The [voice contract](chat/11-voice.md) specifies the existing call lifecycle,

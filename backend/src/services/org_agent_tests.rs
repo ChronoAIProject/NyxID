@@ -2505,3 +2505,121 @@ async fn org_specialist_access_request_is_denied_by_default_and_routed_when_allo
     assert_eq!(value["error"], "acknowledgement_required");
     assert_eq!(card.unwrap().decider, "orchestrator");
 }
+
+#[tokio::test]
+async fn delegation_bare_names_filter_use_acl_before_ambiguity() {
+    use crate::errors::AppError;
+    let f = Fixture::new("org_delegation_admission").await;
+    let (first, _) = f.create().await;
+    let second_org = Uuid::new_v4().to_string();
+    let mut org = test_user(&second_org, UserType::Org);
+    org.slug = Some("second-team".into());
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(org)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection(crate::models::org_membership::COLLECTION_NAME)
+        .insert_one(test_membership(
+            &second_org,
+            &f.member,
+            OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (second, _) = team::create_specialist_for(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &second_org,
+        f.request("researcher"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let memberships = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME);
+    assert!(matches!(
+        team::delegable_specialist(&f.state.db, &f.member, "researcher").await,
+        Err(AppError::ValidationError(ref message))
+            if message == "Agent name is ambiguous; use one of: org-agent-team/researcher, second-team/researcher"
+    ));
+    memberships
+        .update_one(
+            doc! {"org_user_id": &second_org, "member_user_id": &f.member},
+            doc! {"$set": {"role": "viewer"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        team::delegable_specialist(&f.state.db, &f.member, "researcher")
+            .await
+            .unwrap()
+            .id,
+        first.id
+    );
+    // Read admission includes both readable profiles, even though one is unusable.
+    assert!(
+        team::names_readable_organization_specialist(&f.state.db, &f.member, "researcher")
+            .await
+            .unwrap()
+    );
+    // With only the Viewer candidate left, delegation must conceal its existence.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .delete_one(doc! {"_id": &first.id})
+        .await
+        .unwrap();
+    assert!(
+        matches!(team::delegable_specialist(&f.state.db, &f.member, "researcher").await,
+        Err(AppError::NotFound(ref message)) if message == "Agent not found")
+    );
+    assert!(
+        team::names_readable_organization_specialist(&f.state.db, &f.member, "researcher")
+            .await
+            .unwrap()
+    );
+    // Read admission rechecks membership and excludes unreadable names and IDs.
+    memberships
+        .update_one(
+            doc! {"org_user_id": &second_org, "member_user_id": &f.member},
+            doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    for selector in [second.id.as_str(), "researcher", "second-team/researcher"] {
+        assert!(matches!(
+            team::delegable_specialist(&f.state.db, &f.member, selector).await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+    for selector in ["researcher", "second-team/researcher"] {
+        assert!(
+            !team::names_readable_organization_specialist(&f.state.db, &f.member, selector)
+                .await
+                .unwrap()
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delegation_qualified_flag_error_precedes_org_selector_resolution() {
+    use crate::errors::AppError;
+    let f = Fixture::new("org_delegation_flag_order").await;
+    f.flag(false).await;
+    for selector in ["org-agent-team/researcher", "invisible-org/researcher"] {
+        assert!(
+            matches!(team::delegable_specialist(&f.state.db, &f.member, selector).await,
+            Err(AppError::ValidationError(ref message)) if message == "Organization agents are not enabled yet")
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
