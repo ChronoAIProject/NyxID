@@ -160,6 +160,17 @@ pub(crate) async fn gateway_call(
     idempotency_key: Option<&str>,
 ) -> AppResult<GatewayResponse> {
     let base = gateway_base(state).await?;
+    gateway_call_at_base(&base, method, path, bearer, body, idempotency_key).await
+}
+
+pub(crate) async fn gateway_call_at_base(
+    base: &str,
+    method: reqwest::Method,
+    path: &str,
+    bearer: &str,
+    body: Option<&Value>,
+    idempotency_key: Option<&str>,
+) -> AppResult<GatewayResponse> {
     let requires_json = method != reqwest::Method::DELETE && method != reqwest::Method::HEAD;
     let mut request = GATEWAY_HTTP_CLIENT
         .request(method, format!("{base}{path}"))
@@ -467,6 +478,9 @@ mod tests {
             machine_node_ids: vec![],
             gateway_channel_id: Some("old-remote".into()),
             gateway_version: Some(7),
+            record_id: None,
+            binding_id: None,
+            agent_api_key_id: None,
             completed: false,
             claim_id: None,
             retry_at: chrono::Utc::now(),
