@@ -146,6 +146,7 @@ pub fn read_saved_token() -> Option<String> {
     read_saved_token_for(None)
 }
 
+#[cfg(test)]
 pub fn read_saved_refresh_token_for(profile: Option<&str>) -> Option<String> {
     if agent_key::is_agent_key_profile(profile) {
         return None;
