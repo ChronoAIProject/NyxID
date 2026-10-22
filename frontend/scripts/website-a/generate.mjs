@@ -555,6 +555,14 @@ for (locale of ["en", "zh"]) {
 const css = source.match(/<style>([\s\S]*?)<\/style>/)[1];
 const sheet = postcss.parse(css);
 fixPrimaryButtonPaint(sheet);
+// Language buttons become links; retain centered text in their fixed-height control.
+sheet.walkRules(".lang button", (rule) => {
+  rule.prepend(
+    { prop: "display", value: "inline-flex" },
+    { prop: "align-items", value: "center" },
+    { prop: "justify-content", value: "center" },
+  );
+});
 const keyframes = [];
 sheet.walkAtRules(/keyframes$/, (rule) => {
   keyframes.push(rule.params);
