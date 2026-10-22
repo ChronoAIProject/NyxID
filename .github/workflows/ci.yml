@@ -523,7 +523,8 @@ jobs:
       attestations: read
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.machine == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Cold desktop package downloads can consume the former 45-minute budget.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v4
