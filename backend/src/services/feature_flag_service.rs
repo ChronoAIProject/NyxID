@@ -7,6 +7,8 @@
 //! admins manage every flag. Creator identity is separate from editable metadata.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use futures::TryStreamExt;
@@ -946,10 +948,89 @@ pub async fn personal_flag_enabled(
         .await?
         .iter()
         .any(|key| key == flag_key);
-    if enabled {
-        super::security_readiness_service::require(db, flag_key).await?;
+    if enabled && super::security_readiness_service::CAPABILITIES.contains(&flag_key) {
+        warn_if_flag_in_effect_unready(db, user_id, flag_key).await;
     }
     Ok(enabled)
+}
+
+const UNREADY_FLAG_EVENT: &str = "security_readiness_flag_in_effect_unready";
+const UNREADY_FLAG_INTERVAL: Duration = Duration::from_secs(60);
+static UNREADY_FLAG_THROTTLE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn reset_unready_flag_throttle() {
+    UNREADY_FLAG_THROTTLE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
+/// Readiness gates admin activation; existing flag reads remain available.
+/// Throttle locally before diagnostic I/O, then share a one-minute emission
+/// window per flag across replicas so enabled unready flags remain visible.
+async fn warn_if_flag_in_effect_unready(db: &mongodb::Database, user_id: &str, flag_key: &str) {
+    let throttle_key = flag_key.to_owned();
+    // Isolated test databases model independent deployments in one process.
+    #[cfg(test)]
+    let throttle_key = format!("{}:{throttle_key}", db.name());
+    {
+        let mut attempts = UNREADY_FLAG_THROTTLE
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
+        if attempts
+            .get(&throttle_key)
+            .is_some_and(|last| now.duration_since(*last) < UNREADY_FLAG_INTERVAL)
+        {
+            return;
+        }
+        attempts.insert(throttle_key, now);
+    }
+    match super::coordination_service::RateWindowStore::admit(
+        db,
+        UNREADY_FLAG_EVENT,
+        flag_key,
+        1,
+        UNREADY_FLAG_INTERVAL,
+    )
+    .await
+    {
+        Ok(admission) if admission.allowed => {}
+        Ok(_) => return,
+        Err(error) => {
+            tracing::debug!(flag_key, %error, "Flag readiness diagnostic rate window unavailable");
+            return;
+        }
+    }
+    let report = match super::security_readiness_service::report(db, flag_key).await {
+        Ok(report) if !report.ready => report,
+        Ok(_) => return,
+        Err(error) => {
+            tracing::debug!(flag_key, %error, "Flag readiness diagnostic unavailable");
+            return;
+        }
+    };
+    tracing::warn!(flag_key, user_id, blockers = ?report.blockers, "Readiness-gated flag {flag_key} is enabled but the fleet roster is not ready (blockers: {:?})", report.blockers);
+    let _ = super::audit_service::log_actor_event(
+        db.clone(),
+        &super::audit_service::AuditActor {
+            user_id: user_id.to_owned(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        },
+        UNREADY_FLAG_EVENT,
+        Some(serde_json::json!({
+            "flag_key": flag_key,
+            "user_id": user_id,
+            "blockers": report.blockers,
+        })),
+    )
+    .await;
 }
 
 /// Who a flag can be on for, so background work can skip a flag nobody has
@@ -1211,6 +1292,9 @@ pub async fn set_platform_override(
         }
     }
 
+    if enabled {
+        super::security_readiness_service::require(db, flag_key).await?;
+    }
     let now = bson::DateTime::from_chrono(Utc::now());
     let target_key = match target.key() {
         Some(k) => bson::Bson::String(k),
@@ -1299,6 +1383,9 @@ pub async fn set_platform_org_override(
         ));
     }
     ensure_org_exists(db, org_user_id).await?;
+    if enabled {
+        super::security_readiness_service::require(db, flag_key).await?;
+    }
     upsert_override_row(
         db,
         org_user_id,
@@ -1613,6 +1700,241 @@ mod tests {
             updated_at: Utc::now(),
             updated_by: "actor".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn security_readiness_gates_admin_enable_for_global_user_and_org_overrides() {
+        let db = connect_test_database("feature_flag_activation")
+            .await
+            .expect("configured Mongo required");
+        let user = Uuid::new_v4().to_string();
+        let org = Uuid::new_v4().to_string();
+        for (id, kind) in [(&user, UserType::Person), (&org, UserType::Org)] {
+            db.collection::<User>(USERS)
+                .insert_one(test_user(id, kind))
+                .await
+                .unwrap();
+        }
+        for flag in FEATURE_FLAGS.iter().filter(|flag| {
+            super::super::security_readiness_service::CAPABILITIES.contains(&flag.key)
+        }) {
+            for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
+                assert!(matches!(
+                    set_platform_override(&db, flag.key, &target, true, &user).await,
+                    Err(AppError::SecurityReadinessUnavailable)
+                ));
+                assert!(
+                    !set_platform_override(&db, flag.key, &target, false, &user)
+                        .await
+                        .unwrap()
+                        .enabled
+                );
+            }
+            assert!(matches!(
+                set_platform_org_override(&db, &org, flag.key, true, &user).await,
+                Err(AppError::SecurityReadinessUnavailable)
+            ));
+            assert!(
+                !set_platform_org_override(&db, &org, flag.key, false, &user)
+                    .await
+                    .unwrap()
+                    .enabled
+            );
+        }
+        // Ordinary flags retain enable/disable behavior without readiness.
+        for enabled in [true, false] {
+            for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
+                assert_eq!(
+                    set_platform_override(&db, "example_ui", &target, enabled, &user)
+                        .await
+                        .unwrap()
+                        .enabled,
+                    enabled
+                );
+            }
+            assert_eq!(
+                set_platform_org_override(&db, &org, "example_ui", enabled, &user)
+                    .await
+                    .unwrap()
+                    .enabled,
+                enabled
+            );
+        }
+        super::super::security_readiness_service::ready_test_replica(&db).await;
+        for flag in FEATURE_FLAGS.iter().filter(|flag| {
+            super::super::security_readiness_service::CAPABILITIES.contains(&flag.key)
+        }) {
+            for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
+                assert!(
+                    set_platform_override(&db, flag.key, &target, true, &user)
+                        .await
+                        .unwrap()
+                        .enabled
+                );
+            }
+            assert!(
+                set_platform_org_override(&db, &org, flag.key, true, &user)
+                    .await
+                    .unwrap()
+                    .enabled
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn personal_flag_enabled_when_unready_throttles_per_flag_and_ignores_report_errors() {
+        use super::super::security_readiness_service as readiness;
+        use crate::models::audit_log::AuditLog;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+
+        struct CountDiagnostics {
+            warnings: Arc<AtomicUsize>,
+            errors: Arc<AtomicUsize>,
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountDiagnostics {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN
+                    && event.metadata().fields().field("blockers").is_some()
+                {
+                    self.warnings.fetch_add(1, Ordering::SeqCst);
+                }
+                if *event.metadata().level() == tracing::Level::DEBUG
+                    && event.metadata().fields().field("flag_key").is_some()
+                    && event.metadata().fields().field("error").is_some()
+                {
+                    self.errors.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        let db = connect_test_database("personal_flag_unready")
+            .await
+            .expect("configured Mongo required");
+        reset_unready_flag_throttle();
+        let flag = ASSISTANT_LIVE_TURN_GATE_FLAG_KEY;
+        let user = Uuid::new_v4().to_string();
+        let other_user = Uuid::new_v4().to_string();
+        // Simulate an override enabled before PR #1976, with no local observation.
+        db.collection::<FeatureFlagOverride>(COLLECTION_NAME)
+            .insert_one(override_row(None, flag, FlagTargetKind::Global, None, true))
+            .await
+            .unwrap();
+        // Stay within a single shared rate window even when this suite starts
+        // near a minute boundary.
+        crate::test_utils::ensure_rate_window_headroom(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        readiness::ready_test_replica(&db).await;
+        let replicas =
+            db.collection::<bson::Document>(crate::models::security_replica::COLLECTION_NAME);
+        replicas.delete_many(doc! {}).await.unwrap();
+        assert!(!readiness::report(&db, flag).await.unwrap().ready);
+        let warnings = Arc::new(AtomicUsize::new(0));
+        let errors = Arc::new(AtomicUsize::new(0));
+        let subscriber =
+            tracing::Dispatch::new(tracing_subscriber::registry().with(CountDiagnostics {
+                warnings: warnings.clone(),
+                errors: errors.clone(),
+            }));
+        let reads =
+            futures::future::join_all((0..8).map(|_| personal_flag_enabled(&db, &user, flag)))
+                .with_subscriber(subscriber.clone())
+                .await;
+        assert!(reads.into_iter().all(|result| matches!(result, Ok(true))));
+        assert!(
+            personal_flag_enabled(&db, &other_user, flag)
+                .with_subscriber(subscriber.clone())
+                .await
+                .unwrap()
+        );
+        // Model a second replica by clearing only the local throttle. The
+        // shared flag-keyed window must still suppress a different user.
+        reset_unready_flag_throttle();
+        assert!(
+            personal_flag_enabled(&db, &other_user, flag)
+                .with_subscriber(subscriber.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(warnings.load(Ordering::SeqCst), 1);
+        assert_eq!(errors.load(Ordering::SeqCst), 0);
+        let audits = db.collection::<AuditLog>(crate::models::audit_log::COLLECTION_NAME);
+        let events: Vec<_> = audits
+            .find(doc! {"event_type": UNREADY_FLAG_EVENT})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "all users share one flag-keyed window");
+        assert_eq!(events[0].user_id.as_deref(), Some(user.as_str()));
+        assert_eq!(events[0].event_data.as_ref().unwrap()["flag_key"], flag);
+        assert_eq!(events[0].event_data.as_ref().unwrap()["user_id"], user);
+        // A malformed fresh observation makes report() fail independently of
+        // flag resolution. Diagnostic failures must still preserve the flag.
+        replicas
+            .insert_one(doc! {"_id": "malformed", "observed_at": bson::DateTime::now()})
+            .await
+            .unwrap();
+        assert!(readiness::report(&db, flag).await.is_err());
+        let windows = db
+            .collection::<bson::Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME);
+        windows
+            .update_one(
+                doc! {"namespace": UNREADY_FLAG_EVENT},
+                doc! {"$set": {"count": "malformed"}},
+            )
+            .await
+            .unwrap();
+        // The local throttle must skip both the malformed window and report.
+        assert!(
+            personal_flag_enabled(&db, &user, flag)
+                .with_subscriber(subscriber.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(errors.load(Ordering::SeqCst), 0);
+        reset_unready_flag_throttle();
+        assert!(
+            personal_flag_enabled(&db, &user, flag)
+                .with_subscriber(subscriber.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(errors.load(Ordering::SeqCst), 1);
+        reset_unready_flag_throttle();
+        windows
+            .delete_many(doc! {"namespace": UNREADY_FLAG_EVENT})
+            .await
+            .unwrap();
+        assert!(
+            personal_flag_enabled(&db, &user, flag)
+                .with_subscriber(subscriber)
+                .await
+                .unwrap()
+        );
+        assert_eq!(errors.load(Ordering::SeqCst), 2);
+        assert_eq!(warnings.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            audits
+                .count_documents(doc! {"event_type": UNREADY_FLAG_EVENT})
+                .await
+                .unwrap(),
+            1
+        );
+        db.drop().await.unwrap();
     }
 
     #[test]
