@@ -146,7 +146,6 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
             telemetryIdentify(session.userId);
           }
           void activatePushAfterLogin({ forceRegister: true })
-
             .catch((error) => {
               if (__DEV__) console.warn("[push] activate after session restore failed", error);
             });

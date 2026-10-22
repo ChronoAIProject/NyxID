@@ -824,7 +824,6 @@ or ended (absent/ineligible). A live second read or database failure is a server
 availability error. CLI and mobile keep transient refresh errors distinct from
 login-required outcomes and persist rotated refresh credentials before access.
 
-
 | Field           | Type          | Constraints     | Description                     |
 |-----------------|---------------|-----------------|---------------------------------|
 | `_id`           | ObjectId      | PK              | MongoDB document ID             |
