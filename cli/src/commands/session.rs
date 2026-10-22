@@ -159,7 +159,6 @@ pub(crate) async fn saved_status(auth: &crate::cli::AuthArgs) -> (Value, i32) {
         agent,
         access,
         refresh,
-        generation: _generation,
         destination,
     } = match crate::auth::snapshot_saved_profile(auth).await {
         Ok(snapshot) => snapshot,

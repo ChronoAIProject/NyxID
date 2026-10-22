@@ -260,7 +260,6 @@ pub(crate) struct SavedProfileSnapshot {
     pub agent: bool,
     pub access: Option<String>,
     pub refresh: Option<String>,
-    pub generation: Option<String>,
     pub destination: Option<String>,
 }
 
@@ -301,7 +300,6 @@ pub(crate) async fn snapshot_saved_profile(
         },
     )?;
     let refresh = read_profile_file(profile, REFRESH_TOKEN_FILE_NAME)?;
-    let generation = read_login_generation(profile)?;
     let destination = auth
         .base_url
         .clone()
@@ -313,7 +311,6 @@ pub(crate) async fn snapshot_saved_profile(
         agent,
         access,
         refresh,
-        generation,
         destination,
     })
 }
