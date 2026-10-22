@@ -3538,29 +3538,33 @@ mod retirement_tests {
     }
 
     /// Worker routes authenticate inside their handlers, so an anonymous call
-    /// proves the retirement layer runs first. Consumer routes sit behind the
-    /// JWT layer; a signed-in service account proves the same for them.
+    /// proves the retirement layer answers before any handler runs. The
+    /// consumer routes, which sit behind the JWT layer, are covered by
+    /// `handlers::oracle_pools::retirement_tests` with a signed-in caller.
     #[tokio::test]
-    async fn builtin_oracle_routes_answer_410_oracle_retired() {
-        let f = crate::handlers::curation_tests::fixture("oracle_retired_routes", false).await;
-        let (_, private) = build_router_with_state(f.state.clone());
-        let app = private.with_state(f.state.clone());
-        let bearer = crate::handlers::curation_tests::token(&f, None).await;
-        for (method, path, auth) in [
-            ("GET", "/api/v1/oracle/worker/task?worker=w1", false),
-            ("POST", "/api/v1/oracle/worker/heartbeat", false),
-            ("GET", "/api/v1/oracle/pools", true),
-            ("POST", "/api/v1/oracle/pools/chatgpt-pro/tasks", true),
-            ("GET", "/api/v1/oracle/tasks/t1", true),
-            ("GET", "/api/v1/oracle/sessions", true),
+    async fn builtin_oracle_worker_routes_answer_410_oracle_retired() {
+        let Some(db) = crate::test_utils::connect_test_database("oracle_retired_routes").await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let (_, private) = build_router_with_state(state.clone());
+        let app = private.with_state(state);
+        for (method, path) in [
+            ("GET", "/api/v1/oracle/worker/task?worker=w1"),
+            ("POST", "/api/v1/oracle/worker/heartbeat"),
+            ("GET", "/api/v1/oracle/worker/bundle"),
+            ("POST", "/api/v1/oracle/worker/result"),
         ] {
-            let mut builder = Request::builder().method(method).uri(path);
-            if auth {
-                builder = builder.header("authorization", format!("Bearer {bearer}"));
-            }
             let response = app
                 .clone()
-                .oneshot(builder.body(Body::empty()).unwrap())
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::GONE, "{method} {path}");
@@ -3571,7 +3575,7 @@ mod retirement_tests {
             assert_eq!(payload["error"], "oracle_retired", "{method} {path}");
             assert_eq!(payload["error_code"], 11099, "{method} {path}");
         }
-        f.state.db.drop().await.unwrap();
+        db.drop().await.unwrap();
     }
 }
 
