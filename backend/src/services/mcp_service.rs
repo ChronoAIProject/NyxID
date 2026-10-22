@@ -1676,7 +1676,8 @@ async fn load_user_tools_with_grants(
         }
 
         let endpoint_rows = eps_by_svc.get(svc.id.as_str()).cloned().unwrap_or_default();
-        let endpoints = stored_service_endpoints_to_mcp(&endpoint_rows, Some(svc));
+        let mut endpoints = stored_service_endpoints_to_mcp(&endpoint_rows, Some(svc));
+        super::cma_operation::apply_contracts(&svc.slug, &mut endpoints);
         let durable_endpoint_metadata =
             service_endpoint_durable_metadata(&endpoint_rows, Some(svc.slug.as_str()));
 
@@ -1778,6 +1779,7 @@ fn service_endpoint_durable_metadata(
 /// overlay says about the operations they share, matched literally by
 /// endpoint name or `METHOD path`.
 fn mark_catalog_operations(published: &mut ParsedMcpEndpoints, catalog_slug: &str) {
+    super::cma_operation::apply_contracts(catalog_slug, &mut published.endpoints);
     for endpoint in &published.endpoints {
         let marks = super::catalog_spec_registry::operation_marks(
             catalog_slug,
@@ -2647,7 +2649,8 @@ pub fn generate_tool_definitions(
         description: "Execute any connected tool by name. Use nyx__search_tools first to \
             discover available tools and their inputSchema, then invoke them through this \
             tool. Pass the tool_name and arguments_json (a JSON string containing all \
-            required parameters from the tool's inputSchema)."
+            required parameters from the tool's inputSchema). For chat Notion block reads, \
+            use result_query to retrieve relevant sections from the returned block page."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -2659,6 +2662,12 @@ pub fn generate_tool_definitions(
                 "arguments_json": {
                     "type": "string",
                     "description": "A JSON string containing all required arguments for the tool. Check the tool's inputSchema from nyx__search_tools results. Example: '{\"graphId\": \"dbeef00f-f2c7-4447-9686-3a6deba65a72\", \"depth\": 2}'. Pass '{}' if the tool takes no arguments."
+                },
+                "result_query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": "Chat only: for a published Notion block-children GET, return compact sections matching these keywords, with block IDs, revisions and pagination. Searches only the returned page of blocks; set page_size=100 and follow next_cursor if needed. Does not search the workspace or expand nested blocks. Omit for a section index and preview. This field is never sent to the provider."
                 }
             },
             "required": ["tool_name", "arguments_json"]
@@ -3805,6 +3814,7 @@ pub struct PreparedProxyCall {
     /// The content type the body is sent with.
     body_content_type: Option<String>,
     is_generic_proxy_endpoint: bool,
+    approval_metadata: McpDurableEndpointMetadata,
 }
 
 impl PreparedProxyCall {
@@ -3919,11 +3929,17 @@ impl PreparedProxyCall {
     }
 
     pub fn operation_descriptor(&self) -> operation_descriptor::OperationDescriptor {
-        operation_descriptor::build_mcp_descriptor(
+        let mut descriptor = operation_descriptor::build_mcp_descriptor(
             self.method.as_str(),
             &self.path,
             self.body.as_ref().map(|bytes| bytes.as_ref()),
-        )
+        );
+        operation_descriptor::apply_operation_effects(
+            &mut descriptor,
+            operation_effects(&self.method, self.approval_metadata),
+            self.carries_method_override(),
+        );
+        descriptor
     }
 
     pub(crate) fn authorize_agent_operations(
@@ -4121,6 +4137,7 @@ pub(crate) fn http_carries_method_override(
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned),
         is_generic_proxy_endpoint: true,
+        approval_metadata: Default::default(),
     }
     .carries_override(true)
 }
@@ -4220,6 +4237,15 @@ fn prepare_proxy_tool_call_inner(
             .then(|| request_content_type_or_default(endpoint).to_string()),
         body,
         is_generic_proxy_endpoint,
+        approval_metadata: if is_generic_proxy_endpoint {
+            Default::default()
+        } else {
+            service
+                .durable_endpoint_metadata
+                .get(&endpoint.endpoint_id)
+                .copied()
+                .unwrap_or_default()
+        },
     })
 }
 
@@ -5738,6 +5764,7 @@ async fn execute_tool_resolved_inner(
             body,
             body_content_type,
             is_generic_proxy_endpoint,
+            approval_metadata: _,
         } = prepared;
 
         proxy_service::validate_ifttt_request(

@@ -20,7 +20,7 @@ when you talk to NyxBot or in a group NyxBot is in (#1883). When NyxBot assigned
 the work, the specialist asks NyxBot for anything else and NyxBot decides from
 what the user asked. Conversations are
 **threads** of an agent, so the user can talk to NyxBot or any specialist, in the
-web app or through a channel bot linked to that agent (Telegram, Lark, ...).
+web app or, for NyxBot and personal specialists, through a linked channel bot (Telegram, Lark, ...).
 NyxID owns agents, threads, keys and wake-ups; NyxAgent runs each thread
 unchanged.
 
@@ -49,7 +49,7 @@ several agents, routines/scheduled triggers, and cross-user agents.
 | --- | --- |
 | One NyxAgent conversation = one `assistant_conversations` row + one restricted `nyxid-assistant` key + encrypted raw key; NyxAgent binds its session to that key | A thread keeps its own key; an agent's authority is applied to every thread key |
 | Execution authority is the key (`allow_all_services`, `allowed_service_ids`, `allowed_platform_service_ids`, `assistant:account`), enforced in MCP (`chat_access`, gates, `ensure_service_in_scope`) | Specialist grants are enforced by NyxID, never by prompts |
-| Per-user turn limiter: 2 in flight, 10 starts per 60 s | Server-started turns need their own owner-level pool |
+| Per-user browser turn limiter: 4 running, 8 queued, 30 starts per 60 s | Server-started turns need their own owner-level pool |
 | NyxAgent per turn: 600 s, 40 tool calls, results truncated; NyxID calls time out at 150 s | Waiting is bounded (120 s) and completion wakes NyxBot later |
 | NyxAgent disables Codex multi-agent | Codex subagents would share one key and vanish; NyxID owns agents instead |
 | Turns are detached server tasks | NyxID can start turns itself for tasks, wake-ups and chat apps |
@@ -129,8 +129,10 @@ thread; returns started, busy or pool_full), `wait_for_subagents` (≤ 120 s),
 `create_group`, `list_groups`, `post_to_group`, `update_group`, `delete_group`,
 `settings_link` (the exact NyxID page for configuration the tools do not cover,
 such as creating an agent key, security, profile, billing, organizations or
-triggers), `channel_bot_setup_link`, `connect_channel_bot` (to NyxBot or a
+triggers), `channel_bot_setup_link`, `connect_channel_bot` (to NyxBot or a personal
 specialist), `link_channel_bot`, `list_channel_agents`, `disconnect_channel_bot`.
+The organization-specialist channel-target boundary and recovery contract are
+documented in [ORG_AGENTS.md](../ORG_AGENTS.md).
 `message_subagent` accepts a personal specialist name or ID, an organization
 specialist ID, or the qualified `org-slug/agent-name` shown by the roster. A
 bare name always prefers the person's specialist; an organization-only bare
@@ -362,9 +364,11 @@ Account deletion purges agents, settings, threads and channel records.
 
 ## 12. Channel bots
 
-Any channel bot can be linked to NyxBot or a specialist (`connect_channel_bot`,
+Any channel bot can be linked to NyxBot or a personal specialist (`connect_channel_bot`,
 settings, or relinked later); each chat becomes a thread of the linked agent
 (or of the chat's own agent, §12a), with that agent's authority and memory.
+See [ORG_AGENTS.md](../ORG_AGENTS.md) for the organization-specialist channel
+target boundary and recovery contract.
 
 - **Everything is answerable in the chat.** A chat app cannot show NyxID's cards
   or buttons, so channel threads are told to give every link as a full URL and
@@ -381,9 +385,12 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   creates the gateway channel as the owner, points the route key's callback at the
   gateway, creates the default route, and attaches it. Channel management
   (create, attach, delete) authenticates as the owner with a 120-second delegated
-  token carrying only `account:read`, because the gateway resolves creators with
-  `GET /api/v1/users/me`, which refuses API keys. The agent key is the channel's
-  provider and event-tool bearer, never a creator bearer. NyxID is the gateway's
+  token carrying only `account:read` and reserved actor
+  `nyxid:nyxbot-gateway-creator`, separate from the provider/event-tool agent key.
+  Its actor-scoped management grant is restricted to the catalog-associated
+  confidential gateway caller. See the [gateway creator contract](../CHANNEL_EVENT_GATEWAY.md#nyxbot-gateway-creator-authorization-and-recovery)
+  for both validators, the full-client-ID association, permission boundaries,
+  failure responses and HTTP limits. NyxID is the gateway's
   `nyxbot` provider (`/api/v1/nyxbot/{agent-card,bindings/…,responses}`) and
   streams only the final answer as a committed message; `event_context` is stored
   encrypted and served verbatim for `readEventContext`.
@@ -423,7 +430,7 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   platforms other than Telegram pins the bot's own user ID (Lark: its `open_id`,
   looked up with the bot's credentials) instead of a username; without it the
   gateway counts any mention of a bot as addressing it. If the
-  gateway refuses, its channel is released at its current version, the new keys
+  gateway refuses, exact-version cleanup is durably queued, the new keys
   are deleted and the bot stays exactly as it was (`gateway_fallback_at`),
   retried the next day; a manual connect never rebuilds a working bot just to
   change transport. A new bot on a listed platform the gateway refuses is
@@ -438,13 +445,15 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   images directly through its adapters on both transports, before the reply text. A message whose route the relay looked up
   just before the swap committed reaches NyxID's relay endpoint after it and is
   refused and reported like any lost message. A move whose replica stopped
-  midway leaves `pending_agent_api_key_id`/`pending_route_api_key_id`; the sweep
-  deletes those keys after 30 minutes. The swap needs MongoDB transactions (a
+  midway leaves `pending_agent_api_key_id`/`pending_route_api_key_id`; after
+  30 minutes, a retirement transaction captures its cleanup responsibility and
+  revokes those keys while preserving the working route. The swap needs MongoDB transactions (a
   replica set, as in production); on a standalone development database every
   move ends as `swap_failed` and the bot stays on its existing transport.
   A return to the relay builds a fresh route key beside the working gateway
-  connection and atomically swaps the channel and existing route before
-  releasing the gateway channel and deleting its provider key and old route key.
+  connection and atomically swaps the channel and existing route, revokes the
+  provider and old route keys, and captures exact gateway cleanup responsibility.
+  Remote release is attempted after that transaction commits.
   Both directions recheck the flag, org authority and active turns before the
   swap; a busy return retries after ten minutes. At most one move is attempted
   per sweep per replica, across both directions. Gateway private events retain
@@ -467,8 +476,8 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   Every gateway provider endpoint and relay inbound re-checks live org-admin
   membership, as do the sweep and asynchronous replies. Loss fails the link with
   `org_access_lost`, retains the existing metadata audit and link-status/watch
-  behaviour, removes the org route, releases the gateway channel, and deletes
-  active and pending keys under their respective owners. No event reaches the
+  behaviour, atomically retires the org route, queues exact gateway cleanup and
+  revokes active and pending keys under their respective owners. No event reaches the
   linking person's agent after that check fails. Telegram org bots always use
   the gateway. Lark/Feishu org bots use the linking person's media flag and
   the same owner-media rules as personal bots; live org-admin authority is
@@ -514,6 +523,10 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   from an earlier setup) are lost as `routed_elsewhere`, and the agent is told
   to show the user that route and remove it with their OK; connecting reports
   such routes up front (`other_routes`).
+- **Failed connections and listing.** Failed rows offer explicit **Reconnect**
+  with the selected live agent; channel listings show one current record per
+  owner/bot while retaining history. See the [gateway recovery contract](../CHANNEL_EVENT_GATEWAY.md#nyxbot-gateway-creator-authorization-and-recovery)
+  for action behavior, error guidance and the current-row selection rules.
 - **Verification hints.** While the owner has not verified a channel, the chat's
   waiting note and `nyxid__list_channel_agents` (`inbound_hint`) say what NyxID saw
   from the bot since the code was issued: nothing at all (check the platform's
@@ -525,6 +538,32 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   are delivered to the chat through the gateway's `replyToEvent` while the newest
   event reference is valid, or through the relay reply API; messages that arrive
   while the agent is busy are queued and answered next instead of bounced.
+
+### Explicit reconnect continuity
+
+An explicit reconnect restores eligible history atomically with activation. The
+source is the latest disconnected connection for the same linking person and bot,
+with the same canonical platform and effective bot owner, no committed successor,
+and ordinary personal-route eligibility. An incompatible newest row is a boundary;
+NyxBot never skips it to recover older history. Failed attempts and platform
+conversion are not continuity sources. A failed activation consumes no predecessor
+and leaves no active destination.
+
+Verified owner sender IDs, private-chat policy, stable chat partitions and their
+settings carry forward. All `conv_*` partitions remain on the predecessor, as
+before. Changing the channel's agent invalidates inherited conversation bindings
+and stops followed children; otherwise suspended children stay unavailable until
+admitted again. Stable conversation `channel` and `reply_channel` metadata move
+independently. Every activation stores a fresh one-time owner-link hash with a
+24-hour expiry and returns its new code; predecessor link material is never copied.
+Lineage records the committed predecessor/successor relationship. Gateway group
+policy is marked due in the activation transaction, so a crash before inline sync
+is repaired by the existing sweep.
+
+Reconnect remains explicit. Gateway lifecycle cleanup is independent of reconnect
+and adds no message delivery retry. See [gateway retirement and recovery](../CHANNEL_EVENT_GATEWAY.md#nyxbot-gateway-retirement-and-recovery)
+for the release states, exact-version cleanup, retired-binding acknowledgement,
+operator review and deployment boundary.
 
 ### Channel turn delivery after the provider stream closes
 
@@ -637,7 +676,7 @@ Telegram bots can be linked:
 `max_inflight` caps concurrent gateway calls to NyxID across all NyxBot
 channels; each running turn holds a slot for its whole duration. 256 equals
 the gateway-wide ceiling (`CMAEG_PROVIDER_MAX_INFLIGHT`) and `cma_codex`, and
-each provider has its own pool. NyxID still limits each owner to two
+each provider has its own pool. NyxID still limits each owner to four
 concurrent channel turns and queues the rest.
 
 ### 12a. Chats, groups and guests
@@ -672,7 +711,7 @@ payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
 | `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing; a member who addresses it before the owner has talked there is told why, at most daily. |
 | `allow_posts` | off | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |
-| agent | the bot's agent | The chat reaches another agent; it starts a new thread with it, and relinking the bot leaves such chats alone. |
+| agent | the bot's agent | The chat reaches NyxBot or a personal specialist; it starts a new thread with it, and relinking the bot leaves such chats alone. Organization specialists are refused under the [organization-agent channel contract](../ORG_AGENTS.md) because their conversations are private member threads. |
 
 Per bot, `private_chats` (`nyxid__update_channel_access`) is `owner` (default)
 or `everyone`: anyone who messages the bot privately gets their own thread, as a
@@ -829,6 +868,16 @@ per-image counts (`sent_now`, `previously_delivered`, `failed`, `skipped`,
 this call's attempts. Tool-image notes mention `include_images` when the turn's
 images would not otherwise reach a chat the agent posts to. Guests cannot post.
 
+Chat destinations add a bounded turn-only length note using the delivery
+planner's platform budget (Telegram 4,096 UTF-16 code units; Discord 2,000).
+Prefer one message unless the user explicitly asks for long or complete output;
+the planner still splits longer output without truncation. This follows channel,
+followed-thread, manager and automation destinations, including additional
+recipients. Assigned specialists capture their requesting turn's guidance at
+assignment. Chat-list tool results provide `reply_length_guidance` for drafting
+explicit posts, whose input bound is 32,768 characters. App-only turns receive no
+channel-length note, and destination advice stays out of stable instructions.
+
 Upgrade from 0.71.0 keeps v1 image barriers in `nyxbot_image_deliveries`
 (read-only, original seven-day TTL) before every v2 attempt in the separate
 `nyxbot_image_deliveries_v2` collection. The guard matches the source turn and
@@ -963,7 +1012,7 @@ admin-settable at `/api/v1/admin/assistant/profile-routes` but inactive
 5. A direct message to a specialist does not wake NyxBot; it appears in NyxBot's
    next turn.
 6. NyxBot is one persistent personal agent (Muse / Grok Bot), not one
-   orchestrator per chat; chat apps link to NyxBot or any specialist.
+   orchestrator per chat; chat apps link to NyxBot or any personal specialist.
 
 ## Machine nodes and saved logins
 

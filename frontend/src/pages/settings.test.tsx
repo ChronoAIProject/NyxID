@@ -17,28 +17,28 @@ import { useConsentStore } from "@/stores/consent-store";
 import type { User } from "@/types/api";
 import { SettingsPage } from "./settings";
 
+const { securityUser, mockDisable } = vi.hoisted(() => ({
+  securityUser: { display_name: "Reader", email: "reader@example.com", email_verified: true, mfa_enabled: false, social_provider: null as string | null, has_password: true },
+  mockDisable: vi.fn(),
+}));
 vi.mock("@/hooks/use-auth", () => ({
-  useUser: () => ({
-    data: {
-      display_name: "Reader",
-      email: "reader@example.com",
-      email_verified: true,
-    },
-  }),
-  useMfaDisable: () => ({ mutateAsync: vi.fn() }),
+  useUser: () => ({ data: securityUser }),
+  useMfaDisable: () => ({ mutateAsync: mockDisable }),
   useRevokeSession: () => ({ mutateAsync: vi.fn() }),
 }));
 vi.mock("@/hooks/use-public-config", () => ({
-  usePublicConfig: () => ({ data: { mcp_url: "https://nyxid.test/mcp" } }),
+  usePublicConfig: () => ({ data: { mcp_url: "https://nyxid.test/mcp", email_auth_enabled: false } }),
 }));
 vi.mock("@/components/auth/mfa-setup-dialog", () => ({
-  MfaSetupDialog: () => null,
+  MfaSetupDialog: ({ open }: { open: boolean }) => open ? <div data-testid="mfa-setup" /> : null,
 }));
 
 const initialAuth = useAuthStore.getState();
 const transport = vi.fn<typeof fetch>();
 const unexpectedRequests: string[] = [];
 beforeEach(() => {
+  Object.assign(securityUser, { mfa_enabled: false, social_provider: null, has_password: true });
+  mockDisable.mockReset().mockResolvedValue(undefined);
   useAuthStore.setState({ user: { id: "owner", email: "reader@example.com" } as User });
   unexpectedRequests.length = 0;
   transport.mockReset().mockImplementation(async (url, options) => {
@@ -213,3 +213,26 @@ describe.each(["/settings", "/assistant"] as const)(
     });
   },
 );
+
+
+describe("MFA security settings", () => {
+  it("offers social-only enrollment while email authentication is disabled", async () => {
+    securityUser.social_provider = "google"; securityUser.has_password = false;
+    useAuthStore.setState({ user: { id: "owner", ...securityUser } as User });
+    const user = userEvent.setup(); await open("/settings", "security");
+    await user.click(await screen.findByRole("switch", { name: "Toggle two-factor authentication" }));
+    expect(screen.getByTestId("mfa-setup")).toBeInTheDocument();
+  });
+  it.each([{ provider: "google", hasPassword: false }, { provider: null, hasPassword: true }, { provider: "github", hasPassword: true }])("requires code and the actual password availability: $provider / $hasPassword", async ({ provider, hasPassword }) => {
+    Object.assign(securityUser, { mfa_enabled: true, social_provider: provider, has_password: hasPassword });
+    useAuthStore.setState({ user: { id: "owner", ...securityUser } as User });
+    const user = userEvent.setup(); await open("/settings", "security");
+    await user.click(await screen.findByRole("switch", { name: "Toggle two-factor authentication" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByLabelText("Password") !== null).toBe(hasPassword);
+    await user.type(within(dialog).getByLabelText("Authenticator or recovery code"), "Ab_cd-12");
+    if (hasPassword) await user.type(within(dialog).getByLabelText("Password"), "current-password");
+    await user.click(within(dialog).getByRole("button", { name: "Disable MFA" }));
+    await waitFor(() => expect(mockDisable).toHaveBeenCalledWith({ code: "Ab_cd-12", ...(hasPassword ? { password: "current-password" } : {}) }));
+  });
+});

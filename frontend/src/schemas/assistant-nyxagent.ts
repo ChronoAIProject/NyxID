@@ -2,6 +2,7 @@ import { platformThreadSchema, platformTurnOriginSchema } from "./platform-perso
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
 import { machineReceiptSchema } from "./machine-activity";
+import { cmaOperationSchema } from "./cma-operation";
 
 const conversationId = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 
@@ -90,7 +91,14 @@ export const nyxAgentConversationSchema = z.object({
     .object({
       platform_origin: platformTurnOriginSchema.nullish(),
       turn_id: z.string(),
+      reply: z.object({
+        message_id: z.string(),
+        block_id: z.string(),
+        cursor: z.number().int().nonnegative(),
+        text: z.string(),
+      }).nullish(),
       response_id: z.string().nullish(),
+      queued: z.boolean().optional(),
       waiting_for_capacity: z.boolean().optional(),
       capacity_wait_note_origin: z.string().nullish(),
       engine_request_started_at: z.string().nullish(),
@@ -246,6 +254,7 @@ export const nyxAgentWaitingSchema = z.object({
 export type NyxAgentWaiting = z.infer<typeof nyxAgentWaitingSchema>;
 
 export const nyxAgentHistorySchema = z.object({
+  cma_operations: z.array(cmaOperationSchema).default([]),
   conversation: nyxAgentConversationSchema,
   messages: z.array(nyxAgentMessageSchema),
   acknowledgements: z.array(nyxAgentAcknowledgementSchema).default([]),
@@ -264,7 +273,9 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     event: z.literal("turn.status"),
     conversation_id: conversationId,
     turn_id: z.string(),
+    started_at: z.string().optional(),
     status: z.enum(["running", "waiting"]),
+    queued: z.boolean().optional(),
     waiting_for_capacity: z.boolean().optional(),
     engine_accepted: z.boolean().optional(),
     capacity_wait_note_origin: z.string().nullish(),

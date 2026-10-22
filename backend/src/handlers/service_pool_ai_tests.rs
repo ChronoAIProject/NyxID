@@ -286,6 +286,8 @@ async fn machine_pool_discovery_and_execution_share_org_admin_only_acl() {
     let org = fixture.auth.user_id.to_string();
     let actor = Uuid::new_v4().to_string();
     let db = &fixture.state.db;
+    crate::test_utils::set_test_approval_preference(db, &actor, false).await;
+
     db.collection::<Document>("users")
         .update_one(
             doc! { "_id": &org },
@@ -380,6 +382,13 @@ async fn pool_ai_gateway_accepts_llm_scope_without_widening_slug_access() {
     )
     .await;
     fixture.auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+    crate::test_utils::set_test_approval_preference(
+        &fixture.state.db,
+        &fixture.auth.user_id.to_string(),
+        false,
+    )
+    .await;
+
     fixture.auth.scope = crate::mw::auth::LLM_PROXY_SCOPE.into();
     let denied = call(&fixture, Entry::Slug, "chat/completions", basic_request())
         .await

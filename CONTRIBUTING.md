@@ -341,20 +341,25 @@ A change under `Cargo.toml` / `Cargo.lock` re-runs both `Backend Test` and `CLI 
 
 Wait for a green `CI Pipeline` before merging. If a check fails, fix the issue locally and push -- the workflow re-runs automatically.
 
-Backend test and coverage jobs use `CARGO_PROFILE_TEST_DEBUG=line-tables-only`
-to keep the large test binary within hosted-runner memory. Use the same setting
-for head and base coverage measurements. This preserves line locations and LLVM
-coverage instrumentation; keep the full test selection and coverage thresholds.
+Backend test and coverage builds use `CARGO_PROFILE_TEST_DEBUG=line-tables-only`
+to keep the large test binary within hosted-runner memory. Each mode compiles
+one archive, then runs four isolated shards with one MongoDB per runner.
+Inventory verification checks that every expected test ran exactly once across
+the shards; coverage profiles are merged before enforcing the existing threshold.
 When a runner exits with code 143 during compilation, inspect the last completed
 step before treating it as a test failure. Repeated shutdowns at the same compile
 stage need a build-resource correction rather than repeated full-workflow retries.
 
-The CI profile schedules the capacity-wait heartbeat test alone to keep
-concurrent database creation and cleanup out of its timing window. Head and
-base coverage use the same checked-out nextest configuration, which is included
-in the coverage-cache fingerprint.
-Backend test and coverage jobs allow 120 minutes for compilation and the full
-suite. Each test retains the CI profile's five-minute deadline and no retries.
+The CI profile schedules the capacity-wait heartbeat, trigger grace deadline/recovery,
+lost-session recovery, stream-bound, and bounded analytics admission tests alone
+within each shard to keep concurrent database creation and cleanup out of their
+timing windows. The profile and reusable workflow are included in the coverage
+fingerprint. Base coverage reuses an exact-commit published report when available;
+it is informational and does not rerun the base suite.
+The reusable backend workflow sets `RUST_MIN_STACK=8388608` (8 MiB) for ordinary
+and instrumented native journeys. Each build and execution shard has a 60-minute
+budget. Tests retain the CI profile's five-minute deadline and one retry; every
+retried test is named in the job summary, and a second failure fails the run.
 
 ### Rollup Health Triage
 

@@ -4,6 +4,7 @@ import {
   remoteMachinePlatformFixture,
 } from "@/test/remote-machine-fixture";
 import {
+  machineSetupCommand,
   remoteMachineSchema,
   remoteMachineCreateRequestSchema,
   remoteMachineActionRequestSchema,
@@ -538,5 +539,37 @@ it("binds request schemas to the sole controlled profile and rejects arbitrary d
         ...patch,
       }).success,
     ).toBe(false);
+  }
+});
+
+it("requires explicit legacy acknowledgement and carries selection to native and Docker setup", async () => {
+  const { machineChoicesSchema, machineSetupCommand } = await import("./machines");
+  const choices = { name: "machine", where: "vm" as const, capabilities: ["shell" as const], grant_to: null };
+  const token = `nyx_nreg_${"a".repeat(64)}`;
+  expect(machineChoicesSchema.safeParse({ ...choices, separation:null, legacy_warning_acknowledged:false }).success).toBe(true);
+  expect(machineSetupCommand(choices, token, "wss://nyxid.example/api/v1/nodes/ws")).toContain("node setup --separation 'automatic'");
+  expect(machineChoicesSchema.safeParse({ ...choices, separation: "shared_legacy" }).success).toBe(false);
+  expect(() => machineSetupCommand({ ...choices, separation: "shared_legacy" }, token, "wss://nyxid.example/api/v1/nodes/ws")).toThrow(/acknowledge/);
+  const explicit = { ...choices, separation: "shared_legacy" as const, legacy_warning_acknowledged: true };
+  expect(machineSetupCommand(explicit, token, "wss://nyxid.example/api/v1/nodes/ws")).toContain("--separation 'shared-legacy'");
+  const image = `ghcr.io/chronoaiproject/nyxid/nyxid-machine-updater@sha256:${"ab".repeat(32)}`;
+  expect(machineSetupCommand({ ...explicit, where: "docker" }, token, "wss://nyxid.example/api/v1/nodes/ws", "0.72.0", image)).toContain("NYXID_MACHINE_SEPARATION=shared-legacy");
+  expect(machineSetupCommand({ ...choices, where: "docker", separation: "require_separated" }, token, "wss://nyxid.example/api/v1/nodes/ws", "0.72.0", image)).toContain("NYXID_MACHINE_SEPARATION=require-separated");
+});
+
+
+it("keeps native setup limited to the selected capabilities", () => {
+  const token = `nyx_nreg_${"a".repeat(64)}`;
+  for (const capability of ["shell", "files", "browser", "computer"] as const) {
+    const command = machineSetupCommand({
+      name: "limited-machine", where: "this_computer", grant_to: null,
+      separation: "shared_legacy", legacy_warning_acknowledged: true,
+      capabilities: [capability],
+    }, token, "wss://nyxid.example/api/v1/nodes/ws");
+    expect(command).toContain(` --${capability}`);
+    expect(command).not.toContain(" --machine");
+    for (const excluded of ["shell", "files", "browser", "computer"].filter(value => value !== capability)) {
+      expect(command).not.toContain(` --${excluded}`);
+    }
   }
 });

@@ -135,7 +135,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
             {step === "verify" &&
               "Scan this QR code with your authenticator app, then enter the verification code."}
             {step === "recovery" &&
-              "Save these recovery codes in a safe place. You can use them to access your account if you lose your authenticator device."}
+              "Save these recovery codes in a safe place. Each code works once if you lose your authenticator. Your other devices have been signed out."}
           </DialogDescription>
         </DialogHeader>
 

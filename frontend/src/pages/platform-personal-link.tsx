@@ -2,7 +2,11 @@ import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { usePersonalLinkPreview } from "@/hooks/use-platform-personal";
-import { personalLinkApi } from "@/lib/platform-personal";
+import {
+  personalLinkApi,
+  telegramConfirmationUrl,
+} from "@/lib/platform-personal";
+import { CopyableField } from "@/components/shared/copyable-field";
 import {
   readPersonalLink,
   clearPersonalLink,
@@ -154,6 +158,10 @@ function PersonalLinkFlow({
   }
   const chat = review?.chat ?? status.data?.chat ?? preview.data?.chat;
   const chatName = chat?.display_name ?? "chat";
+  const telegramReturn =
+    chat?.platform === "telegram"
+      ? telegramConfirmationUrl(command, preview.data?.manager.username)
+      : undefined;
   const loginInstruction =
     chat?.login_command ??
     "the login control shown in the original private chat";
@@ -377,14 +385,23 @@ function PersonalLinkFlow({
               </p>
               {command ? (
                 <>
+                  {telegramReturn && (
+                    <Button variant="primary" asChild>
+                      <a
+                        href={telegramReturn}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        Open Telegram to finish
+                      </a>
+                    </Button>
+                  )}
                   <p>
                     {chat?.platform === "discord"
                       ? "Choose the /nyx confirm application command in the same bot DM and enter the shown P-… value in its code option. Ordinary text does not reach this integration."
                       : "Send this one-time command in the private chat:"}
                   </p>
-                  <code className="block select-all rounded-lg bg-muted p-3 font-mono">
-                    {command}
-                  </code>
+                  <CopyableField label="Confirmation command" value={command} />
                 </>
               ) : (
                 <p>

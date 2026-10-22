@@ -106,9 +106,7 @@ export function FilterPicker({
           </span>
         </div>
         {description && (
-          <p className="-mt-1.5 text-11 text-muted-foreground">
-            {description}
-          </p>
+          <p className="-mt-1.5 text-11 text-muted-foreground">{description}</p>
         )}
         <div className="relative">
           <Search className="absolute left-2.5 top-2 size-3.5 text-muted-foreground" />
@@ -162,9 +160,7 @@ export function FilterPicker({
               </Button>
             ))}
             {options.options.length === 0 && (
-              <p className="p-2 text-12 text-muted-foreground">
-                No matches.
-              </p>
+              <p className="p-2 text-12 text-muted-foreground">No matches.</p>
             )}
             {options.total > options.options.length && (
               <p className="text-10 text-muted-foreground">
@@ -232,12 +228,14 @@ export function FilterCard({
 
 export function AnalyticsSelect({
   label,
+  ariaLabel,
   value,
   options,
   onChange,
   inline = false,
 }: {
   label: string;
+  ariaLabel?: string;
   value: string;
   options: { value: string; label: string }[];
   onChange: (value: string) => void;
@@ -260,7 +258,7 @@ export function AnalyticsSelect({
       <Select value={value} onValueChange={onChange}>
         <SelectTrigger
           id={id}
-          aria-label={label}
+          aria-label={ariaLabel ?? label}
           className={inline ? "w-40" : "w-full"}
           style={inline ? { marginTop: 0 } : undefined}
         >

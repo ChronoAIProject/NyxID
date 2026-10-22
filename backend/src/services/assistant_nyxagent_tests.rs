@@ -269,6 +269,87 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 }
 
 #[test]
+fn billing_failures_keep_their_cause_through_streaming_and_recovery() {
+    for code in ["billing_not_configured", "billing_provider_unavailable"] {
+        for status in [401, 402, 403, 409, 503] {
+            assert_eq!(
+                Recovery::default().decide(status, code, true),
+                RecoveryAction::Fail
+            );
+        }
+        let mut stream = ResponseStream::default();
+        let mut failed = terminal("response.failed", 1, "partial");
+        failed["response"]["error"] = json!({"code": code, "message": "SECRET body"});
+        stream.push(&frame(failed)).unwrap();
+        let result = stream.terminal.unwrap();
+        let error = result.error.unwrap();
+        assert_eq!(error.code, code);
+        assert_eq!(result.text, "partial");
+        assert!(error.message.contains("billing"));
+        assert!(!error.message.contains("SECRET"));
+    }
+}
+
+#[test]
+fn billing_attribution_recovers_wrapped_causes_only_with_current_evidence() {
+    use crate::models::assistant_conversation::ModelRefusal;
+    use crate::services::assistant_model_observer::{attribute, refusal_code};
+    let now = Utc::now();
+    let mut row = stale_test_row(now);
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.model_attempt_id = Some("attempt".into());
+    for (error, code) in [
+        (AppError::InsufficientCredits, "insufficient_credits"),
+        (AppError::WalletSuspended, "wallet_suspended"),
+        (
+            AppError::PlanEntitlementRequired("service".into()),
+            "plan_entitlement_required",
+        ),
+        (
+            AppError::BillingNotConfigured("SECRET".into()),
+            "billing_not_configured",
+        ),
+        (
+            AppError::BillingProviderUnavailable("SECRET".into()),
+            "billing_provider_unavailable",
+        ),
+    ] {
+        assert_eq!(refusal_code(&error), Some(code));
+        turn.model_refusal = Some(ModelRefusal {
+            code: code.into(),
+            attempt_id: "attempt".into(),
+            at: now,
+        });
+        for upstream in ["turn_failed", "nyxid_error", "invalid_stream"] {
+            let wrapped = TurnError::new(upstream);
+            let mapped = attribute(&wrapped, turn, now);
+            assert_eq!(mapped.code, code);
+            assert_eq!(mapped.upstream_code, wrapped.upstream_code);
+            assert!(!mapped.message.contains("SECRET"));
+        }
+        for code in ["cancelled", "capacity_exceeded", "credential_invalid"] {
+            assert_eq!(attribute(&TurnError::new(code), turn, now).code, code);
+        }
+        let wrapped = TurnError::new("nyxid_error");
+        turn.model_attribution_uncertain = true;
+        assert_eq!(attribute(&wrapped, turn, now).code, "nyxid_error");
+        turn.model_attribution_uncertain = false;
+        turn.model_attempt_id = Some("newer-attempt".into());
+        assert_eq!(attribute(&wrapped, turn, now).code, "nyxid_error");
+        turn.model_attempt_id = Some("attempt".into());
+        assert_eq!(
+            attribute(&wrapped, turn, now + chrono::Duration::seconds(121)).code,
+            "nyxid_error"
+        );
+    }
+    turn.model_refusal = None;
+    assert_eq!(
+        attribute(&TurnError::new("nyxid_error"), turn, now).code,
+        "nyxid_error"
+    );
+}
+
+#[test]
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
@@ -386,6 +467,27 @@ fn web_research_guidance_reaches_both_roles_without_lifting_guest_limits() {
             "Never send private or authenticated URLs, browser content, cookies or headers"
         ));
         row.guest_turn = false;
+    }
+}
+
+#[test]
+fn cli_guidance_reaches_both_roles_and_confines_cli_to_cma_sandboxes() {
+    let mut row = stale_test_row(Utc::now());
+    for role in [AgentRole::Orchestrator, AgentRole::Subagent] {
+        row.role = role;
+        for guest_turn in [false, true] {
+            row.guest_turn = guest_turn;
+            let prompt = base_prompt(&row, None);
+            for guidance in [
+                "Avoid CLI commands",
+                "If a CLI is absolutely necessary",
+                "CMA (slug cma) sandbox command tool",
+                "only when the owner names that machine",
+                "Guests retain their existing tool limits",
+            ] {
+                assert!(prompt.contains(guidance), "missing {guidance} for {role:?}");
+            }
+        }
     }
 }
 
@@ -888,6 +990,61 @@ async fn persistence_fences_concurrent_turns_scopes_owners_paginates_and_deletes
 }
 
 #[tokio::test]
+async fn new_threads_inherit_agent_profile_explicit_selection_wins_existing_threads_keep_model() {
+    let f =
+        crate::services::assistant_authority_tests::direct_fixture("nyxa_default_profile").await;
+    let agent_id = f.row.agent_id.clone().unwrap();
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&agent_id},
+            doc! {"$set":{"model":"nyxagent/channel"}},
+        )
+        .await
+        .unwrap();
+    let mut req = request(None, "FAQ question");
+    req.agent_id = Some(agent_id.clone());
+    let row = begin_turn(&f.state.db, &f.owner, &req, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    assert_eq!(row.model, "nyxagent/channel");
+    req.model = Some("nyxagent/research".into());
+    let explicit = begin_turn(&f.state.db, &f.owner, &req, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    assert_eq!(explicit.model, "nyxagent/research");
+    // Changing the agent default never rewrites an existing thread's selection.
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&agent_id},
+            doc! {"$set":{"model":"nyxagent/channel"}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&explicit.id},
+            doc! {"$set":{"active_turn":bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    let continued = begin_turn(
+        &f.state.db,
+        &f.owner,
+        &request(Some(&explicit.id), "Continue"),
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert_eq!(continued.model, "nyxagent/research");
+}
+
+#[tokio::test]
 async fn every_failed_turn_clears_binding_and_retains_partial_reply() {
     let db = connect_transaction_test_database("nyxa_failures").await;
     ensure_indexes(&db).await.unwrap();
@@ -987,6 +1144,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             channel_adapter_origin: None,
             invocation_id: None,
             resource_refs: Vec::new(),
+            reply: None,
             platform_reply: None,
             execution_started: false,
             machine_scopes: Vec::new(),
@@ -1019,6 +1177,8 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             continuations: 0,
             tool_progress: Default::default(),
             lease_expires_at: None,
+            queued_at: None,
+            queue_deadline: None,
             heartbeat_at: None,
             trigger_run_id: None,
             report_to: None,
@@ -1794,6 +1954,7 @@ async fn orphan_sweep_reclaims_stale_heartbeat_but_keeps_fresh_and_legacy_turns(
         .update_one(
             doc! {"_id": &stale.id},
             doc! {"$set": {"active_turn.heartbeat_at": old,
+            "active_turn.reply": {"message_id":"partial", "block_id":"partial-text", "cursor":4_i64, "text":"Saved before the worker stopped 界"},
             "active_turn.worker_instance": {"id": "old-process-id", "hostname": "nyxid-old-pod"}}},
         )
         .await
@@ -1856,6 +2017,7 @@ async fn orphan_sweep_reclaims_stale_heartbeat_but_keeps_fresh_and_legacy_turns(
         .pop()
         .unwrap();
     assert_eq!(reclaimed.error_code.as_deref(), Some("turn_lost"));
+    assert_eq!(reclaimed.text, "Saved before the worker stopped 界");
     assert_eq!(
         reclaimed.upstream_error_code, None,
         "a NyxID class, not an upstream code"
@@ -4878,6 +5040,165 @@ fn channel_note_follows_the_turn_destination_and_keeps_image_ordering_explicit()
     }
 }
 
+#[test]
+fn reply_length_guidance_follows_all_channel_destinations_but_never_app_only() {
+    use crate::models::assistant_conversation::PlatformReplyRouting;
+    let mut row = stale_test_row(Utc::now());
+    let telegram = ChannelOrigin {
+        nyxbot_channel_id: "telegram-channel".into(),
+        platform: "telegram".into(),
+        partition: "chat".into(),
+        thread: None,
+    };
+    row.channel = Some(telegram.clone());
+    row.reply_channel = Some(telegram.clone());
+    for origin in [TurnOrigin::User, TurnOrigin::Orchestrator] {
+        row.active_turn.as_mut().unwrap().origin = origin;
+        assert!(!channel_note(&row).contains("One message holds"));
+    }
+    // Both direct and gateway channel turns carry this same admitted origin.
+    for origin in [TurnOrigin::Channel, TurnOrigin::Event] {
+        let turn = row.active_turn.as_mut().unwrap();
+        turn.origin = origin;
+        turn.asked_from = Some(telegram.clone());
+        let note = channel_note(&row);
+        assert!(note.contains("Destination: Telegram."));
+        assert!(note.contains("4,096 characters"));
+    }
+    // A drained followed-thread event supplies its destination explicitly.
+    row.channel = None;
+    row.reply_channel = None;
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.asked_from = None;
+    let mut event = crate::services::assistant_team_service::event("message", "wake".into(), None);
+    event.source_event_ids = vec!["source".into()];
+    event.reply_to = vec![telegram.clone()];
+    turn.events = vec![event];
+    assert!(channel_note(&row).contains("4,096 characters"));
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.events.clear();
+    turn.origin = TurnOrigin::User;
+    // App-origin work can explicitly owe several chat destinations.
+    let mut discord = telegram.clone();
+    discord.platform = "discord".into();
+    turn.also_deliver = vec![telegram.clone(), telegram, discord];
+    let note = channel_note(&row);
+    assert_eq!(note.matches("Destination: Telegram.").count(), 1);
+    assert!(note.contains("Destination: Discord. One message holds 2,000 characters"));
+    row.active_turn.as_mut().unwrap().also_deliver.clear();
+    let platform_origin = platform_test_origin(&row);
+    row.active_turn.as_mut().unwrap().platform_reply = Some(PlatformReplyRouting::Captured {
+        origin: Box::new(platform_origin),
+        turn_id: "manager-turn".into(),
+        expires_at: Utc::now() + chrono::Duration::minutes(30),
+    });
+    assert!(channel_note(&row).contains("4,096 characters"));
+    row.active_turn.as_mut().unwrap().platform_reply = Some(PlatformReplyRouting::WebOnly);
+    assert!(!channel_note(&row).contains("One message holds"));
+    row.active_turn = None;
+    assert!(channel_note(&row).is_empty());
+}
+
+#[tokio::test]
+async fn automation_and_specialist_turn_context_resolves_only_owned_chat_destinations() {
+    use crate::models::nyxbot_channel::{
+        COLLECTION_NAME as CHANNELS, THREADS_COLLECTION_NAME as THREADS,
+    };
+    use crate::models::trigger_run::COLLECTION_NAME as RUNS;
+    let db = connect_transaction_test_database("channel_length_notes").await;
+    let state = test_app_state(db.clone());
+    let date = bson::DateTime::now();
+    db.collection::<bson::Document>(CHANNELS).insert_one(doc! {
+        "_id":"channel", "user_id":"owner", "channel_bot_id":"bot", "platform":"telegram-new", "bot_label":"bot",
+        "transport":"gateway", "status":"active", "route_api_key_id":"key", "created_at":date, "updated_at":date,
+    }).await.unwrap();
+    db.collection::<bson::Document>(THREADS).insert_one(doc! {
+        "_id":"chat", "channel_id":"channel", "user_id":"owner", "partition":"chat", "platform_chat_id":"123",
+        "created_at":date, "updated_at":date,
+    }).await.unwrap();
+    db.collection::<bson::Document>(RUNS).insert_one(doc! {
+        "_id":"run", "trigger_id":"trigger", "user_id":"owner", "scheduled_at":date, "deadline":date,
+        "outcome":"started", "fence":"fence", "lease_until":date, "expires_at":date,
+        "deliver_to":{"type":"chat", "chat_id":"chat"},
+    }).await.unwrap();
+    let mut parent = stale_test_row(Utc::now());
+    parent.active_turn.as_mut().unwrap().trigger_run_id = Some("run".into());
+    parent.active_turn.as_mut().unwrap().origin = TurnOrigin::Trigger;
+    let note =
+        crate::services::assistant_nyxagent_runtime::turn_notes(&state, &parent, None, None).await;
+    assert!(note.contains("Destination: Telegram. One message holds 4,096 characters"));
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_one(&parent)
+        .await
+        .unwrap();
+    let mut specialist = stale_test_row(Utc::now());
+    specialist.role = AgentRole::Subagent;
+    specialist.active_turn.as_mut().unwrap().origin = TurnOrigin::Orchestrator;
+    specialist.active_turn.as_mut().unwrap().report_to = Some(parent.id.clone());
+    specialist.active_turn.as_mut().unwrap().note =
+        reporting_channel_length_note(&db, "owner", Some(&parent.id))
+            .await
+            .unwrap();
+    specialist.report_to = Some(parent.id.clone());
+    let note =
+        crate::services::assistant_nyxagent_runtime::turn_notes(&state, &specialist, None, None)
+            .await;
+    assert!(note.contains("Your report is intended for the requesting turn's chat destination"));
+    assert!(note.contains("4,096 characters"));
+    // Follow the immutable run destination on a confirmation continuation too.
+    parent.active_turn.as_mut().unwrap().origin = TurnOrigin::Event;
+    assert!(
+        additional_channel_length_note(&db, &parent)
+            .await
+            .unwrap()
+            .contains("4,096 characters")
+    );
+    db.collection::<bson::Document>(RUNS)
+        .update_one(
+            doc! {"_id":"run"},
+            doc! {"$set":{"deliver_to":{"type":"thread"}}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        !additional_channel_length_note(&db, &parent)
+            .await
+            .unwrap()
+            .contains("One message holds")
+    );
+    // Assigned work retains its admitted formatting context even if the
+    // requesting turn settles or its next turn is app-only.
+    let note =
+        crate::services::assistant_nyxagent_runtime::turn_notes(&state, &specialist, None, None)
+            .await;
+    assert!(note.contains("4,096 characters"));
+    assert!(
+        reporting_channel_length_note(&db, "owner", Some(&parent.id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Neither another owner's automation nor another owner's reporting thread
+    // can supply destination context to this turn.
+    parent.user_id = "other-owner".into();
+    assert!(
+        additional_channel_length_note(&db, &parent)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        reporting_channel_length_note(&db, "other-owner", Some(&parent.id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let app = stale_test_row(Utc::now());
+    let note =
+        crate::services::assistant_nyxagent_runtime::turn_notes(&state, &app, None, None).await;
+    assert!(!note.contains("One message holds"));
+}
+
 #[tokio::test]
 async fn tool_image_chat_resolves_x_public_dm_and_trigger_destinations() {
     use crate::models::nyxbot_channel::{
@@ -5218,6 +5539,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
     };
     let watch = AsyncServiceOperation {
         secret_context_versions: Default::default(),
+        cma: None,
         id: "watch".into(),
         user_id: row.user_id.clone(),
         conversation_id: row.id.clone(),
@@ -5227,6 +5549,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         service_id: "service".into(),
         submit_endpoint_id: "submit".into(),
         contract: crate::models::async_service_operation::AsyncOperationContract {
+            presentation: None,
             status_operation: "status".into(),
             result_operation: "result".into(),
             cancel_operation: None,
@@ -6061,6 +6384,14 @@ async fn model_facts_are_attempt_and_turn_fenced_and_preserve_upstream_diagnosti
         (
             AppError::PlanEntitlementRequired("service".into()),
             "plan_entitlement_required",
+        ),
+        (
+            AppError::BillingNotConfigured("SECRET".into()),
+            "billing_not_configured",
+        ),
+        (
+            AppError::BillingProviderUnavailable("SECRET".into()),
+            "billing_provider_unavailable",
         ),
     ] {
         let attempt = ModelRequest::capture(

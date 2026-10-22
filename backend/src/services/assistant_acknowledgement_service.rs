@@ -1315,6 +1315,18 @@ pub fn organization_agent_refusal() -> Value {
     })
 }
 
+/// What a tool caller is told when it tries to put an organization specialist
+/// on a channel route or chat. The message and instructions are fixed so no
+/// caller or resource identifiers can enter assistant context.
+pub fn organization_agent_channel_refusal() -> Value {
+    json!({
+        "error": "organization_agent_channel_unsupported",
+        "error_code": 1002,
+        "message": crate::errors::access_denial::ORGANIZATION_AGENT_CHANNEL_MESSAGE,
+        "instructions": crate::errors::access_denial::ORGANIZATION_AGENT_CHANNEL_HINT,
+    })
+}
+
 /// What a guest turn is told when a service call goes beyond what the owner
 /// lets guests do with that service.
 pub fn guest_service_refusal(service: &str, access: GuestAccess) -> Value {

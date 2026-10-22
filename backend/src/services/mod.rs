@@ -6,6 +6,7 @@ pub mod admin_user_service;
 pub mod agent_binding_service;
 pub mod agent_key_introspection;
 pub mod agent_operation_scope_service;
+pub mod agent_skill_preload;
 pub mod analytics_consent_service;
 pub mod analytics_dispatch_service;
 pub mod anonymous_endpoint_service;
@@ -32,6 +33,7 @@ pub(crate) mod assistant_record_service;
 pub mod assistant_resource_service;
 pub mod assistant_service;
 pub mod assistant_skill_authoring;
+pub(crate) mod assistant_stream_checkpoint;
 pub mod assistant_turn_observability;
 pub mod assistant_wire_log_service;
 pub mod audit_chain_service;
@@ -81,6 +83,7 @@ pub mod channel_reply_plan;
 pub mod channel_routing_service;
 pub mod channel_send_service;
 pub mod channel_text;
+pub mod channel_text_delivery;
 pub mod channel_thread_follow_service;
 pub mod channel_thread_service;
 pub mod channel_verification_service;
@@ -147,6 +150,7 @@ pub mod node_routing_service;
 pub mod node_service;
 pub mod node_ws_manager;
 pub mod notification_service;
+pub mod notion_evidence;
 pub mod oauth_app_source;
 pub(crate) mod oauth_broker_record_service;
 pub mod oauth_broker_service;
@@ -225,6 +229,7 @@ pub mod resource_adapter;
 pub mod resource_request_proof;
 pub mod role_service;
 pub mod scope_catalog;
+pub mod security_readiness_service;
 pub mod service_account_key_read_service;
 pub mod service_account_service;
 pub mod service_endpoint_service;
@@ -402,6 +407,7 @@ pub mod tool_publication_service;
 pub mod tools_service;
 
 pub mod async_service_operation;
+pub mod cma_operation;
 pub mod service_preference_service;
 pub mod tool_twin_service;
 
@@ -446,12 +452,14 @@ mod platform_provisioning_acceptance_tests;
 pub mod platform_setup_notice_service;
 
 pub mod assistant_access_policy;
+pub(crate) mod nyxbot_channel_query_service;
 pub(crate) mod nyxbot_gateway_service;
 pub mod nyxbot_watch_service;
 pub mod tools_manager_service;
 
 pub mod platform_manager_delivery;
 pub mod platform_manager_transport;
+pub mod platform_pairing_link;
 
 pub mod platform_public_contract_service;
 
@@ -497,3 +505,11 @@ pub(crate) mod record_storage;
 pub(crate) mod trigger_record_service;
 
 pub(crate) mod agent_login_record_service;
+pub mod telegram_input;
+
+pub mod platform_help_service;
+
+pub mod telegram_manager_registry;
+
+pub(crate) mod nyxbot_channel_continuity_service;
+pub(crate) mod nyxbot_gateway_release_service;

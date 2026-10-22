@@ -5,6 +5,7 @@ import {
   parseNyxAgentLiveEvent,
   resetNyxAgentLiveForTests,
   type NyxAgentLiveEvent,
+  NYXAGENT_LIVE_IDLE_MS,
 } from "./nyxagent-live";
 import { nyxAgentLiveRefresh } from "@/hooks/use-nyxagent-live";
 
@@ -75,6 +76,51 @@ it("shares one stream, delivers its events, and closes it with the last listener
   expect(getNyxAgentLiveStatus()).toBe("live");
   stopSecond();
   expect(getNyxAgentLiveStatus()).toBe("idle");
+});
+
+it("reconnects a silent live stream and cancels its old reader", async () => {
+  vi.useFakeTimers();
+  const cancel = vi.fn();
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    requests.push(endpoint);
+    return new Response(new ReadableStream({
+      start(controller) { controller.enqueue(encoder.encode('data: {"type":"ready"}\n\n')); },
+      cancel,
+    }), { headers: { "content-type": "text/event-stream" } });
+  };
+  const events: NyxAgentLiveEvent[] = [];
+  const stop = listenNyxAgentLive((event) => events.push(event));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(getNyxAgentLiveStatus()).toBe("live");
+  await vi.advanceTimersByTimeAsync(NYXAGENT_LIVE_IDLE_MS);
+  expect(getNyxAgentLiveStatus()).toBe("connecting");
+  expect(cancel).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(requests).toHaveLength(2);
+  expect(events).toEqual([{ type: "ready" }, { type: "ready" }]);
+  stop();
+});
+
+it("counts keepalive comments as connection activity", async () => {
+  vi.useFakeTimers();
+  let writer!: ReadableStreamDefaultController<Uint8Array>;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    requests.push(endpoint);
+    return new Response(new ReadableStream({ start(controller) {
+      writer = controller;
+      controller.enqueue(encoder.encode('data: {"type":"ready"}\n\n'));
+    } }), { headers: { "content-type": "text/event-stream" } });
+  };
+  const stop = listenNyxAgentLive(() => undefined);
+  await vi.advanceTimersByTimeAsync(0);
+  for (let tick = 0; tick < 5; tick += 1) {
+    await vi.advanceTimersByTimeAsync(15_000);
+    writer.enqueue(encoder.encode(': keepalive\n\n'));
+    await vi.advanceTimersByTimeAsync(0);
+  }
+  expect(getNyxAgentLiveStatus()).toBe("live");
+  expect(requests).toHaveLength(1);
+  stop();
 });
 
 it("falls back to polling when the server has no live stream", async () => {

@@ -49,9 +49,20 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3001` | HTTP listen port |
-| `BASE_URL` | `http://localhost:3001` | Backend base URL (used in JWT `aud`) |
+| `BASE_URL` | `http://localhost:3001` | Backend base URL (used in JWT `aud`); configured HTTPS enables HSTS without subdomain/preload commitments, independent of forwarded request headers. |
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
 | `ENVIRONMENT` | `development` | `development`, `staging`, `production` |
+
+### Frontend nginx policy
+
+| Variable | Default | Description |
+|---|---|---|
+| `BACKEND_URL` | `http://backend:3001` | Internal HTTP(S) upstream origin, without path/credentials/query/fragment. |
+| `NYXID_PUBLIC_ORIGIN` | `http://localhost:8080` | Trusted public frontend origin. HTTPS enables HSTS; production Compose passes `FRONTEND_URL`. |
+| `NYXID_BROWSER_CONNECT_ORIGINS` | *(empty)* | At most 16 space-separated HTTP(S) origins for custom runtime API destinations (analytics uses the authenticated same-origin relay); matching WS(S) origins are derived. Origin values are validated, never substituted as CSP/nginx fragments. |
+
+See [Production browser policy](BROWSER_SECURITY_POLICY.md) for response-specific
+CSP, supported resources, split credential routing and the production harness.
 
 ## Request-bound resource reads
 
@@ -119,6 +130,8 @@ listener through a public Service, ingress, or load balancer.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `INSTANCE_NAME` | `POD_NAME`, then `HOSTNAME` | Stable name for one pod or host. A random process generation fences restarts that reuse this name. Kubernetes sets this from `metadata.name`. |
+| `SECURITY_ROLLOUT_REPLICAS` | *(empty)* | Complete comma-separated serving `INSTANCE_NAME` roster, identical on every upgraded replica. Empty/unready rosters block effective security feature activation with HTTP 503. See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md). |
+| `SECURITY_ROLLOUT_DRAINED` | `false` | Exact `true` acknowledges that all old/unregistered serving replicas and relevant writers were drained. This is an operator assertion, not discovery. It must be true on every declared replica for gated security feature activation. |
 | `INTERNAL_BIND_ADDR` | `127.0.0.1:3002` | Bind address for the private authenticated listener. Multi-replica deployments must bind it to a peer-reachable interface, such as `0.0.0.0:3002` inside a pod network. |
 | `INTERNAL_ADVERTISE_URL` | `POD_IP`, detected local IP, `HOSTNAME`, then `127.0.0.1` | Peer-reachable base URL stored in ownership records. NyxID detects a local routable IP when `POD_IP` is unset and `INTERNAL_BIND_ADDR` is non-loopback. Every generated URL uses the port from `INTERNAL_BIND_ADDR`. Set this variable to override detection with an internal pod IP or private DNS URL. Never set the public ingress URL. |
 | `INTERNAL_DISPATCH_HMAC_KEY` | legacy derivation from `ENCRYPTION_KEY`, then JWT PEM | Optional 32-byte hex override (64 hex characters) used during legacy HMAC preparation. A configured `HMAC_KEYSET_PATH` is authoritative after adoption. All replicas must retain the same final domain key; changing an override against a durable pin fails startup. |
@@ -376,7 +389,7 @@ Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3).
 | `RATE_LIMIT_BURST` | `30` | Cluster-wide burst capacity and per-IP limit |
 | `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND` | `0` | Sustained requests/second per user for each platform-credentialed service. Defaults to `0` (disabled): enabling a cap on a shared credential is a deliberate operator decision taken after observing real traffic, so it never arrives with a deploy. |
 | `PLATFORM_SERVICE_RATE_LIMIT_BURST` | `10` | Burst capacity per user for each platform-credentialed service. |
-| `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | When true, a platform-credentialed catalog row with no `proxy_operation_policy` is refused on actor-addressed paths (`/proxy/s/{slug}`, `/llm/*`). Ships **disabled** so deploying changes no existing behaviour; enable per environment once every such row either carries a policy or is confirmed to receive no actor-addressed traffic. Server-chosen surfaces (the assistant) are unaffected either way — they cannot name an operation, so a policy has no meaning there. |
+| `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | Initially false. The first true process observation persists a sticky platform-policy cutover marker before serving. Actor-addressed master credentials then require the complete declared/drained replica roster with this env true, plus explicit policies on the conservative inventory of active master-capable catalog rows. Missing policy blocks readiness; an explicit empty policy is distinct and denies all operations. Expired siblings or changing this env to false do not undo cutover. See [activation and maintenance recovery](SECURITY_ROLLOUT_READINESS.md). Server-chosen surfaces retain their separate policy contract. |
 | `TRUSTED_PROXY_IPS` | *(empty)* | Comma-separated reverse-proxy IPv4/IPv6 addresses or CIDR ranges. Bare addresses mean `/32` (IPv4) or `/128` (IPv6); IPv4-mapped IPv6 addresses are normalized to IPv4. **Only list proxies configured to overwrite client-supplied forwarded headers.** From an allowlisted peer, resolution prefers `CF-Connecting-IP`, then scans `X-Forwarded-For` right-to-left while skipping trusted proxy hops, then uses `X-Real-IP`, then the TCP peer. `CF-Connecting-IP` is the primary Cloudflare path because it does not depend on a complete proxy-hop list. The XFF fallback requires every hop to be listed, including Cloudflare's published IPv4 and IPv6 ranges when Cloudflare is in front; otherwise the rightmost unlisted Cloudflare edge becomes the apparent client and rate-limit key. From an untrusted peer, strict public/device-login paths ignore all forwarded headers. The global limiter and node WebSocket attribution retain their legacy XFF-first behavior only while this setting is empty, then switch to the trusted resolver when configured. Invalid entries are dropped with a warning. Until this is set behind an internal ingress, requester IP and country are unavailable and strict public per-IP buckets can collapse to the ingress peer. |
 | `RATE_LIMIT_EXEMPT_IPS` | *(empty)* | Comma-separated client IPv4/IPv6 addresses or CIDRs exempt from the general per-IP and cluster-wide global request budgets. Matching requests consume neither budget and are admitted even when the global budget is exhausted. Invalid entries are dropped with a warning. This does not exempt authentication, account, API-key/agent, platform-service, public-proxy, device/login, or other dedicated protocol limits, nor connection capacity limits. |
 
@@ -528,6 +541,10 @@ Requires all four values. Create a Services ID and key at the [Apple Developer p
 | `APPROVAL_EXPIRY_INTERVAL_SECS` | `5` | Interval between approval expiry sweeps (seconds) |
 
 The approval system works without Telegram -- users can always approve/reject via the web UI. Telegram delivery requires `TELEGRAM_BOT_TOKEN`.
+
+A missing global preference defaults to **Writes only**: read operations can proceed; write and destructive operations require approval. Explicit stored true selects **All requests**, false selects **Off**. Lazy settings/channel and tool-approval creation leave the preference absent. Existing stored booleans keep their meaning, including unmarked true rows from the unreleased W9.3 build. Users can deliberately reset to Writes only through settings. This default has no environment toggle, and notification availability never suspends required approval.
+
+Drain and upgrade **every** backend replica and participating worker before accepting traffic under the new-user writes-only guarantee. Main-era replicas allow writes when the preference is missing; earlier W9.3 replicas gate reads and lazily persist true. Mixed versions therefore do not implement the guarantee. Publish the three-choice clients after backend cutover, and drain affected traffic before rollback. See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md#required-approval-and-delivery).
 
 **Telegram delivery modes:** When `TELEGRAM_WEBHOOK_URL` (and `TELEGRAM_WEBHOOK_SECRET`) are set, the backend registers a webhook with Telegram at startup. When only `TELEGRAM_BOT_TOKEN` is set (no webhook URL), the backend automatically falls back to `getUpdates` long polling -- ideal for local development without ngrok or tunnels.
 
@@ -713,8 +730,22 @@ cutover. See [Exact accounting](BILLING_EXACT_ACCOUNTING.md#d5-cutover-and-opera
 
 ### Machine node process environments
 
-Machine support adds no backend deployment environment variables. The machine
-container reads `NYXID_NODE_TOKEN` only during first registration (omit it for
+The backend's official updater-image verifier retains authenticated TUF rollback
+floors separately from node credentials. `NYXID_SERVER_TUF_STATE_DIR` selects an
+absolute private durable directory; native default is `$HOME/.nyxid/server-tuf`
+(`%USERPROFILE%` on Windows). The backend image sets `/var/lib/nyxid/tuf` and
+production Compose mounts the named `backend_tuf` volume there. Provision the
+directory mode0700 owned by the backend UID, under trusted parent directories.
+With a read-only root filesystem mount only that private durable directory
+writable. Keep it across restarts/upgrades; do not restore an older copy or use
+ephemeral storage. Permission, configuration and authenticated-state failures
+disable verified updater guidance without accepting an unverified image tag.
+The native CLI's distinct override is `NYXID_TUF_STATE_DIR`; the Docker companion
+uses the private update volume's `tuf/` directory. See [RELEASING.md](RELEASING.md#accepted-provenance-and-authenticated-time).
+
+Machine execution itself adds no backend credential environment variables;
+the updater-image verifier uses the trust-storage setting described above.
+The machine container reads `NYXID_NODE_TOKEN` only during first registration (omit it for
 pairing), and `NYXID_NODE_URL` selects the existing node WebSocket endpoint.
 The entrypoint removes the registration token before starting the daemon.
 `NYXID_PROFILE` keeps the existing CLI profile convention.

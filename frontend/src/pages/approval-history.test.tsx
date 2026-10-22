@@ -126,6 +126,26 @@ beforeEach(() => {
 });
 
 describe("ApprovalHistoryPage", () => {
+  it("can discover a new request after an empty page and refresh its expiry", async () => {
+    const view = render(<ApprovalHistoryPage />);
+    expect(screen.getByText("No Approval Requests")).toBeInTheDocument();
+    mockRefetch.mockImplementationOnce(() => {
+      fixtures.requests = [makeRequest()]; fixtures.total = 1;
+      view.rerender(<ApprovalHistoryPage />);
+      return Promise.resolve({});
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(mockRefetch).toHaveBeenCalledOnce();
+    expect(screen.getAllByRole("button", { name: /approve/i }).length).toBeGreaterThan(0);
+    mockRefetch.mockImplementationOnce(() => {
+      fixtures.requests = [makeRequest({ status: "expired" })];
+      view.rerender(<ApprovalHistoryPage />);
+      return Promise.resolve({});
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
+    expect(screen.getAllByText("Expired").length).toBeGreaterThan(0);
+  });
   it("requests the first page, perPage 20, and no status filter by default", () => {
     render(<ApprovalHistoryPage />);
     // "all" maps to undefined so the hook is not narrowed by status.

@@ -320,7 +320,49 @@ async fn fixture(label: &str) -> Fixture {
         .unwrap();
     let (public, private) = super::build_router_with_state(state.clone());
     let app = public.merge(private).with_state(state.clone());
-    let (status, grant)=http(&app,"PUT",&format!("/api/v1/api-keys/{}/machine-grant",key.id),&owner_token,json!({"expected_state_version":key.state_version,"selection":{"assignments":{(node.id.clone()):{"capabilities":{"shell":true,"files":true},"file_roots":[peer.root.path().to_str().unwrap()],"service_ids":[]}}}})).await;
+    let grant_path = format!("/api/v1/api-keys/{}/machine-grant", key.id);
+    let mut approval = json!({
+        "expected_state_version": key.state_version,
+        "selection": {
+            "assignments": {
+                (node.id.clone()): {
+                    "capabilities": {"shell": true, "files": true},
+                    "file_roots": [peer.root.path().to_str().unwrap()],
+                    "service_ids": []
+                }
+            }
+        }
+    });
+    let (status, refused) = http(&app, "PUT", &grant_path, &owner_token, approval.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["error"], "validation_error");
+    assert_eq!(refused["error_code"], 1008);
+    let message = refused["message"]
+        .as_str()
+        .expect("selection refusal reason");
+    assert!(
+        message.starts_with("Validation error: machine_selection_required:"),
+        "{refused}"
+    );
+    assert!(message.contains(nyxid_machine::context::SHARED_LEGACY_WARNING));
+    assert_eq!(
+        db.collection::<Document>(crate::models::machine_external_grant::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0,
+        "omitting consent must not create Machine authority"
+    );
+    let unchanged: ApiKey = db
+        .collection(crate::models::api_key::COLLECTION_NAME)
+        .find_one(doc! {"_id": &key.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.state_version, key.state_version);
+    approval["selection"]["separation"] = json!("shared_legacy");
+    approval["selection"]["legacy_warning_acknowledged"] = json!(true);
+    let (status, grant) = http(&app, "PUT", &grant_path, &owner_token, approval).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -368,6 +410,7 @@ async fn child(f: &Fixture) -> (String, Zeroizing<String>) {
             permission_snapshot: Some(summary.permission_snapshot),
         },
         Some(Utc::now() + Duration::hours(1)),
+        Utc::now(),
         &f.key.id,
         &id,
         &secret,
@@ -451,6 +494,9 @@ async fn finish(f: Fixture) {
 #[tokio::test]
 async fn local_journey_external_http_node_and_oauth_refresh() {
     let mut f = fixture("local_journey_external_http").await;
+    // The external credential journey keeps the owner generic preference explicit.
+    crate::test_utils::set_test_approval_preference(&f.state.db, &f.owner, false).await;
+
     let (child_id, secret) = child(&f).await;
     let (status, listed) = rpc(&f, &secret, "tools/list", json!({})).await;
     assert_eq!(status, StatusCode::OK, "Agent Key MCP discovery transport");
@@ -1021,7 +1067,7 @@ async fn oauth_login_with_services(
             .1
             .into_owned(),
     );
-    let (status,prepared)=http(&f.app,"POST","/api/v1/users/me/oauth-machine-consent-requests",&f.owner_token,json!({"consent_request":signed.as_str(),"selection":{"assignments":{(f.node.id.clone()):{"capabilities":{"shell":true,"files":true},"file_roots":[f.peer.root.path().display().to_string()],"service_ids":service_ids}}}})).await;
+    let (status,prepared)=http(&f.app,"POST","/api/v1/users/me/oauth-machine-consent-requests",&f.owner_token,json!({"consent_request":signed.as_str(),"selection":{"separation":"shared_legacy","legacy_warning_acknowledged":true,"assignments":{(f.node.id.clone()):{"capabilities":{"shell":true,"files":true},"file_roots":[f.peer.root.path().display().to_string()],"service_ids":service_ids}}}})).await;
     assert_eq!(status, StatusCode::OK, "protected Machine selection");
     let selected = prepared["token"].as_str().unwrap();
     let mut decision = url::form_urlencoded::Serializer::new(String::new());
@@ -1223,7 +1269,7 @@ async fn gateway(f: &mut Fixture) {
         StatusCode::OK,
         "owner reviews current Key mutation version"
     );
-    let (status,grant)=http(&f.app,"PUT",&format!("/api/v1/api-keys/{}/machine-grant",f.key.id),&f.owner_token,json!({"expected_state_version":reviewed_key["state_version"],"expected_revision":f.grant["revision"],"expected_grant_id":f.grant["id"],"selection":{"assignments":{(f.node.id.clone()):{"capabilities":{"shell":true,"files":true},"file_roots":[f.peer.root.path().display().to_string()],"service_ids":[id]}}}})).await;
+    let (status,grant)=http(&f.app,"PUT",&format!("/api/v1/api-keys/{}/machine-grant",f.key.id),&f.owner_token,json!({"expected_state_version":reviewed_key["state_version"],"expected_revision":f.grant["revision"],"expected_grant_id":f.grant["id"],"selection":{"separation":"shared_legacy","legacy_warning_acknowledged":true,"assignments":{(f.node.id.clone()):{"capabilities":{"shell":true,"files":true},"file_roots":[f.peer.root.path().display().to_string()],"service_ids":[id]}}}})).await;
     assert_eq!(status, StatusCode::OK);
     f.grant = grant;
     let undeclared = call(

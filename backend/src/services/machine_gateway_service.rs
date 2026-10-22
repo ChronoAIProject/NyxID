@@ -151,10 +151,12 @@ pub(crate) fn validate_external_job<'a>(
 }
 
 fn structured_body(headers: &axum::http::HeaderMap) -> bool {
-    headers
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.contains("json") || value.contains("x-www-form-urlencoded"))
+    headers.get_all("content-type").iter().any(|value| {
+        value.to_str().ok().is_none_or(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("json") || value.contains("x-www-form-urlencoded")
+        })
+    })
 }
 
 pub const GIT_MAX_BYTES: usize = 16 * 1024 * 1024 * 1024;
@@ -590,27 +592,22 @@ pub fn apply_git_target(
 
 /// Keep structured adapters on their existing bounded inspection path. Git and
 /// opaque HTTP uploads need no body interpretation for policy or credentials.
+/// Git requests with structured content types still need override inspection.
 pub fn can_stream(
     target: &super::proxy_service::ProxyTarget,
     headers: &axum::http::HeaderMap,
     git: bool,
 ) -> bool {
+    if structured_body(headers) {
+        return false;
+    }
     if git {
         return true;
     }
-    !structured_body(headers)
-        && matches!(
-            target.auth_method.as_str(),
-            "none"
-                | "bearer"
-                | "header"
-                | "basic"
-                | "bot_bearer"
-                | "query"
-                | "path"
-                | "token_exchange"
-        )
-        && target.service.inference.is_none()
+    matches!(
+        target.auth_method.as_str(),
+        "none" | "bearer" | "header" | "basic" | "bot_bearer" | "query" | "path" | "token_exchange"
+    ) && target.service.inference.is_none()
 }
 
 pub struct UploadMeter {
@@ -771,6 +768,42 @@ pub async fn job_auth(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_git_structured_uploads_remain_buffered_for_override_inspection() {
+        use axum::http::{HeaderMap, HeaderValue, header::CONTENT_TYPE};
+        let target = super::super::proxy_service::ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
+            base_url: "https://git.example".into(),
+            auth_method: "github_git".into(),
+            auth_key_name: "Authorization".into(),
+            credential: Default::default(),
+            service: crate::models::downstream_service::test_helpers::dummy_service(),
+            catalog_default_headers: vec![],
+            user_service_default_headers: vec![],
+            ws_frame_injections: vec![],
+            connection_id: None,
+        };
+        for content_type in [
+            "application/json",
+            "APPLICATION/JSON",
+            "application/vnd.api+json",
+            "application/x-www-form-urlencoded",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_str(content_type).unwrap());
+            assert!(!can_stream(&target, &headers, true));
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/x-git-upload-pack-request"),
+        );
+        assert!(can_stream(&target, &headers, true));
+        headers.append(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        assert!(!can_stream(&target, &headers, true));
+    }
     #[tokio::test]
     async fn opaque_uploads_are_lazy_and_enforce_limits_without_content_length() {
         use axum::{body::Body, http::Request};

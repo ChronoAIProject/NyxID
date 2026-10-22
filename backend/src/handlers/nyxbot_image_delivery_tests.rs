@@ -13,6 +13,9 @@ use wiremock::matchers::body_string_contains;
 
 async fn image_fixture(platform: &str, transport: &str) -> (Fixture, MockServer) {
     let mut f = fixture(&format!("nyxbot_images_{platform}_{transport}")).await;
+    crate::services::channel_text_delivery::ensure_indexes(&f.state.db)
+        .await
+        .unwrap();
     let server = MockServer::start().await;
     f.channel.platform = platform.into();
     f.channel.transport = transport.into();
@@ -2397,11 +2400,24 @@ async fn nyxbot_cancelled_image_post_releases_claims_for_automation_result() {
         &target.id,
         None,
         run.thread_id.as_deref().unwrap(),
-        "Repeated result",
+        "Automation result",
     )
     .await
     .unwrap();
     assert_eq!(repeated["images"]["previously_delivered"], 2);
+    assert!(
+        chats::post_automation_images(
+            &f.state,
+            &run,
+            &target.id,
+            None,
+            run.thread_id.as_deref().unwrap(),
+            "Changed result",
+        )
+        .await
+        .is_err(),
+        "one run cannot replay a different text plan"
+    );
     assert_eq!(
         server
             .received_requests()
@@ -2712,4 +2728,470 @@ async fn full_direct_owner_queue_refuses_truthfully_without_accepting_another_so
     );
     assert_eq!(reply["reply_to_message_id"], 18);
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_multipart_post_delivers_all_text_and_repeated_calls_reuse_receipts() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let chat = live_image_authority(&f, &[]).await;
+    let target = thread(&f).await;
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":99}})),
+        )
+        .mount(&server)
+        .await;
+    let text = "🦉x".repeat(3000);
+    let result = chats::post_current_turn(&f.state, &chat, &target.id, &text, false)
+        .await
+        .unwrap();
+    assert_eq!(result["text"], "sent");
+    let calls = server.received_requests().await.unwrap();
+    assert!(calls.len() > 1);
+    let bodies: Vec<Value> = calls
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(
+        bodies
+            .iter()
+            .map(|b| b["text"].as_str().unwrap())
+            .collect::<String>(),
+        text.trim()
+    );
+    assert!(bodies.iter().all(
+        |b| b["text"].as_str().unwrap().encode_utf16().count() <= 4096
+            && b.get("parse_mode").is_none()
+    ));
+    assert_eq!(
+        chats::post_current_turn(&f.state, &chat, &target.id, &text, false)
+            .await
+            .unwrap()["text"],
+        "sent"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), calls.len());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_multipart_post_automation_delivers_the_full_saved_result_once() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let chat = live_image_authority(&f, &[]).await;
+    let target = thread(&f).await;
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":99}})),
+        )
+        .mount(&server)
+        .await;
+    let text: String = (0..400)
+        .map(|i| format!("🦉 Full automation paragraph {i}\n\n"))
+        .collect();
+    for _ in 0..2 {
+        chats::post_automation(
+            &f.state,
+            &chat.user_id,
+            &target.id,
+            &text,
+            None,
+            &chat.conversation_id,
+            "multipart-run",
+        )
+        .await
+        .unwrap();
+    }
+    let calls = server.received_requests().await.unwrap();
+    assert!(calls.len() > 2);
+    let bodies: Vec<Value> = calls
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(
+        bodies
+            .iter()
+            .map(|b| b["text"].as_str().unwrap())
+            .collect::<String>(),
+        text.trim()
+    );
+    assert!(
+        chats::post_automation(
+            &f.state,
+            &chat.user_id,
+            &target.id,
+            "Different result",
+            None,
+            &chat.conversation_id,
+            "multipart-run"
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), calls.len());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_multipart_post_keeps_an_accepted_prefix_and_never_retries_ambiguous_parts() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let chat = live_image_authority(&f, &[]).await;
+    let target = thread(&f).await;
+    let counter = Arc::new(AtomicUsize::new(0));
+    let calls = counter.clone();
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(move |_: &wiremock::Request| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"ok":true,"result":{"message_id":99}}))
+            } else {
+                ResponseTemplate::new(200).set_body_string("lost response")
+            }
+        })
+        .mount(&server)
+        .await;
+    let text = "🦉".repeat(3500);
+    for _ in 0..2 {
+        let result = chats::post_current_turn(&f.state, &chat, &target.id, &text, false)
+            .await
+            .unwrap();
+        assert_eq!(result["text"], "unknown");
+    }
+    assert_eq!(counter.load(Ordering::SeqCst), 2);
+    let row = f
+        .state
+        .db
+        .collection::<crate::models::channel_text_delivery::ChannelTextDelivery>(
+            crate::models::channel_text_delivery::COLLECTION_NAME,
+        )
+        .find_one(doc! {})
+        .await
+        .unwrap()
+        .unwrap();
+    use crate::models::channel_text_delivery::TextPartState;
+    assert_eq!(row.parts[0].state, TextPartState::Sent);
+    assert_eq!(row.parts[1].state, TextPartState::Sending);
+    assert_eq!(row.parts.len(), 2);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_multipart_post_rechecks_stop_and_target_before_sending_the_suffix() {
+    for stop_turn in [true, false] {
+        let (f, server) = image_fixture("telegram", "direct").await;
+        let chat = live_image_authority(&f, &[]).await;
+        let target = thread(&f).await;
+        let reached = std::sync::Arc::new(tokio::sync::Notify::new());
+        let notify = reached.clone();
+        Mock::given(path("/bottoken/sendMessage"))
+            .respond_with(move |_: &wiremock::Request| {
+                notify.notify_one();
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(150))
+                    .set_body_json(json!({"ok":true,"result":{"message_id":99}}))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let db = f.state.db.clone();
+        let conversation = chat.conversation_id.clone();
+        let thread_id = target.id.clone();
+        let stop = tokio::spawn(async move {
+            reached.notified().await;
+            if stop_turn {
+                db.collection::<bson::Document>(CONVERSATIONS)
+                    .update_one(
+                        doc! {"_id":conversation},
+                        doc! {"$set":{"active_turn.stop_requested":true}},
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                db.collection::<bson::Document>(THREADS)
+                    .update_one(
+                        doc! {"_id":thread_id},
+                        doc! {"$set":{"platform_chat_id":"987"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let result =
+            chats::post_current_turn(&f.state, &chat, &target.id, &"🦉".repeat(3500), false)
+                .await
+                .unwrap();
+        stop.await.unwrap();
+        assert_eq!(
+            result["text"],
+            if stop_turn { "cancelled" } else { "failed" }
+        );
+        server.verify().await;
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn nyxbot_multipart_post_resumes_a_proven_rate_refusal_without_replaying_the_prefix() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let chat = live_image_authority(&f, &[]).await;
+    let target = thread(&f).await;
+    let counter = Arc::new(AtomicUsize::new(0));
+    let calls = counter.clone();
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(move |_: &wiremock::Request| {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            if n == 1 {
+                ResponseTemplate::new(429).set_body_json(
+                    json!({"ok":false,"error_code":429,"parameters":{"retry_after":1}}),
+                )
+            } else {
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"ok":true,"result":{"message_id":100+n}}))
+            }
+        })
+        .mount(&server)
+        .await;
+    let text: String = (0..600).map(|i| format!("🦉🦉{i} ")).collect();
+    let first = chats::post_current_turn(&f.state, &chat, &target.id, &text, false)
+        .await
+        .unwrap();
+    assert_eq!(first["text_delivery"]["sent"], 1);
+    assert_eq!(first["text_delivery"]["uncertain"], 0);
+    assert_ne!(first["text"], "sent");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let resumed = chats::post_current_turn(&f.state, &chat, &target.id, &text, false)
+        .await
+        .unwrap();
+    assert_eq!(resumed["text"], "sent");
+    let bodies: Vec<Value> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| body["text"] == bodies[0]["text"])
+            .count(),
+        1
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_multipart_scheduler_recovers_rate_limits_and_crashes_without_replay() {
+    use crate::models::trigger_run::{COLLECTION_NAME as RUNS, RunOutcome, TriggerRun};
+    use crate::services::trigger_schedule::{self as schedules, result_delivery};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    // Each path enters the real scheduler, including a legacy default-NyxBot
+    // run without agent_id. Recovery must reload the saved result from its thread.
+    for scenario in [
+        "rate",
+        "prefix_crash",
+        "complete_crash",
+        "unknown",
+        "legacy",
+    ] {
+        let (f, server) = image_fixture("telegram", "direct").await;
+        schedules::indexes(&f.state.db).await.unwrap();
+        let target = thread(&f).await;
+        let text: String = (0..600)
+            .map(|i| format!("🦉 full result {i}\n\n"))
+            .collect();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .update_one(
+                doc! {"conversation_id":&f.event.conversation_id,"turn_id":&f.event.turn_id},
+                doc! {"$set":{"text":&text}},
+            )
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id":&f.event.conversation_id},
+                doc! {"$set":{"active_turn":null}},
+            )
+            .await
+            .unwrap();
+        let row = engine::get(
+            &f.state.db,
+            OWNER,
+            f.event.conversation_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        let run:TriggerRun=bson::from_document(doc! {
+            "_id":Uuid::new_v4().to_string(),"trigger_id":Uuid::new_v4().to_string(),"user_id":OWNER,
+            "scheduled_at":bson::DateTime::now(),"deadline":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::hours(1)),
+            "outcome":"started","thread_id":&f.event.conversation_id,"turn_id":&f.event.turn_id,
+            "deliver_to":{"type":"chat","chat_id":&target.id},
+            "fence":"test","lease_until":bson::DateTime::now(),
+            "expires_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::days(7)),
+        }).unwrap();
+        f.state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .insert_one(&run)
+            .await
+            .unwrap();
+        f.state.db.collection::<bson::Document>(schedules::WORK).insert_one(doc! {
+            "_id":&run.id,"trigger_id":&run.trigger_id,"kind":"run","at":bson::DateTime::now(),"fence":""
+        }).await.unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let calls = count.clone();
+        Mock::given(path("/bottoken/sendMessage"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n == 1 && scenario == "unknown" {
+                    ResponseTemplate::new(200).set_body_string("lost response")
+                } else if n == 1 && matches!(scenario, "rate" | "prefix_crash") {
+                    ResponseTemplate::new(429).set_body_json(
+                        json!({"ok":false,"error_code":429,"parameters":{"retry_after":20}}),
+                    )
+                } else {
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"ok":true,"result":{"message_id":100+n}}))
+                }
+            })
+            .mount(&server)
+            .await;
+        if matches!(scenario, "prefix_crash" | "complete_crash") {
+            assert!(matches!(
+                result_delivery::claim(&f.state.db, &run).await.unwrap(),
+                result_delivery::Claim::Acquired(_)
+            ));
+            let sent =
+                chats::post_automation_images(&f.state, &run, &target.id, None, &row.id, &text)
+                    .await;
+            assert_eq!(sent.is_ok(), scenario == "complete_crash");
+        } else if scenario == "legacy" {
+            f.state
+                .db
+                .collection::<bson::Document>(RUNS)
+                .update_one(doc! {"_id":&run.id}, doc! {"$set":{"result_claimed":true}})
+                .await
+                .unwrap();
+            let mut legacy = run.clone();
+            legacy.result_claimed = true;
+            crate::handlers::trigger_scheduler::settle_result(&f.state, &row, &legacy, &text, None)
+                .await
+                .unwrap();
+        } else {
+            let (a, b) = tokio::join!(
+                crate::handlers::trigger_scheduler::settle_result(
+                    &f.state, &row, &run, &text, None
+                ),
+                crate::handlers::trigger_scheduler::settle_result(
+                    &f.state, &row, &run, &text, None
+                )
+            );
+            a.unwrap();
+            b.unwrap();
+        }
+        let before = count.load(Ordering::SeqCst);
+        if scenario == "rate" {
+            assert_eq!(before, 2);
+            crate::handlers::trigger_scheduler::settle_result(&f.state, &row, &run, &text, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                before,
+                "must honor provider retry delay"
+            );
+        }
+        // Simulate time passing after a worker loss or a provider retry delay.
+        let past = bson::DateTime::from_chrono(Utc::now() - ChronoDuration::seconds(1));
+        if !matches!(scenario, "unknown" | "legacy") {
+            f.state
+                .db
+                .collection::<bson::Document>(RUNS)
+                .update_one(
+                    doc! {"_id":&run.id},
+                    doc! {"$set":{
+                        "result_delivery.lease_until":past,"result_delivery.retry_at":past
+                    }},
+                )
+                .await
+                .unwrap();
+            f.state
+                .db
+                .collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+                .update_many(doc! {}, doc! {"$set":{"retry_at":past}})
+                .await
+                .unwrap();
+            f.state
+                .db
+                .collection::<bson::Document>(schedules::WORK)
+                .update_one(doc! {"_id":&run.id}, doc! {"$set":{"at":past}})
+                .await
+                .unwrap();
+        }
+        crate::handlers::trigger_scheduler::tick(&f.state)
+            .await
+            .unwrap();
+        let saved = f
+            .state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .find_one(doc! {"_id":&run.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.outcome,
+            if matches!(scenario, "unknown" | "legacy") {
+                RunOutcome::Failed
+            } else {
+                RunOutcome::Completed
+            },
+            "{scenario}"
+        );
+        let bodies: Vec<Value> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        if scenario == "legacy" {
+            assert!(bodies.is_empty());
+        } else {
+            assert_eq!(
+                bodies
+                    .iter()
+                    .filter(|b| b["text"] == bodies[0]["text"])
+                    .count(),
+                1,
+                "accepted prefix must not replay: {scenario}"
+            );
+            if matches!(scenario, "unknown" | "complete_crash") {
+                assert_eq!(bodies.len(), before);
+            }
+            if scenario != "unknown" {
+                let delivered: String = bodies
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !(*i == 1 && matches!(scenario, "rate" | "prefix_crash")))
+                    .map(|(_, b)| b["text"].as_str().unwrap())
+                    .collect();
+                assert_eq!(delivered.trim_end(), text.trim_end());
+            }
+        }
+        f.state.db.drop().await.unwrap();
+    }
 }

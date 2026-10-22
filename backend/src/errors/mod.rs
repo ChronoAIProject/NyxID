@@ -176,8 +176,15 @@ pub enum AppError {
     #[error("Rate limited")]
     RateLimited,
 
+    /// A confirmed provider refusal with a bounded retry delay; preserves 1005.
+    #[error("Rate limited")]
+    RateLimitedWithRetry { retry_after: u64 },
+
     #[error("Service concurrency limit reached; retry after an in-flight request completes")]
     ServiceConcurrencyLimited,
+
+    #[error("Security rollout is not ready; inspect admin security readiness")]
+    SecurityReadinessUnavailable,
 
     #[error("Internal server error: {0}")]
     Internal(String),
@@ -836,13 +843,14 @@ impl AppError {
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive | Self::ErasurePreparing => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
+            Self::SecurityReadinessUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
-            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::RateLimited | Self::RateLimitedWithRetry { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
             | Self::InvalidDpopProof(_)
@@ -1062,6 +1070,7 @@ impl AppError {
             Self::Conflict(_) => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
+            Self::SecurityReadinessUnavailable => 12900,
             Self::VoiceProviderUnavailable => 12501,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
@@ -1071,7 +1080,7 @@ impl AppError {
             Self::AssistantModelUnavailable => 12103,
             Self::AssistantAttachmentExpired => 12101,
             Self::ServiceConcurrencyLimited => 12600,
-            Self::RateLimited => 1005,
+            Self::RateLimited | Self::RateLimitedWithRetry { .. } => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
             Self::DatabaseError(_) => 1007,
             Self::ValidationError(_) | Self::SkillDraftValidation(_) => 1008,
@@ -1285,6 +1294,7 @@ impl AppError {
     /// Each variant maps to a standard OAuth error string — no string matching.
     pub(crate) fn oauth_error_code(&self) -> &'static str {
         match self {
+            Self::MfaRequired { .. } => "mfa_required",
             Self::OAuthAuthorityUnavailable => "temporarily_unavailable",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::PkceVerificationFailed | Self::InvalidRedirectUri => "invalid_grant",
@@ -1332,6 +1342,7 @@ impl AppError {
             Self::AssistantTurnActive => "turn_active",
             Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
+            Self::SecurityReadinessUnavailable => "security_readiness_unavailable",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
@@ -1339,7 +1350,7 @@ impl AppError {
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::ServiceConcurrencyLimited => "service_concurrency_limited",
-            Self::RateLimited => "rate_limited",
+            Self::RateLimited | Self::RateLimitedWithRetry { .. } => "rate_limited",
             Self::Internal(_) | Self::PoolAttemptTransport(_) => "internal_error",
             Self::DatabaseError(_) => "database_error",
             Self::ValidationError(_) | Self::SkillDraftValidation(_) => "validation_error",
@@ -1559,6 +1570,14 @@ impl AppError {
 }
 
 impl AppError {
+    pub fn retry_after_seconds(&self) -> Option<u64> {
+        match self {
+            Self::RateLimited => Some(1),
+            Self::RateLimitedWithRetry { retry_after } => Some((*retry_after).clamp(1, 86400)),
+            _ => None,
+        }
+    }
+
     /// The same client-safe payload for JSON responses and streaming errors.
     pub fn response_body(&self) -> ErrorResponse {
         if let Self::VoiceStartFailed(failure) = self {
@@ -1618,7 +1637,7 @@ impl AppError {
                     "Consent required. Complete authorization in browser flow.".to_string()
                 }
                 AppError::ApprovalRequired { .. } => {
-                    "Approval required. A notification has been sent to the resource owner."
+                    "Approval required. Review the pending request in Approval History; configured notifications are attempted."
                         .to_string()
                 }
                 AppError::ApprovalFailed {
@@ -1666,6 +1685,13 @@ impl IntoResponse for AppError {
                 axum::http::HeaderValue::from_static("1"),
             );
         }
+        if let Some(retry_after) = self.retry_after_seconds() {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_str(&retry_after.to_string())
+                    .expect("bounded numeric retry delay"),
+            );
+        }
         response
     }
 }
@@ -1681,6 +1707,24 @@ impl From<crate::models::credits::CreditsError> for AppError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rate_refusal_preserves_bounded_retry_after_without_changing_the_error_contract() {
+        use axum::response::IntoResponse;
+        for (delay, expected) in [(0, "1"), (23, "23"), (u64::MAX, "86400")] {
+            let error = super::AppError::RateLimitedWithRetry { retry_after: delay };
+            assert_eq!(
+                error.error_code(),
+                super::AppError::RateLimited.error_code()
+            );
+            assert_eq!(error.error_key(), "rate_limited");
+            let response = error.into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(
+                response.headers()[axum::http::header::RETRY_AFTER],
+                expected
+            );
+        }
+    }
     use super::*;
     use axum::body::to_bytes;
     use serde_json::Value;

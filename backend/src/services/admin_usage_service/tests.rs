@@ -2940,6 +2940,78 @@ async fn nyxbot_models_exact_primary_scope_filters_and_rollup_daily_parity() {
 }
 
 #[tokio::test]
+async fn nyxbot_reported_model_fills_a_missing_pricing_model_live_and_folded() {
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+    let db = connect_test_database("nyx_reported_model")
+        .await
+        .expect("real MongoDB required");
+    let end = hour(Utc::now());
+    let from = end - chrono::Duration::days(2);
+    let actor = uuid::Uuid::new_v4().to_string();
+    let at = end - chrono::Duration::hours(5);
+    let mut reported = nyx_meter(&actor, &actor, None, Some("1"), at);
+    reported.insert("reported_model", "gpt-5.5");
+    insert(&db, reported).await;
+    // A recorded pricing model keeps its identity over the reported one.
+    let mut priced = nyx_meter(&actor, &actor, Some("alias-x"), Some("1"), at);
+    priced.insert("reported_model", "gpt-5.5-2026-09-01");
+    insert(&db, priced).await;
+    insert(&db, nyx_meter(&actor, &actor, None, Some("1"), at)).await;
+    // Legacy-cost rows estimate from a model-keyed cached rate; a reported
+    // model must not change that lookup, so they stay unknown.
+    let mut legacy = nyx_meter(&actor, &actor, None, None, at);
+    legacy.insert("reported_model", "gpt-5.5");
+    insert(&db, legacy).await;
+    for folded in [false, true] {
+        if folded {
+            while fold_once(&db, end).await.unwrap() > 0 {}
+        }
+        let report = nyx_read(&db, from, end, None, false).await;
+        let mut models: Vec<_> = report
+            .models
+            .iter()
+            .map(|row| (row.model.clone(), row.usage.requests))
+            .collect();
+        models.sort();
+        assert_eq!(
+            models,
+            vec![
+                (None, 2),
+                (Some("alias-x".to_owned()), 1),
+                (Some("gpt-5.5".to_owned()), 1),
+            ],
+            "folded={folded}"
+        );
+        // Every model execution also reports its inference service, so the
+        // service breakdown covers unknown-model history too.
+        let services: Vec<_> = report
+            .services
+            .iter()
+            .map(|row| {
+                (
+                    row.is_other,
+                    row.service.as_ref().and_then(|s| s.service_slug.clone()),
+                    row.usage.requests,
+                )
+            })
+            .collect();
+        assert_eq!(services, vec![(false, Some("provider".to_owned()), 4)]);
+        assert_eq!(
+            nyx_read(&db, from, end, Some("gpt-5.5"), false)
+                .await
+                .totals
+                .requests,
+            1
+        );
+        assert_eq!(
+            nyx_read(&db, from, end, None, true).await.totals.requests,
+            2
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn nyxbot_top_accounts_and_unknown_only_other_models_are_honest() {
     let db = connect_test_database("nyx_other")
         .await
@@ -3366,5 +3438,201 @@ async fn nyxbot_daily_top_membership_matches_exact_period_order_at_zero_null_tie
         other.model.usage.gross_cost,
         Some(crate::models::credits::Credits::ZERO)
     );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn analytics_models_preserve_unattributed_usage_and_shared_filters_after_folding() {
+    use super::analytics::{AnalyticsQuery, get_analytics};
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+    let db = connect_test_database("usage_models").await.unwrap();
+    let now = hour(Utc::now());
+    let actor = uuid::Uuid::new_v4().to_string();
+    let owner = uuid::Uuid::new_v4().to_string();
+    for (model, tokens, age, person, service) in [
+        (Some("model-a"), 100, 2, actor.as_str(), "chrono-llm-public"),
+        (Some("model-b"), 60, 3, actor.as_str(), "chrono-llm-public"),
+        (None, 20, 4, actor.as_str(), "chrono-llm-public"),
+        (Some("model-a"), 999, 2, owner.as_str(), "chrono-llm-public"),
+        (Some("model-a"), 999, 2, actor.as_str(), "deepseek"),
+        (
+            Some("model-a"),
+            999,
+            30,
+            actor.as_str(),
+            "chrono-llm-public",
+        ),
+    ] {
+        let mut row = meter(person, &owner, service, tokens);
+        row.insert("model", model);
+        if model == Some("model-b") {
+            // Generic inference reports model identity separately from pricing.
+            row.insert("model", Bson::Null);
+            row.insert("reported_model", "model-b");
+        }
+        row.insert(
+            "created_at",
+            bson::DateTime::from_chrono(now - chrono::Duration::hours(age)),
+        );
+        row.insert(
+            "token_breakdown",
+            doc! { "prompt_tokens": tokens, "completion_tokens": 0_i64 },
+        );
+        insert(&db, row).await;
+    }
+    for folded in [false, true] {
+        if folded {
+            fold_once(&db, now).await.unwrap();
+        }
+        let result = get_analytics(
+            &db,
+            AnalyticsQuery {
+                from: Some((now - chrono::Duration::hours(24)).to_rfc3339()),
+                to: Some(now.to_rfc3339()),
+                actors: Some(actor.clone()),
+                owners: Some(owner.clone()),
+                services: Some("chrono-llm-public".into()),
+                measure: Some("total_tokens".into()),
+                breakdown: Some("model".into()),
+                ..Default::default()
+            }
+            .validate(now)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.total, Some(180));
+        assert_eq!(result.totals.requests, 3);
+        assert_eq!(
+            result
+                .slices
+                .iter()
+                .map(|s| (s.label.as_str(), s.value))
+                .collect::<Vec<_>>(),
+            vec![
+                ("model-a", Some(100)),
+                ("model-b", Some(60)),
+                ("Unattributed", Some(20))
+            ]
+        );
+        assert_eq!(
+            result
+                .series
+                .iter()
+                .map(|s| s.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["model-a", "model-b", "Unattributed"]
+        );
+        assert_eq!(
+            result
+                .series
+                .iter()
+                .flat_map(|s| &s.points)
+                .map(|p| p.value.unwrap())
+                .sum::<i64>(),
+            180
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn analytics_groups_models_across_services_with_shared_filters_before_and_after_folding() {
+    use super::analytics::{AnalyticsQuery, get_analytics};
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+
+    let db = connect_test_database("usage_models_across_services")
+        .await
+        .unwrap();
+    let end = hour(Utc::now());
+    let actor = uuid::Uuid::new_v4().to_string();
+    let owner = uuid::Uuid::new_v4().to_string();
+    let other = uuid::Uuid::new_v4().to_string();
+    for (service, model, tokens, who, account, hours) in [
+        (
+            "chrono-llm-public",
+            Some("deepseek-chat"),
+            100,
+            &actor,
+            &owner,
+            2,
+        ),
+        ("deepseek", Some("deepseek-chat"), 200, &actor, &owner, 3),
+        (
+            "chrono-llm-public",
+            Some("another-model"),
+            50,
+            &actor,
+            &owner,
+            2,
+        ),
+        ("deepseek", None, 10, &actor, &owner, 2),
+        ("deepseek", Some("deepseek-chat"), 900, &other, &owner, 2),
+        ("deepseek", Some("deepseek-chat"), 900, &actor, &other, 2),
+        ("deepseek", Some("deepseek-chat"), 900, &actor, &owner, 26),
+    ] {
+        let mut row = meter(who, account, service, tokens);
+        row.insert("model", model.map(Bson::from).unwrap_or(Bson::Null));
+        row.insert(
+            "created_at",
+            bson::DateTime::from_chrono(end - chrono::Duration::hours(hours)),
+        );
+        row.insert(
+            "token_breakdown",
+            doc! { "prompt_tokens": tokens, "completion_tokens": 0_i64 },
+        );
+        insert(&db, row).await;
+    }
+    let query = || AnalyticsQuery {
+        from: Some((end - chrono::Duration::hours(24)).to_rfc3339()),
+        to: Some(end.to_rfc3339()),
+        actors: Some(actor.clone()),
+        owners: Some(owner.clone()),
+        measure: Some("total_tokens".into()),
+        breakdown: Some("model".into()),
+        ..Default::default()
+    };
+    for folded in [false, true] {
+        if folded {
+            while fold_once(&db, end).await.unwrap() > 0 {}
+        }
+        let result = get_analytics(&db, query().validate(end).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(result.total, Some(360));
+        assert_eq!(result.slices.len(), 3);
+        assert_eq!(result.slices[0].label, "deepseek-chat");
+        assert_eq!(result.slices[0].value, Some(300));
+        assert_eq!(result.slices[1].label, "another-model");
+        assert_eq!(result.slices[2].label, "Unattributed");
+        assert_eq!(
+            result.slices.iter().map(|s| &s.label).collect::<Vec<_>>(),
+            result.series.iter().map(|s| &s.label).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            result.points.iter().map(|p| p.value.unwrap()).sum::<i64>(),
+            360
+        );
+        let model_series = result
+            .series
+            .iter()
+            .find(|s| s.label == "deepseek-chat")
+            .unwrap();
+        assert_eq!(
+            model_series
+                .points
+                .iter()
+                .map(|p| p.value.unwrap())
+                .sum::<i64>(),
+            300
+        );
+        let mut service_query = query();
+        service_query.services = Some("deepseek".into());
+        let direct = get_analytics(&db, service_query.validate(end).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(direct.total, Some(210));
+        assert_eq!(direct.slices[0].value, Some(200));
+    }
     db.drop().await.unwrap();
 }

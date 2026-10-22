@@ -601,10 +601,18 @@ and allowance credits for attributed model executions. Its daily chart can
 switch funding measure. **Traffic by model** separates request and token charts
 and tables; cache/audio/image counts overlap the documented input/output totals.
 Model names identify stored billing models or request aliases. **Unknown model**
-means no nonblank model identity was recorded on an execution.
+means no nonblank model identity was recorded on an execution, including
+proxied executions settled before provider-reported models were captured.
 
-**Top billing accounts** ranks the complete population by known gross cost,
-requests, then account identity; each account shows model detail. Top model
+**Model services** charts requests by the inference service that handled each
+model execution (Top 20 + Other), with exact credits and tokens per service on
+expansion. The service is recorded for all history, so it also explains usage
+whose model is unknown.
+
+**Top billing accounts** uses the Usage dashboard panel (gross cost by billing
+account, Top 10 + Other, with its data table). It ranks the complete population
+by known gross cost, requests, then account identity; **Models by billing
+account** expands each account's model detail. Top model
 membership is stable across daily buckets. **Other** is the summed usage beyond
 the displayed model/account limit, including unavailable prices. **≥** marks a
 known cost subtotal with unpriced events; **Unavailable** means the selected

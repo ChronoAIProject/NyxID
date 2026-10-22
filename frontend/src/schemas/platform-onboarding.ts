@@ -117,6 +117,12 @@ export const bindingSchema = z.object({
   expires_at: z.string(),
 });
 export const bindingPreviewSchema = z.object({
+  manager_username: z.string().nullable().optional(),
+  confirmation_command: z
+    .string()
+    .regex(/^\/confirm O-[A-F0-9]{32}$/)
+    .nullable()
+    .optional(),
   request_id: z.uuid(),
   manager_bot_id: z.string(),
   requesting_sender_id: z.string(),

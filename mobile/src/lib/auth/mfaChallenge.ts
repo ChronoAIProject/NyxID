@@ -12,11 +12,15 @@ export class MfaChallengeError extends ApiError {
   }
 }
 
+export function isMfaChallengeToken(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+}
+
 /** Accept only the documented first-factor response, without retaining its body. */
 export function mfaChallengeFromResponse(payload: unknown, status: number): MfaChallengeError | null {
-  if (status !== 403 || !payload || typeof payload !== 'object') return null;
+  if ((status !== 403 && status !== 400) || !payload || typeof payload !== 'object') return null;
   const row = payload as Record<string, unknown>;
-  if (row.error_code !== 2002 || typeof row.session_token !== 'string' ||
-      !/^[A-Za-z0-9_-]{1,128}$/.test(row.session_token)) return null;
+  if (status === 400 && row.error !== 'mfa_required') return null;
+  if (row.error_code !== 2002 || !isMfaChallengeToken(row.session_token)) return null;
   return new MfaChallengeError(row.session_token);
 }

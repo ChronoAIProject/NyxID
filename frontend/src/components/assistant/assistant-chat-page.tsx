@@ -1183,6 +1183,7 @@ function NyxAgentThreadPage() {
               )
             }
             conversation={chat.conversation}
+            agentModel={selectedAgent?.model}
             voiceActive={voiceMounted && currentVoice?.active}
             voiceActivity={voiceMounted ? currentVoice?.activity : undefined}
             key={`${user?.id}:${selectedId ?? headerAgent?.id ?? "draft"}`}

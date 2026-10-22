@@ -61,9 +61,9 @@ afterEach(() => {
   clients.splice(0).forEach((c) => c.clear());
   vi.clearAllMocks();
 });
-it("labels shared sessions independently of command isolation", () => {
+it("directs owners to each assignment rather than claiming all agents share", () => {
   render(<MachineSharingBadge />);
-  expect(screen.getByText("Shared workspace and browser")).toHaveAttribute(
+  expect(screen.getByText("Sharing set per agent")).toHaveAttribute(
     "title",
     expect.stringContaining("authenticated browser sessions"),
   );

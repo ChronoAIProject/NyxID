@@ -294,17 +294,24 @@ async fn validate_lineage(
 /// Called only after signature/type validation. Service-issued delegation has
 /// its own signed origin and retains the existing service-policy contract.
 pub async fn validate_claims(db: &Database, claims: &Claims) -> AppResult<()> {
+    validate_claims_with_user(db, claims).await.map(|_| ())
+}
+
+/// Retain the active user loaded during authority validation so callers can
+/// apply account checks without another read. Service accounts and relay tokens
+/// keep their separate authority checks and return no human user.
+pub async fn validate_claims_with_user(db: &Database, claims: &Claims) -> AppResult<Option<User>> {
     validate_claims_with_reads(&mut AuthorityReads::new(db), claims).await
 }
 
 async fn validate_claims_with_reads(
     reads: &mut AuthorityReads<'_>,
     claims: &Claims,
-) -> AppResult<()> {
+) -> AppResult<Option<User>> {
     if claims.sa == Some(true) || claims.relay == Some(true) {
-        return Ok(());
+        return Ok(None);
     }
-    let _: User = reads
+    let user: User = reads
         .required(
             crate::models::user::COLLECTION_NAME,
             doc! {"_id":&claims.sub,"is_active":true,"platform_personal_deleting":{"$ne":true}},
@@ -316,7 +323,7 @@ async fn validate_claims_with_reads(
                 if let Some(lineage) = &claims.oauth_lineage {
                     validate_lineage(reads, &claims.sub, lineage).await?;
                 }
-                return Ok(());
+                return Ok(Some(user));
             }
             // Legacy delegation has no authenticated origin discriminator.
             // It cannot fall back to service authority when a client is deleted.
@@ -346,7 +353,7 @@ async fn validate_claims_with_reads(
     } else if let Some(session) = claims.sid.as_deref() {
         source_session(reads, &claims.sub, session).await?;
     }
-    Ok(())
+    Ok(Some(user))
 }
 
 /// Capture references only during an already-authorized new exchange. Renewal
@@ -357,7 +364,7 @@ pub async fn exchange_bindings(
     receiver: &str,
 ) -> AppResult<Vec<ConsentBinding>> {
     let mut reads = AuthorityReads::new(db);
-    validate_claims_with_reads(&mut reads, source).await?;
+    let _ = validate_claims_with_reads(&mut reads, source).await?;
     let mut bindings = Vec::new();
     if let Some(client) = &source.client_id {
         bindings.push(ConsentBinding {

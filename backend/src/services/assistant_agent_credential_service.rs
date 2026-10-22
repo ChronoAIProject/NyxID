@@ -574,7 +574,9 @@ pub async fn load_or_provision_in_session(
         None,
         &name,
         ASSISTANT_SCOPES,
-        None,
+        super::api_key_validation::NewKeyExpiry::NeverExpires(
+            super::api_key_validation::NonExpiringReason::ManagedConversation,
+        ),
         None,
         Some(&[]),
         Some(&[]),

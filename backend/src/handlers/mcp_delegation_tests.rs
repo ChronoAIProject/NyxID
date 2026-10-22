@@ -42,6 +42,9 @@ impl Fixture {
             .expect("MongoDB required");
         let state = test_app_state(db.clone());
         let owner = uuid::Uuid::new_v4().to_string();
+        // Transport/delegation fixtures declare the owner preference explicitly; per-service true still wins.
+        crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+
         db.collection::<User>(USERS)
             .insert_one(test_user(&owner, UserType::Person))
             .await

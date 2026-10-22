@@ -5,6 +5,8 @@
 pub mod config;
 #[path = "node/credential_store.rs"]
 pub mod credential_store;
+#[path = "node/custody.rs"]
+pub(crate) mod custody;
 #[path = "node/encryption.rs"]
 pub mod encryption;
 #[path = "node/error.rs"]
@@ -27,7 +29,12 @@ pub mod proxy_upload;
 mod secret_backend;
 #[path = "node/signing.rs"]
 mod signing;
+#[path = "node/storage.rs"]
+pub(crate) mod storage;
 pub mod tls;
+#[cfg(unix)]
+#[path = "commands/update_attestation/trusted_directory.rs"]
+mod trusted_directory;
 
 pub mod ws_client {
     pub enum NodeWsMessage {
@@ -105,5 +112,6 @@ mod test_support {
 }
 
 pub mod node {
+    pub(crate) use crate::custody;
     pub use crate::{config, machine, managed_config, managed_deadline, proxy_upload, ws_client};
 }

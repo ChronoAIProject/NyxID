@@ -78,11 +78,17 @@ pub(crate) async fn admit_manager_admin(
     first_party: bool,
     manager: &str,
 ) -> AppResult<()> {
+    let scoped = db
+        .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
+        .find_one(doc! {"provider":format!("telegram-new/{manager}")})
+        .await?
+        .is_some();
     if db
         .collection::<Document>(COLLECTION_NAME)
         .find_one(doc! {"manager_bot_id": manager,"native_entry":bson::Bson::Null})
         .await?
         .is_none()
+        && !scoped
     {
         return Ok(());
     }
@@ -100,6 +106,7 @@ pub(crate) async fn admit_manager_admin(
                     .session(&mut *session)
                     .await?
                     .is_some()
+                    || scoped
                 {
                     require_first_party(first_party)?;
                     fence_admin(&db, &actor, session).await?;
@@ -120,14 +127,20 @@ pub(crate) async fn finalize_manager_delivery(
     manager: &str,
     observation_started_at: String,
 ) -> AppResult<()> {
+    let scoped = db
+        .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
+        .find_one(doc! {"provider":format!("telegram-new/{manager}")})
+        .await?
+        .is_some();
     if db
         .collection::<Document>(COLLECTION_NAME)
         .find_one(doc! {"manager_bot_id": manager,"native_entry":bson::Bson::Null})
         .await?
         .is_none()
+        && !scoped
     {
         db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).update_one(
-            doc! {"provider": "telegram-new", "fields.manager_bot_id": manager},
+            doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", manager)]}, "fields.manager_bot_id": manager},
             doc! {"$set": {"fields.webhook_ready": "true", "fields.observation_started_at": observation_started_at}}
         ).await?;
         return Ok(());
@@ -138,12 +151,12 @@ pub(crate) async fn finalize_manager_delivery(
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let result: AppResult<()> = async {
-            if db.collection::<Document>(COLLECTION_NAME).find_one(doc! {"manager_bot_id": &manager,"native_entry":bson::Bson::Null}).session(&mut *session).await?.is_some() {
+            if db.collection::<Document>(COLLECTION_NAME).find_one(doc! {"manager_bot_id": &manager,"native_entry":bson::Bson::Null}).session(&mut *session).await?.is_some() || scoped {
                 require_first_party(first_party)?;
                 fence_admin(&db, &actor, session).await?;
             }
             if db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).update_one(
-                doc! {"provider": "telegram-new", "fields.manager_bot_id": &manager},
+                doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &manager)]}, "fields.manager_bot_id": &manager},
                 doc! {"$set": {"fields.webhook_ready": "true", "fields.observation_started_at": &observation_started_at}}
             ).session(&mut *session).await?.matched_count != 1 { return Err(AppError::Conflict("Manager configuration changed".into())); }
             Ok(())
@@ -189,6 +202,14 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    for keys in [
+        doc! {"agent_api_key_id":1,"binding_id":1,"owner_user_id":1},
+        doc! {"resource_id":1,"kind":1,"owner_user_id":1},
+    ] {
+        db.collection::<Document>(crate::models::platform_bot_config::CLEANUP_COLLECTION)
+            .create_index(IndexModel::builder().keys(keys).build())
+            .await?;
+    }
     Ok(())
 }
 
@@ -378,7 +399,7 @@ async fn convert_locked(
                 (configuration.credential_fingerprint.clone(),PlatformExecutionProfile::NativeEntry,Some(2),Some(configuration.clone()))
             } else {
                 let manager = db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
-                    .find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":manager_id,"fields.webhook_ready":"true"})
+                    .find_one(doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", manager_id)]}, "fields.manager_bot_id": manager_id,"fields.webhook_ready":"true"})
                     .session(&mut *session).await?.ok_or_else(||AppError::Conflict("Manager configuration is not ready".into()))?;
                 let observation=manager.get_document("fields").ok().and_then(|fields|fields.get_str("observation_id").ok())
                     .ok_or_else(||AppError::Conflict("Manager observation identity unavailable".into()))?.to_owned();
@@ -397,6 +418,9 @@ async fn convert_locked(
             let mut channels = db.collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
                 .find(doc! {"channel_bot_id": &bot_id}).session(&mut *session).await?;
             while let Some(channel) = channels.next(&mut *session).await.transpose()? {
+                if ["gateway_setup_release_id","pending_agent_api_key_id","pending_route_api_key_id"].iter().any(|field|channel.get_str(field).is_ok()) {
+                    return Err(AppError::Conflict("Wait for the channel transport setup to finish or retire before conversion".into()));
+                }
                 if let Ok(id) = channel.get_str("_id") {
                     channel_ids.push(id.into());
                     if channel.get_str("transport").ok() == Some("gateway") && channel.get_str("gateway_channel_id").is_ok() {
@@ -525,6 +549,13 @@ pub(crate) async fn verify_manager(
     if row.deleted_at.is_some() || row.generation != generation {
         return Err(AppError::Conflict("Platform configuration changed".into()));
     }
+    let service = service
+        .for_manager(
+            row.manager_bot_id
+                .parse()
+                .map_err(|_| AppError::Conflict("Invalid manager identity".into()))?,
+        )
+        .await?;
     let (manager, _, values) = service.manager().await?;
     if manager.to_string() != row.manager_bot_id
         || values.get("observation_id") != Some(row.observation_id.as_str())
@@ -579,6 +610,7 @@ async fn queue_cleanup(
     let mut machine_jobs = Vec::new();
     let mut gateway_channel_id = None;
     let mut gateway_version = None;
+    let (mut record_id, mut binding_id, mut agent_api_key_id) = (None, None, None);
     if kind == "conversation" {
         if let Some(conversation) = db
             .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
@@ -660,6 +692,9 @@ async fn queue_cleanup(
             .await?
             .ok_or_else(|| AppError::Conflict("Gateway identity unavailable".into()))?;
         gateway_channel_id = row.get_str("gateway_channel_id").ok().map(str::to_owned);
+        record_id = row.get_str("gateway_record_id").ok().map(str::to_owned);
+        binding_id = row.get_str("binding_id").ok().map(str::to_owned);
+        agent_api_key_id = row.get_str("agent_api_key_id").ok().map(str::to_owned);
         gateway_version = row
             .get_i64("gateway_version")
             .ok()
@@ -684,6 +719,9 @@ async fn queue_cleanup(
         machine_node_ids,
         gateway_channel_id,
         gateway_version,
+        record_id,
+        binding_id,
+        agent_api_key_id,
         completed: false,
         claim_id: None,
         retry_at: now,
@@ -1304,11 +1342,14 @@ mod tests {
         let channels = state
             .db
             .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME);
-        channels.insert_one(doc! {"_id": &link, "channel_bot_id": &bot, "user_id": &actor, "status": "active", "transport": "gateway", "gateway_channel_id": "old-remote", "gateway_version": 7_i64}).await.unwrap();
+        channels.insert_one(doc! {"_id": &link, "channel_bot_id": &bot, "user_id": &actor, "status": "active", "transport": "gateway", "gateway_channel_id": "old-remote", "gateway_version": 7_i64, "gateway_record_id":"captured-record", "binding_id":"captured-binding", "agent_api_key_id":"captured-agent"}).await.unwrap();
         convert(&state.db, &actor, &bot, &funding).await.unwrap();
         let task = claim_cleanup(&state.db).await.unwrap().unwrap();
         assert_eq!(task.gateway_channel_id.as_deref(), Some("old-remote"));
         assert_eq!(task.gateway_version, Some(7));
+        assert_eq!(task.record_id.as_deref(), Some("captured-record"));
+        assert_eq!(task.binding_id.as_deref(), Some("captured-binding"));
+        assert_eq!(task.agent_api_key_id.as_deref(), Some("captured-agent"));
         channels.delete_one(doc! {"_id": &link}).await.unwrap();
         Mock::given(method("GET"))
             .and(path("/channels/old-remote"))
@@ -1477,7 +1518,7 @@ pub(crate) async fn configure_guide(
                 return Err(AppError::Forbidden("Funding consent changed".into()));
             }
             if db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).find_one(
-                doc! {"provider": "telegram-new", "fields.manager_bot_id": &profile.manager_bot_id, "fields.observation_id": &profile.observation_id, "fields.webhook_ready": "true"})
+                doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &profile.manager_bot_id)]}, "fields.manager_bot_id": &profile.manager_bot_id, "fields.observation_id": &profile.observation_id, "fields.webhook_ready": "true"})
                 .session(&mut *session).await?.is_none() { return Err(AppError::Conflict("Manager delivery is unavailable".into())); }
             if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
                 doc! {"_id": &profile.channel_bot_id, "platform_profile_id": &profile.id, "is_active": true}, doc! {"$inc": {"route_revision": 1_i64}})
@@ -1557,4 +1598,32 @@ pub(crate) async fn display_names(
             Some((row.get_str("_id").ok()?.to_owned(), label.to_owned()))
         })
         .collect())
+}
+
+/// Legacy conversion tasks may recover proof only from their exact retained
+/// retired channel; missing proof never authorizes an inactive credential.
+pub(crate) async fn retired_gateway_proof(
+    db: &Database,
+    task: &crate::models::platform_bot_config::PlatformBotCleanup,
+) -> AppResult<Option<(String, String)>> {
+    if task.kind != "gateway" {
+        return Ok(None);
+    }
+    match (&task.agent_api_key_id, &task.binding_id) {
+        (Some(key), Some(binding)) if !key.is_empty() && !binding.is_empty() => {
+            return Ok(Some((key.clone(), binding.clone())));
+        }
+        (None, None) => {}
+        _ => return Ok(None),
+    }
+    let Some(row)=db.collection::<crate::models::nyxbot_channel::NyxbotChannel>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .find_one(doc! {"_id":&task.resource_id,"user_id":&task.owner_user_id,"status":{"$nin":["pending","active"]},
+            "last_error":"platform_conversion","gateway_channel_id":&task.gateway_channel_id,"gateway_version":task.gateway_version}).await? else {return Ok(None);};
+    let (Some(key), Some(binding)) = (row.agent_api_key_id, row.binding_id) else {
+        return Ok(None);
+    };
+    db.collection::<Document>(crate::models::platform_bot_config::CLEANUP_COLLECTION).update_one(
+        doc! {"_id":&task.id,"agent_api_key_id":bson::Bson::Null,"binding_id":bson::Bson::Null},
+        doc! {"$set":{"agent_api_key_id":&key,"binding_id":&binding,"record_id":row.gateway_record_id}}).await?;
+    Ok(Some((key, binding)))
 }

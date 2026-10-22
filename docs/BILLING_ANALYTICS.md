@@ -4,7 +4,11 @@ The existing `/admin/usage` page contains Dashboard, List, and NyxBot tabs.
 Dashboard uses Recharts 3.8, the visualization library already used by NyxID, with an Operations
 grid and multiple private saved views. List reuses the existing service,
 credential-class, and user ranking tables. Dashboard and List share service, acting-user,
-billing-account and time-range filters. There is one Usage navigation entry;
+billing-account and time-range filters directly below the Usage heading, above
+the tabs and summary. **Users** selects request actors; **Users / organizations**
+selects billing owners. Organization selection does not include all activity by
+its members: platform-key requests bill the acting person. Choose the last
+24 hours, 7 days, 30 days, or a custom UTC range. There is one Usage navigation entry;
 `/admin/analytics` redirects to it.
 
 NyxBot shows assistant activity, turn outcomes, and reply feedback using the same
@@ -233,17 +237,29 @@ input/output totals are preserved, and the UI does not infer a missing image
 breakdown. New image details require the updated backend; a local frontend using
 the production backend can show only the fields that backend already returns.
 
-Panels can break down by service, acting user, billing account, or credential class.
+Panels can break down by service, model, acting user, billing account, or credential class.
 Credential classes use the same names as the platform's List view. Service/user/
-account legends support drilldown using the shared filters; credential classes
+account legends support drilldown using the shared filters; models and credential classes
 are reporting groups without an identity-filter action.
+
+Each panel exposes a **Group by** selector. For example, filter to Chrono LLM
+and choose **Model** to inspect its recorded model usage. New workspaces include
+a **Tokens by model** panel; saved workspaces keep their existing panels.
+Identical recorded model IDs combine across services (for example, Chrono LLM
+and direct DeepSeek usage); distinct aliases remain separate. Service, actor,
+billing-owner, and time filters apply before this grouping.
+Model grouping reuses the pricing-model / provider-reported-model projection
+described under [NyxBot model usage](#nyxbot-model-usage), without changing rates
+or Lago events. Missing model identities appear as **Unattributed**; history is
+not backfilled. Real models named Other or Unattributed receive a `(model)`
+suffix so they remain distinct from the aggregate and missing-value buckets.
 
 Safe future derived measures include cost per request and tokens per request,
 calculated from matching populations with a null result for zero denominators.
 Cost coverage must account for overlap between legacy and uncosted counts.
-Cache-hit rates require provider-specific accounting. Model metadata exists in
-some meter and rollup records, but a model breakdown needs an explicit reporting
-contract and missing-value rules; it does not require inventing model data.
+Cache-hit rates require provider-specific accounting. Recorded model identities
+do not establish the resolved provider, fallback, or revision; those details
+require an upstream reporting contract.
 Agent/API-key and route breakdowns require a review of retained rollup dimensions.
 Latency percentiles, HTTP error rates, funnels, retention, and fiat revenue need
 additional reporting inputs and are not offered as fabricated metrics.
@@ -305,7 +321,8 @@ Use the revision returned by GET or PUT for subsequent updates. `chart` accepts
 `line`, `bar`, `pie` (rendered as a donut), or `combo`. Measures are `cost`,
 `requests`, `total_tokens`, `quantity`, `wallet_cost`, `grant_cost`, and
 `allowance_cost`. `quantity` selects an existing billing metric through `metric`.
-Breakdowns are `service`, `user` (acting person), or `owner` (billing account).
+Breakdowns are `service`, `model`, `user` (request actor), `owner` (billing account),
+or `credential_class`.
 `top` is 0 for aggregate, 5, or 10. Combined charts show the selected measure as
 stacked bars and requests on a labeled right axis; requests alone use a single
 axis. Standard-width panels follow their layout's grid; full-width panels span it.
@@ -445,6 +462,21 @@ billing identities, which may be request aliases; they do not assert a resolved
 provider model. Conversation settings and transcript length are never usage
 sources.
 
+The pricing `model` on a usage row is the request model when the ingress already
+knows it (the `/llm` gateway and Codex translation); it selects model-specific
+cached rates and is sent to Lago. Proxy, node, service-pool and MCP inference
+settlements also record `reported_model`: the model the provider reported in the
+response that carried the usage (OpenAI/xAI `model`, Responses API
+`response.model`, Anthropic `message.model`, Gemini `modelVersion`), written on
+every row of the request. It is observability only: it never selects a rate, is
+never sent to Lago and is not part of ledger entries. Reports group by the
+pricing model, else the reported model; legacy-cost rows (estimated from a
+model-keyed cached rate) keep their pricing model alone. Only plain identifiers
+of at most 128 characters (ASCII letters, digits and `-._:/@+`) are recorded.
+Rows settled before this capture stay in the unknown bucket; there is no
+backfill because no model was stored. Upgrade every replica: rows settled or
+folded by an older replica are reported without the reported model.
+
 The response reuses the journal-validated reporting engine: raw boundary hours,
 unfolded tail, hourly summaries, and daily summaries have the same pricing and
 primary-row counting rules. Exact credit strings preserve twelve fractional
@@ -473,7 +505,12 @@ known gross cost, requests, then account identity. Each selected account has its
 own Top 20 model breakdown and an exact summed Other row; remaining accounts
 have a summed Other total. Null cost sorts below a known zero, and partial cost
 can affect ranking. Exact model search reaches models outside the Top 20. These
-NyxBot model options do not expand the generic saved-workspace breakdown schema.
+NyxBot model filters are independent of the generic workspace's `model` breakdown.
+`services` ranks the same model population by inference service (`service_id`
+and `service_slug` rollup dimensions, names resolved from the catalog) with the
+same ordering, a Top 20 and a summed Other row. It honours the model filter and
+needs no new stored data, so it covers history recorded before model names were
+captured.
 
 ### Attribution and historical coverage
 

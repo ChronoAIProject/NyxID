@@ -602,7 +602,7 @@ async fn download_checked(
     Ok(bytes)
 }
 
-fn safe_path(path: &str) -> bool {
+pub(super) fn safe_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= 256
         && !path.contains(['\\', ':'])
@@ -904,6 +904,8 @@ pub async fn set(
                 AgentSkillMetadata {
                     description: p.description,
                     size_bytes: p.size_bytes,
+                    preload_paths: vec![],
+                    preload_bytes: 0,
                 },
             );
         }
@@ -1022,7 +1024,8 @@ pub fn instructions(agent: &AssistantAgent) -> String {
 mod tests;
 
 /// Audit events that make up an agent's skill history.
-pub const HISTORY_EVENTS: [&str; 7] = [
+pub const HISTORY_EVENTS: [&str; 8] = [
+    "assistant_skill_preload_updated",
     "assistant_skills_updated",
     "assistant_learning_proposal_edited",
     "assistant_learning_proposal_rejected",

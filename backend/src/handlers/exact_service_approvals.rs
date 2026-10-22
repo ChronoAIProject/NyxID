@@ -141,6 +141,7 @@ mod tests {
 
     fn auth(method: AuthMethod) -> AuthUser {
         AuthUser {
+            mfa_assured: false,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,

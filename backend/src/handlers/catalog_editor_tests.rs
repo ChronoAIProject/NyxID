@@ -764,6 +764,8 @@ async fn catalog_scope_save_preserves_ornn_slug_workflow_without_operation_polic
     };
 
     let (f, upstream, role_id) = ornn_account("editor_ornn_scope_save").await;
+    crate::test_utils::set_test_approval_preference(&f.state.db, &f.owner, false).await;
+
     let proxy_token = token(&f, None).await;
     let validate_path = "/api/v1/proxy/s/ornn-api/api/v1/skill-format/validate";
     Mock::given(method("POST"))

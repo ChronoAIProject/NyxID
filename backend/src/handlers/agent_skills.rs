@@ -417,6 +417,91 @@ pub async fn set(
     ))
 }
 
+pub async fn set_preload(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, skill_id)): Path<(String, String)>,
+    Json(selection): Json<crate::services::agent_skill_preload::Selection>,
+) -> AppResult<Json<skills::SkillsResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    crate::services::assistant_nyxagent::require_enabled(&state.db, &actor).await?;
+    Ok(Json(
+        crate::services::agent_skill_preload::set(
+            &state.db,
+            &Reader {
+                state: &state,
+                person: &actor,
+                thread_key: None,
+                scopes: None,
+                chat: None,
+            },
+            &actor,
+            &id,
+            &skill_id,
+            &selection,
+        )
+        .await?,
+    ))
+}
+
+/// Transport adapter for automatic reads: retain the live conversation key,
+/// operation restrictions and approval policy used by native skill_read.
+pub(crate) fn preload_context(
+    state: AppState,
+) -> std::sync::Arc<dyn crate::services::agent_skill_preload::ContextProvider> {
+    std::sync::Arc::new(PreloadContext(state))
+}
+
+struct PreloadContext(AppState);
+
+#[async_trait::async_trait]
+impl crate::services::agent_skill_preload::ContextProvider for PreloadContext {
+    async fn prepare(
+        &self,
+        row: &crate::models::assistant_conversation::AssistantConversation,
+        agent: &crate::models::assistant_agent::AssistantAgent,
+    ) -> AppResult<String> {
+        preload_for_turn(&self.0, row, agent).await
+    }
+}
+
+pub(crate) async fn preload_for_turn(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+) -> AppResult<String> {
+    if !crate::services::agent_skill_preload::enabled(agent, row.guest_turn) {
+        return Ok(String::new());
+    }
+    let chat = acks::for_key(&state.db, &row.user_id, Some(&row.credential_api_key_id))
+        .await?
+        .filter(|chat| {
+            chat.turn_live
+                && !chat.turn_stopped
+                && !chat.guest
+                && chat.agent_id == agent.id
+                && chat.conversation_id == row.id
+                && chat.turn_id.as_deref()
+                    == row.active_turn.as_ref().map(|turn| turn.turn_id.as_str())
+        })
+        .ok_or_else(|| {
+            AppError::Forbidden("Live owner turn required for skill preloading".into())
+        })?;
+    Ok(crate::services::agent_skill_preload::instructions(
+        &Reader {
+            state,
+            person: &row.user_id,
+            thread_key: Some(&row.credential_api_key_id),
+            scopes: Some(&agent.operation_scopes),
+            chat: Some(std::sync::Arc::new(chat)),
+        },
+        agent,
+        row.guest_turn,
+    )
+    .await)
+}
+
 /// The result of testing one attached pin the way its agent reads it.
 #[derive(Debug, Serialize)]
 pub struct SkillTestResponse {

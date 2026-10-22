@@ -651,3 +651,36 @@ explains that NyxID will resume the originating thread and that the model should
 end its turn or do other work, without polling. See
 [async event delivery](chat/09-nyxbot-orchestrator.md#asynchronous-service-results)
 for limits and lifecycle semantics.
+
+### CMA operation cards
+
+The `cma` catalog service has compiled adapters for the following exact HTTP
+operations. Each adapter requires a unique matching GET operation on the same
+service destination; instance aliases and operation names may differ. A custom
+connection named CMA does not activate these adapters.
+
+| Submission | Status operation | Confirmed outcome |
+| --- | --- | --- |
+| `POST /api/v1/agents` | `GET /api/v1/agent-lifecycle/{id}` | `succeeded`: agent ready |
+| `POST /api/v1/responses` | `GET /api/v1/responses/{response_id}` | `completed`: response complete |
+| `POST /api/v1/agents/{id}/input` | `GET /api/v1/agents/{id}` | agent status, then ready after observed activity |
+| `POST /api/v1/agui/run` | `GET /api/v1/agents/{id}` | agent status, then ready after observed activity |
+
+JSON receipts and Responses SSE frames can supply a response ID. Agent input
+receipts may contain only `queued`; those watches use the agent ID from the
+typed request arguments. An initial `ready` is insufficient to settle a queued
+agent input: the watch must first observe activity. Agent status is not a
+per-input completion receipt. If work starts and finishes between polls, its
+completion cannot be confirmed from that status endpoint; the watch can time
+out rather than inventing a completed response. Prefer Responses operations
+when per-request completion is required.
+
+These adapters use the existing authenticated async-watch executor, two-hour
+deadline, quotas, billing and live authority checks. They add no user-controlled
+polling URL or new cancellation API. Guest calls retain their ordinary tool
+response without registering a CMA watch. Card metadata allows only bounded
+identifiers and known status/phase values, and history excludes encrypted
+results. CMA watch metadata has a 30-day TTL; result encryption and the four-hour
+payload deadline remain the same as other watches. The
+[frontend contract](chat/05-frontend-ui.md#cma-delegation-cards) describes card
+placement and refresh behavior.

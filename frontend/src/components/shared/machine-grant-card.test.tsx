@@ -618,6 +618,15 @@ describe("Machine grant owner management", () => {
     );
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByText(/other · retained/)).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("button", { name: "Remove current Machine" }),
+    ).toBeDisabled();
+    expect(mocks.save).not.toHaveBeenCalled();
+    await userEvent.click(
+      within(dialog).getByRole("checkbox", {
+        name: /I explicitly allow shared legacy/,
+      }),
+    );
     await userEvent.click(
       within(dialog).getByRole("button", { name: "Remove current Machine" }),
     );
@@ -627,7 +636,11 @@ describe("Machine grant owner management", () => {
           expected_grant_id: "grant",
           expected_revision: 7,
           expected_state_version: 8,
-          selection: expect.objectContaining({ assignments: { other } }),
+          selection: expect.objectContaining({
+            assignments: { other },
+            separation: "shared_legacy",
+            legacy_warning_acknowledged: true,
+          }),
         }),
       ),
     );

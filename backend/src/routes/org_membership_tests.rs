@@ -630,7 +630,7 @@ async fn org_reads_require_live_keys_and_support_agent_login_children() {
             &child_id,
             &Uuid::new_v4().to_string(),
             "org reader login",
-            None,
+            chrono::Utc::now() + chrono::Duration::days(1),
             &secret,
             &mut session,
         )

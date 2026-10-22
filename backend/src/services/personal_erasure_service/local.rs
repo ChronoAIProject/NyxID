@@ -188,6 +188,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner},
         ),
         (
+            m::channel_text_delivery::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
             m::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,
             doc! {"user_id":owner},
         ),

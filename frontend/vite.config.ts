@@ -18,7 +18,8 @@ function telegramClaimReferrer(): Plugin {
     name: "telegram-claim-referrer",
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
-        if (new URL(req.url ?? "/", "http://localhost").searchParams.has("claim"))
+        const url = new URL(req.url ?? "/", "http://localhost")
+        if (url.searchParams.has("claim") || url.pathname === "/onboarding/link")
           res.setHeader("Referrer-Policy", "no-referrer")
         next()
       })
@@ -254,9 +255,10 @@ export default defineConfig({
     "import.meta.env.VITE_ROUTING_PREVIEW": JSON.stringify(process.env.NYXID_ROUTING_PREVIEW === "1" ? "1" : "0"),
   },
   resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-    },
+    alias: [
+      { find: /^zod$/, replacement: path.resolve(__dirname, "./src/lib/zod-csp.ts") },
+      { find: "@", replacement: path.resolve(__dirname, "./src") },
+    ],
   },
   build: {
     rollupOptions: {

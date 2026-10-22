@@ -49,8 +49,10 @@ export function NotificationSetupCard() {
     settings?.push_enabled && (pushDevices?.devices.length ?? 0) > 0;
   const approvalEnabled = settings?.approval_required ?? false;
   const approvalSuspended = settings?.approval_suspended ?? false;
+  const deliveryConfigured = settings?.approval_delivery_configured;
+  const webAvailable = settings?.approval_web_available === true;
   const hasChannel = telegramReady || pushReady;
-  const allDone = hasChannel && approvalEnabled && !approvalSuspended;
+  const allDone = approvalEnabled && !approvalSuspended && webAvailable;
 
   const handleDismiss = useCallback(() => {
     localStorage.setItem(DISMISSED_KEY, "true");
@@ -89,7 +91,7 @@ export function NotificationSetupCard() {
   const steps = [
     {
       done: Boolean(telegramReady || pushReady),
-      label: "Set up a notification channel",
+      label: webAvailable ? "Add optional notifications" : "Connect a notification channel",
     },
     { done: approvalEnabled, label: "Enable approval protection" },
   ];
@@ -152,7 +154,9 @@ export function NotificationSetupCard() {
                 </span>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
-                AI agents must request your approval before accessing services.{" "}
+                {settings?.global_approval_mode === "writes_only"
+                  ? "Writes and destructive operations require approval; reads and stateless model inference can proceed. "
+                  : "AI agents must request your approval before accessing services. "}
                 <Link
                   to="/approvals/settings"
                   className="text-primary-text hover:underline"
@@ -163,20 +167,28 @@ export function NotificationSetupCard() {
             </div>
           )}
 
-          {approvalSuspended && (
+          {approvalEnabled && deliveryConfigured === false && webAvailable && !approvalSuspended && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3">
               <div className="flex items-center gap-2">
                 <Shield className="h-4 w-4 text-amber-500" />
                 <span className="text-13 font-medium">
-                  Approval protection is suspended
+                  Review approvals on the web
                 </span>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
-                Your approval preference remains on. Connect or re-enable
-                Telegram or push notifications and protection will resume
-                automatically.
+                Approval remains required while notifications are unavailable. Review pending requests in the Approval History page. Notifications are optional and delivery can fail.
               </p>
             </div>
+          )}
+
+          {approvalEnabled && (approvalSuspended || !webAvailable) && (
+            <p role="status" className="text-xs text-amber-600">
+              {approvalSuspended ? "Server reports approval is suspended. " : "Web-only approval support is unconfirmed. "}
+              Keep a configured notification channel enabled until the server confirms required web approval.
+            </p>
+          )}
+          {deliveryConfigured === undefined && (
+            <p className="text-xs text-muted-foreground">Notification provider configuration is unknown.</p>
           )}
 
           {/* Channel rows -- always shown so users can add more channels */}
@@ -244,10 +256,11 @@ export function NotificationSetupCard() {
             </div>
 
             {/* Enable approval button */}
-            {hasChannel && !approvalEnabled && (
+            {!approvalEnabled && (
               <Button
                 variant="primary"
                 className="w-full"
+                disabled={!hasChannel && !webAvailable}
                 onClick={() => void handleToggleApproval(true)}
                 isLoading={updateMutation.isPending}
               >
@@ -256,11 +269,14 @@ export function NotificationSetupCard() {
               </Button>
             )}
 
-            {!hasChannel && (
+            {!hasChannel && webAvailable && (
               <p className="text-xs text-muted-foreground">
-                Connect Telegram or download the mobile app to receive approval
-                requests. Then explicitly enable approval protection in this
-                card or Approval Settings.
+                Review pending requests in Approval History on the web. You can also connect Telegram or the mobile app for optional notifications.
+              </p>
+            )}
+            {!hasChannel && !webAvailable && (
+              <p className="text-xs text-muted-foreground">
+                Web-only approval support is unconfirmed. Connect and enable a notification channel before turning on approval protection on this server.
               </p>
             )}
           </div>

@@ -1657,7 +1657,7 @@ pub async fn finalize_unallocated_delete(
             if !deletion_authorized_in_session(&db_owned, session, &machine_id).await? {
                 return Err(AppError::Conflict("machine_owner_deletion_basis_required".into()));
             }
-            if !super::remote_machine_operation_service::creation_responsibilities_terminal_in_session(&db_owned,session,&machine).await? {return Ok(None);}
+            if !super::remote_machine_operation_service::delete_creation_responsibilities_terminal_in_session(&db_owned,session,&machine).await? {return Ok(None);}
             super::remote_machine_runtime::require_accounting_final_in_session(&db_owned,session,&machine).await?;
             let node = db_owned.collection::<Document>(crate::models::node::COLLECTION_NAME).find_one(doc! {"_id": &machine_id, "is_active": false, "signing_secret_encrypted": bson::Bson::Null}).session(&mut *session).await?;
             if node.is_none() { return Ok(None); }

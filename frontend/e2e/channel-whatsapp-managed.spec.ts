@@ -1,4 +1,5 @@
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./production-policy-fixture";
 import type { ChannelMessageItem } from "../src/types/channels";
 import {
   managedBot,
@@ -18,7 +19,7 @@ for (const viewport of [
       await mockDashboard(page);
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.addInitScript(() => {
+      const facebookTransport = () => {
         window.FB = {
           init: (options) => {
             sessionStorage.setItem("meta-init", JSON.stringify(options));
@@ -58,7 +59,17 @@ for (const viewport of [
             );
           },
         };
-      });
+      };
+      if (process.env.NYXID_PRODUCTION_TEST_URL) {
+        // Exercise the app's external script insertion/load path; mock the
+        // provider at its network boundary instead of pre-seeding window.FB.
+        await page.route("https://connect.facebook.net/en_US/sdk.js", (route) => route.fulfill({
+          contentType: "text/javascript", body: `(${facebookTransport.toString()})()`,
+          headers: { "access-control-allow-origin": "*" },
+        }));
+      } else {
+        await page.addInitScript(facebookTransport);
+      }
       await page.route("**/channel-bots/managed-onboarding/whatsapp", (route) =>
         route.fulfill({
           json: managedBootstrap,
