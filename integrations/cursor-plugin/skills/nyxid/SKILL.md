@@ -52,6 +52,4 @@ The CLI stores its session locally and can list services, manage keys, and issue
 The hosted MCP server also exposes these NyxID-owned tools when the account has the corresponding capability:
 
 - SSH: `nyx__ssh_list_services`, `nyx__ssh_exec`.
-- Browser-backed Oracle relay: `nyx__oracle_pools`, `nyx__oracle_ask`, `nyx__oracle_result`, `nyx__oracle_attach`, `nyx__oracle_extract`, `nyx__oracle_session`.
-
-Use `nyx__oracle_pools` before submitting Oracle work. Poll a pending task with `nyx__oracle_result`. Use `nyx__oracle_attach` only when the user supplies an existing ChatGPT conversation URL and asks to import it.
+The browser-backed Oracle relay tools (`nyx__oracle_*`) are permanently retired. They are no longer listed, and any call to one is refused with a message saying so. Do not retry them.

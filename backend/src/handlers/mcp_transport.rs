@@ -19,8 +19,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{self, AuthMethod};
 use crate::services::{
     approval_service, audit_service, connect_link_service, mcp_service, notification_service,
-    operation_descriptor, oracle_pool_service, oracle_session_service, oracle_task_service,
-    proxy_service, ssh_service, user_service_service,
+    operation_descriptor, proxy_service, ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -2206,9 +2205,6 @@ async fn handle_tools_list(
     if is_scoped_api_key(auth) {
         tool_defs.retain(|t| !SSH_META_TOOL_NAMES.contains(&t.name.as_str()));
     }
-    if !auth.assistant_operation_scopes.is_empty() {
-        tool_defs.retain(|t| !t.name.starts_with("nyx__oracle_"));
-    }
 
     if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
         tool_defs.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
@@ -2602,12 +2598,6 @@ async fn dispatch_tools_call(
                 | "nyx__call_tool"
                 | "nyx__ssh_exec"
                 | "nyx__ssh_list_services"
-                | "nyx__oracle_pools"
-                | "nyx__oracle_ask"
-                | "nyx__oracle_result"
-                | "nyx__oracle_attach"
-                | "nyx__oracle_extract"
-                | "nyx__oracle_session"
                 | "nyx__resource_get"
         );
         let known_account_tool = tool_name.strip_prefix("nyxid__").is_some_and(|name| {
@@ -2664,10 +2654,7 @@ async fn dispatch_tools_call(
                 | "nyx__call_tool"
                 | "nyx__wait_for_connection"
                 | "nyx__ssh_list_services"
-                | "nyx__oracle_pools"
-                | "nyx__oracle_result"
-                | "nyx__oracle_session"
-                | "nyx__ssh_exec" | "nyx__oracle_ask" | "nyx__oracle_attach" | "nyx__oracle_extract"
+                | "nyx__ssh_exec"
                 | "nyx__resource_get"
                 | "nyx__attachment_read" | "nyx__attachment_list" | "nyx__conversation_history"
                 | "nyx__machine_list"
@@ -2687,13 +2674,10 @@ async fn dispatch_tools_call(
     {
         use crate::services::assistant_acknowledgement_service as acks;
         let class = acks::classify_owner_action(tool_name, &arguments);
-        // Webhook automations keep treating oracle prompts (data leaving for
-        // an external model) as destructive, as before access modes.
         let facts = acks::ActionFacts {
             class,
             read_only: false,
-            destructive: class == acks::OwnerActionClass::Destructive
-                || tool_name == "nyx__oracle_ask",
+            destructive: class == acks::OwnerActionClass::Destructive,
         };
         let gate = async {
             match acks::confirmation_needed(&state.db, chat, facts, false).await? {
@@ -2877,48 +2861,16 @@ fn dispatch_meta_tool<'a>(
             client_accepts_sse,
             billing_egress_permit,
         )),
-        // Oracle pools have no operation identity, so an operation-scoped key
-        // could otherwise spend the owner's pool outside every scope.
-        name if name.starts_with("nyx__oracle_") && !auth.assistant_operation_scopes.is_empty() => {
-            Box::pin(async move {
-                tool_result(
-                    request.id.clone(),
-                    "Oracle tools are not available to operation-scoped keys.",
-                    true,
-                )
-            })
-        }
-        "nyx__oracle_pools" => Box::pin(handle_oracle_pools(state, auth, request.id.clone())),
-        "nyx__oracle_ask" => Box::pin(handle_oracle_ask(
-            state,
-            auth,
-            arguments,
-            request.id.clone(),
-        )),
-        "nyx__oracle_result" => Box::pin(handle_oracle_result(
-            state,
-            auth,
-            arguments,
-            request.id.clone(),
-        )),
-        "nyx__oracle_attach" => Box::pin(handle_oracle_attach(
-            state,
-            auth,
-            arguments,
-            request.id.clone(),
-        )),
-        "nyx__oracle_extract" => Box::pin(handle_oracle_extract(
-            state,
-            auth,
-            arguments,
-            request.id.clone(),
-        )),
-        "nyx__oracle_session" => Box::pin(handle_oracle_session(
-            state,
-            auth,
-            arguments,
-            request.id.clone(),
-        )),
+        // NyxID's built-in oracle is permanently retired. The tools are no
+        // longer listed; a client that still names one is told so, as an
+        // error result it can read, instead of an unknown-tool fault.
+        name if name.starts_with("nyx__oracle_") => Box::pin(async move {
+            tool_result(
+                request.id.clone(),
+                &crate::errors::AppError::OracleRetired.to_string(),
+                true,
+            )
+        }),
         "nyx__ssh_exec" | "nyx__ssh_list_services" => Box::pin(async move {
             if is_scoped_api_key(auth) {
                 return tool_result(
@@ -3922,9 +3874,6 @@ fn webhook_tool_schema(auth: &McpAuthContext, schema: &serde_json::Value) -> ser
 fn meta_action_summary(tool: &str, args: &serde_json::Value) -> String {
     let what = match tool {
         "nyx__ssh_exec" => "Run a command over SSH",
-        "nyx__oracle_ask" => "Send a prompt to an oracle pool",
-        "nyx__oracle_attach" => "Import a ChatGPT conversation into an oracle pool",
-        "nyx__oracle_extract" => "Extract a web page with an oracle pool",
         "nyx__connect_service" => "Connect a service",
         _ => "Run a NyxID tool",
     };
@@ -5428,488 +5377,6 @@ async fn handle_wait_for_connection(
             };
             tool_result(request_id, &message, true)
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Oracle meta-tool dispatch helpers
-// ---------------------------------------------------------------------------
-
-fn oracle_submitter(auth: &McpAuthContext) -> oracle_task_service::SubmitterIdentity {
-    oracle_task_service::SubmitterIdentity {
-        user_id: auth.user_id.clone(),
-        api_key_id: auth.api_key_id.clone(),
-        api_key_name: auth.api_key_name.clone(),
-    }
-}
-
-fn required_arg<'a>(arguments: &'a serde_json::Value, name: &str) -> Result<&'a str, &'static str> {
-    arguments
-        .get(name)
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .ok_or("required")
-}
-
-fn optional_string_arg(arguments: &serde_json::Value, name: &str) -> Option<String> {
-    arguments
-        .get(name)
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(ToString::to_string)
-}
-
-fn wait_seconds(
-    arguments: &serde_json::Value,
-    default_secs: u64,
-    min_secs: u64,
-    max_secs: u64,
-) -> u64 {
-    arguments
-        .get("wait_seconds")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(default_secs)
-        .clamp(min_secs, max_secs)
-}
-
-async fn poll_oracle_task(
-    db: &mongodb::Database,
-    actor: &str,
-    task_id: &str,
-    wait_secs: u64,
-) -> crate::errors::AppResult<(crate::models::oracle_task::OracleTask, u64)> {
-    let started = tokio::time::Instant::now();
-    loop {
-        let (task, position) =
-            oracle_task_service::get_task_for_consumer(db, actor, task_id).await?;
-        if task.status.is_terminal() || started.elapsed() >= Duration::from_secs(wait_secs) {
-            return Ok((task, position));
-        }
-        tokio::time::sleep(Duration::from_secs(3)).await;
-    }
-}
-
-/// Inventory of generated files and images on a completed task. The MCP text
-/// channel cannot carry bytes, so list name, MIME, and size and point at the
-/// retrieval paths (base64 in `GET /api/v1/oracle/tasks/{id}`, or
-/// `nyxid oracle result <id> --artifacts <dir>`). Never inlines bodies.
-fn render_oracle_artifacts(task: &crate::models::oracle_task::OracleTask) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    for file in task.files.iter().flatten() {
-        lines.push(format!(
-            "- {} ({}, {} bytes)",
-            file.name,
-            file.mime,
-            file.data.len()
-        ));
-    }
-    for (index, image) in task.images.iter().flatten().enumerate() {
-        let name = image
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("image_{}", index + 1));
-        lines.push(format!(
-            "- {} ({}, {} bytes)",
-            name,
-            image.mime,
-            image.data.len()
-        ));
-    }
-    if lines.is_empty() {
-        return String::new();
-    }
-    format!(
-        "Artifacts ({}):\n{}\nRetrieve them with `nyxid oracle result {} --artifacts <dir>` or as base64 `files`/`images` in GET /api/v1/oracle/tasks/{}.",
-        lines.len(),
-        lines.join("\n"),
-        task.id,
-        task.id
-    )
-}
-
-fn render_oracle_task_result(
-    task: &crate::models::oracle_task::OracleTask,
-    queue_position: u64,
-    pending_message: &str,
-) -> (String, bool) {
-    match task.status {
-        crate::models::oracle_task::OracleTaskStatus::Completed => {
-            let mut text = task.response.clone().unwrap_or_default();
-            let artifacts = render_oracle_artifacts(task);
-            if text.is_empty() {
-                text = if artifacts.is_empty() {
-                    format!("Task {} completed with an empty response.", task.id)
-                } else {
-                    format!(
-                        "Task {} completed with no text; see artifacts below.",
-                        task.id
-                    )
-                };
-            }
-            if !artifacts.is_empty() {
-                text.push_str("\n\n");
-                text.push_str(&artifacts);
-            }
-            (text, false)
-        }
-        crate::models::oracle_task::OracleTaskStatus::Failed => (
-            format!(
-                "Task {} failed: {}",
-                task.id,
-                task.failure_reason
-                    .as_deref()
-                    .unwrap_or("worker did not provide a failure reason")
-            ),
-            true,
-        ),
-        crate::models::oracle_task::OracleTaskStatus::Cancelled => {
-            (format!("Task {} was cancelled.", task.id), true)
-        }
-        crate::models::oracle_task::OracleTaskStatus::Queued
-        | crate::models::oracle_task::OracleTaskStatus::Dispatched => {
-            let mut details = format!(
-                "{pending_message} (status {}, queue_position {}).",
-                task.status.as_str(),
-                queue_position
-            );
-            if let Some(phase) = &task.phase {
-                details.push_str(&format!(" Phase: {phase}."));
-            }
-            if let Some(conversation_id) = &task.conversation_id {
-                details.push_str(&format!(" conversation_id: {conversation_id}."));
-            }
-            (details, false)
-        }
-    }
-}
-
-async fn handle_oracle_pools(
-    state: &AppState,
-    auth: &McpAuthContext,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    match oracle_pool_service::list_visible_pools(&state.db, &auth.user_id).await {
-        Ok(pools) => {
-            let mut pool_lines = Vec::new();
-            for pool in pools {
-                if oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool)
-                    .await
-                    .is_err()
-                {
-                    continue;
-                }
-                pool_lines.push(format!(
-                    "- {} ({}) visibility={} id={}",
-                    pool.slug,
-                    pool.name,
-                    pool.visibility.as_str(),
-                    pool.id
-                ));
-            }
-            let mut lines = vec![format!(
-                "{} oracle pool(s) available for submission:",
-                pool_lines.len()
-            )];
-            if pool_lines.is_empty() {
-                lines.push("No active oracle pools are available for submission.".to_string());
-            } else {
-                lines.extend(pool_lines);
-            }
-            tool_result(request_id, &lines.join("\n"), false)
-        }
-        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
-    }
-}
-
-async fn handle_oracle_ask(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    let pool_ref = match required_arg(arguments, "pool") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"pool\" is required", true),
-    };
-    let prompt = match required_arg(arguments, "prompt") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"prompt\" is required", true),
-    };
-    let wait_secs = wait_seconds(arguments, 120, 5, 300);
-
-    let result = async {
-        let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
-        oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
-        let admission = match crate::services::assistant_native_execution::resource(
-            &state.db,
-            auth.chat.as_ref(),
-            crate::services::assistant_native_execution::NativeResource {
-                collection: "oracle_pools",
-                id: &pool.id,
-                owner: &pool.user_id,
-            },
-            "nyx__oracle_ask",
-            arguments,
-            crate::services::assistant_acknowledgement_service::ActionFacts {
-                class: crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
-                read_only: false,
-                destructive: true,
-            },
-            "Use the exact approved Oracle operation",
-        )
-        .await?
-        {
-            Ok(value) => value,
-            Err(refusal) => return Err(crate::errors::AppError::Conflict(refusal.to_string())),
-        };
-        if let Some(admission) = &admission {
-            admission.revalidate(&state.db).await?;
-        }
-        let outcome = oracle_task_service::submit_task(
-            &state.db,
-            &pool,
-            &oracle_submitter(auth),
-            oracle_task_service::SubmitTaskInput {
-                prompt: prompt.to_string(),
-                model_label: optional_string_arg(arguments, "model"),
-                project_url: optional_string_arg(arguments, "project_url"),
-                conversation_id: optional_string_arg(arguments, "conversation_id"),
-                ..Default::default()
-            },
-        )
-        .await?;
-        if let Some(admission) = &admission {
-            admission.receipt(&state.db).await;
-        }
-        poll_oracle_task(&state.db, &auth.user_id, &outcome.task.id, wait_secs).await
-    }
-    .await;
-
-    match result {
-        Ok((task, position)) => {
-            let (text, is_error) = render_oracle_task_result(
-                &task,
-                position,
-                &format!(
-                    "Task {} still processing. Call nyx__oracle_result with this task_id",
-                    task.id
-                ),
-            );
-            tool_result(request_id, &text, is_error)
-        }
-        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
-    }
-}
-
-async fn handle_oracle_result(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    let task_id = match required_arg(arguments, "task_id") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"task_id\" is required", true),
-    };
-    let wait_secs = wait_seconds(arguments, 60, 0, 300);
-
-    match poll_oracle_task(&state.db, &auth.user_id, task_id, wait_secs).await {
-        Ok((task, position)) => {
-            let (text, is_error) = render_oracle_task_result(
-                &task,
-                position,
-                &format!(
-                    "Task {} still processing. Call nyx__oracle_result with this task_id",
-                    task.id
-                ),
-            );
-            tool_result(request_id, &text, is_error)
-        }
-        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
-    }
-}
-
-async fn handle_oracle_attach(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    let pool_ref = match required_arg(arguments, "pool") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"pool\" is required", true),
-    };
-    let chatgpt_url = match required_arg(arguments, "chatgpt_url") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"chatgpt_url\" is required", true),
-    };
-
-    let result = async {
-        let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
-        oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
-        let admission = match crate::services::assistant_native_execution::resource(
-            &state.db,
-            auth.chat.as_ref(),
-            crate::services::assistant_native_execution::NativeResource {
-                collection: "oracle_pools",
-                id: &pool.id,
-                owner: &pool.user_id,
-            },
-            "nyx__oracle_attach",
-            arguments,
-            crate::services::assistant_acknowledgement_service::ActionFacts {
-                class: crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
-                read_only: false,
-                destructive: true,
-            },
-            "Use the exact approved Oracle operation",
-        )
-        .await?
-        {
-            Ok(value) => value,
-            Err(refusal) => return Err(crate::errors::AppError::Conflict(refusal.to_string())),
-        };
-        if let Some(admission) = &admission {
-            admission.revalidate(&state.db).await?;
-        }
-        let outcome = oracle_task_service::attach_conversation(
-            &state.db,
-            &pool,
-            &oracle_submitter(auth),
-            chatgpt_url,
-            None,
-        )
-        .await?;
-        if let Some(admission) = &admission {
-            admission.receipt(&state.db).await;
-        }
-        Ok(outcome)
-    }
-    .await;
-
-    match result {
-        Ok((session, task)) => {
-            let text = format!(
-                "Attached conversation.\nconversation_id: {}\nscrape_task_id: {}\nPoll nyx__oracle_result with the scrape task_id, then call nyx__oracle_session with the conversation_id.",
-                session.id, task.id
-            );
-            tool_result(request_id, &text, false)
-        }
-        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
-    }
-}
-
-async fn handle_oracle_extract(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    let pool_ref = match required_arg(arguments, "pool") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"pool\" is required", true),
-    };
-    let url = match required_arg(arguments, "url") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"url\" is required", true),
-    };
-    let wait_secs = wait_seconds(arguments, 120, 5, 300);
-
-    let result = async {
-        let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
-        oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
-        let admission = match crate::services::assistant_native_execution::resource(
-            &state.db,
-            auth.chat.as_ref(),
-            crate::services::assistant_native_execution::NativeResource {
-                collection: "oracle_pools",
-                id: &pool.id,
-                owner: &pool.user_id,
-            },
-            "nyx__oracle_extract",
-            arguments,
-            crate::services::assistant_acknowledgement_service::ActionFacts {
-                class: crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
-                read_only: false,
-                destructive: true,
-            },
-            "Use the exact approved Oracle operation",
-        )
-        .await?
-        {
-            Ok(value) => value,
-            Err(refusal) => return Err(crate::errors::AppError::Conflict(refusal.to_string())),
-        };
-        if let Some(admission) = &admission {
-            admission.revalidate(&state.db).await?;
-        }
-        let task = oracle_task_service::extract_url(
-            &state.db,
-            &pool,
-            &oracle_submitter(auth),
-            url,
-            optional_string_arg(arguments, "model"),
-        )
-        .await?;
-        if let Some(admission) = &admission {
-            admission.receipt(&state.db).await;
-        }
-        poll_oracle_task(&state.db, &auth.user_id, &task.id, wait_secs).await
-    }
-    .await;
-
-    match result {
-        Ok((task, position)) => {
-            let (text, is_error) = render_oracle_task_result(
-                &task,
-                position,
-                &format!(
-                    "Task {} still processing. Call nyx__oracle_result with this task_id",
-                    task.id
-                ),
-            );
-            tool_result(request_id, &text, is_error)
-        }
-        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
-    }
-}
-
-async fn handle_oracle_session(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    let conversation_id = match required_arg(arguments, "conversation_id") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"conversation_id\" is required", true),
-    };
-
-    match oracle_session_service::list_session_tasks(&state.db, &auth.user_id, conversation_id)
-        .await
-    {
-        Ok((session, tasks)) => {
-            let mut lines = vec![format!(
-                "conversation_id: {}\npool_id: {}\nturn_count: {}",
-                session.id, session.pool_id, session.turn_count
-            )];
-            for task in tasks {
-                if !task.prompt.trim().is_empty() {
-                    lines.push(format!("Q: {}", task.prompt));
-                }
-                if let Some(response) = task.response.as_deref().filter(|r| !r.trim().is_empty()) {
-                    lines.push(format!("A: {response}"));
-                } else if !task.status.is_terminal() {
-                    lines.push(format!("A: [{}]", task.status.as_str()));
-                } else if let Some(reason) = task.failure_reason.as_deref() {
-                    lines.push(format!("A: [{}: {}]", task.status.as_str(), reason));
-                }
-            }
-            tool_result(request_id, &lines.join("\n\n"), false)
-        }
-        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
     }
 }
 
@@ -7499,6 +6966,59 @@ mod tests {
                     .label,
                 name
             );
+        }
+        db.drop().await.unwrap();
+    }
+
+    /// A client that still has the retired oracle tool names wired in gets a
+    /// readable error result saying the feature is permanently gone, not an
+    /// unknown-tool fault it might retry.
+    #[tokio::test]
+    async fn retired_oracle_tools_refuse_with_permanent_deprecation() {
+        let Some(db) = crate::test_utils::connect_test_database("mcp_oracle_retired").await else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let auth = McpAuthContext::user("user-1".to_string(), AuthMethod::AccessToken);
+        for name in [
+            "nyx__oracle_pools",
+            "nyx__oracle_ask",
+            "nyx__oracle_result",
+            "nyx__oracle_attach",
+            "nyx__oracle_extract",
+            "nyx__oracle_session",
+        ] {
+            let request = JsonRpcRequest {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: Some(serde_json::json!(1)),
+                method: "tools/call".to_string(),
+                params: Some(serde_json::json!({
+                    "name": name,
+                    "arguments": { "pool": "chatgpt-pro", "prompt": "hi", "task_id": "t1" }
+                })),
+            };
+            let permit =
+                crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                    Some(
+                        crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                            crate::services::billing::BillingIngress::Mcp,
+                        ),
+                    ),
+                    crate::services::billing::BillingIngress::Mcp,
+                )
+                .expect("MCP billing route classification");
+            let response = handle_tools_call(&state, &auth, None, &request, false, permit).await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["result"]["isError"], true, "{name}: {payload}");
+            let text = payload["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(text.contains("permanently deprecated"), "{name}: {text}");
+            assert!(text.contains("Do not retry"), "{name}: {text}");
         }
         db.drop().await.unwrap();
     }
@@ -9142,79 +8662,6 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(body["result"]["protocolVersion"], expected);
         }
-    }
-    #[test]
-    fn oracle_result_lists_artifacts_instead_of_claiming_empty_response() {
-        use crate::models::oracle_task::{OracleFile, OracleTask, OracleTaskStatus};
-        let now = chrono::Utc::now();
-        let mut task = OracleTask {
-            failure_detail: None,
-            observed_model_switcher: None,
-            observed_model_effort: None,
-            require_model_match: true,
-            excluded_worker_ids: Vec::new(),
-            reroute_count: 0,
-            id: "task-1".to_string(),
-            pool_id: "pool-1".to_string(),
-            submitter_user_id: "user-1".to_string(),
-            kind: "prompt".to_string(),
-            target_url: None,
-            api_key_id: None,
-            api_key_name: None,
-            prompt: "p".to_string(),
-            model_label: None,
-            project_url: None,
-            tag: None,
-            pdf_base64: None,
-            pdf_name: None,
-            attachment_base64: None,
-            attachment_name: None,
-            conversation_id: None,
-            is_followup: false,
-            required_worker_label: None,
-            client_ref: None,
-            status: OracleTaskStatus::Completed,
-            phase: None,
-            phase_detail: None,
-            phase_at: None,
-            assigned_worker_id: None,
-            dispatched_at: None,
-            lease_expires_at: None,
-            retry_count: 0,
-            max_retries: 0,
-            attempt_count: 0,
-            dispatch_attempt_id: None,
-            response: None,
-            response_chars: None,
-            images: None,
-            files: Some(vec![OracleFile {
-                name: "result.json".to_string(),
-                mime: "application/json".to_string(),
-                data: b"{\"verdict\":\"reject\"}".to_vec(),
-            }]),
-            chatgpt_url: None,
-            failure_reason: None,
-            worker_script_version: None,
-            completed_at: None,
-            expires_at: None,
-            created_at: now,
-            updated_at: now,
-        };
-        let (text, is_error) = render_oracle_task_result(&task, 0, "pending");
-        assert!(!is_error);
-        assert!(!text.contains("empty response"), "{text}");
-        assert!(
-            text.contains("result.json (application/json, 20 bytes)"),
-            "{text}"
-        );
-        assert!(text.contains("--artifacts"), "{text}");
-        // The body itself is never inlined into the MCP text.
-        assert!(!text.contains("verdict"), "{text}");
-
-        task.response = Some("Summary only.".to_string());
-        let (text, _) = render_oracle_task_result(&task, 0, "pending");
-        assert!(text.starts_with("Summary only."));
-        assert!(text.contains("Artifacts (1)"));
     }
 }
 

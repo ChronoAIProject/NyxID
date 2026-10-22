@@ -1,5 +1,12 @@
 # Oracle Relay: call browser LLMs through NyxID
 
+> **Retired on 2026-10-22.** NyxID's built-in oracle is permanently deprecated.
+> Every route under `/api/v1/oracle` answers `410 Gone` with error
+> `oracle_retired` (code 11099), the `nyx__oracle_*` MCP tools are no longer
+> listed and refuse every call with the same message, and `nyxid oracle`
+> commands fail with that server error. Do not retry. The rest of this
+> document describes the design as it was and is kept for history only.
+
 The oracle relay turns a logged-in ChatGPT Pro browser into shared capacity
 that any NyxID user or agent can call. A **pool** is one capacity unit. Its
 owner runs the supervised CDP worker or the NyxID userscript in one or more
