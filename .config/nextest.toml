@@ -16,6 +16,21 @@ store-failure-output = true
 filter = "test(=handlers::assistant_nyxagent::tests::capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot) | test(=handlers::assistant_nyxagent::tests::capacity_retry_after_never_extends_trigger_grace_deadline) | test(=handlers::assistant_nyxagent::tests::expired_or_nearly_expired_run_grace_preserves_dispatch_and_response_bounds) | test(=handlers::assistant_nyxagent::tests::lost_session_rebinds_with_recap_and_same_turn_id)"
 threads-required = "num-cpus"
 
+# Stream-bound tests use 400ms/500ms deadlines and one measures settlement
+# against a four-second ceiling. They need the same isolation as the recovery
+# tests above so unrelated database setup/drop work cannot consume those bounds.
+[[profile.ci.overrides]]
+filter = """
+test(=handlers::assistant_nyxagent::tests::delayed_headers_fail_as_first_byte_with_internal_stage) |
+test(=handlers::assistant_nyxagent::tests::keepalives_before_created_satisfy_first_byte_and_the_turn_completes) |
+test(=handlers::assistant_nyxagent::tests::keepalive_only_stream_fails_on_no_progress_with_its_response_id) |
+test(=handlers::assistant_nyxagent::tests::tool_progress_events_reset_the_no_progress_bound) |
+test(=handlers::assistant_nyxagent::tests::silent_transport_fails_on_the_idle_bound) |
+test(=handlers::assistant_nyxagent::tests::unreachable_upstream_fails_at_connect) |
+test(=handlers::assistant_nyxagent::tests::capacity_refusals_recover_after_old_retry_limit_and_slow_proof_respects_first_byte_bound)
+"""
+threads-required = "num-cpus"
+
 # These tests require positive live-consent reads within the production 200ms
 # MongoDB / 250ms overall deadlines. Reserve the runner's test slots so unrelated
 # MongoDB fixture churn cannot turn their healthy-admission preconditions into
