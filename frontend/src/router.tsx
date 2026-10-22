@@ -15,6 +15,7 @@ import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
 import { Suspense } from "react";
+import { captureUnexpectedNyxbotError } from "@/lib/assistant/error-telemetry";
 import { managedConnectPlatform } from "@/lib/channel-platforms";
 import {
   channelBotSetupRewrite,
@@ -417,6 +418,8 @@ const standaloneAuthBeforeLoad = async ({
 
 const assistantRoute = createRoute({
   path: "/assistant",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant"),
   getParentRoute: () => rootRoute,
   // Shared with AssistantPage so the router and the page agree on what
   // `?draft` means; a param dropped here makes the optimistic "New chat"
@@ -428,6 +431,8 @@ const assistantRoute = createRoute({
 
 const assistantPluginsRoute = createRoute({
   path: "/assistant/plugins",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/plugins"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/plugins"),
   getParentRoute: () => rootRoute,
   validateSearch: withAccountPanelSearch(() => ({})),
   beforeLoad: standaloneAuthBeforeLoad,
@@ -436,6 +441,8 @@ const assistantPluginsRoute = createRoute({
 
 const assistantApprovalsRoute = createRoute({
   path: "/assistant/approvals",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/approvals"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/approvals"),
   getParentRoute: () => rootRoute,
   validateSearch: withAccountPanelSearch(() => ({})),
   beforeLoad: standaloneAuthBeforeLoad,
@@ -717,6 +724,8 @@ const automationsRoute = createRoute({
 
 const assistantAutomationsRoute = createRoute({
   path: "/assistant/automations",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/automations"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/automations"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   validateSearch: withAccountPanelSearch(parseAutomationSearch),
@@ -725,6 +734,8 @@ const assistantAutomationsRoute = createRoute({
 
 const assistantMachinesRoute = createRoute({
   path: "/assistant/machines",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   validateSearch: withAccountPanelSearch(parseMachinesSearch),
@@ -790,6 +801,8 @@ const nodesRoute = createRoute({
 
 const machineDesktopRoute = createRoute({
   path: "/assistant/machines/$nodeId/desktop",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/$nodeId/desktop"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/$nodeId/desktop"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: MachineDesktopPage,
@@ -798,6 +811,8 @@ const machineDesktopRoute = createRoute({
 
 const machineSetupRoute = createRoute({
   path: "/assistant/machines/new",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/new"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/new"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="machine-setup" />,
@@ -805,6 +820,8 @@ const machineSetupRoute = createRoute({
 });
 const machinePairRoute = createRoute({
   path: "/assistant/machines/pair",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/pair"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/pair"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="machine-pair" />,
