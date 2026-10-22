@@ -150,6 +150,31 @@ async fn retry_uses_original_token_for_server_conflict_timeout_and_malformed_suc
     }
 }
 #[tokio::test]
+async fn malformed_transient_response_preserves_retry_after_within_the_total_budget() {
+    for status in [408, 429, 503] {
+        let server = MockServer::start().await;
+        Mock::given(path("/api/v1/auth/refresh"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .set_body_string("{")
+                    .insert_header("Retry-After", "9999"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let outcome = refresh_with_retry(
+            &reqwest::Client::new(),
+            &server.uri(),
+            "original",
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(outcome, RefreshExchange::Network(_)));
+        server.verify().await;
+    }
+}
+#[tokio::test]
 async fn terminal_responses_are_never_retried_and_transients_exhaust_as_unavailable() {
     for (status, body, terminal) in [
         (

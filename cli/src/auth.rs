@@ -786,7 +786,9 @@ pub(crate) async fn refresh_with_retry(
                         false,
                     ));
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Ok((RefreshExchange::Network(error.into()), retry_after, true));
+                }
             };
             let rotation_conflict = status == reqwest::StatusCode::CONFLICT
                 && body
