@@ -899,7 +899,7 @@ async fn recover_resources_inner(
         return block(manager, machine, &mut progress, "delete_pod_still_present").await;
     }
     let current_creation_terminal =
-        operations::creation_responsibilities_terminal(&manager.db, machine).await?;
+        operations::delete_creation_responsibilities_terminal(&manager.db, machine).await?;
     // Retain the terminal-work milestone that authorized the first absence
     // stop. Fresh responsibilities still gate completion below, including on
     // tombstone scans; they cannot replace that first accounting boundary.

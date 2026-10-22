@@ -68,6 +68,7 @@ function conversation(key = id): NyxAgentConversation {
 
 function history(): NyxAgentHistory {
   return {
+    cma_operations: [],
     conversation: conversation(),
     messages: [
       {
@@ -178,6 +179,39 @@ afterEach(() => {
 });
 
 describe("NyxAgent server-backed transport", () => {
+  it("keeps CMA status independent of the completed reply, refreshes it, and restores it after reload", async () => {
+    const page = history();
+    page.cma_operations = [{
+      id: "watch-1", turn_id: "turn", kind: "cma_response", operation_id: "resp_agt_test_1",
+      agent_id: "agt_test", idempotency_key: "request-1", status: "in_progress", phase: null,
+      state: "waiting", reason: null, monitor_name: "NyxBot", created_at: start, checked_at: afterReset,
+    }];
+    globalThis.__nyxidAssistantHttpMock = () => json(page);
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    expect(transport.session(id).messages.find((message) => message.id === "u")?.cmaOperations).toBeUndefined();
+    const reply = transport.session(id).messages.find((message) => message.id === "a");
+    expect(reply?.status).toBe("complete");
+    expect(reply?.cmaOperations?.[0]?.status).toBe("in_progress");
+    await transport.history(id);
+    expect(transport.session(id).messages.find((message) => message.id === "a")).toBe(reply);
+    // The latest page no longer contains the original reply, but the thread's
+    // operation snapshot must still settle its card on the retained older page.
+    page.messages = [];
+    page.cma_operations[0] = { ...page.cma_operations[0]!, state: "delivered", reason: "completed", status: "completed" };
+    await transport.history(id);
+    expect(transport.session(id).messages.find((message) => message.id === "a")?.cmaOperations?.[0]?.status).toBe("completed");
+    const restored = new NyxAgentTransport();
+    page.messages = history().messages;
+    await restored.history(id);
+    expect(restored.session(id).messages.find((message) => message.id === "a")?.cmaOperations).toEqual(page.cma_operations);
+    page.cma_operations = [];
+    await transport.history(id);
+    expect(transport.session(id).messages.every((message) => !message.cmaOperations)).toBe(true);
+    const ordinary = new NyxAgentTransport();
+    await ordinary.history(id);
+    expect(ordinary.session(id).messages.every((message) => !message.cmaOperations)).toBe(true);
+  });
   it("keeps stopped replies visibly stopped with a cancellation code", async () => {
     globalThis.__nyxidAssistantHttpMock = () =>
       json({

@@ -167,6 +167,19 @@ impl Manager {
             };
             let claim = effect.claim_id.as_deref().ok_or_else(unavailable)?;
             let result = self.apply_effect(&effect).await;
+            if result.is_err() && operations::has_fresh_undispatched_claim(&effect) {
+                // apply_effect can itself safety-pause before returning an
+                // error. Seal that same claim before either acknowledgement
+                // exit can discard its final non-dispatch attestation.
+                if let Some(current) =
+                    lifecycle::get_machine(&self.db, &effect.owner_id, &effect.machine_id).await?
+                {
+                    Box::pin(operations::cancel_undispatched_claim(
+                        &self.db, &current, &effect,
+                    ))
+                    .await?;
+                }
+            }
             operations::acknowledge_effect(
                 &self.db,
                 &effect.id,
@@ -332,7 +345,16 @@ impl Manager {
         // Free safety windows use the same native shutdownTime contract.
         let free: Vec<ManagedMachine> = self.db.collection(MACHINES).find(doc!{"free_slot":true,"resource_state":{"$in":["ready","provisioning","resuming"]}}).sort(doc!{"native_safety_checked_at":1,"_id":1}).limit(16).max_time(Duration::from_secs(3)).await?.try_collect().await?;
         for machine in free {
-            if machine
+            if super::remote_machine_runtime::pending_resume_initialization(
+                &self.db,
+                &machine,
+                Utc::now(),
+            )
+            .await?
+            {
+                // Keep the stopped predecessor's deadline unchanged. The
+                // accepted finite Resume will initialize the next generation.
+            } else if machine
                 .native_run_not_after
                 .is_some_and(|at| at <= Utc::now())
             {
@@ -350,7 +372,7 @@ impl Manager {
             self.db
                 .collection::<Document>(MACHINES)
                 .update_one(
-                    doc! {"_id":&machine.node_id},
+                    super::remote_machine_runtime::maintenance_snapshot_filter(&machine),
                     doc! {"$set":{"native_safety_checked_at":bson::DateTime::now()}},
                 )
                 .await?;
@@ -430,13 +452,25 @@ impl Manager {
         if machine.active_operation_id.as_deref() != Some(effect.operation_id.as_str()) {
             // The successor owns desired state. Old lost-response effects are
             // never allowed to resurrect or remove its resource.
-            operations::cancel_undispatched_claim(&self.db, &machine, effect).await?;
+            let cancelled =
+                operations::cancel_undispatched_claim(&self.db, &machine, effect).await?;
+            if !cancelled && operations::has_fresh_undispatched_claim(effect) {
+                return Err(unavailable());
+            }
+            // Legacy unknown deliveries may be acknowledged as inert work;
+            // that bookkeeping never discharges their request responsibility.
             return Ok(());
         }
         if machine.resource_state == ResourceState::Deleting
             && effect.kind != EffectKind::DeleteSandbox
         {
-            operations::cancel_undispatched_claim(&self.db, &machine, effect).await?;
+            let cancelled =
+                operations::cancel_undispatched_claim(&self.db, &machine, effect).await?;
+            if !cancelled && operations::has_fresh_undispatched_claim(effect) {
+                return Err(unavailable());
+            }
+            // Legacy unknown deliveries may be acknowledged as inert work;
+            // that bookkeeping never discharges their request responsibility.
             return Ok(());
         }
         if effect.kind == EffectKind::DeleteSandbox {

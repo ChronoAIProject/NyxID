@@ -5,6 +5,8 @@ const channelErrors: Record<string, string> = {
     "The channel gateway has not authorized NyxBot to manage this connection. An administrator needs to check the gateway configuration.",
   gateway_unavailable:
     "The channel gateway is temporarily unavailable. Try again shortly.",
+  setup_interrupted:
+    "This connection changed while it was being set up. Reconnect to try again.",
   gateway_provider_not_registered:
     "The Agent Event Gateway has not registered NyxBot as a provider yet (operator step). Telegram bots cannot use NyxBot until it is.",
   gateway_rejected_request:

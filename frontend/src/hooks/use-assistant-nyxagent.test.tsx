@@ -53,6 +53,7 @@ beforeEach(() => {
   requests = [];
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   page = {
+    cma_operations: [],
     conversation: {
       id,
       title: "Question",
@@ -108,6 +109,24 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
+
+it("keeps polling a CMA job after the assistant turn has ended", async () => {
+  page.conversation.active_turn = null;
+  page.cma_operations = [{
+    id: "watch-1", turn_id: "turn", kind: "cma_response", operation_id: "resp_agt_test_1",
+    agent_id: "agt_test", idempotency_key: null, status: "in_progress", phase: null,
+    state: "waiting", reason: null, monitor_name: "NyxBot", created_at: "2026-10-22T10:00:00Z", checked_at: null,
+  }];
+  const { result, unmount } = renderHook(() => useNyxAgentAssistantChat({
+    selectedConversationId: id, onConversationAdopted: vi.fn(), threadsAgentId: NYXBOT,
+  }), { wrapper });
+  await waitFor(() => expect(result.current.isStreaming).toBe(false));
+  const reads = () => requests.filter((request) => request.includes(`/conversations/${id}`)).length;
+  await waitFor(() => expect(reads()).toBeGreaterThanOrEqual(1));
+  await waitFor(() => expect(reads()).toBeGreaterThanOrEqual(2), { timeout: 6500 });
+  expect(requests.some((request) => request.startsWith("POST"))).toBe(false);
+  unmount();
+}, 8000);
 
 it("polls only selected history every two seconds and refreshes the agent's threads once on settlement",
   async () => {

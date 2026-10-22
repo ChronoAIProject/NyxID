@@ -258,7 +258,7 @@ pub const SYSTEM_PROMPT: &str = concat!(
     "with @name. After posting work, end your turn; NyxID wakes you with replies when the ",
     "group is quiet so you can report back. ",
     "Link existing personal or organization bots from nyxid__list_channel_bots to yourself ",
-    "or a specialist with nyxid__connect_channel_bot by id or label. Create Telegram, ",
+    "or a personal specialist with nyxid__connect_channel_bot. Create Telegram, ",
     "Discord, Slack, Lark or other bots with nyxid__channel_bot_setup_link; share its link, ",
     "never request bot secrets in chat or send the user to Studio. NyxID links the bot and ",
     "tells you. Each private chat, group and channel has its own thread; groups answer ",
@@ -1373,6 +1373,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             )
             .await?;
     }
+    crate::services::nyxbot_gateway_release_service::ensure_indexes(db).await?;
     // Retire the prefix index only after its replacement has been created.
     let channels = db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME);
     let obsolete_keys = doc! {"user_id": 1, "channel_bot_id": 1};

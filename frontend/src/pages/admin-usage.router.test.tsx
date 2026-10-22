@@ -42,11 +42,27 @@ it("keeps the dashboard and list on one route with a shared saved time range", a
       created_at: "2026-09-19T00:00:00Z",
     },
   });
+  const actor = "22222222-2222-4222-8222-222222222222";
+  const owner = "33333333-3333-4333-8333-333333333333";
   const config = { version: 1, draft: newView(), saved_views: [] };
   const get = vi.spyOn(api, "get").mockImplementation(async (path) => {
     if (path === "/admin/usage/workspace") return { revision: 1, config };
+    if (path === "/services") return { services: [] };
+    if (path.startsWith("/admin/assistant/feedback?"))
+      return { counts: [], recent: [], next_cursor: null };
     if (path.startsWith("/admin/usage/identities?"))
-      return { options: [], total: 0 };
+      return {
+        options: path.includes("kind=actors")
+          ? [{ id: actor, label: "Example User", detail: "user@example.test" }]
+          : [
+              {
+                id: owner,
+                label: "Example Organization",
+                detail: "example-org",
+              },
+            ],
+        total: 1,
+      };
     return usageFixture();
   });
   vi.spyOn(api, "put").mockImplementation(async (_path, body) => ({
@@ -71,7 +87,11 @@ it("keeps the dashboard and list on one route with a shared saved time range", a
   expect(
     // The real lazy page imports the analytics bundle on a cold test worker.
     // Allow that load to finish even while the backend compiler is running.
-    await screen.findByRole("combobox", { name: "Time range" }, { timeout: 10_000 }),
+    await screen.findByRole(
+      "combobox",
+      { name: "Time range" },
+      { timeout: 10_000 },
+    ),
   ).toHaveTextContent("Last 7 days");
   expect(
     await screen.findByRole("combobox", { name: "Ranking sort" }),
@@ -108,6 +128,40 @@ it("keeps the dashboard and list on one route with a shared saved time range", a
     "true",
   );
   expect(screen.getAllByRole("heading", { name: /^Usage$/ })).toHaveLength(1);
+  const filters = screen.getByRole("group", { name: "Usage filters" });
+  expect(
+    filters.compareDocumentPosition(
+      screen.getByRole("tab", { name: "Dashboard" }),
+    ) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  for (const [filter, option] of [
+    ["users", "Example User"],
+    ["users / organizations", "Example Organization"],
+  ]) {
+    await userEvent.click(
+      screen.getByRole("button", { name: `Filter ${filter}` }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: new RegExp(option!) }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Apply" }),
+    );
+  }
+  await waitFor(() =>
+    expect(get).toHaveBeenCalledWith(
+      expect.stringContaining(`actors=${actor}&owners=${owner}`),
+    ),
+  );
+  await userEvent.click(screen.getByRole("tab", { name: "Dashboard" }));
+  await waitFor(() =>
+    expect(get).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `/admin/usage/analytics?period=30d&actors=${actor}&owners=${owner}`,
+      ),
+    ),
+  );
+
   await waitFor(() =>
     expect(api.put).toHaveBeenCalledWith(
       "/admin/usage/workspace",
@@ -122,4 +176,4 @@ it("keeps the dashboard and list on one route with a shared saved time range", a
   );
   view.unmount();
   client.clear();
-});
+}, 20_000);

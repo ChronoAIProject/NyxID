@@ -588,7 +588,7 @@ profile per role and per specialist specialty, but is inactive
 ## Channel bots
 
 `nyxid__connect_channel_bot` (or `POST /channels`) links one of the owner's
-channel bots to NyxBot or a specialist (`link_channel_bot` / `PATCH /channels/{id}`
+channel bots to NyxBot or a personal specialist (`link_channel_bot` / `PATCH /channels/{id}`
 relinks it). Telegram bots use the Agent Event Gateway (catalog slug
 `cmaeg`): NyxID mints a dedicated route key and gateway agent key, creates the
 gateway channel as the owner (the gateway verifies the agent key through

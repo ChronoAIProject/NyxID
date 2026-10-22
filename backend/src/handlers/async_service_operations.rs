@@ -95,7 +95,7 @@ async fn call(
     {
         return Err(denied());
     }
-    let id = watch.operation_id.as_deref().ok_or_else(denied)?;
+    let id = crate::services::cma_operation::poll_id(watch).ok_or_else(denied)?;
     let args = serde_json::json!({watch.contract.id_parameter.clone():id});
     let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args)?
         .with_async_continuation(
@@ -214,7 +214,7 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         return Ok(());
     }
     if w.state == "cancelling" {
-        if w.operation_id.is_none()
+        if crate::services::cma_operation::poll_id(w).is_none()
             && chrono::Utc::now() < w.created_at + chrono::Duration::minutes(2)
         {
             return watches::defer(&state.db, w).await;
@@ -283,6 +283,8 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         .pointer(&w.contract.status_field)
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
+    let agent_not_started =
+        crate::services::cma_operation::record_observation(&state.db, w, &parsed).await?;
     if w.contract.failure_states.iter().any(|s| s == phase) {
         // Error payloads are equally untrusted; retain only bounded encrypted data.
         let detail = w
@@ -300,7 +302,7 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         )
         .await;
     }
-    if !w.contract.success_states.iter().any(|s| s == phase) {
+    if agent_not_started || !w.contract.success_states.iter().any(|s| s == phase) {
         return watches::defer(&state.db, w).await;
     }
     let result = call(state, w, &w.contract.result_operation).await?;

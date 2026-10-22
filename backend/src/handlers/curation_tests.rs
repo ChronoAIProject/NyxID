@@ -1879,7 +1879,8 @@ async fn curation_router_rejects_other_credential_classes_and_live_grant_changes
         .insert_one(crate::models::session::Session {
             purpose: Some(crate::models::session::SessionPurpose::Authenticated),
             mfa_method: None,
-            mfa_assured: false,
+            mfa_assured: Some(false),
+            mfa_exemption: None,
             id: Uuid::new_v4().to_string(),
             user_id: f.owner.clone(),
             token_hash: hash_token(&session_token),

@@ -201,7 +201,11 @@ async fn billed_fixture(label: &str, first_response: ResponseTemplate) -> Billed
 }
 
 async fn settled_rows(fixture: &BilledFixture, expected: usize) -> Vec<UsageMeterRow> {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    // Release follows the attempt's own deadline (up to 20 s overall in these
+    // fixtures) plus MongoDB settlement. Observe for longer than that budget so
+    // a loaded four-slot CI runner cannot turn a correct release into a timeout;
+    // the assertions on what was released are unchanged.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let rows: Vec<UsageMeterRow> = fixture
                 .proxy
@@ -664,7 +668,10 @@ async fn pool_proxy_paused_consumer_renews_lease_and_lease_loss_closes_provider(
     let initial = rows.find_one(doc! {}).await.unwrap().unwrap();
     assert!(!initial.released);
     let initial_lease = initial.pool_attempt.as_ref().unwrap().lease_until;
-    tokio::time::timeout(std::time::Duration::from_secs(14), async {
+    // The heartbeat renews every 10 s. Observe two full intervals plus margin,
+    // because a loaded CI runner can delay one tick past a single interval
+    // without the renewal ever stopping. The renewal itself is still required.
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
         loop {
             let current = rows
                 .find_one(doc! { "_id": &initial.id })

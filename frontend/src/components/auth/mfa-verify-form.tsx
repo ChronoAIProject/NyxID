@@ -1,3 +1,4 @@
+import type { Control } from "react-hook-form";
 import { useRef, useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate } from "@tanstack/react-router";
@@ -123,38 +124,13 @@ export function MfaVerifyForm({ returnTo, cookieChallenge = false }: MfaVerifyFo
             </div>
           )}
 
-          <FormField
+          <MfaCodeFields
             control={form.control}
-            name="code"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>{recoveryMode ? "Recovery code" : "Authenticator code"}</FormLabel>
-                <FormControl>
-                  <Input
-                    placeholder={recoveryMode ? "Paste a recovery code" : "000000"}
-                    maxLength={32}
-                    autoComplete="one-time-code"
-                    inputMode={recoveryMode ? "text" : "numeric"}
-                    disabled={verifyMutation.sessionConfirmationPending}
-                    aria-label={recoveryMode ? "Recovery code" : "Authenticator code"}
-                    className="min-w-0 font-mono text-xs tracking-normal sm:text-sm"
-                    {...field}
-                    ref={codeInputRef}
-                  />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
+            recoveryMode={recoveryMode}
+            onToggleRecovery={() => setRecoveryMode((value) => !value)}
+            disabled={verifyMutation.sessionConfirmationPending}
+            inputRef={codeInputRef}
           />
-
-          <Button
-            type="button"
-            variant="link"
-            className="h-auto p-0 text-12"
-            onClick={() => setRecoveryMode((value) => !value)}
-          >
-            {recoveryMode ? "Use an authenticator code" : "Use a recovery code"}
-          </Button>
 
           <div className="flex flex-col gap-2">
             <Button
@@ -177,5 +153,62 @@ export function MfaVerifyForm({ returnTo, cookieChallenge = false }: MfaVerifyFo
         </form>
       </Form>
     </div>
+  );
+}
+
+/** Shared authenticator/recovery input for sign-in and current-session step-up. */
+export function MfaCodeFields({
+  control,
+  recoveryMode,
+  onToggleRecovery,
+  disabled = false,
+  inputRef,
+}: {
+  control: Control<MfaVerifyFormData>;
+  recoveryMode: boolean;
+  onToggleRecovery: () => void;
+  disabled?: boolean;
+  inputRef?: React.Ref<HTMLInputElement>;
+}) {
+  return (
+    <>
+      <FormField
+        control={control}
+        name="code"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>
+              {recoveryMode ? "Recovery code" : "Authenticator code"}
+            </FormLabel>
+            <FormControl>
+              <Input
+                placeholder={recoveryMode ? "Paste a recovery code" : "000000"}
+                maxLength={32}
+                autoComplete="one-time-code"
+                inputMode={recoveryMode ? "text" : "numeric"}
+                disabled={disabled}
+                aria-label={
+                  recoveryMode ? "Recovery code" : "Authenticator code"
+                }
+                className="min-w-0 font-mono text-xs tracking-normal sm:text-sm"
+                {...field}
+                ref={inputRef ?? field.ref}
+              />
+            </FormControl>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+
+      <Button
+        type="button"
+        variant="link"
+        className="h-auto p-0 text-12"
+        disabled={disabled}
+        onClick={onToggleRecovery}
+      >
+        {recoveryMode ? "Use an authenticator code" : "Use a recovery code"}
+      </Button>
+    </>
   );
 }

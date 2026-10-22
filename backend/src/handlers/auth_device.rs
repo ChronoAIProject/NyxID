@@ -654,7 +654,7 @@ async fn approve_device_grant(
             input,
             selection,
             expiry,
-            user.mfa_assured,
+            user.derived_mfa_authority(),
         )
         .await?;
     } else {
@@ -670,7 +670,7 @@ async fn approve_device_grant(
             &state.encryption_keys,
             state.auth_device_hmac_key.as_slice(),
             input,
-            user.mfa_assured,
+            user.derived_mfa_authority(),
         )
         .await?;
     }
@@ -2119,7 +2119,7 @@ mod tests {
                 approver_ip: Some("127.0.0.1".to_string()),
                 approver_user_agent: Some("nyxid-cli/0.8.0".to_string()),
             },
-            false,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false),
         )
         .await
         .expect("approve");

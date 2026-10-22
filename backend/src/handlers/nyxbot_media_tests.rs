@@ -7,6 +7,7 @@ use crate::{
         channel_platform::{InboundAttachment, InboundMessage},
     },
 };
+use futures::TryStreamExt;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::*};
 
 static INGESTION_ORIGINS: std::sync::LazyLock<
@@ -1822,18 +1823,21 @@ async fn channel_media_chunked_unknown_understated_bodies_retry_once_and_recheck
         } else {
             assert!(input.contains("input_image"), "{input}");
         }
-        let attempts = state
+        // Admission rows are keyed per wall-clock minute, so a slow retry can
+        // land in the next minute's row. Count every admitted attempt.
+        let attempts: i32 = state
             .db
             .collection::<bson::Document>("assistant_upload_limits")
-            .find_one(doc! {})
+            .find(doc! {})
             .await
             .unwrap()
-            .unwrap();
-        assert_eq!(
-            attempts.get_i32("attempts").unwrap(),
-            2,
-            "failed attempt and retry both admitted"
-        );
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get_i32("attempts").unwrap())
+            .sum();
+        assert_eq!(attempts, 2, "failed attempt and retry both admitted");
         provider.abort();
         server.abort();
     }
@@ -2164,17 +2168,38 @@ async fn channel_media_busy_mixed_queue_preserves_order_and_drains_after_flag_di
         .await
         .unwrap();
     finish_media_turn(&state, &blocked).await;
-    for expected_media in [false, true] {
-        let mut start: TurnStart = (&owner_turn_request(&home, "")).into();
-        start.origin = TurnOrigin::Event;
-        let started = start_server_turn(&state, OWNER, start, Pool::Channel { owner: OWNER })
-            .await
-            .unwrap();
-        let Started::Turn { receiver, .. } = started else {
-            panic!("queued turn was not started")
-        };
-        final_reply(receiver).await.unwrap();
-        let captured = calls.lock().await.last().unwrap().clone();
+    // Settlement wakes the next queued question automatically. Starting each
+    // turn here races that detached after_turn hook after turn.completed.
+    crate::handlers::assistant_team::wake(&state, OWNER, &home).await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let thread = engine::get(&state.db, OWNER, &home).await.unwrap();
+            if calls.lock().await.len() == 3
+                && thread.pending_events.is_empty()
+                && thread.active_turn.is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("queued turns settled");
+    let messages = engine::messages(&state.db, OWNER, &home, 10, None)
+        .await
+        .unwrap();
+    let replies: Vec<_> = messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .collect();
+    assert_eq!(replies.len(), 4);
+    for reply in &replies[2..] {
+        assert_eq!(reply.status, "completed");
+        assert_eq!(reply.text, "Here is your answer");
+    }
+    let calls = calls.lock().await;
+    assert_eq!(calls.len(), 3);
+    for (captured, expected_media) in calls[1..].iter().zip([false, true]) {
         assert_eq!(
             captured.to_string().contains("input_image"),
             expected_media,

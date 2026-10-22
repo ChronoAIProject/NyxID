@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useRemoteMachineServiceUsage } from "@/hooks/use-remote-machine-service-usage";
 import { creditsLabel, number } from "@/lib/billing-display";
-import { exactCredits } from "@/lib/credits";
+import { exactCredits, parseCredits } from "@/lib/credits";
 import { useAuthStore } from "@/stores/auth-store";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -31,7 +31,16 @@ export function RemoteMachineServiceUsage({ machineId }: { readonly machineId: s
       const cost = creditsLabel([row], "estimated_credits_micros");
       const exactCost = exactCredits(row.estimated_credits, row.estimated_credits_micros);
       return <article key={`${attribution.job_id}-${row.lago_metric_code}-${row.layer}-${index}`} className="space-y-3 rounded-lg border border-border/50 bg-card p-4">
-        <div className="flex flex-wrap items-center gap-2"><h4 className="break-all text-13 font-medium">{row.service_slug ?? row.service_id ?? "Unavailable service"}</h4><Badge variant="secondary">{row.layer}</Badge>{!row.billable && <Badge variant="secondary">Metering only</Badge>}</div>
+        <div className="flex flex-wrap items-center gap-2">
+          <h4 className="break-all text-13 font-medium">{row.service_slug ?? row.service_id ?? "Unavailable service"}</h4>
+          <Badge variant="secondary">{row.layer}</Badge>
+          <Badge variant="secondary">{row.billable ? "Billable" : "Metering only"}</Badge>
+          {row.billable && (exactCost === null
+            ? <Badge variant="warning">Amount unknown</Badge>
+            : parseCredits(exactCost) === 0n
+              ? <Badge variant="secondary">Zero estimate</Badge>
+              : null)}
+        </div>
         <dl className="grid gap-3 text-12 sm:grid-cols-2">
           <div><dt className="text-muted-foreground">Estimated service cost</dt><dd title={row.billable && exactCost !== null ? `${exactCost} Credits` : undefined}>{row.billable ? `${cost.text} Credits` : "Not charged"}</dd></div>
           <div><dt className="text-muted-foreground">Metered quantity</dt><dd>{number(row.quantity)} {row.metric} · {number(row.events)} events</dd></div>

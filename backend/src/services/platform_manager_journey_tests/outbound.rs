@@ -675,3 +675,42 @@ async fn manager_outbound_provider_valid_text_preserves_links_and_whitespace() {
     }
     j.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn concurrent_saved_reply_notice_snapshots_reuse_the_winner() {
+    let j = Journey::new().await;
+    j.link().await;
+    let (destination, reply, saved) = j.prepared_reply(7801).await;
+    let body = delivery::render_saved(&saved, &j.state.config.frontend_url);
+    assert!(matches!(
+        j.deliver(&destination, &reply, body.clone()).await.unwrap(),
+        DeliveryOutcome::Sent { .. }
+    ));
+    let sent = j.sends().await.len();
+    // Repeat the forced interleaving without depending on scheduler luck.
+    for iteration in 0..8 {
+        j.state
+            .db
+            .collection::<Document>(crate::models::platform_manager_delivery::COLLECTION_NAME)
+            .update_one(
+                doc! {"reference.reply_id": &saved.id},
+                doc! {"$unset": {"notice_card_ids": ""}},
+            )
+            .await
+            .unwrap();
+        let (a, b) = delivery::TEST_BEFORE_NOTICE_SNAPSHOT
+            .scope(Arc::new(tokio::sync::Barrier::new(2)), async {
+                tokio::join!(
+                    Box::pin(j.deliver(&destination, &reply, body.clone())),
+                    Box::pin(j.deliver(&destination, &reply, body.clone()))
+                )
+            })
+            .await;
+        assert!(
+            a.is_ok() && b.is_ok(),
+            "iteration={iteration} a={a:?} b={b:?}"
+        );
+        assert_eq!(j.sends().await.len(), sent, "a={a:?} b={b:?}");
+    }
+    j.state.db.drop().await.unwrap();
+}

@@ -331,6 +331,7 @@ mod tests {
         crate::services::analytics_consent_service::set(&db, actor, true)
             .await
             .unwrap();
+        await_responsive_consent_reads(&db, actor).await;
         TelemetryClient {
             admission_slots: Arc::new(Semaphore::new(CHANNEL_CAPACITY)),
             db: Some(db),
@@ -339,6 +340,38 @@ mod tests {
             environment: "staging",
             app_version: "0.0-test",
             tx,
+        }
+    }
+
+    /// These tests observe the production consent gate: a linearizable read
+    /// that must answer within its 200 ms MongoDB / 250 ms overall deadline.
+    /// That deadline is the assertion, so the precondition is a responsive
+    /// server. A CI runner can still be stalled on the database's own I/O
+    /// backlog (journal flushes, hundreds of per-test database drops) when the
+    /// test starts, even with every test slot reserved. Wait, within the same
+    /// bounded budget the test-database readiness probe uses, until the gate
+    /// answers comfortably inside its deadline; each measured call below still
+    /// runs exactly once against the unchanged production bounds.
+    async fn await_responsive_consent_reads(db: &mongodb::Database, actor: &str) {
+        const BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+        const RESPONSIVE: std::time::Duration = std::time::Duration::from_millis(100);
+        let started = std::time::Instant::now();
+        loop {
+            let probe = std::time::Instant::now();
+            let permitted =
+                crate::services::analytics_consent_service::permitted_revision(db, actor)
+                    .await
+                    .is_some();
+            if permitted && probe.elapsed() <= RESPONSIVE {
+                return;
+            }
+            assert!(
+                started.elapsed() < BUDGET,
+                "MongoDB consent reads were not responsive within {RESPONSIVE:?} for {BUDGET:?} \
+                 (last probe: permitted={permitted}, took {:?})",
+                probe.elapsed()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
     }
 
