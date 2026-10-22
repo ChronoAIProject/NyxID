@@ -1072,6 +1072,7 @@ mod no_auth_strict_push_tests {
             &NodeCapabilitiesMsg {
                 machine: None,
                 http_signature_v2: false,
+                http_guest_no_redirect: false,
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 credential_ack_correlation: true,

@@ -170,7 +170,7 @@ async fn handle_callback_query(
         request.telegram_chat_id,
         chat_id,
         callback.from.id,
-        request.assistant_group.is_some(),
+        request.assistant_group.is_some() || request.guest.is_some(),
     ) {
         tracing::warn!(
             "Chat ID mismatch: expected {:?}, got {}",
@@ -179,6 +179,30 @@ async fn handle_callback_query(
         );
         answer_callback(state, &callback.id, "Unauthorized").await;
         return;
+    }
+
+    if request.guest.is_some() {
+        let recipient = state
+            .db
+            .collection::<crate::models::notification_channel::NotificationChannel>(
+                crate::models::notification_channel::COLLECTION_NAME,
+            )
+            .find_one(bson::doc! {"telegram_chat_id": callback.from.id, "telegram_enabled": true})
+            .await;
+        let authorized = match recipient {
+            Ok(Some(channel)) => super::guest_approval_service::require_decider(
+                &state.db,
+                &request,
+                &channel.user_id,
+            )
+            .await
+            .is_ok(),
+            _ => false,
+        };
+        if !authorized {
+            answer_callback(state, &callback.id, "Unauthorized").await;
+            return;
+        }
     }
 
     // Build an idempotency key from the callback so Telegram retries are

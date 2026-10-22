@@ -1142,6 +1142,7 @@ async fn connect_and_serve(
     // is full we'll retry on the next status_update / reconnect.
     let mut capabilities = serde_json::Map::new();
     capabilities.insert("http_signature_v2".to_string(), true.into());
+    capabilities.insert("http_guest_no_redirect".to_string(), true.into());
     capabilities.insert("proxy_upload_v1".to_string(), true.into());
     capabilities.insert("http_cancellation".to_string(), true.into());
     capabilities.insert("credential_ack_correlation".to_string(), true.into());

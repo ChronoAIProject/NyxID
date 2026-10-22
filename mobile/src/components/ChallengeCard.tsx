@@ -40,8 +40,8 @@ export function ChallengeCard({
   const riskVariant = challenge.risk_level === "high" ? "riskHigh" : challenge.risk_level === "medium" ? "riskMedium" : "riskLow";
   // DESIGN.md §Interaction Rules: status badges always Title Case.
   const riskLabel = challenge.risk_level.charAt(0).toUpperCase() + challenge.risk_level.slice(1);
-  const modeLabel = challenge.approval_mode === "grant" ? "Grant mode" : "Per-request";
-  const durationLabel = challenge.approval_mode === "grant" ? ` · ${grantDurationLabel}` : "";
+  const modeLabel = !challenge.guest && challenge.approval_mode === "grant" ? "Grant mode" : "Per-request";
+  const durationLabel = !challenge.guest && challenge.approval_mode === "grant" ? ` · ${grantDurationLabel}` : "";
   const timeAgo = formatTimeAgo(challenge.created_at);
   // Render an org chip when the backend marks the request as
   // created under an org approval policy. The label falls back to

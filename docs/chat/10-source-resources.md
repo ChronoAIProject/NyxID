@@ -94,8 +94,9 @@ Use the existing specialist configuration: linked-service grants select the
 authorized connection, Role describes the task and starting sources, and
 attached skills hold repeatable procedures and source guides. Source identifiers
 in that configuration are guidance, not a page-level access restriction. Skills
-do not grant service access, and guest turns omit attached skills; a channel
-bot's guest-facing source routing must therefore remain available without a
+do not grant service access. Guest turns omit attached skills unless the owner
+enables both the specialist guest policy and skill sharing. With sharing OFF,
+a channel bot's guest-facing source routing must remain available without a
 private skill. The existing agent model setting controls new specialist threads
 unless the owner explicitly chooses a model for the thread.
 

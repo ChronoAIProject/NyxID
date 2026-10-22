@@ -1,6 +1,7 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
 import type {
+  AssistantGuestPolicyPatch,
   AssistantAgent,
   AssistantAgentCreate,
   AssistantAgentGrantsRequest,
@@ -105,6 +106,17 @@ export function useSetNyxBotAgentGrants() {
   return useAgentOwnerMutation({
     mutationFn: ({ id, ...grants }: AssistantAgentGrantsRequest & { id: string }, guard) =>
       nyxBotApi.setGrants(id, grants, guard),
+    onSettled: (owner) => client.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(owner) }),
+  });
+}
+
+export function useSetNyxBotGuestAccess() {
+  const client = useQueryClient();
+  return useAgentOwnerMutation({
+    mutationFn: (
+      { id, ...patch }: AssistantGuestPolicyPatch & { id: string },
+      guard,
+    ) => nyxBotApi.setGuestAccess(id, patch, guard),
     onSettled: (owner) => client.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(owner) }),
   });
 }

@@ -20,6 +20,7 @@ const WS_PROXY_BUFFER_CAPACITY: usize = 512;
 /// base64 JSON request, 11 MiB is the largest conservative raw-body bound.
 const LEGACY_NODE_PROXY_MAX_BODY_SIZE: usize = 11 * 1024 * 1024;
 pub(crate) const NODE_PROXY_MESSAGE_OVERHEAD_BYTES: usize = 1024 * 1024;
+pub(crate) const GUEST_NO_REDIRECT_HEADER: &str = "x-nyxid-guest-no-redirect";
 
 fn proxy_cancellation_key(node_id: &str, request_id: &str) -> String {
     format!("{}:{node_id}{request_id}", node_id.len())
@@ -445,6 +446,7 @@ struct NodeConnection {
 pub struct NodeCapabilitiesFlags {
     pub http_cancellation: bool,
     pub http_signature_v2: bool,
+    pub http_guest_no_redirect: bool,
     pub proxy_upload_v1: bool,
     pub credential_ack_correlation: bool,
     pub remote_credential_crypto_v1: bool,
@@ -1124,6 +1126,8 @@ pub struct NodeCapabilitiesMsg {
     pub http_cancellation: bool,
     #[serde(default)]
     pub http_signature_v2: bool,
+    #[serde(default)]
+    pub http_guest_no_redirect: bool,
     #[serde(default)]
     pub proxy_upload_v1: bool,
     /// Node echoes the `request_id` from a `credential_update` /
@@ -1902,6 +1906,20 @@ impl NodeWsManager {
         Ok(())
     }
 
+    pub async fn require_guest_no_redirect(&self, node_id: &str) -> AppResult<()> {
+        self.await_cluster_capability_resolution(node_id, std::time::Duration::from_millis(500))
+            .await;
+        if !self
+            .cluster_session_info(node_id)
+            .await
+            .capabilities
+            .http_guest_no_redirect
+        {
+            return Err(AppError::GuestEscalationUnavailable);
+        }
+        Ok(())
+    }
+
     /// Send a proxy request to a node and wait for the response.
     /// If `signing_secret` is provided, the request is HMAC-signed.
     /// Returns either a complete response or a streaming channel.
@@ -1959,13 +1977,30 @@ impl NodeWsManager {
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
         let request_body_len = request.body.as_ref().map_or(0, Vec::len);
-        if request.target_id.is_some() || request_body_len > LEGACY_NODE_PROXY_MAX_BODY_SIZE {
+        let guest = request
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(GUEST_NO_REDIRECT_HEADER));
+        if guest
+            || request.target_id.is_some()
+            || request_body_len > LEGACY_NODE_PROXY_MAX_BODY_SIZE
+        {
             self.await_capability_resolution(node_id, std::time::Duration::from_millis(500))
                 .await;
         }
         let conn = self
             .connection_for(node_id, expected_connection_id)
             .map_err(NodeProxyFailure::before_dispatch)?;
+        if guest
+            && !conn
+                .capabilities
+                .lock()
+                .is_ok_and(|caps| caps.http_guest_no_redirect)
+        {
+            return Err(NodeProxyFailure::before_dispatch(
+                AppError::GuestEscalationUnavailable,
+            ));
+        }
         if request.target_id.is_some() {
             let capable = conn
                 .capabilities
@@ -2947,6 +2982,7 @@ impl NodeWsManager {
             && let Ok(mut flags) = conn.capabilities.lock()
         {
             flags.http_signature_v2 = caps.http_signature_v2;
+            flags.http_guest_no_redirect = caps.http_guest_no_redirect;
             flags.proxy_upload_v1 = caps.proxy_upload_v1;
             flags.http_cancellation = caps.http_cancellation;
             flags.credential_ack_correlation = caps.credential_ack_correlation;
@@ -4605,6 +4641,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guest_redirect_policy_rejects_legacy_and_reconnected_nodes_before_dispatch() {
+        let manager = NodeWsManager::new(1, 4);
+        let (tx, mut rx) = mpsc::channel(4);
+        manager.register_connection_with_id("node", "first".into(), tx);
+        manager.mark_status_update_received("node");
+        assert!(matches!(
+            manager.require_guest_no_redirect("node").await,
+            Err(AppError::GuestEscalationUnavailable)
+        ));
+        manager.record_capabilities(
+            "node",
+            &NodeCapabilitiesMsg {
+                http_guest_no_redirect: true,
+                ..Default::default()
+            },
+        );
+        manager.require_guest_no_redirect("node").await.unwrap();
+        let (replacement, mut replacement_rx) = mpsc::channel(4);
+        manager.register_connection_with_id("node", "second".into(), replacement);
+        manager.mark_status_update_received("node");
+        assert!(matches!(
+            manager.require_guest_no_redirect("node").await,
+            Err(AppError::GuestEscalationUnavailable)
+        ));
+        let mut request = cancellation_request("guest-request");
+        request
+            .headers
+            .push((GUEST_NO_REDIRECT_HEADER.into(), "1".into()));
+        let failure = manager
+            .send_proxy_request_classified_prepared(
+                "node",
+                request,
+                None,
+                Some("second"),
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
+            )
+            .await;
+        let failure = match failure {
+            Err(failure) => failure,
+            Ok(_) => panic!("legacy node received a guest request"),
+        };
+        assert!(!failure.dispatched);
+        assert!(matches!(
+            failure.error,
+            AppError::GuestEscalationUnavailable
+        ));
+        assert!(rx.try_recv().is_err());
+        assert!(replacement_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn pool_node_own_header_timeout_cancels_provider_and_cleans_pending() {
         let manager = NodeWsManager::new(1, 100);
         let (tx, mut rx) = mpsc::channel(256);
@@ -4899,6 +4986,7 @@ mod tests {
             &NodeCapabilitiesMsg {
                 machine: None,
                 http_signature_v2: false,
+                http_guest_no_redirect: false,
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 proxy_max_body_size: Some(4),
@@ -6063,6 +6151,7 @@ mod tests {
             &NodeCapabilitiesMsg {
                 machine: None,
                 http_signature_v2: false,
+                http_guest_no_redirect: false,
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 credential_ack_correlation: true,
@@ -6092,6 +6181,7 @@ mod tests {
             &NodeCapabilitiesMsg {
                 machine: None,
                 http_signature_v2: false,
+                http_guest_no_redirect: false,
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,

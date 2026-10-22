@@ -463,6 +463,7 @@ fn node_session_info(
             capabilities_resolved: owner.capabilities_resolved,
             capabilities: crate::services::node_ws_manager::NodeCapabilitiesFlags {
                 http_signature_v2: owner.http_signature_v2,
+                http_guest_no_redirect: owner.http_guest_no_redirect,
                 proxy_upload_v1: owner.proxy_upload_v1,
                 http_cancellation: owner.http_cancellation,
                 credential_ack_correlation: owner.credential_ack_correlation,
@@ -3169,6 +3170,7 @@ mod tests {
             &first.id,
             &NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                http_guest_no_redirect: false,
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
@@ -3576,6 +3578,7 @@ mod tests {
             &node.id,
             &NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                http_guest_no_redirect: false,
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
@@ -3859,6 +3862,7 @@ mod tests {
                         &node.id,
                         &NodeCapabilitiesMsg {
                             http_signature_v2: false,
+                            http_guest_no_redirect: false,
                             proxy_upload_v1: false,
                             http_cancellation: false,
                             remote_credential_crypto_v1: true,
@@ -5822,6 +5826,7 @@ mod tests {
             }),
             capabilities: NodeCapabilitiesFlags {
                 http_signature_v2: false,
+                http_guest_no_redirect: false,
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 credential_ack_correlation: true,

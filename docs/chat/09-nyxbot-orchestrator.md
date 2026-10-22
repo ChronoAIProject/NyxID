@@ -807,20 +807,57 @@ guest authorization; their catalog inclusion grants no execution access.
   asking NyxBot (`nyxid__set_guest_access`, "let the group edit the office
   sheet"; `all` must name its services); `nyxid__list_subagents` and the agent
   summary show them (`guest_access`). Levels are kept across other grant
-  changes and dropped with the service; a service granted anew starts at
-  `use`. Calls beyond the level are refused with
-  `owner_only` (naming the service and its level) before anything is sent. SSH
+  changes and dropped with the service.
+  `guest_policy.enabled` defaults to false, including existing rows. OFF selects
+  the legacy paths: missing levels mean `use`, owner approvals stay private,
+  skills are not shared, and redirects and WebSocket upgrades behave as before.
+  Saved default/escalation/share values are dormant. MCP looks up explicit levels
+  by connection/service ID only; raw HTTP retains its catalog fallback.
+  The following default, escalation and transport rules apply only while ON.
+  `guest_policy.default_access` (`read` or
+  `use`, default `use`) applies to every granted service without an explicit
+  level, including services granted later; `all` must name services. Setting a
+  service to `default` removes its override. This covers both user connections
+  and platform/catalog allowlists; a connection override precedes a catalog
+  override. Operation and input scopes are an independent hard limit, never
+  widened by a guest approval.
+  `guest_policy.escalation=refuse` (default) refuses beyond-level calls with
+  `owner_only`; `ask_owner` flags them to the owner through the ordinary approval
+  service as an exact, single-use per-request approval. The foreground MCP call
+  waits; approve sends that call once, deny/expiry returns `guest_owner_declined`.
+  Neither Full access nor an owner's reusable grant approves it. No guest request
+  creates a grant, and remember/duration decisions are rejected by the server.
+  At most one request may be pending per guest thread, and at most 20 may be
+  admitted per specialist in a rolling hour (`guest_escalation_limited`).
+  Notifications, web, mobile and Telegram mark the guest's sanitized platform,
+  chat title, sender name and specialist; decision controls go only to the owner,
+  never the guest chat.
+  Raw HTTP proxy (ID, slug, `_nyxid_via`, including SDK and node paths) and the
+  LLM gateway enforce the same level but lack a guest-bound prepared-call
+  continuation. Beyond-level and approval-gated calls under `ask_owner` return
+  `guest_escalation_unavailable` (403, code 12104); the default `refuse` policy
+  retains its existing scope refusal. Guest WebSocket upgrades require effective
+  `all` access, with every existing service, operation-scope, approval and node gate
+  still enforced. Read/use cannot classify later frames: they return 12104 under
+  `ask_owner`, or the legacy scope refusal (9000) under `refuse`. Durable async
+  watches always refuse guests because consent cannot authorize background
+  operations: ON + `ask_owner` returns 12104, while ON + `refuse` uses the
+  legacy Forbidden for watch admission and the guest refusal for MCP calls.
+  OFF retains the exact main-era async ordering and response, including
+  `Forbidden("Guests cannot create async watches")` after ordinary approval checks.
+  Use foreground MCP for guest approvals. Org specialists retain their existing
+  refusal of channel/guest turns. SSH
   (a shell can do anything) stays the owner's, as do `nyxid__` account, team,
   memory and posting tools and connection and Oracle tools (the user's
   decision: "anyone in the group can talk to the bot … dangerous command should
   only be allowed by the owner", with the agent's key scoped to its granted
   services);
-- an ungranted service, and an operation the owner put behind approval, are
-  refused without a permission or approval request at every level, and an
-  approval the owner granted for their own requests does not let a guest in
-  (the chat's key is shared, the approval is not), so a guest never widens
-  what a specialist may use or acts in the owner's name; audit rows of chat
-  tool calls record `guest`;
+- an ungranted service is always refused without a permission request. An
+  approval-gated operation needs its own explicit guest decision under
+  `ask_owner`, at every guest level; otherwise it is refused. The owner's
+  reusable approvals never authorize guests. Policy edits emit metadata-only
+  `assistant_guest_policy_changed`; escalations record `guest`, `escalated` and
+  outcome without payloads;
 - guests' messages are never queued as the owner's work: a busy agent asks them
   to try again (only if they spoke to the bot), a guest turn leaves the owner's
   queued events alone, and guest turns never reset the owner's event-turn loop
@@ -835,6 +872,34 @@ guest authorization; their catalog inclusion grants no execution access.
   them (messages record the turn origin), never what the owner said in the
   app, NyxID's notices, or event-turn replies (not always delivered);
 - only the owner's words confirm action cards.
+
+`guest_policy.share_skills` defaults to false. With the policy ON and sharing selected, specialist guest
+turns receive attached skill guidance and owner-selected preloads. Authoring,
+learning, memory and owner account tools remain private. Sharing skills changes
+the guest prompt itself and therefore its instruction fingerprint. Guest policy
+metadata is never appended to prompts; owner and NyxBot contexts keep their binding.
+The Grants tab exposes these settings and the preset “Same as me for everyday work; ask me for the rest”
+(enables the policy with `use`, `ask_owner`, shared skills). The switch is OFF by
+default; other policy controls are disabled while OFF, and legacy per-service
+levels remain editable. The human-only
+`GET/PATCH /api/v1/assistant/nyxagent/agents/{id}/guest-access`, NyxBot's Sensitive
+`nyxid__set_guest_access` tool, and `nyxid nyxbot guest-access show|set` expose the
+same policy for personal specialists. `enabled` omitted in PATCH preserves its
+value; other settings never implicitly enable it. GET and agent/list summaries
+return saved `guest_policy` and `effective_guest_policy`. Organization specialists do not answer guests;
+guest policy and guest-level writes are forbidden (HTTP 403) and their UI controls
+are hidden. Organization grants retain their existing combined refusal of personal
+account access, saved logins and guest sharing.
+`PUT /agents/{id}/grants` accepts `default` in `guest_access` to clear an override
+atomically with the grants save; read/use/all retain their explicit meanings.
+
+**Rollout:** upgrade all API, execution and approval replicas before enabling the
+policy on any specialist. Upgrade node agents before routing policy-ON guest HTTP
+through them; OFF needs no node upgrade. Stored models accept future policy fields,
+but earlier drafts with a strict stored policy reader cannot deserialize `enabled`:
+drain those binaries before writing it. Main-era binaries ignore policy entirely.
+Disabling is a rollback of behavior on these new binaries, not permission to restart
+older policy-aware drafts. No data migration or inferred enabling is performed.
 
 Guests' turns are billed to the owner, like every channel turn, and share the
 owner's channel pool. Messages no turn answered (e.g. group chatter while the
@@ -891,6 +956,13 @@ platform, count, a dot while one is working) that opens for the thread being
 viewed and shows five chats, then more on request. Each thread row shows a
 private, group or channel icon. Thread listings carry `channel.channel_agent_id`,
 `bot_label`, `chat_id`, `chat_kind` and `chat_title`.
+
+Policy-ON guest HTTP returns redirects for a new policy check. Node-routed ON guest
+calls require `http_guest_no_redirect`; legacy nodes refuse those calls before
+dispatch. OFF uses the existing clients, emits no guest control header and needs
+no new capability. Existing scoped/resource/permission no-redirect rules still apply
+in both states. ON WebSockets require explicit per-service `all`; approval-gated
+streams remain refused. OFF preserves legacy WebSocket classification and upgrades.
 
 ### 12b. One context for the owner, and no double work
 

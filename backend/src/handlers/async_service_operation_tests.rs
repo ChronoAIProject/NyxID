@@ -24,7 +24,13 @@ impl AsyncFixture {
         Self::build(false).await
     }
     async fn build(distinct_operations: bool) -> Self {
-        let f = orchestrator_fixture("async_service").await;
+        Self::build_for(
+            orchestrator_fixture("async_service").await,
+            distinct_operations,
+        )
+        .await
+    }
+    async fn build_for(f: Fixture, distinct_operations: bool) -> Self {
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = calls.clone();
         let status_gate = Arc::new(tokio::sync::Semaphore::new(1));
@@ -753,11 +759,11 @@ async fn async_guest_refused_and_nonannotated_call_unchanged() {
         .unwrap();
     let mut chat = a.f.chat.clone();
     chat.guest = true;
-    assert!(
-        watches::reserve(&a.f.state.db, &chat, service, endpoint)
-            .await
-            .is_err()
-    );
+    assert!(matches!(
+        watches::reserve(&a.f.state.db, &chat, service, endpoint).await,
+        Err(crate::errors::AppError::Forbidden(message))
+            if message == "Guests cannot create async watches"
+    ));
 }
 
 #[tokio::test]
@@ -1839,3 +1845,221 @@ mod service_policy;
 
 #[path = "async_service_invocation_tests.rs"]
 mod invocation_policy;
+
+#[tokio::test]
+async fn guest_policy_async_transport_refuses_before_approval_or_submission() {
+    use crate::models::assistant_agent::AgentGrants;
+    for platform in [false, true] {
+        let a = AsyncFixture::build_for(fixture("guest_async_transport").await, false).await;
+        let row =
+            a.f.state
+                .db
+                .collection::<crate::models::user_service::UserService>(
+                    crate::models::user_service::COLLECTION_NAME,
+                )
+                .find_one(doc! {"_id": &a.service})
+                .await
+                .unwrap()
+                .unwrap();
+        let id = if platform {
+            row.catalog_service_id.unwrap()
+        } else {
+            a.service.clone()
+        };
+        let grants = if platform {
+            AgentGrants {
+                platform_service_ids: vec![id.clone()],
+                ..Default::default()
+            }
+        } else {
+            AgentGrants {
+                service_ids: vec![id.clone()],
+                ..Default::default()
+            }
+        };
+        crate::services::assistant_team_service::set_grants(
+            &a.f.state.db,
+            &a.f.owner,
+            &a.f.chat.agent_id,
+            crate::services::assistant_team_service::GrantChange::Add(grants),
+        )
+        .await
+        .unwrap();
+        mark_guest(&a.f, true).await;
+        let auth = authenticate(&a.f).await;
+        let catalog = mcp_service::load_operation_catalog(
+            &a.f.state.db,
+            a.f.state.node_ws_manager.as_ref(),
+            &a.f.owner,
+            mcp_node_scope(&auth),
+            mcp_service_scope(&auth),
+        )
+        .await
+        .unwrap();
+        let service = catalog
+            .services
+            .iter()
+            .find(|s| s.service_id == id)
+            .unwrap();
+        let endpoint = service
+            .endpoints
+            .iter()
+            .find(|e| e.async_operation.is_some())
+            .unwrap();
+        for enabled in [false, true] {
+            for level in ["read", "use", "all"] {
+                for escalation in [None, Some("refuse"), Some("ask_owner")] {
+                    let update = match escalation {
+                        Some(escalation) => doc! {"$set": {
+                            format!("guest_access.{id}"):level,
+                            "guest_policy.enabled":enabled, "guest_policy.default_access":"read", "guest_policy.share_skills":true,
+                            "guest_policy.escalation":escalation,
+                        }},
+                        None => doc! {
+                            "$set": {format!("guest_access.{id}"):level},
+                            "$unset": {"guest_policy":""},
+                        },
+                    };
+                    a.f.state
+                        .db
+                        .collection::<bson::Document>(
+                            crate::models::assistant_agent::COLLECTION_NAME,
+                        )
+                        .update_one(doc! {"_id": &a.f.chat.agent_id}, update)
+                        .await
+                        .unwrap();
+                    let auth = authenticate(&a.f).await;
+                    let error = watches::reserve(
+                        &a.f.state.db,
+                        auth.chat.as_ref().unwrap(),
+                        service,
+                        endpoint,
+                    )
+                    .await
+                    .err()
+                    .unwrap();
+                    if enabled && escalation == Some("ask_owner") {
+                        assert!(matches!(
+                            error,
+                            crate::errors::AppError::GuestEscalationUnavailable
+                        ));
+                    } else {
+                        assert!(matches!(&error, crate::errors::AppError::Forbidden(message)
+                        if message == "Guests cannot create async watches"));
+                        assert_eq!(error.error_code(), 1002);
+                        assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
+                    }
+                    for meta in [false, true] {
+                        let auth = authenticate(&a.f).await;
+                        let name = if platform {
+                            "chrono-sandbox__submit_execution_handler"
+                        } else {
+                            "sandbox__submit_execution_handler"
+                        };
+                        let args = json!({"Idempotency-Key":"guest-no-submit","script":"print(1)","language":"python"});
+                        let response = if meta {
+                            call(&a.f, &auth, name, args).await
+                        } else {
+                            direct_call(&a.f, &auth, name, args).await
+                        };
+                        if !enabled || escalation.is_none() {
+                            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                                .await
+                                .unwrap();
+                            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+                            assert_eq!(envelope["result"]["isError"], true);
+                            let text = envelope["result"]["content"][0]["text"].as_str().unwrap();
+                            if level == "read" {
+                                assert_eq!(serde_json::from_str::<Value>(text).unwrap(), crate::services::assistant_acknowledgement_service::guest_service_refusal(&service.service_slug, crate::models::assistant_agent::GuestAccess::Read));
+                            } else {
+                                assert_eq!(
+                                    text,
+                                    crate::errors::AppError::Forbidden(
+                                        "Guests cannot create async watches".into()
+                                    )
+                                    .to_string()
+                                );
+                            }
+                            assert!(a.calls.lock().unwrap().is_empty());
+                            continue;
+                        }
+                        let refusal = result(response, true).await;
+                        if enabled && escalation == Some("ask_owner") {
+                            assert_eq!(
+                                refusal["error"], "guest_escalation_unavailable",
+                                "{refusal}"
+                            );
+                        } else {
+                            let expected = if level == "read" {
+                                crate::services::assistant_acknowledgement_service::guest_service_refusal(
+                                &service.service_slug,
+                                crate::models::assistant_agent::GuestAccess::Read,
+                            )
+                            } else {
+                                crate::services::assistant_acknowledgement_service::guest_refusal_for(auth.chat.as_ref().unwrap())
+                            };
+                            assert_eq!(refusal, expected);
+                        }
+                        assert!(a.calls.lock().unwrap().is_empty());
+                    }
+                }
+            }
+        }
+        // Main evaluates approval policy before durable-watch admission.
+        a.f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(doc! {"_id": &a.f.chat.agent_id},doc! {"$set": {"guest_policy": {"enabled":false,"default_access":"read","escalation":"ask_owner","share_skills":true},"guest_access": {&id:"all"}}}).await.unwrap();
+        crate::services::approval_service::set_service_approval_config(
+            &a.f.state.db,
+            &a.f.owner,
+            &id,
+            &service.service_slug,
+            Some(true),
+            Some(&crate::models::service_approval_config::ApprovalMode::PerRequest),
+            Some(&[]),
+            Some(&crate::models::service_approval_config::ApprovalEffect::Deny),
+        )
+        .await
+        .unwrap();
+        for meta in [false, true] {
+            let auth = authenticate(&a.f).await;
+            let name = if platform {
+                "chrono-sandbox__submit_execution_handler"
+            } else {
+                "sandbox__submit_execution_handler"
+            };
+            let args = json!({"Idempotency-Key":"guest-no-submit","script":"print(1)","language":"python"});
+            let response = if meta {
+                call(&a.f, &auth, name, args).await
+            } else {
+                direct_call(&a.f, &auth, name, args).await
+            };
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(envelope["result"]["isError"], true);
+            assert_eq!(
+                envelope["result"]["content"][0]["text"],
+                "Operation denied by approval policy"
+            );
+        }
+        assert_eq!(
+            a.f.state
+                .db
+                .collection::<bson::Document>(WATCHES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            a.f.state
+                .db
+                .collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+}

@@ -20,7 +20,27 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 // --- Response types ---
 
 #[derive(Debug, Serialize)]
+pub struct GuestApprovalContextResponse {
+    pub platform: String,
+    pub chat_title: String,
+    pub sender_name: String,
+    pub agent_name: String,
+}
+
+impl From<crate::models::approval_request::GuestApprovalContext> for GuestApprovalContextResponse {
+    fn from(guest: crate::models::approval_request::GuestApprovalContext) -> Self {
+        Self {
+            platform: guest.platform,
+            chat_title: guest.chat_title,
+            sender_name: guest.sender_name,
+            agent_name: guest.agent_name,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct ApprovalRequestItem {
+    pub guest: Option<GuestApprovalContextResponse>,
     pub id: String,
     pub service_name: String,
     pub service_slug: String,
@@ -198,6 +218,7 @@ fn to_approval_request_item(
         tool_call_id: request.tool_call_id,
         tool_arguments: request.tool_arguments,
         is_destructive: request.is_destructive,
+        guest: request.guest.map(Into::into),
         approval_mode: request.approval_mode,
         status: request.status,
         created_at: request.created_at.to_rfc3339(),
@@ -402,6 +423,10 @@ async fn ensure_caller_can_decide(
     request: &crate::models::approval_request::ApprovalRequest,
     auth_user_id: &str,
 ) -> AppResult<Option<std::sync::Arc<crate::services::org_agent_service::RequestAccess>>> {
+    if request.guest.is_some() {
+        crate::services::guest_approval_service::require_decider(db, request, auth_user_id).await?;
+        return Ok(None);
+    }
     let group_access =
         crate::services::org_group_service::authorize_approval(db, request, auth_user_id, None)
             .await?;
@@ -823,6 +848,9 @@ pub async fn decide_request(
     // Verify the caller can act on this request -- direct owner, named
     // recipient, or current admin of the owning org.
     let request = approval_service::get_request(&state.db, &request_id).await?;
+    if request.guest.is_some() {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+    }
     let group_access = ensure_caller_can_decide(&state.db, &request, &user_id).await?;
 
     if let Some(duration_sec) = body.duration_sec
@@ -1897,6 +1925,7 @@ mod tests {
 
     fn sample_request(user_id: &str) -> ApprovalRequest {
         ApprovalRequest {
+            guest: None,
             assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
@@ -1931,6 +1960,32 @@ mod tests {
             exact_service: None,
             created_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn guest_approval_response_exposes_display_context_without_execution_binding() {
+        let mut request = sample_request("owner");
+        request.guest = Some(crate::models::approval_request::GuestApprovalContext {
+            agent_id: "private-agent-id".into(),
+            agent_owner_id: "private-owner-id".into(),
+            conversation_id: "private-conversation-id".into(),
+            turn_id: "private-turn-id".into(),
+            endpoint_id: "private-endpoint-id".into(),
+            operation_digest: "private-operation-digest".into(),
+            platform: "telegram".into(),
+            chat_title: "Guest chat".into(),
+            sender_name: "Guest".into(),
+            agent_name: "Specialist".into(),
+            consumed: false,
+        });
+        let response = serde_json::to_value(to_approval_request_item(request, None)).unwrap();
+        assert_eq!(
+            response["guest"],
+            serde_json::json!({
+                "platform":"telegram", "chat_title":"Guest chat", "sender_name":"Guest", "agent_name":"Specialist"
+            })
+        );
+        assert!(!response.to_string().contains("private-"));
     }
 
     #[test]

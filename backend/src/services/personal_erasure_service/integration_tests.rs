@@ -116,6 +116,10 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
             doc! {"_id":"agent-personal","user_id":&owner},
         ),
         (
+            crate::models::assistant_guest_escalation_budget::COLLECTION_NAME,
+            doc! {"_id":"agent-personal","attempts":[],"pending":[]},
+        ),
+        (
             "assistant_resources",
             doc! {"_id":"personal-resource","user_id":&owner,"conversation_id":"private-chat"},
         ),

@@ -343,3 +343,114 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod guest_policy_regressions {
+    use super::*;
+    use crate::models::{assistant_agent::AgentKind, assistant_conversation::AgentRole};
+    use bson::doc;
+
+    fn fixture() -> (AssistantConversation, AssistantAgent) {
+        let now = bson::DateTime::now();
+        let row = bson::from_document(doc! {
+            "_id":"thread", "user_id":"owner", "title":"Test", "model":"model",
+            "credential_api_key_id":"key", "message_count":0_i64,
+            "created_at":now, "updated_at":now,
+        })
+        .unwrap();
+        let agent = bson::from_document(doc! {
+            "_id":"agent", "user_id":"owner", "kind":"specialist", "name":"helper",
+            "description":"Help", "created_by":"user", "model":"model",
+            "created_at":now, "updated_at":now,
+        })
+        .unwrap();
+        (row, agent)
+    }
+
+    #[test]
+    fn guest_policy_default_and_absent_preserve_main_owner_and_nyxbot_instruction_bytes() {
+        let (mut row, mut agent) = fixture();
+        let key = [9; 32];
+        for (role, kind) in [
+            (AgentRole::Orchestrator, AgentKind::Nyxbot),
+            (AgentRole::Subagent, AgentKind::Specialist),
+        ] {
+            row.role = role;
+            agent.kind = kind;
+            // Main's stable instruction construction, before guest policy existed.
+            let main_stable = engine::base_prompt(&row, Some(&agent)) + "guidance" + PROTOCOL;
+            let main_fingerprint =
+                audit_service::keyed_fingerprint(Some(&key), DOMAIN, main_stable.as_bytes())
+                    .unwrap();
+            row.nyxagent_session_id = Some("existing-main-session".into());
+            row.nyxagent_instruction_binding = Some(InstructionBinding {
+                session_id: "existing-main-session".into(),
+                fingerprint: main_fingerprint.clone(),
+                marker: Some("main-marker".into()),
+                guest: false,
+            });
+            for absent in [false, true] {
+                let mut document = bson::to_document(&agent).unwrap();
+                if absent {
+                    document.remove("guest_policy");
+                }
+                let agent = bson::from_document(document).unwrap();
+                let prepared =
+                    Prepared::with_guidance(&key, &row, Some(&agent), &[], "guidance").unwrap();
+                assert_eq!(
+                    prepared.instructions().as_bytes(),
+                    format!("{main_stable}\nSession context marker: main-marker").as_bytes()
+                );
+                assert_eq!(prepared.binding.fingerprint, main_fingerprint);
+                assert!(!prepared.reset);
+            }
+        }
+    }
+
+    #[test]
+    fn guest_policy_sharing_skills_changes_guest_fingerprint_and_keeps_memory_private() {
+        let (mut row, mut agent) = fixture();
+        row.role = AgentRole::Subagent;
+        row.guest_turn = true;
+        agent
+            .skills
+            .push(crate::models::catalog_skill_revision::SkillReference {
+                source: "ornn".into(),
+                skill_id: "skill".into(),
+                name: "Selected guidance".into(),
+                version: "1".into(),
+                sha256: "a".repeat(64),
+                dependencies: vec![],
+                disabled: false,
+            });
+        let initial = Prepared::new(&[9; 32], &row, Some(&agent), &[]).unwrap();
+        row.nyxagent_session_id = Some("guest-session".into());
+        let mut binding = initial.binding.clone();
+        binding.session_id = "guest-session".into();
+        row.nyxagent_instruction_binding = Some(binding);
+        agent.guest_policy.default_access =
+            crate::models::assistant_agent::GuestDefaultAccess::Read;
+        agent.guest_policy.escalation = crate::models::assistant_agent::GuestEscalation::AskOwner;
+        agent.guest_policy.share_skills = true;
+        let dormant = Prepared::new(&[9; 32], &row, Some(&agent), &[]).unwrap();
+        assert_eq!(
+            initial.instructions().as_bytes(),
+            dormant.instructions().as_bytes()
+        );
+        assert_eq!(initial.binding.fingerprint, dormant.binding.fingerprint);
+        assert!(!dormant.reset);
+        agent.guest_policy.enabled = true;
+        let shared = Prepared::new(&[9; 32], &row, Some(&agent), &[]).unwrap();
+        assert_ne!(initial.binding.fingerprint, shared.binding.fingerprint);
+        assert!(shared.reset);
+        assert!(shared.memory.is_empty());
+        agent.guest_policy.share_skills = false;
+        assert_eq!(
+            initial.binding.fingerprint,
+            Prepared::new(&[9; 32], &row, Some(&agent), &[])
+                .unwrap()
+                .binding
+                .fingerprint
+        );
+    }
+}

@@ -811,6 +811,11 @@ mod access_mode_tests {
             ("nyxid__set_approval_mode", none.clone(), Sensitive),
             ("nyxid__list_agent_keys", none.clone(), Read),
             ("nyxid__grant_subagent", none.clone(), Sensitive),
+            (
+                "nyxid__set_guest_access",
+                json!({"default":"use", "escalation":"ask_owner", "share_skills":true}),
+                Sensitive,
+            ),
             ("nyxid__spawn_subagent", json!({"name": "a"}), Change),
             (
                 "nyxid__spawn_subagent",
@@ -876,6 +881,7 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            guest_policy: Default::default(),
             channel_adapter_origin: None,
             invocation_controlled: false,
             invocation_id: None,
@@ -930,6 +936,8 @@ pub struct ChatAuthority {
     /// owner): service calls only as far as the owner lets guests use each
     /// service (`AssistantAgent::guest_access`); see `guest_refusal`.
     pub guest: bool,
+    /// Resolved with the live agent; only enabled guest turns select the new policy path.
+    pub guest_policy: crate::models::assistant_agent::GuestPolicy,
     pub confirmation_policy: Option<crate::models::trigger_schedule::ConfirmationPolicy>,
     /// The NyxBot thread that assigned the live turn's work, copied from the
     /// live, unstopped `ActiveTurn` snapshot (issue #1883). `None` for the
@@ -941,6 +949,10 @@ pub struct ChatAuthority {
     pub with_nyxbot: bool,
 }
 impl ChatAuthority {
+    pub fn guest_policy_enabled(&self) -> bool {
+        self.guest && self.guest_policy.enabled
+    }
+
     /// NyxBot threads run with Full access; specialists only with their grants.
     pub fn is_orchestrator(&self) -> bool {
         self.role == AgentRole::Orchestrator
@@ -1035,6 +1047,18 @@ pub fn guest_refusal() -> Value {
         anything that needs their approval, or more than the owner lets guests do with a \
         service. Help with your services otherwise, and say that only the bot's owner can \
         ask for that."})
+}
+
+/// Policy-aware guidance is selected only for an enabled specialist guest turn.
+pub fn guest_refusal_for(chat: &ChatAuthority) -> Value {
+    if !chat.guest_policy_enabled() {
+        return guest_refusal();
+    }
+    json!({"error": "owner_only", "instructions": "You are answering someone other than the \
+        owner. Only the owner can ask for account actions, new connections, more access, \
+        machines, saved logins, SSH, Oracle, or memory. Help within the specialist's granted \
+        services and guest policy. Service calls may wait for the owner's one-time approval \
+        when the owner enabled it; a declined, expired or limited request cannot run."})
 }
 
 pub fn access_request_denied() -> Value {
@@ -1416,6 +1440,7 @@ pub async fn for_key_with_access(
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        guest_policy: agent.guest_policy.clone(),
         channel_adapter_origin: conversation
             .active_turn
             .as_ref()
@@ -2587,7 +2612,7 @@ pub async fn service_gate(
     }
     // A guest never widens what the agent may use: no permission request.
     if chat.guest {
-        return Ok(Some((guest_refusal(), None)));
+        return Ok(Some((guest_refusal_for(chat), None)));
     }
     if !chat.involved() {
         audit_missing_access(db, chat, Some(id), "service").await;
@@ -2661,7 +2686,7 @@ pub async fn account_gate(
         return Ok(None);
     }
     if chat.guest {
-        return Ok(Some((guest_refusal(), None)));
+        return Ok(Some((guest_refusal_for(chat), None)));
     }
     if !chat.involved() {
         audit_missing_access(db, chat, None, "account").await;
@@ -2839,6 +2864,7 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        guest_policy: Default::default(),
         channel_adapter_origin: None,
         invocation_controlled: false,
         invocation_id: row.invocation_id.clone(),
@@ -3265,5 +3291,16 @@ mod reply_selection_tests {
             "new"
         );
         assert!(choose_reply(vec![stale], None, Some(now)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod guest_policy_legacy_text_tests {
+    #[test]
+    fn guest_refusal_preserves_main_instruction_bytes() {
+        assert_eq!(
+            super::guest_refusal(),
+            serde_json::json!({"error":"owner_only", "instructions":"You are answering someone other than the owner. Only the owner can ask for account actions, new connections, more access, anything that needs their approval, or more than the owner lets guests do with a service. Help with your services otherwise, and say that only the bot's owner can ask for that."})
+        );
     }
 }

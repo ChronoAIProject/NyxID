@@ -1,3 +1,4 @@
+import { guestApprovalLabel } from "@/lib/guest-approval";
 import { primaryActionLabel } from "@/lib/approval-labels";
 import type { ApprovalRequestItem } from "@/types/approvals";
 import type {
@@ -66,12 +67,17 @@ export function toAssistantApprovalEntry(
       type: "approval_card",
       block_id: request.id,
       approval_request_id: request.id,
-      body: primaryActionLabel(request),
+      body: request.guest
+        ? `${guestApprovalLabel(request.guest)} — ${primaryActionLabel(request)}`
+        : primaryActionLabel(request),
+      guest: request.guest,
       service_slug: request.service_slug,
-      agent_key_prefix: request.requester_label ?? request.requester_type,
-      approval_mode: request.approval_mode,
+      agent_key_prefix: request.guest
+        ? request.guest.agent_name
+        : (request.requester_label ?? request.requester_type),
+      approval_mode: request.guest ? "per_request" : request.approval_mode,
       grant_duration_sec:
-        request.approval_mode === "grant" ? grantDurationSec : null,
+        !request.guest && request.approval_mode === "grant" ? grantDurationSec : null,
       expires_at: request.expires_at,
       decision: toDecision(request.status),
       decision_channel: toDecisionChannel(request.decision_channel),

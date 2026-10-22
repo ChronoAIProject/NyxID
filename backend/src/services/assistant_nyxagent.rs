@@ -411,7 +411,7 @@ pub fn base_prompt(
     prompt.push_str(WEB_RESEARCH_PROMPT);
     prompt.push_str(CLI_PROMPT);
     if let Some(agent) = agent {
-        if !row.guest_turn {
+        if !row.guest_turn || agent.shares_guest_skills() {
             prompt.push_str(&super::agent_skill_service::instructions(agent));
         }
         if let Some(display_name) = agent.display_name.as_deref() {

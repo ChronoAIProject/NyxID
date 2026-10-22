@@ -73,6 +73,41 @@ impl GuestAccess {
     }
 }
 
+/// Default levels deliberately exclude unrestricted access.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuestDefaultAccess {
+    Read,
+    #[default]
+    Use,
+}
+
+impl From<GuestDefaultAccess> for GuestAccess {
+    fn from(value: GuestDefaultAccess) -> Self {
+        match value {
+            GuestDefaultAccess::Read => Self::Read,
+            GuestDefaultAccess::Use => Self::Use,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestEscalation {
+    #[default]
+    Refuse,
+    AskOwner,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuestPolicy {
+    pub enabled: bool,
+    pub default_access: GuestDefaultAccess,
+    pub escalation: GuestEscalation,
+    pub share_skills: bool,
+}
+
 /// One thing the agent chose to remember. Agent-authored, bounded, never
 /// secrets; shown to the owner, who can delete it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -106,10 +141,13 @@ pub struct AssistantAgent {
     pub grants: AgentGrants,
     /// What people other than the owner (guests in the chats a specialist
     /// answers) may do with each granted service, by service ID. A service
-    /// without an entry uses [`GuestAccess::Use`]. Beside `grants`, not in it,
+    /// without an entry uses `use` while policy is OFF, otherwise its saved default.
+    /// Beside `grants`, not in it,
     /// so writers of `grants` that predate it never erase it.
     #[serde(default)]
     pub guest_access: BTreeMap<String, GuestAccess>,
+    #[serde(default)]
+    pub guest_policy: GuestPolicy,
     /// Stored beside grants so older grant writers cannot erase restrictions.
     #[serde(default)]
     pub operation_scopes: super::agent_operation_scope::OperationScopes,
@@ -172,6 +210,34 @@ pub struct AgentSkillMetadata {
 }
 
 impl AssistantAgent {
+    pub fn effective_guest_policy(&self) -> GuestPolicy {
+        if self.guest_policy.enabled {
+            self.guest_policy.clone()
+        } else {
+            GuestPolicy::default()
+        }
+    }
+
+    pub fn guest_level(&self, service_id: &str) -> GuestAccess {
+        self.guest_access
+            .get(service_id)
+            .copied()
+            .unwrap_or_else(|| self.effective_guest_policy().default_access.into())
+    }
+
+    /// A connection-specific override precedes its catalog override.
+    pub fn guest_level_for(&self, service_id: &str, catalog_id: Option<&str>) -> GuestAccess {
+        self.guest_access
+            .get(service_id)
+            .or_else(|| catalog_id.and_then(|id| self.guest_access.get(id)))
+            .copied()
+            .unwrap_or_else(|| self.guest_level(service_id))
+    }
+
+    pub fn shares_guest_skills(&self) -> bool {
+        !self.is_nyxbot() && self.guest_policy.enabled && self.guest_policy.share_skills
+    }
+
     pub fn is_nyxbot(&self) -> bool {
         self.kind == AgentKind::Nyxbot
     }
@@ -199,5 +265,76 @@ impl std::fmt::Debug for SkillSelection {
             .field("expected_revision", &self.expected_revision)
             .field("count", &self.skills.len())
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod guest_policy_tests {
+    use super::*;
+
+    #[test]
+    fn saved_policy_without_enabled_is_off_and_accepts_future_fields() {
+        let policy: GuestPolicy = bson::from_document(bson::doc! {
+            "default_access":"read", "escalation":"ask_owner", "share_skills":true, "future_setting": {"value":true}
+        }).unwrap();
+        assert!(!policy.enabled);
+        assert_eq!(policy.default_access, GuestDefaultAccess::Read);
+        assert_eq!(policy.escalation, GuestEscalation::AskOwner);
+        assert!(policy.share_skills);
+    }
+
+    #[test]
+    fn legacy_documents_and_explicit_default_resolution() {
+        let now = bson::DateTime::now();
+        let mut agent: AssistantAgent = bson::from_document(bson::doc! {
+            "_id": uuid::Uuid::new_v4().to_string(), "user_id": "owner", "kind": "specialist",
+            "name": "worker", "created_by": "user", "model": "model", "created_at": now, "updated_at": now,
+            "guest_access": {"explicit": "all", "use": "use"}
+        }).unwrap();
+        assert_eq!(agent.guest_policy, GuestPolicy::default());
+        assert_eq!(agent.guest_level("new"), GuestAccess::Use);
+        agent.guest_policy.default_access = GuestDefaultAccess::Read;
+        agent.guest_policy.escalation = GuestEscalation::AskOwner;
+        agent.guest_policy.share_skills = true;
+        assert_eq!(agent.guest_level("new"), GuestAccess::Use);
+        assert!(!agent.shares_guest_skills());
+        assert_eq!(agent.effective_guest_policy(), GuestPolicy::default());
+        agent.guest_policy.enabled = true;
+        assert_eq!(agent.guest_level("new"), GuestAccess::Read);
+        assert_eq!(agent.guest_level("explicit"), GuestAccess::All);
+        assert_eq!(agent.guest_level("use"), GuestAccess::Use);
+        assert_eq!(
+            agent.guest_level_for("connection", Some("explicit")),
+            GuestAccess::All
+        );
+        agent
+            .guest_access
+            .insert("connection".into(), GuestAccess::Read);
+        assert_eq!(
+            agent.guest_level_for("connection", Some("explicit")),
+            GuestAccess::Read
+        );
+        assert_eq!(
+            agent.guest_level_for("new", Some("new-catalog")),
+            GuestAccess::Read
+        );
+        agent.guest_access.remove("explicit");
+        assert_eq!(agent.guest_level("explicit"), GuestAccess::Read);
+        let mut encoded = bson::to_document(&agent).unwrap();
+        encoded
+            .get_document_mut("guest_policy")
+            .unwrap()
+            .insert("future_setting", true);
+        assert!(encoded.contains_key("guest_policy"));
+        assert_eq!(
+            bson::from_document::<AssistantAgent>(encoded)
+                .unwrap()
+                .guest_policy,
+            agent.guest_policy
+        );
+        assert!(
+            serde_json::from_value::<GuestPolicy>(serde_json::json!({"default_access":"all"}))
+                .is_err()
+        );
     }
 }

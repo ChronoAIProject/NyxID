@@ -2540,6 +2540,7 @@ async fn check_llm_approval(
 
     crate::services::agent_operation_scope_service::check_guest_approval(
         operation_guest,
+        auth_user.assistant_chat.as_deref(),
         &approval_outcome,
     )?;
     let pending = match approval_outcome {
@@ -2673,6 +2674,10 @@ async fn enforce_agent_llm_operations(
         .await?;
         return Ok(LlmOperationScope {
             guest,
+            guest_policy_enabled: auth
+                .assistant_chat
+                .as_deref()
+                .is_some_and(|chat| chat.guest_policy_enabled()),
             ..Default::default()
         });
     }
@@ -2700,6 +2705,10 @@ async fn enforce_agent_llm_operations(
     Ok(LlmOperationScope {
         forwarding,
         guest,
+        guest_policy_enabled: auth
+            .assistant_chat
+            .as_deref()
+            .is_some_and(|chat| chat.guest_policy_enabled()),
         identity: Some((id.to_owned(), catalog_id.map(str::to_owned))),
     })
 }
@@ -2711,6 +2720,7 @@ async fn enforce_agent_llm_operations(
 struct LlmOperationScope {
     forwarding: Option<String>,
     guest: bool,
+    guest_policy_enabled: bool,
     identity: Option<(String, Option<String>)>,
 }
 
@@ -2743,7 +2753,7 @@ impl LlmOperationScope {
     }
 
     fn client<'a>(&self, shared: &'a reqwest::Client) -> &'a reqwest::Client {
-        if self.identity.is_some() {
+        if self.guest_policy_enabled || self.identity.is_some() {
             proxy_service::no_redirect_http_client()
         } else {
             shared

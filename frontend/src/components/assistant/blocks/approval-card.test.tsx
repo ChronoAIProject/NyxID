@@ -134,3 +134,26 @@ describe("ApprovalCard", () => {
     ).not.toBeInTheDocument();
   });
 });
+it("shows guest context and hides remember for a guest even if the row says grant", () => {
+  render(
+    <ApprovalCard
+      block={{
+        ...approval(),
+        approval_mode: "grant",
+        grant_duration_sec: 3600,
+        guest: {
+          platform: "telegram",
+          chat_title: "Team",
+          sender_name: "Visitor",
+          agent_name: "researcher",
+        },
+      }}
+      onDecide={vi.fn()}
+    />,
+  );
+  expect(
+    screen.getByText(/Guest request: Visitor via telegram in Team/),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/repeat lark-bot writes/)).not.toBeInTheDocument();
+  expect(screen.getByText("per-request approval")).toBeInTheDocument();
+});

@@ -2652,6 +2652,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             axum::routing::put(handlers::assistant_team::set_agent_operations),
         )
         .route(
+            "/nyxagent/agents/{id}/guest-access",
+            get(handlers::assistant_team::get_guest_access)
+                .patch(handlers::assistant_team::patch_guest_access),
+        )
+        .route(
             "/nyxagent/agents/{id}/grants",
             axum::routing::put(handlers::assistant_team::set_agent_grants),
         )

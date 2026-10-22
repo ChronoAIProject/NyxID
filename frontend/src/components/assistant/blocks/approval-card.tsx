@@ -1,3 +1,4 @@
+import { guestApprovalLabel } from "@/lib/guest-approval";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Ban,
@@ -57,6 +58,11 @@ function ScopeChip({ children }: { readonly children: ReactNode }) {
 function ScopeRow({ block }: { readonly block: ApprovalCardContentBlock }) {
   return (
     <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+      {block.guest ? (
+        <span className="w-full text-11 text-warning">
+          {guestApprovalLabel(block.guest)}
+        </span>
+      ) : null}
       <span className="text-10 font-semibold uppercase tracking-[1px] text-muted-foreground">
         Scope
       </span>
@@ -69,7 +75,7 @@ function ScopeRow({ block }: { readonly block: ApprovalCardContentBlock }) {
         <span className="truncate">{block.agent_key_prefix}</span>
       </ScopeChip>
       <ScopeChip>
-        {block.approval_mode === "per_request"
+        {block.guest || block.approval_mode === "per_request"
           ? "per-request approval"
           : `grant · ${grantDurationLabel(block.grant_duration_sec)}`}
       </ScopeChip>
@@ -265,7 +271,7 @@ export function ApprovalCard({
 
         <ScopeRow block={block} />
 
-        {block.approval_mode === "grant" && (
+        {!block.guest && block.approval_mode === "grant" && (
           <p className="mt-2.5 text-11 leading-relaxed text-muted-foreground">
             Approving also allows repeat {block.service_slug} writes for the
             next {grantDurationLabel(block.grant_duration_sec)} without asking

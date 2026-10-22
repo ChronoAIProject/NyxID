@@ -738,11 +738,11 @@ fn remote_identity(release: &Release, body: &Value) -> Observation {
     let version = body["version"].as_i64().filter(|v| *v > 0);
     let channel = body["channel_id"].as_str().filter(|v| valid_channel_id(v));
     if release.gateway_channel_id.is_none()
-        && !release
+        && release
             .record_id
             .as_ref()
             .and_then(|id| Uuid::parse_str(id).ok())
-            .is_some_and(|id| release.binding_id == format!("bnd_{}", id.simple()))
+            .is_none_or(|id| release.binding_id != format!("bnd_{}", id.simple()))
     {
         return Observation::Malformed;
     }

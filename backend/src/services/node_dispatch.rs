@@ -104,6 +104,7 @@ impl NodeDispatch {
             capabilities_resolved: owner.capabilities_resolved,
             capabilities: crate::services::node_ws_manager::NodeCapabilitiesFlags {
                 http_signature_v2: owner.http_signature_v2,
+                http_guest_no_redirect: owner.http_guest_no_redirect,
                 proxy_upload_v1: owner.proxy_upload_v1,
                 http_cancellation: owner.http_cancellation,
                 credential_ack_correlation: owner.credential_ack_correlation,
@@ -2531,6 +2532,7 @@ mod tests {
         let now = Utc::now();
         NodeConnectionOwner {
             http_signature_v2: false,
+            http_guest_no_redirect: false,
             proxy_upload_v1: false,
             http_cancellation: false,
             instance_name: instance_name.to_string(),

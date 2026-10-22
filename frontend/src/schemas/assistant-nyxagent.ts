@@ -424,6 +424,36 @@ export type AssistantAgentRequest = z.infer<typeof assistantAgentRequestSchema>;
 export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
 export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
 
+export const assistantGuestPolicySchema = z.object({
+  enabled: z.boolean(),
+  default_access: z.enum(["read", "use"]),
+  escalation: z.enum(["refuse", "ask_owner"]),
+  share_skills: z.boolean(),
+});
+export type AssistantGuestPolicy = z.infer<typeof assistantGuestPolicySchema>;
+export const assistantGuestPolicyPatchSchema = assistantGuestPolicySchema
+  .partial()
+  .extend({
+    services: z
+      .record(z.string(), z.enum(["read", "use", "all", "default"]))
+      .optional(),
+  });
+export type AssistantGuestPolicyPatch = z.infer<
+  typeof assistantGuestPolicyPatchSchema
+>;
+export const assistantGuestAccessViewSchema = z.object({
+  agent_id: z.string(),
+  guest_policy: assistantGuestPolicySchema,
+  effective_guest_policy: assistantGuestPolicySchema,
+  services: z.record(
+    z.string(),
+    z.object({
+      access: assistantGuestAccessSchema,
+      source: z.enum(["explicit", "default"]),
+    }),
+  ),
+});
+
 export const assistantAgentSchema = z.object({
   owner_id: z.string().optional(),
   owner_name: z.string().nullable().optional(),
@@ -453,6 +483,11 @@ export const assistantAgentSchema = z.object({
   account_read: z.boolean().default(false),
   /** What guests (other members of the agent's chats) may do with each service. */
   guest_access: z.record(z.string(), assistantGuestAccessSchema.catch("use")).default({}),
+  guest_access_explicit: z
+    .record(z.string(), assistantGuestAccessSchema)
+    .optional(),
+  guest_policy: assistantGuestPolicySchema.optional(),
+  effective_guest_policy: assistantGuestPolicySchema.optional(),
   pending_requests: z.array(assistantAgentRequestSchema).default([]),
   last_reply: z
     .object({
@@ -612,7 +647,7 @@ export const assistantAgentGrantsSchema = z.object({
   services: z.array(z.string()),
   account_read: z.boolean(),
   /** Guest access by service slug; services left out keep their level. */
-  guest_access: z.record(z.string(), assistantGuestAccessSchema),
+  guest_access: z.record(z.string(), z.enum(["read", "use", "all", "default"])),
 });
 /** What the grants endpoint takes: levels only for services whose level changed. */
 export const assistantAgentGrantsRequestSchema = z.object({
@@ -620,7 +655,7 @@ export const assistantAgentGrantsRequestSchema = z.object({
   logins: z.array(z.string()).optional(),
   services: z.array(z.string()),
   account_read: z.boolean(),
-  guest_access: z.record(z.string(), assistantGuestAccessSchema).optional(),
+  guest_access: z.record(z.string(), z.enum(["read", "use", "all", "default"])).optional(),
 });
 export type AssistantAgentGrants = z.infer<typeof assistantAgentGrantsSchema>;
 export type AssistantAgentGrantsRequest = z.infer<typeof assistantAgentGrantsRequestSchema>;

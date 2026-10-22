@@ -959,18 +959,24 @@ async fn check_non_mcp_chat_context(
     let (reads, uses, destructive) = (effects.reads, effects.uses, effects.destructive);
     if chat.guest {
         let agent = team::agent(db, &chat.user_id, &chat.agent_id).await?;
-        let access = agent
-            .guest_access
-            .get(service)
-            .or_else(|| catalog.and_then(|id| agent.guest_access.get(id)))
-            .copied()
-            .unwrap_or_default();
+        if agent.is_nyxbot() {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "NyxBot guest turns cannot execute services".into(),
+            ));
+        }
+        let access = agent.guest_level_for(service, catalog);
         let allowed = match access {
             GuestAccess::All => true,
             GuestAccess::Use => uses,
             GuestAccess::Read => reads && uses,
         };
         if !allowed {
+            if agent.guest_policy.enabled
+                && agent.guest_policy.escalation
+                    == crate::models::assistant_agent::GuestEscalation::AskOwner
+            {
+                return Err(AppError::GuestEscalationUnavailable);
+            }
             return Err(AppError::ApiKeyScopeForbidden(
                 "Guest access does not permit this operation".into(),
             ));
@@ -986,6 +992,38 @@ async fn check_non_mcp_chat_context(
         ));
     }
     Ok(chat.guest)
+}
+
+/// Arbitrary frames require all-level authority; approval cannot classify a stream.
+/// Called before both direct and node WebSocket upgrades; all other gates still run.
+pub async fn check_guest_websocket(
+    db: &Database,
+    chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+    service: &str,
+    catalog: Option<&str>,
+) -> AppResult<()> {
+    let Some(chat) = chat.filter(|chat| chat.guest_policy_enabled()) else {
+        return Ok(());
+    };
+    let agent = team::agent(db, &chat.user_id, &chat.agent_id).await?;
+    if !agent.guest_policy.enabled {
+        return Ok(());
+    }
+    if !agent.is_nyxbot()
+        && agent.guest_level_for(service, catalog)
+            == crate::models::assistant_agent::GuestAccess::All
+    {
+        return Ok(());
+    }
+    if !agent.is_nyxbot()
+        && agent.guest_policy.escalation
+            == crate::models::assistant_agent::GuestEscalation::AskOwner
+    {
+        return Err(AppError::GuestEscalationUnavailable);
+    }
+    Err(AppError::ApiKeyScopeForbidden(
+        "Guest WebSocket access requires all access to this service".into(),
+    ))
 }
 
 fn intersect_effects(
@@ -1071,9 +1109,11 @@ pub(crate) async fn unscoped_effects(
 }
 
 /// Guests share a thread key, never the owner's approval grants or ability to
-/// request approval. Call this before any approval notification or forwarding.
+/// request approval on raw transports. Foreground MCP uses its guest-bound
+/// prepared-call continuation. Call this before raw notifications or forwarding.
 pub fn check_guest_approval(
     guest: bool,
+    chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
     outcome: &super::approval_service::ApprovalOutcome,
 ) -> AppResult<()> {
     if guest
@@ -1082,6 +1122,13 @@ pub fn check_guest_approval(
             super::approval_service::ApprovalOutcome::Allowed { required: false }
         )
     {
+        if let Some(chat) = chat
+            && chat.guest_policy_enabled()
+            && chat.guest_policy.escalation
+                == crate::models::assistant_agent::GuestEscalation::AskOwner
+        {
+            return Err(AppError::GuestEscalationUnavailable);
+        }
         return Err(AppError::ApiKeyScopeForbidden(
             "Guest calls cannot request or use owner approvals".into(),
         ));

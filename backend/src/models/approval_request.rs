@@ -36,6 +36,23 @@ pub struct ExactServiceApprovalRedemption {
     pub failure_code: Option<String>,
 }
 
+/// Server-authored guest identity and exact suspended-call binding. No payloads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestApprovalContext {
+    pub agent_id: String,
+    pub agent_owner_id: String,
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub endpoint_id: String,
+    pub operation_digest: String,
+    pub platform: String,
+    pub chat_title: String,
+    pub sender_name: String,
+    pub agent_name: String,
+    #[serde(default)]
+    pub consumed: bool,
+}
+
 /// Server-only actor and message-chain binding for organization group cards.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupApprovalBinding {
@@ -107,6 +124,8 @@ pub struct ExactServiceApprovalBinding {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalRequest {
+    #[serde(default)]
+    pub guest: Option<GuestApprovalContext>,
     #[serde(default)]
     pub assistant_group: Option<GroupApprovalBinding>,
     /// UUID v4 string
@@ -266,6 +285,7 @@ mod tests {
 
     fn make_approval_request() -> ApprovalRequest {
         ApprovalRequest {
+            guest: None,
             assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),

@@ -43,6 +43,7 @@ fn transport_error_category(error: &reqwest::Error) -> &'static str {
 
 /// Maximum chunk size for streaming responses (64 KB raw bytes).
 const MAX_CHUNK_SIZE: usize = 64 * 1024;
+const GUEST_NO_REDIRECT_HEADER: &str = "x-nyxid-guest-no-redirect";
 
 /// Content types that should be streamed regardless of size.
 const STREAMING_CONTENT_TYPES: &[&str] = &[
@@ -391,6 +392,7 @@ async fn execute_proxy_request_inner(
             .map(|headers| {
                 headers
                     .iter()
+                    .filter(|(name, _)| !name.eq_ignore_ascii_case(GUEST_NO_REDIRECT_HEADER))
                     .filter_map(|(name, value)| {
                         value
                             .as_str()
@@ -467,7 +469,15 @@ async fn execute_proxy_request_inner(
 
     let method = reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
     let destination_client;
-    let http_client = if target_selected || upload.as_ref().is_some_and(|upload| upload.git()) {
+    let guest_no_redirect = request["headers"].as_object().is_some_and(|headers| {
+        headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case(GUEST_NO_REDIRECT_HEADER))
+    });
+    let http_client = if guest_no_redirect
+        || target_selected
+        || upload.as_ref().is_some_and(|upload| upload.git())
+    {
         destination_client = match target_http_client() {
             Ok(client) => client,
             Err(error) => {
@@ -504,6 +514,9 @@ async fn execute_proxy_request_inner(
     let mut forwarded_headers: Vec<(String, String)> = Vec::new();
     if let Some(headers) = request["headers"].as_object() {
         for (name, value) in headers {
+            if name.eq_ignore_ascii_case(GUEST_NO_REDIRECT_HEADER) {
+                continue;
+            }
             if let Some(v) = value.as_str() {
                 if is_aws_sigv4 {
                     let lower = name.to_ascii_lowercase();
@@ -890,6 +903,116 @@ pub fn append_query_param(url: &str, param_name: &str, param_value: &str) -> Str
 #[cfg(test)]
 mod tests {
     use super::append_query_param;
+
+    #[tokio::test]
+    async fn guest_proxy_returns_redirect_without_following_or_leaking_control_header() {
+        use super::super::config::{CredentialConfig, NodeConfig};
+        use super::super::encryption::LocalEncryption;
+        use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for enabled in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let destination =
+                std::sync::Arc::new(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+            let target = destination.clone();
+            let followed = (!enabled).then(|| {
+                tokio::spawn(async move {
+                    let (mut stream, _) = target.accept().await.unwrap();
+                    let mut request = [0_u8; 4096];
+                    let n = stream.read(&mut request).await.unwrap();
+                    assert!(n > 0);
+                    assert!(
+                        !String::from_utf8_lossy(&request[..n])
+                            .to_ascii_lowercase()
+                            .contains(GUEST_NO_REDIRECT_HEADER)
+                    );
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                })
+            });
+            let location = format!("http://{}/outside", destination.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut buffer = [0_u8; 4096];
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert_ne!(count, 0);
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                stream.write_all(format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                request
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+            let mut config: NodeConfig = serde_json::from_value(serde_json::json!({
+            "server":{"url":"https://nyxid.test"}, "node":{"id":"node","auth_token_encrypted":""}
+        }))
+        .unwrap();
+            config.credentials.insert(
+                "guest-service".into(),
+                CredentialConfig::new_header(
+                    "Authorization".into(),
+                    Some(encryption.encrypt("Bearer fixture-token").unwrap()),
+                    Some(origin.clone()),
+                ),
+            );
+            let credentials = CredentialStore::from_config(&config, &encryption).unwrap();
+            let mut request = serde_json::json!({"request_id":"guest-redirect","service_id":"service","service_slug":"guest-service",
+            "base_url":origin,"method":"GET","path":"/safe", "headers":{"X-Nyxid-Guest-No-Redirect":"1"}});
+            if !enabled {
+                request["headers"] = serde_json::json!({});
+            }
+            let (tx, mut rx) = mpsc::channel(4);
+            let replay = tokio::sync::Mutex::new(ReplayGuard::new());
+            let metrics = NodeMetrics::new();
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(1))
+                .build()
+                .unwrap();
+            execute_proxy_request(
+                &request,
+                &credentials,
+                None,
+                &replay,
+                &metrics,
+                &tx,
+                false,
+                &client,
+            )
+            .await;
+            let NodeWsMessage::Text(frame) = rx.recv().await.unwrap() else {
+                panic!("expected proxy response")
+            };
+            let response: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_eq!(response["status"], if enabled { 307 } else { 200 });
+            let received = String::from_utf8(server.await.unwrap())
+                .unwrap()
+                .to_ascii_lowercase();
+            assert!(received.starts_with("get /safe "));
+            assert!(!received.contains(GUEST_NO_REDIRECT_HEADER));
+            if let Some(followed) = followed {
+                followed.await.unwrap();
+            } else {
+                assert!(
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(50),
+                        destination.accept()
+                    )
+                    .await
+                    .is_err()
+                );
+            }
+        }
+    }
 
     #[test]
     fn http_and_ws_requests_redact_custom_defaults_and_sigv4_material() {

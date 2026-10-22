@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAuthStore } from "@/stores/auth-store";
 import { AgentDetailsSheet } from "./nyxbot-agent-details";
 
+
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ to, search, ...props }: ComponentProps<"a"> & { to: string; search?: Record<string, string> }) => (
     <a href={to + (search ? `?${new URLSearchParams(search)}` : "")} {...props} />
@@ -30,6 +31,7 @@ let agent: Record<string, unknown>;
 let memory: { id: string; text: string; created_at: string; updated_at: string }[];
 let writes: { method: string; endpoint: string; body: unknown }[];
 let client: QueryClient;
+let guestAccessFails: boolean;
 let requestMode: "denied" | "routed_to_nyxbot";
 
 function agentRow(fields: Record<string, unknown>) {
@@ -83,6 +85,7 @@ beforeEach(() => {
     return new Response(JSON.stringify(fixtures[path]));
   }));
   writes = [];
+  guestAccessFails = false;
   requestMode = "denied";
   agent = agentRow({});
   memory = [
@@ -105,6 +108,51 @@ beforeEach(() => {
     }
     if (endpoint === `/assistant/nyxagent/agents/${id}/skills`) {
       return new Response(JSON.stringify({ revision: 0, skills: [], metadata: {} }));
+    }
+    if (endpoint === `/assistant/nyxagent/agents/${id}/guest-access`) {
+      if (guestAccessFails) {
+        return new Response(
+          JSON.stringify({ message: "Guest defaults were not saved" }),
+          { status: 500 },
+        );
+      }
+      const { services, ...patch } = body as Record<string, unknown>;
+      const policy = {
+        enabled: false,
+        default_access: "use",
+        escalation: "refuse",
+        share_skills: false,
+        ...(agent.guest_policy as object),
+        ...patch,
+      };
+      const explicit = {
+        ...((agent.guest_access_explicit ?? agent.guest_access) as Record<string, string>),
+      };
+      for (const [name, level] of Object.entries(
+        (services ?? {}) as Record<string, string>,
+      )) {
+        if (level === "default") delete explicit[name];
+        else explicit[name] = level;
+      }
+      agent = {
+        ...agent,
+        guest_policy: policy,
+        guest_access_explicit: explicit,
+        guest_access: Object.fromEntries(
+          (agent.services as string[]).map((name) => [
+            name,
+            explicit[name] ?? (policy.enabled ? policy.default_access : "use"),
+          ]),
+        ),
+      };
+      return new Response(
+        JSON.stringify({
+          agent_id: id,
+          guest_policy: agent.guest_policy,
+          effective_guest_policy: policy.enabled ? policy : { enabled: false, default_access: "use", escalation: "refuse", share_skills: false },
+          services: {},
+        }),
+      );
     }
     if (endpoint === `/assistant/nyxagent/agents/${id}/grants`) {
       agent = { ...agent, ...(body as object) };
@@ -610,4 +658,118 @@ it("saves the optional channel progress reply without changing grants or prompt"
     body: { channel_checking_notice: true },
   }));
   await waitFor(() => expect(within(sheet).getByRole("button", { name: "Save" })).toBeDisabled());
+});
+
+it("applies the guest preset with a dirty-gated policy patch", async () => {
+  const { user } = renderSheet();
+  const form = await screen.findByRole("form", { name: "Guest policy" });
+  const save = within(form).getByRole("button", { name: "Save guest policy" });
+  expect(save).toBeDisabled();
+  await user.click(
+    within(form).getByRole("button", {
+      name: "Same as me for everyday work; ask me for the rest",
+    }),
+  );
+  expect(save).toBeEnabled();
+  expect(
+    within(form).getByRole("switch", { name: "Share skills with guests" }),
+  ).toBeChecked();
+  await user.click(save);
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PATCH",
+      endpoint: "/assistant/nyxagent/agents/agent-researcher/guest-access",
+      body: { enabled: true, escalation: "ask_owner", share_skills: true },
+    }),
+  );
+});
+
+it.each(["grants", "policy"])("keeps unsaved changes in the other form when saving %s", async (saving) => {
+  agent = agentRow({
+    guest_access_explicit: {},
+    guest_access: { github: "use" },
+    guest_policy: { enabled: true, default_access: "use", escalation: "refuse", share_skills: false },
+  });
+  const { user } = renderSheet();
+  const grants = await screen.findByRole("form", { name: "Grants" });
+  const policy = screen.getByRole("form", { name: "Guest policy" });
+  await user.click(within(grants).getByRole("switch", { name: "Read my account" }));
+  await user.click(within(policy).getByRole("switch", { name: "Share skills with guests" }));
+  await user.click(within(saving === "grants" ? grants : policy).getByRole("button", {
+    name: saving === "grants" ? "Save grants" : "Save guest policy",
+  }));
+  await waitFor(() => expect(writes).toHaveLength(1));
+  await waitFor(() => {
+    if (saving === "grants") {
+      expect(agent.account_read).toBe(true);
+      expect(within(screen.getByRole("form", { name: "Grants" })).getByRole("button", { name: "Save grants" })).toBeDisabled();
+    } else {
+      expect(agent.guest_policy).toMatchObject({ share_skills: true });
+      expect(within(screen.getByRole("form", { name: "Guest policy" })).getByRole("button", { name: "Save guest policy" })).toBeDisabled();
+    }
+  });
+  const other = screen.getByRole("form", { name: saving === "grants" ? "Guest policy" : "Grants" });
+  expect(within(other).getByRole("switch", { name: saving === "grants" ? "Share skills with guests" : "Read my account" })).toBeChecked();
+  expect(within(other).getByRole("button", { name: saving === "grants" ? "Save guest policy" : "Save grants" })).toBeEnabled();
+});
+
+it("clears an explicit service level to the specialist default", async () => {
+  agent = agentRow({
+    guest_policy: {
+      enabled: true,
+      default_access: "read",
+      escalation: "refuse",
+      share_skills: false,
+    },
+    guest_access_explicit: { github: "all" },
+    guest_access: { github: "all" },
+  });
+  const { user } = renderSheet();
+  const form = await screen.findByRole("form", { name: "Grants" });
+  await user.click(within(form).getByRole("combobox", { name: "github" }));
+  await user.click(
+    screen.getByRole("option", { name: "Default (Look things up only)" }),
+  );
+  await user.click(within(form).getByRole("button", { name: "Save grants" }));
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PUT",
+      endpoint: "/assistant/nyxagent/agents/agent-researcher/grants",
+      body: { services: ["github"], account_read: false, guest_access: { github: "default" } },
+    }),
+  );
+  expect(writes).toHaveLength(1);
+});
+
+it.each([true, false])("hides all guest settings for organization specialists (maintainer %s)", async (canMaintain) => {
+  agent = agentRow({ owner_kind: "org", owner_id: "org", can_maintain: canMaintain, can_use: canMaintain });
+  renderSheet();
+  await screen.findByRole("form", { name: "Grants" });
+  expect(screen.queryByRole("form", { name: "Guest policy" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("list", { name: "Guest access" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Guests" })).not.toBeInTheDocument();
+});
+
+it("keeps saved policy dormant while off and preserves it when toggled", async () => {
+  agent = agentRow({
+    guest_access_explicit: {}, guest_access: { github: "use" },
+    guest_policy: { enabled: false, default_access: "read", escalation: "ask_owner", share_skills: true },
+  });
+  const { user } = renderSheet();
+  const policy = await screen.findByRole("form", { name: "Guest policy" });
+  const enabled = within(policy).getByRole("switch", { name: "Guest policy" });
+  expect(enabled).not.toBeChecked();
+  expect(within(policy).getByRole("combobox", { name: "Default guest level" })).toBeDisabled();
+  expect(within(policy).getByRole("combobox", { name: "When a guest asks for more" })).toBeDisabled();
+  expect(within(policy).getByRole("switch", { name: "Share skills with guests" })).toBeDisabled();
+  const grants = screen.getByRole("form", { name: "Grants" });
+  expect(within(grants).getByRole("combobox", { name: "github" })).toBeEnabled();
+  expect(within(grants).getByRole("combobox", { name: "github" })).toHaveTextContent("Default (Use, but not change or delete)");
+  await user.click(enabled);
+  expect(within(policy).getByRole("combobox", { name: "Default guest level" })).toBeEnabled();
+  await user.click(within(policy).getByRole("button", { name: "Save guest policy" }));
+  await waitFor(() => expect(writes).toEqual([{
+    method: "PATCH", endpoint: "/assistant/nyxagent/agents/agent-researcher/guest-access", body: { enabled: true },
+  }]));
+  expect(agent.guest_policy).toEqual({ enabled: true, default_access: "read", escalation: "ask_owner", share_skills: true });
 });

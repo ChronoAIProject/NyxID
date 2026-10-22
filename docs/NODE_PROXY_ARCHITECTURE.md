@@ -1230,3 +1230,7 @@ and aborts the provider request on `proxy_cancel` or connection shutdown.
 See [Service pool routing architecture](SERVICE_POOL_ROUTING_PROOF.md) for the
 attempt deadlines, replay evidence and durable accounting that depend on this
 transport lifecycle.
+
+### Guest HTTP redirects
+
+Guest calls authorize the original method and path, so neither direct forwarding nor node forwarding follows redirects automatically. Nodes advertise `http_guest_no_redirect` in their status capabilities. NyxID attaches the internal `x-nyxid-guest-no-redirect` control header to guest node requests; it travels over the authenticated node/cluster transport and the node removes it before forwarding. The HTTP request HMAC does not cover forwarded headers; the server replaces guest-supplied copies of this control header. The server checks capability during admission and again on the owning connection before dispatch. Upgrade node agents before sending guest traffic through them: legacy nodes refuse these calls with `guest_escalation_unavailable` (HTTP 403, code 12104). Owner traffic keeps its existing redirect policy.

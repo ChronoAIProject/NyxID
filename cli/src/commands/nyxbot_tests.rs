@@ -302,3 +302,231 @@ fn nyxbot_rendering_identifies_review_reason_child_and_bounded_history() {
     assert!(text.contains("Additional replies omitted"));
     assert!(text.contains("nyxid nyxbot history nyxa-child"));
 }
+
+fn guest_args(args: &[&str]) -> GuestAccessSet {
+    let cli = crate::cli::Cli::try_parse_from(
+        ["nyxid", "nyxbot", "guest-access", "set"]
+            .into_iter()
+            .chain(args.iter().copied()),
+    )
+    .unwrap();
+    let crate::cli::Commands::Nyxbot {
+        command:
+            NyxbotCommands::GuestAccess {
+                command: GuestAccessCommands::Set(args),
+            },
+    } = cli.command
+    else {
+        panic!("wrong command")
+    };
+    args
+}
+
+#[test]
+fn guest_policy_cli_parsing_preset_and_explicit_overrides() {
+    assert_eq!(
+        guest_patch(&guest_args(&["worker", "--preset", "owner-like"])).unwrap(),
+        json!({"enabled":true,"default_access":"use","escalation":"ask_owner","share_skills":true})
+    );
+    let args = guest_args(&[
+        "@worker",
+        "--preset",
+        "owner-like",
+        "--default",
+        "read",
+        "--share-skills",
+        "false",
+        "--escalation",
+        "refuse",
+        "--service",
+        "github=all",
+        "--service",
+        "slack=default",
+    ]);
+    assert_eq!(
+        guest_patch(&args).unwrap(),
+        json!({"enabled":true,"default_access":"read","escalation":"refuse","share_skills":false,"services":{"github":"all","slack":"default"}})
+    );
+    for flag in [
+        ["--default", "all"],
+        ["--escalation", "auto"],
+        ["--service", "=all"],
+        ["--service", "github=invalid"],
+    ] {
+        assert!(
+            crate::cli::Cli::try_parse_from([
+                "nyxid",
+                "nyxbot",
+                "guest-access",
+                "set",
+                "worker",
+                flag[0],
+                flag[1]
+            ])
+            .is_err()
+        );
+    }
+    assert!(guest_patch(&guest_args(&["worker"])).is_err());
+    assert_eq!(
+        guest_patch(&guest_args(&["worker", "--enabled", "false"])).unwrap(),
+        json!({"enabled":false})
+    );
+    assert_eq!(
+        guest_patch(&guest_args(&["worker", "--default", "read"])).unwrap(),
+        json!({"default_access":"read"})
+    );
+    assert_eq!(
+        guest_patch(&guest_args(&[
+            "worker",
+            "--preset",
+            "owner-like",
+            "--enabled",
+            "false"
+        ]))
+        .unwrap()["enabled"],
+        false
+    );
+    assert!(
+        guest_patch(&guest_args(&[
+            "worker",
+            "--service",
+            "x=all",
+            "--service",
+            "x=read"
+        ]))
+        .is_err()
+    );
+}
+
+#[test]
+fn guest_policy_cli_selects_unambiguous_specialists_and_safe_outputs() {
+    let agents = json!({"agents":[{"id":"a","name":"worker","kind":"specialist","status":"idle"},{"id":"b","name":"NyxBot","kind":"nyxbot","status":"idle"}]});
+    assert_eq!(select_guest_agent(&agents, "@worker").unwrap(), "a");
+    assert_eq!(select_guest_agent(&agents, "a").unwrap(), "a");
+    assert!(select_guest_agent(&agents, "NyxBot").is_err());
+    assert!(select_guest_agent(&agents, "missing").is_err());
+    let ambiguous = json!({"agents": [
+        {"id":"a","name":"worker","kind":"specialist","status":"idle"},
+        {"id":"c","name":"worker","kind":"specialist","status":"idle"}
+    ]});
+    assert!(select_guest_agent(&ambiguous, "worker").is_err());
+    assert_eq!(select_guest_agent(&ambiguous, "a").unwrap(), "a");
+    let destroyed =
+        json!({"agents": [{"id":"a","name":"worker","kind":"specialist","status":"destroyed"}]});
+    assert!(select_guest_agent(&destroyed, "a").is_err());
+    let mut output = json!({"agent_id":"a", "guest_policy":{"enabled":false,"default_access":"read","escalation":"ask_owner","share_skills":true},
+        "effective_guest_policy":{"enabled":false,"default_access":"use","escalation":"refuse","share_skills":false},
+        "services":{"gh\u{1b}[2J":{"access":"all","source":"explicit"}}});
+    assert_eq!(
+        serde_json::from_str::<Value>(&render_guest_access(&output, OutputFormat::Json).unwrap())
+            .unwrap(),
+        output
+    );
+    let table = render_guest_access(&output, OutputFormat::Table).unwrap();
+    assert!(table.contains("ask_owner") && table.contains("explicit"));
+    assert!(!table.contains('\u{1b}'));
+    for expected in [
+        "Guest policy: off (legacy)",
+        "Saved default: read",
+        "Saved escalation: ask_owner",
+        "Saved share skills: true",
+        "Effective default: use",
+        "Effective escalation: refuse",
+        "Effective share skills: false",
+    ] {
+        assert!(table.contains(expected), "missing output: {expected}");
+    }
+    output["guest_policy"]["enabled"] = json!(true);
+    output["effective_guest_policy"] = output["guest_policy"].clone();
+    let table = render_guest_access(&output, OutputFormat::Table).unwrap();
+    for expected in [
+        "Guest policy: on",
+        "Effective default: read",
+        "Effective escalation: ask_owner",
+        "Effective share skills: true",
+    ] {
+        assert!(table.contains(expected), "missing output: {expected}");
+    }
+}
+
+#[test]
+fn guest_policy_cli_help_explains_every_setting() {
+    for (subcommand, expected) in [
+        ("show", vec!["Specialist ID or @name", "guest default"]),
+        (
+            "set",
+            vec![
+                "Specialist ID or @name",
+                "read/create/act",
+                "single-use foreground MCP approval",
+                "--share-skills <true|false>",
+                "--service <SLUG=read|use|all|default>",
+                "Repeatable override",
+                "all (also change/delete)",
+                "default (clear override)",
+                "owner-like enables the policy with use, ask-owner and shared skills",
+                "--enabled <true|false>",
+                "false preserves legacy behavior",
+            ],
+        ),
+    ] {
+        let help = crate::cli::Cli::try_parse_from([
+            "nyxid",
+            "nyxbot",
+            "guest-access",
+            subcommand,
+            "--help",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        let text = help
+            .to_string()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for expected in expected {
+            assert!(text.contains(expected), "missing help: {expected}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn guest_policy_cli_surfaces_org_specialist_server_message() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/v1/assistant/nyxagent/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"agents":[{
+            "id":"org-agent", "name":"helper", "kind":"specialist", "status":"idle", "owner_kind":"org"
+        }]}))).mount(&server).await;
+    Mock::given(method("PATCH"))
+        .and(path(
+            "/api/v1/assistant/nyxagent/agents/org-agent/guest-access",
+        ))
+        .respond_with(ResponseTemplate::new(403).set_body_json(
+            json!({"message":"Organization specialists do not answer guests", "error_code":1002}),
+        ))
+        .mount(&server)
+        .await;
+    let args = guest_args(&[
+        "@helper",
+        "--default",
+        "read",
+        "--base-url",
+        &server.uri(),
+        "--access-token",
+        "explicit-test-token",
+    ]);
+    let error = guest_access(GuestAccessCommands::Set(args))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Organization specialists do not answer guests"),
+        "{error}"
+    );
+}
