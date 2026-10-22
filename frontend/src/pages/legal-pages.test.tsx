@@ -66,6 +66,9 @@ it("renders hosted content, encryption limits, recipients and incomplete-erasure
   expect(screen.getByText(/This inventory describes supported data flows/)).toHaveTextContent(
     "not a claim that every listed service is enabled or acts as our sub-processor",
   );
+  expect(screen.getByText(/Reply feedback, including optional comments/)).toHaveTextContent(
+    "users with permission to read administrative usage reports, including Usage Viewers",
+  );
   expect(screen.getByText(/NyxID requests revocation/)).toHaveTextContent(
     "Deletion does not yet cover every stored record",
   );

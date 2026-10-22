@@ -354,3 +354,54 @@ changed during this delta review. All files except this evidence document remain
 frozen for this reviewer. Backend/CI validation, live provider facts, the selected
 per-user override and absence of broader overrides, deployment and final public
 checks remain with PM; this review performs no live access or production writes.
+
+## 2026-10-23 integration note: feedback readers after #2026
+
+PM integrated literal incoming main
+`756a20c336bb44bcf4fe8651f7eb6a2e2c1f3a08`; the resulting merge HEAD for this
+focused policy correction is `54d41e8ac6ad59e9fecd83914d7ab4b11dac9091`.
+The earlier source reviews and native report remain scoped to their recorded
+snapshots. This note supersedes their admin/operator-only feedback description
+and the previous Privacy/test hashes; it does not claim a full review of the
+integrated application or complete a native review token.
+
+Read the actual merged handler and documentation. At
+`backend/src/handlers/assistant_feedback.rs:363`, feedback reads now call
+`require_admin_usage_read`; `AdminFeedbackRow.comment` is returned at `:354`.
+`backend/src/handlers/admin_helpers.rs:108`/`:122` checks the current user's
+resolved permission through `role_service::can_read_admin_usage`.
+`backend/src/services/role_service.rs:261` permits admins/operators and people
+whose direct or group roles hold `nyxid:admin:usage:read`; the seeded Usage Viewer
+role is an example, not the only way to receive that permission.
+`docs/chat/08-nyxagent-engine.md:1768` explicitly documents that these readers can
+see feedback comments and context. It does not expose conversation message text.
+
+Updated only the feedback-reader bullet in `frontend/public/legal/privacy.md:48`
+to disclose review by authorised administrators, operators and users with
+permission to read administrative usage reports, including Usage Viewers. Added
+one assertion to the existing public Privacy rendering test at
+`frontend/src/pages/legal-pages.test.tsx:69` to require that disclosure. The
+effective date remains 2026-10-23; Terms and all other policy content are unchanged.
+
+Focused verification from `frontend`:
+
+```sh
+npm test -- --run src/pages/legal-pages.test.tsx
+```
+
+Result: **1 file, 4 tests passed**, exit 0, 948 ms. Only the legal suite was run;
+no application/backend suite or build was started. Scoped whitespace validation
+also passed. These checks cover local policy rendering, not production access.
+
+Updated freeze hashes:
+
+| File | SHA-256 |
+| --- | --- |
+| `frontend/public/legal/terms.md` (unchanged) | `906c5a071a7d7695b28b16e29ca17eda10a903b8739f2e4d4b8fffabe443b6ea` |
+| `frontend/public/legal/privacy.md` | `c5169c1ae5b5d0cd76b10ad82b65352e9a920dcc3cd122afaf6745f6bc467c33` |
+| `frontend/src/pages/legal-pages.test.tsx` | `4d722a97a659a0bb5dc941c4fcfe1afeadcaf95649f74f8a08e12aad8219b510` |
+
+This correction and this evidence document are frozen for PM's fresh integrated
+reviews. Only the three authorised files (Privacy, its existing test and this
+document) were edited. No staging, commits, Git integration, other repository
+edits or production writes were performed by this reviewer.

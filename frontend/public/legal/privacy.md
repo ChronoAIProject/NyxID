@@ -45,7 +45,7 @@ The information processed depends on the features you use and their configuratio
 - Uploaded files and images, display filenames, extracted document text and generated tool images; enabled channel-media features can import supported files from verified owner messages
 - Tool activity, action confirmations, automation instructions and execution status, and results retained for asynchronous work
 - Voice audio processed for an enabled voice feature, transcripts saved in the conversation, and voice session or usage metadata
-- Reply feedback, including optional comments, for review by authorised service administrators and operators
+- Reply feedback, including optional comments, for review by authorised service administrators, operators and users with permission to read administrative usage reports, including Usage Viewers
 
 **Linked channels and other hosted features**
 

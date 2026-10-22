@@ -26,11 +26,11 @@ The user authorized implementation, review, pull request, merge, production acti
 
 ## Evidence and status
 
-2026-10-23: Clean branch verified. Both requested staff created successfully with explicit placement and confirmed by this PM gateway. Both staff completed their assigned edits and independent cross-reviews with ordinary local reads/edits available. Final staff review tasks use the same original agents. Application and legal files are frozen for release review; frontend checks are passing. No PR, merge, deployment or production setting write is claimed yet.
+2026-10-23: Both requested staff were created with explicit placement and confirmed by this PM gateway. Both completed their assigned edits and independent cross-reviews. PM committed the application, public policies and evidence, then merged fetched main at literal `756a20c336bb44bcf4fe8651f7eb6a2e2c1f3a08` without conflicts (integration commit `54d41e8ac`). Fresh integrated checks and reviews use the same original agents. No PR, protected main merge, deployment or production setting write is claimed at this checkpoint.
 
 | Gate | Status | Evidence / remaining work |
 | --- | --- | --- |
-| Staff running | Confirmed | Both original child IDs report running in this worktree; no duplicates |
+| Staff placement and work | Confirmed | Both original child IDs completed edits and cross-reviews in this worktree; reused for final reviews, no duplicates |
 | Source and current acceptance review | Completed for changed scope | AGENTS.md, DESIGN.md, current onboarding/repair, billing, feature flag and environment docs; current A1–A17 names below |
 | Implementation and tests | Implemented; frontend verified | Default Assistant redirects, preserved explicit Studio return, authenticated default-off workspace preview; 240 distinct targeted application/BotFather tests verified incrementally; backend audience test awaits CI |
 | Policy corrections and source assessment | Edited; cross-review passed | Astra edited public Terms/Privacy and assessed #1930/#1957 against source; Sol independently checked policy hashes and 4 rendering tests. Both issues remain open |
@@ -131,3 +131,22 @@ be presented as completion of Telegram onboarding acceptance.
 The production rollout order is: merge reviewed head after required CI; deploy backend and frontend through the supported operator path; verify matching revisions and public `/terms` and `/privacy`; set the sole `assistant:workspace-preview` per-person enable for Calvin and verify no wider grants; enable `experimental:ai-assistant` globally and verify ordinary-user capabilities/navigation. Existing normal chat engine and billing are already enabled. Migration gates, unsupported providers and optional beta features require their own readiness and are not blanket-enabled.
 
 Remaining external inputs are the existing production deployment command/runbook and access to two authorised real NyxID/Telegram test identities with pinned runtime revision evidence. Admin API access is available. No SSH/kube/cloud host trust or security state has been changed to obtain deployment access.
+
+## Main integration and publication checkpoint
+
+Main integration includes Usage Viewer access to NyxBot usage/feedback (#2026), bounded NyxBot error telemetry (#2024), and activation-time feature readiness with diagnostic reads (#2014). Activation readiness guards are preserved. Astra corrected the public Privacy feedback disclosure to include authorised administrative usage readers, including Usage Viewers, matching the merged handler and role scope. Her focused legal suite passed 4/4. Terms are unchanged from their independently reviewed revision.
+
+The first read-only documentation audit identified one current guide error: the sign-up guide still promised default dashboard arrival. PM corrected `docs/site/web/getting-started/sign-up.md` to explain Assistant arrival, explicit Studio `/dashboard` returns and trusted protected/OAuth destinations. The remaining audit attempt will inspect the final frozen integrated candidate. No third audit or silent reuse of stale review evidence is permitted.
+
+Protected merge requires a separate approving GitHub review under the active `main` ruleset `13955986`, in addition to the repository's passing-check requirement. Staff source reviews do not substitute for an approval from a separate GitHub actor. PM will prepare a concrete PR and run its real CI before requesting the outstanding review; no self-approval or protection bypass is authorised.
+
+Fresh checks after integrating main and the feedback disclosure:
+
+- `frontend: npm test`: **608 files / 6,612 tests passed**, 113.81 seconds. This includes the current default/return routes and public policy rendering, superseding the earlier frontend count for this candidate.
+- `frontend: npm run build`: **passed**, including TypeScript, production Vite, public legal prerender, credential-accept output and mock-footprint assertion.
+- `frontend: npm run lint`: **zero errors / 33 existing warnings**, exit 0.
+- `cargo fmt --all --check` and `git diff --check`: **passed**. The backend transactional test remains unexecuted locally and must pass in real CI.
+- PM inspected all 16 eligible test/gate edit hunks in the integrated diff (22 listed, none unread); no security/readiness checks, retries, timeouts or thresholds were weakened. The MFA locator follows the current accessible label and retains rejected-code and same-chat consent checks.
+- Sol's fresh source-grounded legal/guide delta review found no substantive issue and pinned the current policy/test/guide hashes. This is static review, not new backend or live acceptance evidence.
+
+Private execution logs and review reports are retained under `/tmp/nyxid-launch-integrated-*` on the PM host. The PR will carry the final review and documentation-audit outcomes. Current production observations above remain evidence of the older deployed revision only.
