@@ -1,7 +1,10 @@
+import { createSessionInvalidationHandler } from "../../lib/auth/sessionInvalidation";
 import { createContext, PropsWithChildren, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
 import {
   clearStoredAuthSession,
+  compareAndClearAuthSession,
+  cleanupIfSessionInvalidated,
   authSessionGeneration,
   loadStoredAuthSession,
   persistAuthSession,
@@ -69,15 +72,22 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
     }
   }, []);
 
-  // Register the HTTP-layer session invalidation hook so that a 401
-  // after failed refresh triggers a full sign-out (React state + storage
-  // + push cleanup) instead of silently clearing SecureStore.
   useEffect(() => {
-    setSessionInvalidationListener(() => {
-      void performSignOut();
+    const invalidate = createSessionInvalidationHandler({
+      compareAndClear: compareAndClearAuthSession,
+      remoteCleanup: deactivatePushOnLogout,
+      cleanupIfInvalidated: cleanupIfSessionInvalidated,
+      localCleanup: async (pushUnlinked) => {
+        if (pushUnlinked) await clearLocalPushRegistrationState();
+        else await clearPendingPushSyncSignal();
+        clearPendingApprovalRefreshSignal();
+        telemetryReset();
+      },
+      signedOut: () => setIsAuthenticated(false),
     });
+    setSessionInvalidationListener(invalidate);
     return () => setSessionInvalidationListener(null);
-  }, [performSignOut]);
+  }, []);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -136,11 +146,7 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
             telemetryIdentify(session.userId);
           }
           void activatePushAfterLogin({ forceRegister: true })
-            .then((result) => {
-              if (__DEV__) {
-                console.log("[push] activate after session restore", result);
-              }
-            })
+
             .catch((error) => {
               if (__DEV__) console.warn("[push] activate after session restore failed", error);
             });
@@ -198,10 +204,7 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
         telemetryIdentify(userId);
       }
       try {
-        const pushResult = await activatePushAfterLogin({ forceRegister: true });
-        if (__DEV__) {
-          console.log("[push] activate after sign in", pushResult);
-        }
+        await activatePushAfterLogin({ forceRegister: true });
       } catch (error) {
         if (__DEV__) console.warn("[push] activate after sign in failed", error);
       }

@@ -1,3 +1,4 @@
+import type { StoredAuthSession } from "../auth/sessionCoordinator";
 import * as Notifications from "expo-notifications";
 import * as SecureStore from "expo-secure-store";
 import * as TaskManager from "expo-task-manager";
@@ -598,7 +599,7 @@ export async function clearPendingPushSyncSignal(): Promise<void> {
   }
 }
 
-export async function deactivatePushOnLogout(): Promise<boolean> {
+export async function deactivatePushOnLogout(capturedSession?: StoredAuthSession): Promise<boolean> {
   const token = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
   if (!token) {
     return true;
@@ -615,7 +616,7 @@ export async function deactivatePushOnLogout(): Promise<boolean> {
       token,
       provider,
       platform,
-    });
+    }, capturedSession);
     return true;
   } catch (error) {
     if (__DEV__) console.warn("[push] unregister on logout failed", error);
