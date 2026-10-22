@@ -2431,10 +2431,11 @@ pub(crate) async fn test_app_state_no_db() -> AppState {
     test_app_state(client.database("nyxid_unit_unused"))
 }
 
-/// Build a permissive session-auth `AuthUser` for handler tests.
+/// Build a session-shaped `AuthUser` without a validated derivation policy.
 pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
     AuthUser {
         mfa_assured: false,
+        mfa_enabled: None,
         org_agent_access: None,
         assistant_group_id: None,
         assistant_agent_owner_id: None,

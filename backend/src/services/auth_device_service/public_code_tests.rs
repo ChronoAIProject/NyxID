@@ -105,7 +105,7 @@ async fn duplicate_codes_in_either_collection_fail_closed_without_approval_or_de
                     approver_ip: None,
                     approver_user_agent: None
                 },
-                false
+                crate::services::session_authority::DerivedMfaAuthority::new(false, false)
             )
             .await,
             Err(AppError::AuthDeviceUserCodeInvalid)

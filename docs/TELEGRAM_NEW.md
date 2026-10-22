@@ -332,7 +332,9 @@ for sent, uncertain, refused and unattempted parts. A fully delivered status
 requires a confirmed receipt for every text part.
 
 The manager pins action-card IDs and media outcome counts, and proactive plans
-pin numeric media-notice inputs. Deciding a card or revisiting an image claim
+pin numeric media-notice inputs. Concurrent initialization accepts the same ordered
+card-ID snapshot; a different or malformed existing snapshot remains a conflict.
+Deciding a card or revisiting an image claim
 cannot alter a partially accepted plan. Live manager identity, binding generation,
 Stop/revocation and destination authority are checked between provider effects.
 Native receipt/token expiry remains an upper bound; each provider call is bounded.

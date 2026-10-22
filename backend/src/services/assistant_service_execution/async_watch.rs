@@ -43,7 +43,7 @@ impl AsyncContinuation {
         nodes: std::sync::Arc<crate::services::node_ws_manager::NodeWsManager>,
     ) -> AppResult<Self> {
         let name = endpoint.name.as_str();
-        if watch.operation_id.is_none()
+        if crate::services::cma_operation::poll_id(watch).is_none()
             || watch.lease_id.is_none()
             || !(name == watch.contract.status_operation
                 || name == watch.contract.result_operation
@@ -149,7 +149,8 @@ impl AsyncContinuation {
         if self.endpoint_contract != mcp_service::endpoint_contract_digest(endpoint) {
             return Err(denied());
         }
-        let args = json!({w.contract.id_parameter.clone():w.operation_id});
+        let args =
+            json!({w.contract.id_parameter.clone():crate::services::cma_operation::poll_id(w)});
         mcp_service::prepare_proxy_tool_call(service, endpoint, &args)?
             .authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)?;
         let fresh = acks::for_key(db, &w.user_id, Some(&w.api_key_id))
@@ -167,6 +168,10 @@ impl AsyncContinuation {
             "execution_binding":&w.execution_binding,
             "delivery.invocation_id":&w.delivery.invocation_id,
         };
+        if w.operation_id.is_none() {
+            filter.insert("cma.kind", "cma_agent");
+            filter.insert("cma.agent_id", crate::services::cma_operation::poll_id(w));
+        }
         if w.authority_version == 0 {
             filter.insert(
                 "$or",

@@ -1338,9 +1338,7 @@ pub(crate) async fn update_chat(
         } else {
             let agent = team::agent(&state.db, owner, agent).await?;
             if agent.user_id != owner {
-                return Err(AppError::Forbidden(
-                    "Organization agents require private member threads".into(),
-                ));
+                return Err(AppError::organization_agent_channel_unsupported());
             }
             if agent.destroyed_at.is_some() {
                 return Err(AppError::Conflict("That agent was destroyed".into()));

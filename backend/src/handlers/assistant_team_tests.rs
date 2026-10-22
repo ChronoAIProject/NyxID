@@ -3825,3 +3825,303 @@ async fn routed_request_notice_is_not_sent_after_stop_or_replacement() {
     idle_row(&state, &orchestrator.id).await;
     server.abort();
 }
+
+fn channel_target_calls(selector: &str) -> [(&'static str, Value); 4] {
+    [
+        (
+            "nyxid__connect_channel_bot",
+            json!({"bot": "test-bot", "agent": selector}),
+        ),
+        (
+            "nyxid__link_channel_bot",
+            json!({"channel_agent_id": "test-channel", "agent": selector}),
+        ),
+        (
+            "nyxid__channel_bot_setup_link",
+            json!({"platform": "telegram", "agent": selector}),
+        ),
+        (
+            "nyxid__update_channel_chat",
+            json!({"chat_id": "test-chat", "agent": selector}),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn org_channel_targets_are_refused_before_any_owner_confirmation() {
+    use crate::models::assistant_settings::AccessMode;
+    use crate::services::{feature_flag_service as flags, org_agent_tests::Fixture};
+    let f = Fixture::new("team_org_channel_preflight").await;
+    let (agent, _) = f.create().await;
+    // Exercise enabled membership, then disabled admission and read-only membership.
+    for (actor, flag) in [(&f.admin, true), (&f.member, false), (&f.viewer, false)] {
+        flags::set_platform_override(
+            &f.state.db,
+            "assistant:org-agents",
+            &flags::FlagTarget::Global,
+            flag,
+            &f.admin,
+        )
+        .await
+        .unwrap();
+        let row = crate::services::assistant_authority_tests::new_orchestrator(
+            &f.state,
+            actor,
+            "Link a channel",
+        )
+        .await;
+        let chat = acks::for_key(&f.state.db, actor, Some(&row.credential_api_key_id))
+            .await
+            .unwrap()
+            .unwrap();
+        for mode in [AccessMode::Nyxmode, AccessMode::AskEveryTime] {
+            crate::services::assistant_settings_service::update(
+                &f.state.db,
+                actor,
+                crate::services::assistant_settings_service::Update {
+                    access_mode: Some(mode),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            for selector in [agent.id.as_str(), "org-agent-team/researcher", "researcher"] {
+                for (tool, args) in channel_target_calls(selector) {
+                    let (value, error) = execute_tool(&f.state, &chat, tool, &args).await;
+                    assert!(error, "{tool} {selector}: {value}");
+                    assert_eq!(
+                        value,
+                        acks::organization_agent_channel_refusal(),
+                        "{tool} {selector} {mode:?}"
+                    );
+                    assert_eq!(
+                        f.state
+                            .db
+                            .collection::<bson::Document>(
+                                crate::models::assistant_acknowledgement::COLLECTION_NAME
+                            )
+                            .count_documents(doc! {})
+                            .await
+                            .unwrap(),
+                        0,
+                        "{tool} {selector} {mode:?}"
+                    );
+                }
+            }
+        }
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn ambiguous_org_channel_names_are_refused_before_any_owner_confirmation() {
+    use crate::models::{assistant_settings::AccessMode, org_membership::OrgRole};
+    use crate::test_utils::test_membership;
+    let f = crate::services::org_agent_tests::Fixture::new("team_ambiguous_org_channel").await;
+    f.create().await;
+    let second_org = Uuid::new_v4().to_string();
+    let mut org = test_user(&second_org, UserType::Org);
+    org.slug = Some("second-team".into());
+    f.state.db.collection(USERS).insert_one(org).await.unwrap();
+    f.state
+        .db
+        .collection(crate::models::org_membership::COLLECTION_NAME)
+        .insert_one(test_membership(
+            &second_org,
+            &f.admin,
+            OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+    team::create_specialist_for(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.admin,
+        &second_org,
+        f.request("researcher"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let row = crate::services::assistant_authority_tests::new_orchestrator(
+        &f.state,
+        &f.admin,
+        "Link a channel",
+    )
+    .await;
+    let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    for mode in [AccessMode::Nyxmode, AccessMode::AskEveryTime] {
+        crate::services::assistant_settings_service::update(
+            &f.state.db,
+            &f.admin,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(mode),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for (tool, args) in channel_target_calls("researcher") {
+            let (value, error) = execute_tool(&f.state, &chat, tool, &args).await;
+            assert!(error, "{tool} {mode:?}: {value}");
+            assert_eq!(value, acks::organization_agent_channel_refusal());
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>(
+                        crate::models::assistant_acknowledgement::COLLECTION_NAME
+                    )
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "{tool} {mode:?}"
+            );
+        }
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn channel_target_preflight_conceals_unreadable_agents_and_rejects_destroyed_personal_agents()
+{
+    use crate::models::assistant_settings::AccessMode;
+    let f = crate::services::org_agent_tests::Fixture::new("team_channel_target_acl").await;
+    let (org_agent, _) = f.create().await;
+    let (personal, _) = team::create_specialist(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.outsider,
+        f.request("destroyed"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &personal.id},
+            doc! {"$set": {"destroyed_at": bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    let row = crate::services::assistant_authority_tests::new_orchestrator(
+        &f.state,
+        &f.outsider,
+        "Link a channel",
+    )
+    .await;
+    let chat = acks::for_key(&f.state.db, &f.outsider, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    for mode in [AccessMode::Nyxmode, AccessMode::AskEveryTime] {
+        crate::services::assistant_settings_service::update(
+            &f.state.db,
+            &f.outsider,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(mode),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for selector in [org_agent.id.as_str(), personal.id.as_str(), "destroyed"] {
+            for (tool, args) in channel_target_calls(selector) {
+                let (value, error) = execute_tool(&f.state, &chat, tool, &args).await;
+                assert!(error, "{tool}: {value}");
+                assert_eq!(
+                    value["error"],
+                    if selector == org_agent.id {
+                        "not_found"
+                    } else {
+                        "conflict"
+                    },
+                    "{tool}: {value}"
+                );
+                assert!(value.get("details").is_none());
+                assert_eq!(
+                    f.state
+                        .db
+                        .collection::<bson::Document>(
+                            crate::models::assistant_acknowledgement::COLLECTION_NAME
+                        )
+                        .count_documents(doc! {})
+                        .await
+                        .unwrap(),
+                    0
+                );
+            }
+        }
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn personal_channel_targets_retain_owner_confirmation() {
+    use crate::models::assistant_settings::AccessMode;
+    let f = crate::services::org_agent_tests::Fixture::new("team_personal_channel_cards").await;
+    let (personal, _) = team::create_specialist(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.admin,
+        f.request("helper"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let row = crate::services::assistant_authority_tests::new_orchestrator(
+        &f.state,
+        &f.admin,
+        "Link a channel",
+    )
+    .await;
+    let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    for mode in [AccessMode::Nyxmode, AccessMode::AskEveryTime] {
+        crate::services::assistant_settings_service::update(
+            &f.state.db,
+            &f.admin,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(mode),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for selector in ["nyxbot", personal.id.as_str(), "helper"] {
+            for (tool, args) in channel_target_calls(selector) {
+                // Setup links are Change risk: NyxMode runs them without a card.
+                if mode == AccessMode::Nyxmode && tool == "nyxid__channel_bot_setup_link" {
+                    continue;
+                }
+                let (value, error) = execute_tool(&f.state, &chat, tool, &args).await;
+                assert!(error, "{tool}: {value}");
+                assert_eq!(
+                    value["error"], "acknowledgement_required",
+                    "{tool} {mode:?}: {value}"
+                );
+                let card = f
+                    .state
+                    .db
+                    .collection::<bson::Document>(
+                        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"_id": value["acknowledgement_id"].as_str().unwrap()})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(card.get_str("user_id").unwrap(), f.admin);
+                assert_eq!(card.get_str("tool_name").unwrap(), tool);
+            }
+        }
+    }
+    f.state.db.drop().await.unwrap();
+}

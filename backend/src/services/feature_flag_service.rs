@@ -222,6 +222,21 @@ const AGENT_LEARNING_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const MOBILE_MFA_FLAG_KEY: &str = "auth:mobile-mfa";
+const MOBILE_MFA_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: MOBILE_MFA_FLAG_KEY,
+    description: "Require MFA for mobile social sign-ins. While off, anyone holding the account's social first factor can sign in through mobile without an MFA code.",
+    default_enabled: false,
+};
+
+/// Resolve once for the signing-in person, including live org overrides.
+pub async fn mobile_mfa_required(db: &mongodb::Database, person: &str) -> AppResult<bool> {
+    Ok(resolve_personal_features(db, person)
+        .await?
+        .iter()
+        .any(|key| key == MOBILE_MFA_FLAG_KEY))
+}
+
 pub const INVITATION_CODE_FLAG_KEY: &str = "auth:invitation-code";
 const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: INVITATION_CODE_FLAG_KEY,
@@ -288,6 +303,7 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
+    MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     SKILL_PIN_DISABLE_FLAG,
@@ -325,6 +341,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
+    MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     SKILL_PIN_DISABLE_FLAG,
@@ -2506,6 +2523,7 @@ mod tests {
             shipped,
             vec![
                 "auth:invitation-code",
+                "auth:mobile-mfa",
                 "assistant:nyxagent-engine",
                 "assistant:model-controls",
                 "assistant:skill-pin-disable",
@@ -2798,6 +2816,47 @@ mod tests {
                 .expect("resolve after clear")
                 .contains(&"example_ui".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn mobile_mfa_required_resolves_live_org_override_for_person() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("mobile_mfa_org_override").await;
+        let org = Uuid::new_v4().to_string();
+        let person = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&person, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<crate::models::org_membership::OrgMembership>(
+            crate::models::org_membership::COLLECTION_NAME,
+        )
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            &person,
+            OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+        assert!(!mobile_mfa_required(&db, &person).await.unwrap());
+        set_platform_org_override(&db, &org, MOBILE_MFA_FLAG_KEY, true, &person)
+            .await
+            .unwrap();
+        assert!(mobile_mfa_required(&db, &person).await.unwrap());
+        db.collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+            .update_one(
+                doc! {"org_user_id": &org, "member_user_id": &person},
+                doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        assert!(!mobile_mfa_required(&db, &person).await.unwrap());
+        db.drop().await.unwrap();
     }
 
     #[test]

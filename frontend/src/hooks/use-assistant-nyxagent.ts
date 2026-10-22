@@ -10,6 +10,7 @@ import type {
   NyxAgentHistory,
 } from "@/schemas/assistant-nyxagent";
 import { useAuthStore } from "@/stores/auth-store";
+import { isCmaOperationPending } from "@/schemas/cma-operation";
 import { useDecideApproval } from "@/hooks/use-approvals";
 import { nyxBotQueryKeys, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxAgentLive } from "@/hooks/use-nyxagent-live";
@@ -227,16 +228,18 @@ export function useNyxAgentAssistantChat({
     refetchInterval: (query) =>
       streaming || query.state.data?.conversation.active_turn
         ? (live ? 5000 : 2000)
-        : livePollInterval(
-          query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
-          (query.state.data?.approvals.length ?? 0) > 0
-          ? 2000
-          : // Waiting on something outside the chat: notice when it happens.
-            (query.state.data?.waiting.length ?? 0) > 0
-            ? 10_000
-            : false,
-        live,
-      ),
+        : query.state.data?.cma_operations.some(isCmaOperationPending)
+          ? 5000
+          : livePollInterval(
+              query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
+                (query.state.data?.approvals.length ?? 0) > 0
+                ? 2000
+                : // Waiting on something outside the chat: notice when it happens.
+                  (query.state.data?.waiting.length ?? 0) > 0
+                  ? 10_000
+                  : false,
+              live,
+            ),
   });
   // A settled turn, a decided card or a resolved wait changes the agent's
   // summary and its thread row.

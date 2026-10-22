@@ -503,7 +503,33 @@ fn error_result_inner(
             };
         }
 
-        error if error.is_forbidden() || matches!(error, AppError::Unauthorized(_)) => {
+        AppError::ForbiddenWithGuidance { guidance, .. }
+            if matches!(
+                guidance.as_ref(),
+                crate::errors::access_denial::AccessDenial::OrganizationAgentChannelUnsupported { .. }
+            ) =>
+        {
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: super::assistant_acknowledgement_service::organization_agent_channel_refusal(
+                ),
+            };
+        }
+        // Forbidden messages are authored for this same principal and tell
+        // the agent how to correct its request or report the refusal. Guided
+        // denials keep their metadata HTTP-only, so guided and plain denials
+        // have the same assistant shape.
+        AppError::Forbidden(message) | AppError::ForbiddenWithGuidance { message, .. } => {
+            let message: String = message.chars().take(300).collect();
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({"error": body.error, "error_code": body.error_code,
+                    "message": message}),
+            };
+        }
+        AppError::Unauthorized(_) => {
             "This operation requires a conversation key and human acknowledgement."
         }
         AppError::Conflict(_) => {
@@ -597,7 +623,15 @@ impl AccountTools<'_> {
             .map(|chat| chat.conversation_id.clone());
         let result = match chat {
             Ok(Some(chat)) => Box::pin(self.execute_authorized(&chat, auth, tool_name, args)).await,
-            Ok(None) => Err(AppError::Forbidden("Conversation key required".into())),
+            Ok(None) => Ok(ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({
+                    "error": "forbidden",
+                    "error_code": 1002,
+                    "message": "This operation requires a conversation key and human acknowledgement."
+                }),
+            }),
             Err(error) => Err(error),
         };
         let mut result = result.unwrap_or_else(error_result);
@@ -1504,5 +1538,115 @@ mod search_tests {
             let found = crate::services::mcp_service::search_all_tools(&services, query);
             assert_eq!(found.matches[0].name, "nyxid__spawn_subagent", "{query}");
         }
+    }
+
+    #[test]
+    fn forbidden_messages_are_bounded_and_guidance_stays_http_only() {
+        use crate::errors::access_denial::CredentialType;
+        for message in ["Missing scope".to_owned(), "界".repeat(301)] {
+            let plain = error_result(AppError::Forbidden(message.clone()));
+            assert!(plain.is_error);
+            assert!(plain.permission_request.is_none());
+            assert_eq!(
+                plain.value,
+                json!({"error": "forbidden", "error_code": 1002,
+                "message": message.chars().take(300).collect::<String>()})
+            );
+            let mut guided = vec![AppError::insufficient_scope(message.clone())];
+            for kind in [
+                CredentialType::ApiKey,
+                CredentialType::Delegated,
+                CredentialType::Relay,
+                CredentialType::ServiceAccount,
+                CredentialType::OauthClient,
+            ] {
+                guided.push(AppError::unsupported_credential(&message, kind));
+            }
+            for error in guided {
+                let result = error_result(error);
+                assert!(result.is_error);
+                assert!(result.permission_request.is_none());
+                assert_eq!(result.value, plain.value);
+            }
+        }
+    }
+
+    #[test]
+    fn unauthorized_keeps_fixed_conversation_key_copy() {
+        let result = error_result(AppError::Unauthorized(
+            "private authentication detail".into(),
+        ));
+        assert!(result.is_error);
+        assert_eq!(
+            result.value,
+            json!({"error": "unauthorized", "error_code": 1001,
+                "message": "This operation requires a conversation key and human acknowledgement."})
+        );
+        assert!(
+            !result
+                .value
+                .to_string()
+                .contains("private authentication detail")
+        );
+        assert!(result.permission_request.is_none());
+    }
+
+    #[tokio::test]
+    async fn account_tool_without_conversation_key_keeps_fixed_refusal_and_audits_it() {
+        let db = crate::test_utils::connect_transaction_test_database("account_tool_no_key").await;
+        let state = crate::test_utils::test_app_state(db);
+        let owner = uuid::Uuid::new_v4().to_string();
+        let tools = AccountTools {
+            db: &state.db,
+            keys: &state.encryption_keys,
+            http: &state.http_client,
+            config: &state.config,
+            token_exchange_cache: &state.token_exchange_cache,
+            node_manager: &state.node_ws_manager,
+        };
+        for method in [AuthMethod::Session, AuthMethod::ApiKey] {
+            let mut auth = crate::test_utils::test_auth_user(&owner);
+            auth.auth_method = method;
+            if auth.auth_method == AuthMethod::ApiKey {
+                auth.api_key_id = Some(uuid::Uuid::new_v4().to_string());
+            }
+            let result = tools.execute(&auth, "nyxid__list_nodes", &json!({})).await;
+            assert!(result.is_error);
+            assert!(result.permission_request.is_none());
+            assert_eq!(
+                result.value,
+                json!({"error": "forbidden", "error_code": 1002,
+            "message": "This operation requires a conversation key and human acknowledgement."})
+            );
+            let audit = state
+                .db
+                .collection::<crate::models::audit_log::AuditLog>(
+                    crate::models::audit_log::COLLECTION_NAME,
+                )
+                .find_one(doc! {
+                    "user_id": &owner,
+                    "event_type": "assistant_account_tool_call",
+                    "api_key_id": &auth.api_key_id,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let data = audit.event_data.unwrap();
+            assert_eq!(data["outcome"], "refused");
+            assert_eq!(data["tool_name"], "nyxid__list_nodes");
+            assert!(data["conversation_id"].is_null());
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<mongodb::bson::Document>(
+                    crate::models::assistant_acknowledgement::COLLECTION_NAME
+                )
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        state.db.drop().await.unwrap();
     }
 }

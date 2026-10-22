@@ -1,3 +1,4 @@
+import { useMfaStepUp } from "@/hooks/use-mfa-step-up";
 import {
   Fragment,
   useCallback,
@@ -116,6 +117,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
   const [context, setContext] = useState<AgentKeyPreview | null>(null);
   const [terminal, setTerminal] = useState<Terminal | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const stepUp = useMfaStepUp(`${user?.id ?? ""}:${flow}:${code}:${terminal ?? ""}`);
   const [busy, setBusy] = useState(false);
   const [deadline, setDeadline] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now);
@@ -233,6 +235,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
     try {
       await work();
     } catch (failure) {
+      if (stepUp.handle(failure, () => run(work))) return;
       if (alive.current && !ended.current) {
         const errorCode = (failure as { errorCode?: number })?.errorCode;
         if (errorCode === 11201 || errorCode === 11901) finish("expired");
@@ -449,6 +452,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
     });
   const problems = inventory ? requestedProblems(requested, inventory) : [];
   const title = ["Verify request", "Choose access", "Scope & approval"];
+  if (stepUp.prompt) return <LoginDeviceShell>{stepUp.prompt}</LoginDeviceShell>;
   return (
     <LoginDeviceShell>
       <div

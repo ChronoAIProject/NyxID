@@ -310,11 +310,81 @@ pub async fn delegable_specialist(
         Err(error) => return Err(error),
     }
 
+    let mut usable =
+        admitted_organization_specialists(db, actor, selector, OrgAgentAdmission::Use).await?;
+    match usable.len() {
+        0 => Err(not_found()),
+        1 => Ok(usable.pop().expect("one candidate")),
+        _ => {
+            let mut choices = Vec::with_capacity(usable.len());
+            for agent in &usable {
+                choices.push(qualified_name(db, agent).await?);
+            }
+            choices.sort();
+            Err(AppError::ValidationError(format!(
+                "Agent name is ambiguous; use one of: {}",
+                choices.join(", ")
+            )))
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OrgAgentAdmission {
+    Use,
+    Read,
+}
+
+impl OrgAgentAdmission {
+    async fn require_enabled(self, db: &Database, actor: &str) -> AppResult<()> {
+        match self {
+            Self::Use => super::org_agent_service::require_creation_enabled(db, actor).await,
+            Self::Read => Ok(()),
+        }
+    }
+
+    async fn admit(self, db: &Database, actor: &str, agent: &AssistantAgent) -> AppResult<()> {
+        match self {
+            Self::Use => super::org_agent_service::require_use(db, actor, agent).await,
+            Self::Read => {
+                if super::org_agent_service::access(db, actor, &agent.user_id)
+                    .await?
+                    .can_read()
+                {
+                    Ok(())
+                } else {
+                    Err(not_found())
+                }
+            }
+        }
+    }
+}
+
+/// Whether a bare or qualified name matches any readable organization specialist.
+/// Channel targets need no ambiguity selection because every match is refused.
+pub async fn names_readable_organization_specialist(
+    db: &Database,
+    actor: &str,
+    selector: &str,
+) -> AppResult<bool> {
+    match admitted_organization_specialists(db, actor, selector, OrgAgentAdmission::Read).await {
+        Ok(agents) => Ok(!agents.is_empty()),
+        Err(AppError::NotFound(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+async fn admitted_organization_specialists(
+    db: &Database,
+    actor: &str,
+    selector: &str,
+    admission: OrgAgentAdmission,
+) -> AppResult<Vec<AssistantAgent>> {
     if let Some((org_selector, agent_selector)) = selector.split_once('/') {
         if org_selector.is_empty() || agent_selector.is_empty() {
             return Err(not_found());
         }
-        super::org_agent_service::require_creation_enabled(db, actor).await?;
+        admission.require_enabled(db, actor).await?;
         let owner = super::org_agent_service::resolve_org_selector(db, actor, org_selector).await?;
         let agent = db
             .collection::<AssistantAgent>(AGENTS)
@@ -326,8 +396,8 @@ pub async fn delegable_specialist(
             })
             .await?
             .ok_or_else(not_found)?;
-        super::org_agent_service::require_use(db, actor, &agent).await?;
-        return Ok(agent);
+        admission.admit(db, actor, &agent).await?;
+        return Ok(vec![agent]);
     }
 
     if !valid_name(selector) {
@@ -351,31 +421,20 @@ pub async fn delegable_specialist(
     if candidates.is_empty() {
         return Err(not_found());
     }
-    super::org_agent_service::require_creation_enabled(db, actor).await?;
+    admission.require_enabled(db, actor).await?;
 
     let mut usable = Vec::with_capacity(candidates.len());
     for agent in candidates {
-        match super::org_agent_service::require_use(db, actor, &agent).await {
+        match admission.admit(db, actor, &agent).await {
             Ok(()) => usable.push(agent),
-            Err(error) if error.is_forbidden() => {}
+            Err(error)
+                if error.is_forbidden()
+                    || (matches!(admission, OrgAgentAdmission::Read)
+                        && matches!(error, AppError::NotFound(_))) => {}
             Err(error) => return Err(error),
         }
     }
-    match usable.len() {
-        0 => Err(not_found()),
-        1 => Ok(usable.pop().expect("one candidate")),
-        _ => {
-            let mut choices = Vec::with_capacity(usable.len());
-            for agent in &usable {
-                choices.push(qualified_name(db, agent).await?);
-            }
-            choices.sort();
-            Err(AppError::ValidationError(format!(
-                "Agent name is ambiguous; use one of: {}",
-                choices.join(", ")
-            )))
-        }
-    }
+    Ok(usable)
 }
 
 async fn qualified_name(db: &Database, agent: &AssistantAgent) -> AppResult<String> {
