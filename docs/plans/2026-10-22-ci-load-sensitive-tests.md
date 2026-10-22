@@ -138,3 +138,22 @@ assertions nor their individual deadlines.
 
 Cache usage observed during this follow-up: 165 entries, 11,934,166,536 bytes.
 That is a point-in-time measurement, not a post-change performance result.
+
+## Additional hosted regression
+
+After integrating main `68636647f`, run `39856482241` exposed a separate
+fixture race in `cma_agent_input_waits_for_activity_before_settling_ready`.
+Ordinary shard 3 failed both attempts because it expected a completed watch
+after one sweep. The fixture creates two watches against a service with one
+execution slot, while four sweep workers may poll concurrently. Capacity
+refusal legitimately defers a watch, including between status and result
+calls, so one sweep need not settle both watches. The fixture also read an
+unspecified row between phases.
+
+The test now resolves both idempotency keys to stable watch IDs and waits,
+with a bounded deadline, for each to observe `ready`, then `working`, then
+completed `ready`. Only outstanding watches are made due again. Initial
+readiness requires an actual status observation and no terminal result;
+unexpected terminal results fail immediately. The service capacity, production
+sweeper, retry policy and test assertions remain intact, with both watches now
+checked through the complete transition.

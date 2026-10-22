@@ -324,6 +324,8 @@ async fn cma_submission_tracks_status_after_turn_settlement_and_projects_only_me
 
 #[tokio::test]
 async fn cma_agent_input_waits_for_activity_before_settling_ready() {
+    use futures::TryStreamExt;
+
     let a = cma_fixture().await;
     *a.phase.lock().unwrap() = "ready".into();
     let auth = authenticate(&a.f).await;
@@ -371,28 +373,97 @@ async fn cma_agent_input_waits_for_activity_before_settling_ready() {
         2
     );
 
-    a.due().await;
-    async_operations::sweep(&a.f.state).await.unwrap();
-    let ready = a.watch().await;
-    assert_eq!(ready.state, "waiting");
-    assert!(!ready.cma.as_ref().unwrap().seen_working);
-
-    *a.phase.lock().unwrap() = "working".into();
-    a.due().await;
-    async_operations::sweep(&a.f.state).await.unwrap();
-    let working = a.watch().await;
-    assert_eq!(working.state, "waiting");
-    assert!(working.cma.as_ref().unwrap().seen_working);
-
-    *a.phase.lock().unwrap() = "ready".into();
-    a.due().await;
-    async_operations::sweep(&a.f.state).await.unwrap();
-    let finished = a.watch().await;
-    assert_eq!(finished.reason.as_deref(), Some("completed"));
-    assert_eq!(
-        finished.cma.as_ref().unwrap().status.as_deref(),
-        Some("ready")
-    );
+    let watches = a.f.state.db.collection::<AsyncServiceOperation>(WATCHES);
+    let initial: Vec<AsyncServiceOperation> = watches
+        .find(doc! {})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let ids: Vec<String> = ["input-1", "input-2"]
+        .into_iter()
+        .map(|key| {
+            initial
+                .iter()
+                .find(|watch| watch.cma.as_ref().unwrap().idempotency_key.as_deref() == Some(key))
+                .unwrap()
+                .id
+                .clone()
+        })
+        .collect();
+    for (phase, seen_working, reason) in [
+        ("ready", false, None),
+        ("working", true, None),
+        ("ready", true, Some("completed")),
+    ] {
+        *a.phase.lock().unwrap() = phase.into();
+        let mut observed = Vec::new();
+        // Both watches share one service slot. A sweep may legitimately defer
+        // either watch (including between its status and result calls), so wait
+        // for each stable ID to observe this phase before changing upstream.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let rows: Vec<AsyncServiceOperation> = watches
+                    .find(doc! {"_id":{"$in":&ids}})
+                    .await
+                    .unwrap()
+                    .try_collect()
+                    .await
+                    .unwrap();
+                assert_eq!(rows.len(), 2);
+                observed = rows
+                    .iter()
+                    .map(|watch| {
+                        let cma = watch.cma.as_ref().unwrap();
+                        (
+                            watch.id.clone(),
+                            watch.state.clone(),
+                            cma.status.clone(),
+                            watch.reason.clone(),
+                        )
+                    })
+                    .collect();
+                for watch in &rows {
+                    if reason.is_none() {
+                        assert_eq!(watch.state, "waiting", "{observed:?}");
+                        assert!(watch.reason.is_none(), "{observed:?}");
+                    } else if let Some(actual) = &watch.reason {
+                        assert_eq!(actual, "completed", "{observed:?}");
+                    }
+                }
+                let pending: Vec<&str> = rows
+                    .iter()
+                    .filter(|watch| {
+                        let cma = watch.cma.as_ref().unwrap();
+                        cma.status.as_deref() != Some(phase)
+                            || cma.checked_at.is_none()
+                            || cma.seen_working != seen_working
+                            || watch.reason.as_deref() != reason
+                    })
+                    .map(|watch| watch.id.as_str())
+                    .collect();
+                if pending.is_empty() {
+                    break;
+                }
+                a.f.state
+                    .db
+                    .collection::<bson::Document>(WATCHES)
+                    .update_many(
+                        doc! {"_id":{"$in":pending}},
+                        doc! {"$set":{"poll_at":bson::DateTime::from_millis(0)}},
+                    )
+                    .await
+                    .unwrap();
+                async_operations::sweep(&a.f.state).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("both watches must observe {phase} with reason {reason:?}: {observed:?}")
+        });
+    }
 }
 
 #[tokio::test]
