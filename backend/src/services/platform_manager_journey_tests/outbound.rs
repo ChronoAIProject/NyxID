@@ -714,3 +714,89 @@ async fn concurrent_saved_reply_notice_snapshots_reuse_the_winner() {
     }
     j.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn concurrent_saved_reply_render_adopts_a_different_winning_notice_plan() {
+    use crate::models::assistant_acknowledgement::{
+        AssistantAcknowledgement, COLLECTION_NAME as ACKS,
+    };
+    let j = Journey::new().await;
+    j.link().await;
+    let (destination, reply, saved) = j.prepared_reply(7802).await;
+    let body = delivery::render_saved(&saved, &j.state.config.frontend_url);
+    assert!(matches!(
+        j.deliver(&destination, &reply, body).await.unwrap(),
+        DeliveryOutcome::Sent { .. }
+    ));
+    let row = engine::get(&j.state.db, &j.owner, &reply.turn.conversation_id)
+        .await
+        .unwrap();
+    let card = |id: &str, summary: &str| -> AssistantAcknowledgement {
+        bson::from_document(doc! {"_id":id,"conversation_id":&row.id,"user_id":&j.owner,
+        "api_key_id":&row.credential_api_key_id,"kind":"action","summary":summary,
+        "status":"pending","decider":"user","requested_turn_id":&reply.turn.turn_id,
+        "created_at":bson::DateTime::now(),
+        "expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(10)),
+        "routing":{"kind":"not_involved"}})
+        .unwrap()
+    };
+    let decided = card(
+        "00000400-0000-4000-8000-000000000001",
+        "Archive the old report",
+    );
+    let remaining = card(
+        "00000400-0000-4000-8000-000000000002",
+        "Send the weekly summary",
+    );
+    j.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .insert_many([&decided, &remaining])
+        .await
+        .unwrap();
+    let deliveries = j
+        .state
+        .db
+        .collection::<Document>(crate::models::platform_manager_delivery::COLLECTION_NAME);
+    deliveries
+        .update_one(
+            doc! {"reference.reply_id": &saved.id},
+            doc! {"$unset": {"notice_card_ids": ""}},
+        )
+        .await
+        .unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let (rendered, ()) = tokio::join!(
+        delivery::TEST_BEFORE_NOTICE_SNAPSHOT.scope(
+            barrier.clone(),
+            Box::pin(delivery::render_personal(&j.state, &saved, None))
+        ),
+        async {
+            // The renderer has read both cards and is about to pin them.
+            barrier.wait().await;
+            // Another renderer wins with a different plan: the first card was
+            // decided before it read.
+            deliveries
+                .update_one(
+                    doc! {"reference.reply_id": &saved.id},
+                    doc! {"$set": {"notice_card_ids": [&remaining.id]}},
+                )
+                .await
+                .unwrap();
+            barrier.wait().await;
+        }
+    );
+    let rendered = rendered.unwrap();
+    assert!(rendered.contains("Send the weekly summary"));
+    assert!(!rendered.contains("Archive the old report"));
+    let pinned = deliveries
+        .find_one(doc! {"reference.reply_id": &saved.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pinned.get_array("notice_card_ids").unwrap(),
+        &vec![bson::Bson::String(remaining.id.clone())]
+    );
+    j.state.db.drop().await.unwrap();
+}
