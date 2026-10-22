@@ -1076,9 +1076,12 @@ async fn rotate_refresh(
         })
     })
     .await
-    .map_err(|error| match error {
-        AppError::Internal(_) => AppError::OAuthAuthorityUnavailable,
-        other => other,
+    .map_err(|error| {
+        if super::transaction_service::is_indeterminate_commit(&error) {
+            AppError::OAuthAuthorityUnavailable
+        } else {
+            error
+        }
     })
 }
 

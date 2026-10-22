@@ -124,7 +124,10 @@ pub enum AppError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
-    #[error("OAuth authority is temporarily unavailable; retry the request")]
+    /// Retryable authorization uncertainty, including first-party session rereads,
+    /// refresh commit ambiguity and transient post-commit consent fences.
+    /// The OAuth-named wire key and numeric code remain stable for compatibility.
+    #[error("Authorization is temporarily unavailable; retry the request")]
     OAuthAuthorityUnavailable,
 
     #[error("Forbidden: {0}")]
@@ -1736,7 +1739,10 @@ mod tests {
         assert_eq!(error.error_key(), "oauth_authority_unavailable");
         assert_eq!(error.oauth_status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.oauth_error_code(), "temporarily_unavailable");
-        assert!(!error.to_string().contains("authorize again"));
+        assert_eq!(
+            error.to_string(),
+            "Authorization is temporarily unavailable; retry the request"
+        );
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.headers().get("retry-after").unwrap(), "1");

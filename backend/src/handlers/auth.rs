@@ -951,11 +951,7 @@ pub async fn refresh(
         Some(&state.mcp_sessions),
         None,
     )
-    .await
-    .map_err(|error| match error {
-        AppError::DatabaseError(_) | AppError::Internal(_) => AppError::OAuthAuthorityUnavailable,
-        other => other,
-    })?;
+    .await?;
 
     // Telemetry: auth.token_refreshed. Pre-auth path (no AuthUser),
     // so we decode the newly-issued access token to get the user id.
@@ -1647,14 +1643,63 @@ mod refresh_outcome_tests {
     use axum::response::IntoResponse;
     use mongodb::bson::doc;
     #[tokio::test]
+    async fn refresh_handler_preserves_plain_database_faults() {
+        let (db, config, _, issued) =
+            crate::services::token_service::refresh_tests::fixture().await;
+        db.collection::<mongodb::bson::Document>(crate::models::session::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &issued.session_id },
+                doc! {
+                    "$set": {
+                        "expires_at": "invalid stored date"
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state_with_config(db, config);
+        let error = refresh(
+            State(state),
+            HeaderMap::new(),
+            Some(Json(RefreshRequest {
+                refresh_token: Some(issued.refresh_token),
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(&error, AppError::DatabaseError(_)));
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "database_error");
+        assert!(!body.to_string().contains("invalid stored date"));
+    }
+
+    #[tokio::test]
     async fn refresh_handler_distinguishes_rotation_conflict_from_indeterminate_failure() {
         for indeterminate in [false, true] {
             let (db, config, _, issued) =
                 crate::services::token_service::refresh_tests::fixture().await;
             let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
             if !indeterminate {
-                db.collection::<mongodb::bson::Document>(crate::models::refresh_token::COLLECTION_NAME).update_one(doc!{"session_id":&issued.session_id},doc!{"$set":{
-                    "revoked":true,"revoked_at":mongodb::bson::DateTime::now(),"replaced_by":"missing-successor"}}).await.unwrap();
+                db.collection::<mongodb::bson::Document>(
+                    crate::models::refresh_token::COLLECTION_NAME,
+                )
+                .update_one(
+                    doc! { "session_id": &issued.session_id },
+                    doc! {
+                        "$set": {
+                            "revoked": true,
+                            "revoked_at": mongodb::bson::DateTime::now(),
+                            "replaced_by": "missing-successor"
+                        }
+                    },
+                )
+                .await
+                .unwrap();
             }
             let request = refresh(
                 State(state),
@@ -1700,14 +1745,14 @@ mod refresh_outcome_tests {
                 db.collection::<mongodb::bson::Document>(
                     crate::models::refresh_token::COLLECTION_NAME
                 )
-                .count_documents(doc! {"revoked":false})
+                .count_documents(doc! { "revoked": false })
                 .await
                 .unwrap(),
                 u64::from(indeterminate)
             );
             assert!(
                 !db.collection::<mongodb::bson::Document>(crate::models::session::COLLECTION_NAME)
-                    .find_one(doc! {"_id":issued.session_id})
+                    .find_one(doc! { "_id": issued.session_id })
                     .await
                     .unwrap()
                     .unwrap()

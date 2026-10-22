@@ -379,53 +379,90 @@ mod tests {
             session_end_error(&db, &id, &user).await,
             AppError::OAuthAuthorityUnavailable
         ));
-        assert!(
-            matches!(session_end_error(&db,&id,"another-user").await,AppError::Unauthorized(ref message) if message=="Session has ended")
-        );
+        assert!(matches!(
+            session_end_error(&db, &id, "another-user").await,
+            AppError::Unauthorized(ref message) if message == "Session has ended"
+        ));
         for purpose in ["mfa_pending", "unknown"] {
             db.collection::<Document>(SESSIONS)
                 .update_one(
-                    doc! {"_id":&id},
-                    doc! {"$set":{"purpose":purpose,"revoked":true}},
+                    doc! { "_id": &id },
+                    doc! {
+                        "$set": {
+                            "purpose": purpose,
+                            "revoked": true
+                        }
+                    },
                 )
                 .await
                 .unwrap();
-            assert!(
-                matches!(session_end_error(&db,&id,&user).await,AppError::Unauthorized(ref message) if message=="Session has ended")
-            );
+            assert!(matches!(
+                session_end_error(&db, &id, &user).await,
+                AppError::Unauthorized(ref message) if message == "Session has ended"
+            ));
         }
         db.collection::<Document>(SESSIONS)
             .update_one(
-                doc! {"_id":&id},
-                doc! {"$unset":{"purpose":""},"$set":{"user_agent":"mfa_pending"}},
+                doc! { "_id": &id },
+                doc! {
+                    "$unset": {
+                        "purpose": ""
+                    },
+                    "$set": {
+                        "user_agent": "mfa_pending"
+                    }
+                },
             )
             .await
             .unwrap();
-        assert!(
-            matches!(session_end_error(&db,&id,&user).await,AppError::Unauthorized(ref message) if message=="Session has ended")
-        );
+        assert!(matches!(
+            session_end_error(&db, &id, &user).await,
+            AppError::Unauthorized(ref message) if message == "Session has ended"
+        ));
         db.collection::<Document>(SESSIONS)
-            .update_one(doc! {"_id":&id}, doc! {"$unset":{"user_agent":""}})
+            .update_one(
+                doc! { "_id": &id },
+                doc! {
+                    "$unset": {
+                        "user_agent": ""
+                    }
+                },
+            )
             .await
             .unwrap();
-        db.collection::<Document>(SESSIONS).update_one(doc! {"_id":&id},doc! {"$set":{"purpose":"authenticated","revoked":true,
-            "expires_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::seconds(1))}}).await.unwrap();
-        assert!(
-            matches!(session_end_error(&db,&id,&user).await,AppError::Unauthorized(ref message) if message=="Session has been revoked")
-        );
+        db.collection::<Document>(SESSIONS).update_one(doc! { "_id": &id },doc! {
+    "$set": {
+        "purpose": "authenticated",
+        "revoked": true,
+        "expires_at": bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::seconds(1))
+    }
+}).await.unwrap();
+        assert!(matches!(
+            session_end_error(&db, &id, &user).await,
+            AppError::Unauthorized(ref message) if message == "Session has been revoked"
+        ));
         db.collection::<Session>(SESSIONS)
-            .update_one(doc! {"_id":&id}, doc! {"$set":{"revoked":false}})
+            .update_one(
+                doc! { "_id": &id },
+                doc! {
+                    "$set": {
+                        "revoked": false
+                    }
+                },
+            )
             .await
             .unwrap();
-        assert!(
-            matches!(session_end_error(&db,&id,&user).await,AppError::Unauthorized(ref message) if message=="Session has expired")
-        );
+        assert!(matches!(
+            session_end_error(&db, &id, &user).await,
+            AppError::Unauthorized(ref message) if message == "Session has expired"
+        ));
         db.collection::<Session>(SESSIONS)
-            .delete_one(doc! {"_id":&id})
+            .delete_one(doc! { "_id": &id })
             .await
             .unwrap();
-        assert!(
-            matches!(session_end_error(&db,&id,&user).await,AppError::Unauthorized(ref message) if message=="Session has ended")
-        );
+        assert!(matches!(
+            session_end_error(&db, &id, &user).await,
+            AppError::Unauthorized(ref message) if message == "Session has ended"
+        ));
     }
 }

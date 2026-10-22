@@ -2444,7 +2444,9 @@ fn authorization_code_grant_error(error: AppError) -> AppError {
 /// silently. A deactivated issuing client (`AuthenticationFailed`) stays
 /// `invalid_client` so the client re-registers.
 fn refresh_token_grant_error(error: AppError) -> AppError {
-    if crate::services::token_service::is_rotation_conflict(&error) {
+    if crate::services::token_service::is_rotation_conflict(&error)
+        || crate::services::transaction_service::is_indeterminate_commit(&error)
+    {
         return AppError::OAuthAuthorityUnavailable;
     }
     match error {
@@ -2454,7 +2456,6 @@ fn refresh_token_grant_error(error: AppError) -> AppError {
         AppError::TokenExpired => {
             AppError::ExternalTokenInvalid("Refresh token has expired".to_string())
         }
-        AppError::DatabaseError(_) | AppError::Internal(_) => AppError::OAuthAuthorityUnavailable,
         other => other,
     }
 }
@@ -7129,6 +7130,20 @@ mod credential_debug_tests {
         assert!(!format!("{introspect:?}").contains(secret));
         assert!(!format!("{revoke:?}").contains(secret));
     }
+    #[test]
+    fn refresh_grant_preserves_plain_database_and_internal_faults() {
+        let database = AppError::DatabaseError(mongodb::error::Error::custom("plain DB failure"));
+        let mapped = refresh_token_grant_error(database);
+        assert!(matches!(&mapped, AppError::DatabaseError(_)));
+        assert_eq!(mapped.oauth_status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(mapped.oauth_error_code(), "server_error");
+
+        let mapped = refresh_token_grant_error(AppError::Internal("plain internal failure".into()));
+        assert!(matches!(&mapped, AppError::Internal(_)));
+        assert_eq!(mapped.oauth_status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(mapped.oauth_error_code(), "server_error");
+    }
+
     #[test]
     fn refresh_transients_are_temporarily_unavailable_and_definitive_grants_stay_invalid_grant() {
         for error in [

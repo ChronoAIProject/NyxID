@@ -4814,9 +4814,19 @@ mod curation_purpose_regressions {
     #[test]
     fn general_service_accounts_keep_the_existing_purpose_route_projection() {
         let sa: ServiceAccount = bson::from_document(doc! {
-            "_id":uuid::Uuid::new_v4().to_string(),"name":"General","client_id":"sa_test","client_secret_hash":"test-only-hash","secret_prefix":"sas_test",
-            "allowed_scopes":"proxy","is_active":true,"created_by":uuid::Uuid::new_v4().to_string(),"role_ids":[],"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
-        }).unwrap();
+            "_id": uuid::Uuid::new_v4().to_string(),
+            "name": "General",
+            "client_id": "sa_test",
+            "client_secret_hash": "test-only-hash",
+            "secret_prefix": "sas_test",
+            "allowed_scopes": "proxy",
+            "is_active": true,
+            "created_by": uuid::Uuid::new_v4().to_string(),
+            "role_ids": [],
+            "created_at": bson::DateTime::now(),
+            "updated_at": bson::DateTime::now(),
+        })
+        .unwrap();
         for path in [
             "/api/v1/proxy/s/slug/path",
             "/api/v1/proxy/services",
@@ -4857,33 +4867,64 @@ mod curation_purpose_regressions {
             match kind {
                 "deleted" => {
                     collection
-                        .delete_one(doc! {"_id":&issued.session_id})
+                        .delete_one(doc! { "_id": &issued.session_id })
                         .await
                         .unwrap();
                 }
                 "revoked" => {
                     collection
                         .update_one(
-                            doc! {"_id":&issued.session_id},
-                            doc! {"$set":{"revoked":true}},
+                            doc! { "_id": &issued.session_id },
+                            doc! {
+                                "$set": {
+                                    "revoked": true
+                                }
+                            },
                         )
                         .await
                         .unwrap();
                 }
                 "expired" => {
-                    collection.update_one(doc! {"_id":&issued.session_id},doc! {"$set":{"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::seconds(1))}}).await.unwrap();
+                    let expired_at = bson::DateTime::from_chrono(
+                        chrono::Utc::now() - chrono::Duration::seconds(1),
+                    );
+                    collection
+                        .update_one(
+                            doc! { "_id": &issued.session_id },
+                            doc! { "$set": { "expires_at": expired_at } },
+                        )
+                        .await
+                        .unwrap();
                 }
                 "owner" => {
                     collection
                         .update_one(
-                            doc! {"_id":&issued.session_id},
-                            doc! {"$set":{"user_id":Uuid::new_v4().to_string()}},
+                            doc! { "_id": &issued.session_id },
+                            doc! {
+                                "$set": {
+                                    "user_id": Uuid::new_v4().to_string()
+                                }
+                            },
                         )
                         .await
                         .unwrap();
                 }
                 _ => {
-                    collection.update_one(doc! {"_id":&issued.session_id},doc! {"$set":{"purpose":if kind=="pending" {"mfa_pending"}else{"unknown"}}}).await.unwrap();
+                    collection
+                        .update_one(
+                            doc! { "_id": &issued.session_id },
+                            doc! {
+                                "$set": {
+                                    "purpose": if kind == "pending" {
+                                        "mfa_pending"
+                                    } else {
+                                        "unknown"
+                                    }
+                                }
+                            },
+                        )
+                        .await
+                        .unwrap();
                 }
             }
             let state = crate::test_utils::test_app_state_with_config(db, config);
@@ -4919,7 +4960,7 @@ mod curation_purpose_regressions {
         let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
         let owner = db
             .collection::<crate::models::session::Session>(crate::models::session::COLLECTION_NAME)
-            .find_one(doc! {"_id":&issued.session_id})
+            .find_one(doc! { "_id": &issued.session_id })
             .await
             .unwrap()
             .unwrap()
@@ -4963,9 +5004,12 @@ mod curation_purpose_regressions {
             crate::services::token_service::refresh_tests::fixture().await;
         db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
             .update_one(
-                doc! {"_id": &issued.session_id},
-                doc! {"$set": {"expires_at": bson::DateTime::from_chrono(
-                chrono::Utc::now() - chrono::Duration::seconds(1))}},
+                doc! { "_id": &issued.session_id },
+                doc! {
+    "$set": {
+        "expires_at": bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::seconds(1))
+    }
+},
             )
             .await
             .unwrap();

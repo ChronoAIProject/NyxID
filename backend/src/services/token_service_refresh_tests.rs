@@ -27,14 +27,14 @@ async fn token_row(db: &mongodb::Database, jwt: &str) -> RefreshToken {
         .unwrap();
     let claims: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     db.collection::<RefreshToken>(REFRESH_TOKENS)
-        .find_one(doc! {"jti": claims["jti"].as_str().unwrap()})
+        .find_one(doc! { "jti": claims["jti"].as_str().unwrap() })
         .await
         .unwrap()
         .unwrap()
 }
 async fn session_row(db: &mongodb::Database, id: &str) -> Session {
     db.collection::<Session>(SESSIONS)
-        .find_one(doc! {"_id": id})
+        .find_one(doc! { "_id": id })
         .await
         .unwrap()
         .unwrap()
@@ -50,10 +50,13 @@ async fn renew(
 async fn shorten_session(db: &mongodb::Database, id: &str) {
     db.collection::<Session>(SESSIONS)
         .update_one(
-            doc! {"_id": id},
-            doc! {"$set": {
-            "created_at": bson::DateTime::from_chrono(Utc::now() - Duration::days(60)),
-            "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(1))}},
+            doc! { "_id": id },
+            doc! {
+                "$set": {
+                    "created_at": bson::DateTime::from_chrono(Utc::now() - Duration::days(60)),
+                    "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(1))
+                }
+            },
         )
         .await
         .unwrap();
@@ -146,8 +149,17 @@ async fn expired_at_slide_aborts_cas_and_insert_and_never_returns_credentials() 
     let mut successor = old.clone();
     successor.id = Uuid::new_v4().to_string();
     successor.jti = Uuid::new_v4().to_string();
-    db.collection::<Session>(SESSIONS).update_one(doc! {"_id": &issued.session_id},
-        doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
+    db.collection::<Session>(SESSIONS)
+        .update_one(
+            doc! { "_id": &issued.session_id },
+            doc! {
+                "$set": {
+                    "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))
+                }
+            },
+        )
+        .await
+        .unwrap();
     let error = rotate_refresh(&db, &old, &successor).await.unwrap_err();
     assert!(matches!(error, AppError::Unauthorized(ref text) if text == "Session has expired"));
     assert!(!token_row(&db, &issued.refresh_token).await.revoked);
@@ -194,7 +206,7 @@ async fn replacement_chain_follows_rotated_intermediates_and_bounds_missing_link
     );
     let b_row = token_row(&db, &b.refresh_token).await;
     db.collection::<RefreshToken>(REFRESH_TOKENS)
-        .delete_one(doc! {"_id": &b_row.id})
+        .delete_one(doc! { "_id": &b_row.id })
         .await
         .unwrap();
     let old_revoked_at = token_row(&db, &issued.refresh_token).await.revoked_at;
@@ -211,8 +223,17 @@ async fn replacement_chain_follows_rotated_intermediates_and_bounds_missing_link
             old_revoked_at
         );
     }
-    db.collection::<RefreshToken>(REFRESH_TOKENS).update_one(doc! {"jti": &token_row(&db, &issued.refresh_token).await.jti},
-        doc! {"$set": {"revoked_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(121))}}).await.unwrap();
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .update_one(
+            doc! { "jti": &token_row(&db, &issued.refresh_token).await.jti },
+            doc! {
+                "$set": {
+                    "revoked_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(121))
+                }
+            },
+        )
+        .await
+        .unwrap();
     assert!(
         renew(&db, &config, &keys, &issued.refresh_token)
             .await
@@ -229,12 +250,19 @@ async fn legacy_missing_revocation_time_recovers_active_chain_but_never_missing_
             .unwrap();
         let old = token_row(&db, &issued.refresh_token).await;
         db.collection::<RefreshToken>(REFRESH_TOKENS)
-            .update_one(doc! {"_id": &old.id}, doc! {"$unset": {"revoked_at": ""}})
+            .update_one(
+                doc! { "_id": &old.id },
+                doc! {
+                    "$unset": {
+                        "revoked_at": ""
+                    }
+                },
+            )
             .await
             .unwrap();
         if missing {
             db.collection::<RefreshToken>(REFRESH_TOKENS)
-                .delete_one(doc! {"_id": old.replaced_by.unwrap()})
+                .delete_one(doc! { "_id": old.replaced_by.unwrap() })
                 .await
                 .unwrap();
         }
@@ -261,7 +289,14 @@ async fn terminal_successor_and_depth_exhaustion_revoke_instead_of_conflict() {
         if depth == 1 {
             let row = token_row(&db, &token).await;
             db.collection::<RefreshToken>(REFRESH_TOKENS)
-                .update_one(doc! {"_id":row.id}, doc! {"$set":{"revoked":true}})
+                .update_one(
+                    doc! { "_id": row.id },
+                    doc! {
+                        "$set": {
+                            "revoked": true
+                        }
+                    },
+                )
                 .await
                 .unwrap();
         }
@@ -279,10 +314,21 @@ async fn expired_successor_is_terminal_and_revokes_the_session() {
         .await
         .unwrap();
     let successor = token_row(&db, &next.refresh_token).await;
-    db.collection::<RefreshToken>(REFRESH_TOKENS).update_one(doc!{"_id":successor.id},doc!{"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
-    assert!(
-        matches!(renew(&db,&config,&keys,&issued.refresh_token).await,Err(AppError::Unauthorized(ref message)) if message=="Refresh token has been revoked")
-    );
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .update_one(
+            doc! { "_id": successor.id },
+            doc! {
+                "$set": {
+                    "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))
+                }
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        renew(&db, &config, &keys, &issued.refresh_token).await,
+        Err(AppError::Unauthorized(ref message)) if message == "Refresh token has been revoked"
+    ));
     assert!(session_row(&db, &issued.session_id).await.revoked);
 }
 #[tokio::test]
@@ -300,33 +346,59 @@ async fn revoked_expired_missing_and_ineligible_sessions_have_distinct_refresh_r
         match state {
             "missing" => {
                 collection
-                    .delete_one(doc! {"_id":&issued.session_id})
+                    .delete_one(doc! { "_id": &issued.session_id })
                     .await
                     .unwrap();
             }
             "revoked" => {
                 collection
                     .update_one(
-                        doc! {"_id":&issued.session_id},
-                        doc! {"$set":{"revoked":true}},
+                        doc! { "_id": &issued.session_id },
+                        doc! {
+                            "$set": {
+                                "revoked": true
+                            }
+                        },
                     )
                     .await
                     .unwrap();
             }
             "expired" => {
-                collection.update_one(doc! {"_id":&issued.session_id},doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
+                collection.update_one(doc! { "_id": &issued.session_id },doc! {
+    "$set": {
+        "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))
+    }
+}).await.unwrap();
             }
             "owner" => {
                 collection
                     .update_one(
-                        doc! {"_id":&issued.session_id},
-                        doc! {"$set":{"user_id":Uuid::new_v4().to_string()}},
+                        doc! { "_id": &issued.session_id },
+                        doc! {
+                            "$set": {
+                                "user_id": Uuid::new_v4().to_string()
+                            }
+                        },
                     )
                     .await
                     .unwrap();
             }
             _ => {
-                collection.update_one(doc! {"_id":&issued.session_id},doc! {"$set":{"purpose":if state=="pending" {"mfa_pending"}else{"future_purpose"}}}).await.unwrap();
+                collection
+                    .update_one(
+                        doc! { "_id": &issued.session_id },
+                        doc! {
+                            "$set": {
+                                "purpose": if state == "pending"{
+                                    "mfa_pending"
+                                } else {
+                                    "future_purpose"
+                                }
+                            }
+                        },
+                    )
+                    .await
+                    .unwrap();
             }
         }
         let error = renew(&db, &config, &keys, &issued.refresh_token)
@@ -334,7 +406,10 @@ async fn revoked_expired_missing_and_ineligible_sessions_have_distinct_refresh_r
             .err()
             .unwrap();
         assert!(
-            matches!(error,AppError::Unauthorized(ref message) if message==expected),
+            matches!(
+                error,
+                AppError::Unauthorized(ref message) if message == expected
+            ),
             "{state}: {error}"
         );
         assert_eq!(
@@ -350,10 +425,17 @@ async fn revoked_expired_missing_and_ineligible_sessions_have_distinct_refresh_r
 #[tokio::test]
 async fn live_session_on_refresh_diagnostic_reread_is_transient_without_rotation() {
     let (db, config, keys, issued) = fixture().await;
-    db.collection::<Session>(SESSIONS).update_one(
-        doc! {"_id": &issued.session_id},
-        doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}},
-    ).await.unwrap();
+    db.collection::<Session>(SESSIONS)
+        .update_one(
+            doc! { "_id": &issued.session_id },
+            doc! {
+                "$set": {
+                    "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))
+                }
+            },
+        )
+        .await
+        .unwrap();
     let result = super::super::session_authority::RESTORE_BEFORE_END_READ
         .scope(true, renew(&db, &config, &keys, &issued.refresh_token))
         .await;
@@ -371,9 +453,21 @@ async fn live_session_on_refresh_diagnostic_reread_is_transient_without_rotation
 async fn oauth_fixture(db: &mongodb::Database, issued: &IssuedTokens) -> String {
     let row = token_row(db, &issued.refresh_token).await;
     let client = Uuid::new_v4().to_string();
-    db.collection::<bson::Document>(OAUTH_CLIENTS).insert_one(doc! {"_id":&client,"client_name":"test",
-        "client_secret_hash":"", "redirect_uris":[],"allowed_scopes":"openid","grant_types":"refresh_token",
-        "client_type":"public","is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+    db.collection::<bson::Document>(OAUTH_CLIENTS)
+        .insert_one(doc! {
+            "_id": &client,
+            "client_name": "test",
+            "client_secret_hash": "",
+            "redirect_uris": [],
+            "allowed_scopes": "openid",
+            "grant_types": "refresh_token",
+            "client_type": "public",
+            "is_active": true,
+            "created_at": bson::DateTime::now(),
+            "updated_at": bson::DateTime::now()
+        })
+        .await
+        .unwrap();
     let consent = super::super::consent_service::grant_consent_with_services(
         db,
         &row.user_id,
@@ -386,8 +480,20 @@ async fn oauth_fixture(db: &mongodb::Database, issued: &IssuedTokens) -> String 
     let reference = super::super::consent_service::ensure_issuance_reference(db, &consent)
         .await
         .unwrap();
-    db.collection::<RefreshToken>(REFRESH_TOKENS).update_one(doc! {"_id":row.id},doc! {"$set":{
-        "client_id":&client,"session_id":null,"scope":"openid","protected_consent":bson::to_bson(&reference).unwrap()}}).await.unwrap();
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .update_one(
+            doc! { "_id": row.id },
+            doc! {
+                "$set": {
+                    "client_id": &client,
+                    "session_id": null,
+                    "scope": "openid",
+                    "protected_consent": bson::to_bson(&reference).unwrap()
+                }
+            },
+        )
+        .await
+        .unwrap();
     client
 }
 #[tokio::test]
@@ -409,7 +515,7 @@ async fn post_commit_transient_read_write_and_unknown_results_keep_successor_for
         assert!(matches!(result, Err(AppError::OAuthAuthorityUnavailable)));
         let rows: Vec<RefreshToken> = db
             .collection(REFRESH_TOKENS)
-            .find(doc! {"revoked":false})
+            .find(doc! { "revoked": false })
             .await
             .unwrap()
             .try_collect()
@@ -447,7 +553,7 @@ async fn post_commit_definitive_denial_revokes_successor_and_regrant_never_resur
         );
         let active = db
             .collection::<RefreshToken>(REFRESH_TOKENS)
-            .count_documents(doc! {"revoked":false})
+            .count_documents(doc! { "revoked": false })
             .await
             .unwrap();
         assert_eq!(active, u64::from(transient_first));
@@ -473,8 +579,12 @@ async fn malformed_session_storage_is_a_database_error_never_expiry() {
     let (db, config, keys, issued) = fixture().await;
     db.collection::<bson::Document>(SESSIONS)
         .update_one(
-            doc! {"_id":&issued.session_id},
-            doc! {"$set":{"created_at":"invalid BSON datetime"}},
+            doc! { "_id": &issued.session_id },
+            doc! {
+                "$set": {
+                    "created_at": "invalid BSON datetime"
+                }
+            },
         )
         .await
         .unwrap();
@@ -498,20 +608,24 @@ async fn assurance_and_legacy_sentinel_gates_prevent_rotation_and_grace_sliding(
             shorten_session(&db, &issued.session_id).await;
             let before = session_row(&db, &issued.session_id).await;
             let patch = match change {
-                "unassured" => doc! {"mfa_assured":false},
-                "pending" => doc! {"purpose":"mfa_pending"},
-                "unknown" => doc! {"purpose":"future-purpose"},
-                _ => doc! {"user_agent":"mfa_pending"},
+                "unassured" => doc! { "mfa_assured": false },
+                "pending" => doc! { "purpose": "mfa_pending" },
+                "unknown" => doc! { "purpose": "future-purpose" },
+                _ => doc! { "user_agent": "mfa_pending" },
             };
             db.collection::<Session>(SESSIONS)
-                .update_one(doc! {"_id":&issued.session_id}, doc! {"$set":patch})
+                .update_one(doc! { "_id": &issued.session_id }, doc! { "$set": patch })
                 .await
                 .unwrap();
             if change == "unassured" {
                 db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
                     .update_one(
-                        doc! {"_id":&before.user_id},
-                        doc! {"$set":{"mfa_enabled":true}},
+                        doc! { "_id": &before.user_id },
+                        doc! {
+                            "$set": {
+                                "mfa_enabled": true
+                            }
+                        },
                     )
                     .await
                     .unwrap();
@@ -554,7 +668,17 @@ async fn successful_refresh_preserves_mcp_fallback_but_reuse_revokes_it() {
         .unwrap();
     assert!(mcp.get_for_auth(&id).await.unwrap().is_some());
     let old = token_row(&db, &issued.refresh_token).await;
-    db.collection::<RefreshToken>(REFRESH_TOKENS).update_one(doc!{"_id":old.id},doc!{"$set":{"revoked_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(121))}}).await.unwrap();
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .update_one(
+            doc! { "_id": old.id },
+            doc! {
+                "$set": {
+                    "revoked_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(121))
+                }
+            },
+        )
+        .await
+        .unwrap();
     assert!(
         refresh_tokens(&db, &config, &keys, &issued.refresh_token, Some(&mcp), None)
             .await
@@ -605,7 +729,7 @@ async fn unknown_commit_retries_only_commit_and_indeterminate_commit_recovers_th
         let old = token_row(&db, &issued.refresh_token).await;
         let successor = db
             .collection::<RefreshToken>(REFRESH_TOKENS)
-            .find_one(doc! {"_id":old.replaced_by.unwrap()})
+            .find_one(doc! { "_id": old.replaced_by.unwrap() })
             .await
             .unwrap()
             .unwrap();

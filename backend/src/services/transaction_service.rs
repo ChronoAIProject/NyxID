@@ -48,10 +48,17 @@ pub(crate) fn map_error(error: mongodb::error::Error) -> AppError {
         AppError::DatabaseError(error)
     }
 }
+#[derive(Debug)]
+struct IndeterminateCommit;
+
+pub(crate) fn is_indeterminate_commit(error: &AppError) -> bool {
+    matches!(error, AppError::DatabaseError(error) if error.get_custom::<IndeterminateCommit>().is_some())
+}
+
 pub(crate) fn indeterminate_commit() -> AppError {
     // The same proof may already have been consumed. Do not promise that
     // repeating verification in a new transaction is safe or will succeed.
-    AppError::Internal("Transaction completion could not be confirmed".into())
+    AppError::DatabaseError(mongodb::error::Error::custom(IndeterminateCommit))
 }
 enum CommitFailure {
     Unknown,
@@ -125,6 +132,17 @@ mod tests {
                 .expect("unexpected commit attempt")
         }
     }
+    #[test]
+    fn only_the_typed_commit_marker_is_indeterminate() {
+        assert!(is_indeterminate_commit(&indeterminate_commit()));
+        assert!(!is_indeterminate_commit(&AppError::Internal(
+            "Transaction completion could not be confirmed".into(),
+        )));
+        assert!(!is_indeterminate_commit(&AppError::DatabaseError(
+            mongodb::error::Error::custom("plain database failure"),
+        )));
+    }
+
     #[tokio::test]
     async fn unknown_commit_then_definite_error_remains_indeterminate() {
         let mut commit = ScriptedCommit::new([
@@ -135,7 +153,7 @@ mod tests {
         ]);
         let error = retry_commit(&mut commit).await.unwrap_err();
         assert_eq!(commit.attempts, 2);
-        assert!(matches!(error, AppError::Internal(_)));
+        assert!(is_indeterminate_commit(&error));
         assert!(!error.to_string().contains("retry"));
     }
     #[tokio::test]
@@ -150,7 +168,7 @@ mod tests {
         let mut commit = ScriptedCommit::new((0..3).map(|_| Err(CommitFailure::Unknown)));
         let error = retry_commit(&mut commit).await.unwrap_err();
         assert_eq!(commit.attempts, 3);
-        assert!(matches!(error, AppError::Internal(_)));
+        assert!(is_indeterminate_commit(&error));
         assert!(!error.to_string().contains("retry"));
         let mut commit = ScriptedCommit::new([Err(CommitFailure::Definite(AppError::Conflict(
             "changed".into(),

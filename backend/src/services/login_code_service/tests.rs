@@ -321,7 +321,11 @@ async fn issuer_revocation_blocks_initial_and_refreshed_access_at_authentication
         protected_status(&state, &tokens.access_token).await,
         axum::http::StatusCode::OK
     );
-    state.db.collection::<Session>(SESSIONS).update_one(doc!{"_id":&tokens.session_id},doc!{"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(1))}}).await.unwrap();
+    state.db.collection::<Session>(SESSIONS).update_one(doc! { "_id": &tokens.session_id },doc! {
+    "$set": {
+        "expires_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(1))
+    }
+}).await.unwrap();
     let refreshed = token_service::refresh_tokens(
         &state.db,
         &state.config,
@@ -339,7 +343,7 @@ async fn issuer_revocation_blocks_initial_and_refreshed_access_at_authentication
     let session = state
         .db
         .collection::<Session>(SESSIONS)
-        .find_one(doc! {"_id":&tokens.session_id})
+        .find_one(doc! { "_id": &tokens.session_id })
         .await
         .unwrap()
         .unwrap();
@@ -348,7 +352,10 @@ async fn issuer_revocation_blocks_initial_and_refreshed_access_at_authentication
         .collection::<crate::models::refresh_token::RefreshToken>(
             crate::models::refresh_token::COLLECTION_NAME,
         )
-        .find_one(doc! {"session_id":&tokens.session_id,"revoked":false})
+        .find_one(doc! {
+            "session_id": &tokens.session_id,
+            "revoked": false
+        })
         .await
         .unwrap()
         .unwrap();
@@ -378,17 +385,19 @@ async fn refresh_refuses_expired_deleted_or_revoked_bound_session_before_rotatio
         let sessions = state.db.collection::<Session>(SESSIONS);
         if action == "deleted" {
             sessions
-                .delete_one(doc! {"_id": &tokens.session_id})
+                .delete_one(doc! { "_id": &tokens.session_id })
                 .await
                 .unwrap();
         } else {
             let update = if action == "expired" {
-                doc! {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}
+                doc! {
+                    "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))
+                }
             } else {
-                doc! {"revoked": true}
+                doc! { "revoked": true }
             };
             sessions
-                .update_one(doc! {"_id": &tokens.session_id}, doc! {"$set": update})
+                .update_one(doc! { "_id": &tokens.session_id }, doc! { "$set": update })
                 .await
                 .unwrap();
         }
@@ -408,7 +417,7 @@ async fn refresh_refuses_expired_deleted_or_revoked_bound_session_before_rotatio
             state
                 .db
                 .collection::<bson::Document>(crate::models::refresh_token::COLLECTION_NAME)
-                .count_documents(doc! {"session_id": &tokens.session_id})
+                .count_documents(doc! { "session_id": &tokens.session_id })
                 .await
                 .unwrap(),
             1
@@ -459,7 +468,7 @@ async fn restricted_browser_handoff_and_direct_delivery_cannot_both_win() {
         state
             .db
             .collection::<ApiKeyCredential>(CHILDREN)
-            .count_documents(doc! {"is_active": true})
+            .count_documents(doc! { "is_active": true })
             .await
             .unwrap(),
         1
@@ -483,13 +492,23 @@ async fn third_party_oauth_cannot_mint_or_approve_human_login_grants() {
     use tower::ServiceExt;
     let (state, actor) = fixture("login_code_oauth_guard").await;
     let client = Uuid::new_v4().to_string();
-    state.db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+    state
+        .db
+        .collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
         .insert_one(doc! {
-            "_id": &client, "client_name": "Authorized third-party fixture", "client_secret_hash": "",
-            "redirect_uris": ["https://example.test/callback"], "allowed_scopes": "openid profile",
-            "grant_types": "authorization_code refresh_token", "client_type": "public", "is_active": true,
-            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
-        }).await.unwrap();
+            "_id": &client,
+            "client_name": "Authorized third-party fixture",
+            "client_secret_hash": "",
+            "redirect_uris": ["https://example.test/callback"],
+            "allowed_scopes": "openid profile",
+            "grant_types": "authorization_code refresh_token",
+            "client_type": "public",
+            "is_active": true,
+            "created_at": bson::DateTime::now(),
+            "updated_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
     let consent = crate::services::consent_service::grant_consent(
         &state.db,
         &actor,
@@ -595,7 +614,7 @@ async fn mint_freezes_default_intent_and_old_shaped_pending_codes_remain_readabl
         .unwrap();
     let rows = state.db.collection::<LoginCode>(COLLECTION_NAME);
     let row = rows
-        .find_one(doc! {"_id": &code.id})
+        .find_one(doc! { "_id": &code.id })
         .await
         .unwrap()
         .unwrap();
@@ -628,11 +647,18 @@ async fn mint_freezes_default_intent_and_old_shaped_pending_codes_remain_readabl
     // Simulate an old replica's persisted intent: absent new field and no expiry.
     let created_at = bson::DateTime::from_chrono(Utc::now() - Duration::hours(1));
     rows.update_one(
-        doc! {"_id": &code.id},
-        doc! {"$set": {
-            "selection": {"kind": "new", "name": "Old pending", "scopes": "proxy"},
-            "credential_expires_at": bson::Bson::Null, "created_at": created_at,
-        }},
+        doc! { "_id": &code.id },
+        doc! {
+            "$set": {
+                "selection": {
+                    "kind": "new",
+                    "name": "Old pending",
+                    "scopes": "proxy"
+                },
+                "credential_expires_at": bson::Bson::Null,
+                "created_at": created_at,
+            }
+        },
     )
     .await
     .unwrap();
@@ -658,7 +684,14 @@ async fn mfa_browser_handoff_inherits_device_assurance_and_rejects_unassured_del
         state
             .db
             .collection::<User>(USERS)
-            .update_one(doc! {"_id": &actor}, doc! {"$set": {"mfa_enabled": true}})
+            .update_one(
+                doc! { "_id": &actor },
+                doc! {
+                    "$set": {
+                        "mfa_enabled": true
+                    }
+                },
+            )
             .await
             .unwrap();
         let request = device::initiate_v2(&state.db, KEY, context("192.0.2.1"), true)
@@ -686,7 +719,7 @@ async fn mfa_browser_handoff_inherits_device_assurance_and_rejects_unassured_del
         let row = state
             .db
             .collection::<LoginCode>(COLLECTION_NAME)
-            .find_one(doc! {"_id": &handoff.id})
+            .find_one(doc! { "_id": &handoff.id })
             .await
             .unwrap()
             .unwrap();
