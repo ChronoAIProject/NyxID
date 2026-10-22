@@ -58,11 +58,13 @@ Admin enable writes return HTTP 503 (`security_readiness_unavailable`, code
 12900) while readiness is red; disabling remains allowed. Request-path reads
 return the resolved boolean, preserving existing overrides, membership changes,
 override clearing and defaults even if readiness later becomes unavailable.
-Enabled gated reads emit a 1% sampled warning and audit event
-`security_readiness_flag_in_effect_unready`, limited to one pair per flag/user
-per one-minute shared window. Readiness report errors are debug-logged and
-do not fail requests. An effective false value retains existing flag-off
-behavior and does not erase stored policy.
+Enabled gated reads emit at most one warn+audit per flag per minute cluster-wide,
+using `security_readiness_flag_in_effect_unready`: a local per-replica throttle
+runs before any readiness I/O, then a shared rate window admits the readiness
+report and warn/audit pair. The event includes the flag key, user ID and
+blockers, with the user as audit actor. Readiness report or rate-window errors
+are debug-logged and do not fail requests. An effective false value retains
+existing flag-off behavior and does not erase stored policy.
 
 The `approval:required-web-v1` capability is **diagnostic**, not an enforced
 activation switch. Required approval is implemented by every upgraded process
