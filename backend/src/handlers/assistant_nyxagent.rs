@@ -679,7 +679,7 @@ pub struct HistoryResponse {
 pub struct CmaOperationResponse {
     id: String,
     turn_id: String,
-    kind: crate::models::async_service_operation::AsyncOperationPresentation,
+    kind: crate::models::async_service_operation::CmaOperationKind,
     operation_id: Option<String>,
     agent_id: Option<String>,
     idempotency_key: Option<String>,

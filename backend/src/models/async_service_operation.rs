@@ -10,7 +10,7 @@ pub const QUOTAS_COLLECTION_NAME: &str = "assistant_async_quotas";
 #[serde(deny_unknown_fields)]
 pub struct AsyncOperationContract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub presentation: Option<AsyncOperationPresentation>,
+    pub presentation: Option<CmaOperationKind>,
     pub status_operation: String,
     pub result_operation: String,
     pub cancel_operation: Option<String>,
@@ -23,11 +23,13 @@ pub struct AsyncOperationContract {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AsyncOperationPresentation {
-    CmaProvisioning,
-    CmaResponse,
-    CmaAgent,
+pub enum CmaOperationKind {
+    #[serde(rename = "cma_provisioning")]
+    Provisioning,
+    #[serde(rename = "cma_response")]
+    Response,
+    #[serde(rename = "cma_agent")]
+    Agent,
 }
 
 /// Bounded identifiers and observed lifecycle metadata, never task input/output.
@@ -38,7 +40,7 @@ pub struct CmaOperation {
     pub receipt_id: Option<String>,
     #[serde(default)]
     pub seen_working: bool,
-    pub kind: AsyncOperationPresentation,
+    pub kind: CmaOperationKind,
     pub agent_id: Option<String>,
     pub idempotency_key: Option<String>,
     pub status: Option<String>,

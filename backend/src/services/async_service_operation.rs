@@ -241,9 +241,10 @@ pub async fn submitted(
                 serde_json::from_str::<Value>(&r.text).ok()
             }
         });
-    let agent_input = watch.cma.as_ref().is_some_and(|c| {
-        c.kind == crate::models::async_service_operation::AsyncOperationPresentation::CmaAgent
-    });
+    let agent_input = watch
+        .cma
+        .as_ref()
+        .is_some_and(|c| c.kind == crate::models::async_service_operation::CmaOperationKind::Agent);
     let id = if agent_input {
         response
             .filter(|r| (200..300).contains(&r.status))

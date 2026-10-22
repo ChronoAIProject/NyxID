@@ -2,7 +2,7 @@
 //! contract; tool names, prose and remote OpenAPI extensions cannot select it.
 use super::mcp_service::McpToolEndpoint;
 use crate::models::async_service_operation::{
-    AsyncOperationContract, AsyncOperationPresentation as Presentation, CmaOperation,
+    AsyncOperationContract, CmaOperation, CmaOperationKind as Presentation,
 };
 use serde_json::Value;
 
@@ -18,21 +18,21 @@ pub fn apply_contracts(catalog_slug: &str, endpoints: &mut [McpToolEndpoint]) {
             }
             let (kind, status_path, parameter, successes, failures) = match submit.path.as_str() {
                 "/api/v1/agents" => (
-                    Presentation::CmaProvisioning,
+                    Presentation::Provisioning,
                     "/api/v1/agent-lifecycle/{id}",
                     "id",
                     vec!["succeeded"],
                     vec!["failed", "cancelled"],
                 ),
                 "/api/v1/responses" => (
-                    Presentation::CmaResponse,
+                    Presentation::Response,
                     "/api/v1/responses/{response_id}",
                     "response_id",
                     vec!["completed"],
                     vec!["failed", "incomplete", "cancelled"],
                 ),
                 "/api/v1/agents/{id}/input" | "/api/v1/agui/run" => (
-                    Presentation::CmaAgent,
+                    Presentation::Agent,
                     "/api/v1/agents/{id}",
                     "id",
                     vec!["ready"],
@@ -104,7 +104,7 @@ pub fn poll_id(
     watch: &crate::models::async_service_operation::AsyncServiceOperation,
 ) -> Option<&str> {
     match &watch.cma {
-        Some(cma) if cma.kind == Presentation::CmaAgent => cma.agent_id.as_deref(),
+        Some(cma) if cma.kind == Presentation::Agent => cma.agent_id.as_deref(),
         _ => watch.operation_id.as_deref(),
     }
 }
@@ -120,7 +120,7 @@ pub fn response_metadata(text: &str) -> Option<Value> {
         .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
         .filter_map(|event| event.get("response").cloned())
         .filter(|v| v["id"].is_string())
-        .last()
+        .next_back()
 }
 
 pub fn observed(cma: &mut CmaOperation, value: &Value) {
@@ -184,7 +184,7 @@ pub async fn record_observation(
         return Ok(false);
     };
     observed(&mut cma, value);
-    let awaiting_activity = cma.kind == Presentation::CmaAgent && !cma.seen_working;
+    let awaiting_activity = cma.kind == Presentation::Agent && !cma.seen_working;
     db.collection::<bson::Document>(crate::models::async_service_operation::COLLECTION_NAME)
         .update_one(
             doc! {"_id":&watch.id,"state":&watch.state,"lease_id":&watch.lease_id},
@@ -250,7 +250,7 @@ mod tests {
         eps[1].target_id = None;
         apply_contracts("cma", &mut eps);
         let contract = eps[0].async_operation.as_ref().unwrap();
-        assert_eq!(contract.presentation, Some(Presentation::CmaProvisioning));
+        assert_eq!(contract.presentation, Some(Presentation::Provisioning));
         assert_eq!(contract.success_states, ["succeeded"]);
         assert_eq!(contract.status_operation, "status");
     }
