@@ -1,3 +1,9 @@
+experimental = ["wrapper-scripts"]
+
+[scripts.wrapper.telegram-personal-journey-stack]
+command = "env RUST_MIN_STACK=16777216"
+target-runner = "within-wrapper"
+
 [profile.ci]
 fail-fast = false
 # Terminate any test after five minutes so a stalled runner or hung test reports
@@ -15,6 +21,13 @@ retries = 1
 path = "junit.xml"
 store-success-output = false
 store-failure-output = true
+
+# The two concurrent deliveries in this journey exceed libtest's 2 MiB stack,
+# including in the unchanged base-coverage checkout. Match the 16 MiB used by
+# run_native_journey_test without changing other tests' stack requirements.
+[[profile.ci.scripts]]
+filter = "binary_id(=nyxid::bin/nyxid-server) & test(=services::platform_manager_transport::journey_tests::telegram_personal_link_saved_reply_web_history_and_unlink_journey)"
+run-wrapper = "telegram-personal-journey-stack"
 
 # These tests observe real MongoDB work against wall-clock deadlines.
 # Keep concurrent fixture creation and cleanup out of their observation windows.

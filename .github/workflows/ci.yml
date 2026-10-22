@@ -3,7 +3,8 @@ name: CI
 on:
   pull_request:
     # Rollup PRs must be gated with the same CI coverage as main/dev PRs.
-    branches: [main, dev, 'rollup-*']
+    # Also validate fixes targeting the Oracle retirement branch.
+    branches: [main, dev, 'rollup-*', 'chore/retire-builtin-oracle']
   push:
     # `main` is intentionally not listed here -- pushes to main are gated
     # through publish-images.yml, which calls this workflow via workflow_call.
@@ -343,7 +344,8 @@ jobs:
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.oracle_worker == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Cold Chromium dependency downloads need room alongside the browser suite.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: integrations/oracle/cdp-worker
@@ -522,7 +524,8 @@ jobs:
       attestations: read
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.machine == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Cold desktop package downloads can consume the former 45-minute budget.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v4

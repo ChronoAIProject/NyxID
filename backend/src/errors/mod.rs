@@ -761,6 +761,14 @@ pub enum AppError {
     )]
     OraclePoolActiveWork,
 
+    /// NyxID's built-in oracle relay is retired for good. Every route under
+    /// `/api/v1/oracle` and every `nyx__oracle_*` MCP tool answers with this
+    /// so a caller, an AI agent above all, learns there is nothing to retry.
+    #[error(
+        "NyxID's built-in oracle is permanently deprecated and no longer serves requests. Do not retry this call."
+    )]
+    OracleRetired,
+
     #[error("Service pool not found: {0}")]
     ServicePoolNotFound(String),
 
@@ -1038,6 +1046,7 @@ impl AppError {
             Self::OracleLoginSnapshotNotFound(_) => StatusCode::NOT_FOUND,
             Self::OracleWorkerCredentialRenewalRequired => StatusCode::CONFLICT,
             Self::OraclePoolActiveWork => StatusCode::CONFLICT,
+            Self::OracleRetired => StatusCode::GONE,
             Self::ServicePoolInfrastructureUnavailable | Self::ServicePoolCoolingDown => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
@@ -1278,6 +1287,7 @@ impl AppError {
             Self::OracleLoginSnapshotNotFound(_) => 11015,
             Self::OracleWorkerCredentialRenewalRequired => 11016,
             Self::OraclePoolActiveWork => 11017,
+            Self::OracleRetired => 11099,
             Self::ServicePoolUpstreamEncodingUnsupported => 11407,
             Self::ServicePoolInfrastructureUnavailable => 11404,
             Self::ServicePoolCoolingDown => 11405,
@@ -1551,6 +1561,7 @@ impl AppError {
             Self::OracleWorkerLabelUnavailable(_) => "oracle_worker_label_unavailable",
             Self::OracleLoginSnapshotNotFound(_) => "oracle_login_snapshot_not_found",
             Self::OraclePoolActiveWork => "oracle_pool_active_work",
+            Self::OracleRetired => "oracle_retired",
             Self::OracleWorkerCredentialRenewalRequired => {
                 "oracle_worker_credential_renewal_required"
             }
@@ -1883,6 +1894,22 @@ mod tests {
         assert_eq!(payload["error_code"], 1000);
         assert_eq!(payload["error"], "bad_request");
         assert_eq!(payload["message"], "Bad request: API key is failed");
+    }
+
+    /// The retirement answer is a contract with callers that still have the
+    /// old routes or tools wired in: 410 Gone, a stable key, and a message
+    /// that says the feature is gone for good so nobody retries.
+    #[tokio::test]
+    async fn oracle_retired_is_a_permanent_410() {
+        let response = AppError::OracleRetired.into_response();
+        assert_eq!(response.status(), StatusCode::GONE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"], "oracle_retired");
+        assert_eq!(payload["error_code"], 11099);
+        let message = payload["message"].as_str().unwrap();
+        assert!(message.contains("permanently deprecated"), "{message}");
+        assert!(message.contains("Do not retry"), "{message}");
     }
 
     #[test]
@@ -2332,6 +2359,7 @@ mod tests {
             AppError::OracleWorkerLabelUnavailable("".into()).error_code(),
             AppError::OracleLoginSnapshotNotFound("".into()).error_code(),
             AppError::OracleWorkerCredentialRenewalRequired.error_code(),
+            AppError::OracleRetired.error_code(),
             AppError::GrantCascadeConfirmationRequired(Box::new(GrantCascadePayload {
                 provider_slug: "github".into(),
                 provider_name: "GitHub".into(),

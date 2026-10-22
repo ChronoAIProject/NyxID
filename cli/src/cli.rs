@@ -213,7 +213,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: TelemetryCommands,
     },
-    /// Call ChatGPT Pro (and other browser oracles) through NyxID
+    /// DEPRECATED: NyxID's built-in oracle is permanently retired; every call is refused with HTTP 410
     Oracle {
         #[command(subcommand)]
         command: OracleCommands,

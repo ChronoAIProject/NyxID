@@ -323,6 +323,38 @@ async fn cma_submission_tracks_status_after_turn_settlement_and_projects_only_me
 }
 
 #[tokio::test]
+async fn cma_agent_input_receipts_deduplicate_by_idempotency_key() {
+    let a = cma_fixture().await;
+    *a.phase.lock().unwrap() = "ready".into();
+    let auth = authenticate(&a.f).await;
+    for key in ["input-1", "input-1", "input-2"] {
+        let response = direct_call(
+            &a.f,
+            &auth,
+            "sandbox__post_agent_input",
+            json!({"id":"agt_coffee","text":"private task","Idempotency-Key":key}),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["result"]["isError"], false, "{result}");
+    }
+    let watches = a.f.state.db.collection::<bson::Document>(WATCHES);
+    assert_eq!(watches.count_documents(doc! {}).await.unwrap(), 2);
+    for key in ["input-1", "input-2"] {
+        assert_eq!(
+            watches
+                .count_documents(doc! {"cma.idempotency_key":key})
+                .await
+                .unwrap(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
 async fn cma_agent_input_waits_for_activity_before_settling_ready() {
     let a = cma_fixture().await;
     *a.phase.lock().unwrap() = "ready".into();
@@ -346,29 +378,6 @@ async fn cma_agent_input_waits_for_activity_before_settling_ready() {
     assert_eq!(
         watch.cma.as_ref().unwrap().agent_id.as_deref(),
         Some("agt_coffee")
-    );
-    for key in ["input-1", "input-2"] {
-        let response = direct_call(
-            &a.f,
-            &auth,
-            "sandbox__post_agent_input",
-            json!({"id":"agt_coffee","text":"private task","Idempotency-Key":key}),
-        )
-        .await;
-        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
-            .await
-            .unwrap();
-        let result: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(result["result"]["isError"], false, "{result}");
-    }
-    assert_eq!(
-        a.f.state
-            .db
-            .collection::<bson::Document>(WATCHES)
-            .count_documents(doc! {})
-            .await
-            .unwrap(),
-        2
     );
 
     a.due().await;

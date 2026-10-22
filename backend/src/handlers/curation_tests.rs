@@ -218,7 +218,6 @@ async fn curation_router_scoped_discovery_history_and_route_confinement() {
         "/api/v1/providers".into(),
         "/api/v1/connections".into(),
         "/api/v1/nodes".into(),
-        "/api/v1/oracle/pools".into(),
         "/api/v1/triggers".into(),
         "/api/v1/services".into(),
         "/api/v1/catalog".into(),
@@ -233,6 +232,10 @@ async fn curation_router_scoped_discovery_history_and_route_confinement() {
         let (status, body) = request(&f.state, "GET", &path, &bearer, None).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
     }
+    // The built-in oracle is retired, so its confinement is the permanent 410
+    // every caller gets there, not a scope refusal.
+    let (status, body) = request(&f.state, "GET", "/api/v1/oracle/pools", &bearer, None).await;
+    assert_eq!(status, StatusCode::GONE, "/api/v1/oracle/pools: {body}");
     for (method, path) in [
         ("POST", "/api/v1/assistant/nyxagent/turns".to_string()),
         (
