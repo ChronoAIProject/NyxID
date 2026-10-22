@@ -350,8 +350,8 @@ step before treating it as a test failure. Repeated shutdowns at the same compil
 stage need a build-resource correction rather than repeated full-workflow retries.
 
 The CI profile schedules the capacity-wait heartbeat, trigger grace deadline/recovery,
-and bounded analytics admission tests alone to keep concurrent database creation
-and cleanup out of their timing windows. Head and
+lost-session recovery, and bounded analytics admission tests alone to keep
+concurrent database creation and cleanup out of their timing windows. Head and
 base coverage use the same checked-out nextest configuration, which is included
 in the coverage-cache fingerprint.
 Both coverage jobs set `RUST_MIN_STACK=16777216` (16 MiB) so instrumented native
