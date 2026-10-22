@@ -382,6 +382,21 @@ async fn cma_agent_input_waits_for_activity_before_settling_ready() {
         Some("agt_coffee")
     );
 
+    // Main keeps receipt deduplication in its own test. This lifecycle fixture
+    // still needs two distinct watches to exercise deferred capacity polling.
+    let response = direct_call(
+        &a.f,
+        &auth,
+        "sandbox__post_agent_input",
+        json!({"id":"agt_coffee","text":"private task","Idempotency-Key":"input-2"}),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["result"]["isError"], false, "{result}");
+
     let watches = a.f.state.db.collection::<AsyncServiceOperation>(WATCHES);
     let initial: Vec<AsyncServiceOperation> = watches
         .find(doc! {})

@@ -1,7 +1,7 @@
 # CI stability follow-up: issue #2015
 
 Investigation base: `6f4b94709d4feb7bb4034d8f831384db4fd8902a` (PR #1986).
-Main integration base: `da8412fa1d93f0252ac0ae9de5b1124adef7ed5e`.
+Latest main integration base: `3a5e4175d` (includes Oracle retirement and JWT verification inventory).
 Scope: the four remaining load-sensitive tests, failed-run diagnostics, and
 backend image cache reuse. This builds on the four-shard backend workflow;
 the test inventory verifier, coverage merge, 73% gate, and existing retry
@@ -157,3 +157,36 @@ readiness requires an actual status observation and no terminal result;
 unexpected terminal results fail immediately. The service capacity, production
 sweeper, retry policy and test assertions remain intact, with both watches now
 checked through the complete transition.
+
+
+## Analytics fixture follow-up
+
+Hosted run `39866095746` passed all 10,357 instrumented backend tests without
+retries and reported 89.27% line coverage. Ordinary shard 1 exposed two existing
+analytics setup failures: the active uncertainty repair fixture failed while
+creating its 32-row backlog through bounded admissions, and the independent
+telemetry client test failed its healthy-admission precondition before an outage
+check. The MongoDB log records a consent read rejected with `MaxTimeMSExpired`
+at 199 ms at `2026-10-22T23:32:18.297Z`; the backlog failure coincided with slow
+transaction work and unrelated index/drop activity. Diagnostics retained both
+the repeated failure and the retry, and inventory verification rejected the run.
+
+The repair fixture now seeds historical uncertain rows and their account
+checkpoint directly, verifies 32 unresolved rows, then exercises real cap refusal,
+operator reconciliation, and a single real resumed admission. It checks the
+32-to-31-to-32 transition and the new capture generation, retaining stale consent,
+stale generation, late settlement, audit and provider-drain assertions. It joins
+the existing exclusive analytics scheduling group. The neighboring bound test
+continues to exercise repeated real admission and settlement.
+
+The telemetry fixture refreshes its existing read-only responsiveness probe
+immediately before positive admission prerequisites. Queue-capacity assertions
+prove both replicas and both permission-change cases actually admitted work
+before withdrawal/deletion. Negative cases remain single-shot. Production
+200/250 ms deadlines and fail-closed behavior are unchanged; unknown admission
+outcomes are never retried.
+
+Main `3a5e4175d` separately split CMA receipt deduplication into its own test.
+Integration preserves that test and explicitly creates the second watch needed
+by this PR's bounded lifecycle observation. The merged source must be validated
+by fresh local tests and a new full hosted run before merge.
