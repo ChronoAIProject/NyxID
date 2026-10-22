@@ -554,6 +554,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/setup", post(handlers::mfa::setup))
         .route("/confirm", post(handlers::mfa::confirm))
         .route("/verify", post(handlers::mfa::verify_http))
+        .route("/step-up", post(handlers::mfa::step_up))
         .route("/cancel", post(handlers::mfa::cancel))
         .route("/disable", post(handlers::mfa::disable));
 

@@ -44,8 +44,10 @@ pub async fn approve_with_agent_key(
     input: ApproveInput,
     mut selection: agent::Selection,
     credential_expires_at: Option<DateTime<Utc>>,
-    mfa_assured: bool,
+    authority: crate::services::session_authority::DerivedMfaAuthority,
 ) -> AppResult<()> {
+    crate::services::session_authority::require_derived_mfa(authority)?;
+    let mfa_assured = authority.verified;
     let (collection, row) = pending_request(db, hmac_key, &input.user_code).await?;
     let created_at = Utc::now();
     let credential_expires_at = Some(
@@ -144,6 +146,7 @@ pub async fn poll_agent_key(
         expire(db, &collection, &row).await?;
         return Err(AppError::AuthDeviceCodeExpired);
     }
+    require_delivery_mfa(db, &row).await?;
     let grant = row
         .agent_key_grant
         .as_ref()

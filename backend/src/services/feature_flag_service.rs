@@ -222,6 +222,21 @@ const AGENT_LEARNING_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const MOBILE_MFA_FLAG_KEY: &str = "auth:mobile-mfa";
+const MOBILE_MFA_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: MOBILE_MFA_FLAG_KEY,
+    description: "Require MFA for mobile social sign-ins. While off, anyone holding the account's social first factor can sign in through mobile without an MFA code.",
+    default_enabled: false,
+};
+
+/// Resolve once for the signing-in person, including live org overrides.
+pub async fn mobile_mfa_required(db: &mongodb::Database, person: &str) -> AppResult<bool> {
+    Ok(resolve_personal_features(db, person)
+        .await?
+        .iter()
+        .any(|key| key == MOBILE_MFA_FLAG_KEY))
+}
+
 pub const INVITATION_CODE_FLAG_KEY: &str = "auth:invitation-code";
 const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: INVITATION_CODE_FLAG_KEY,
@@ -288,6 +303,7 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
+    MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     SKILL_PIN_DISABLE_FLAG,
@@ -325,6 +341,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
+    MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     SKILL_PIN_DISABLE_FLAG,

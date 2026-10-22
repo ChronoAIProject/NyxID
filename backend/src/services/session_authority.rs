@@ -3,9 +3,51 @@ use crate::models::mcp_notification::COLLECTION_NAME as MCP_NOTIFICATIONS;
 use crate::models::mcp_session::{MCP_SESSION_COLLECTION, MCP_SESSION_SLOT_COLLECTION};
 use crate::models::refresh_token::COLLECTION_NAME as REFRESH_TOKENS;
 use crate::models::session::COLLECTION_NAME as SESSIONS;
+use crate::models::session::{MfaAssurance, MfaExemption, Session};
 use crate::models::user::COLLECTION_NAME as USERS;
 use bson::{Document, doc};
 use futures::TryStreamExt;
+
+pub fn classification(session: &Session) -> MfaAssurance {
+    match (session.mfa_assured, session.mfa_exemption) {
+        (Some(true), _) => MfaAssurance::Verified,
+        (_, Some(MfaExemption::MobileRollout)) => MfaAssurance::MobileExempt,
+        (None, _) | (_, Some(MfaExemption::LegacyMigration)) => MfaAssurance::Legacy,
+        (Some(false), None) => MfaAssurance::Unverified,
+    }
+}
+
+pub fn satisfies_mfa(session: &Session) -> bool {
+    classification(session) != MfaAssurance::Unverified
+}
+
+pub fn may_derive(mfa_enabled: bool, verified: bool) -> bool {
+    !mfa_enabled || verified
+}
+
+/// Account policy and exact session/proof assurance already resolved by the
+/// caller. Derivation never reloads a person or resolves a feature flag.
+#[derive(Clone, Copy, Debug)]
+pub struct DerivedMfaAuthority {
+    pub mfa_enabled: bool,
+    pub verified: bool,
+}
+
+impl DerivedMfaAuthority {
+    pub fn new(mfa_enabled: bool, verified: bool) -> Self {
+        Self {
+            mfa_enabled,
+            verified,
+        }
+    }
+}
+
+pub fn require_derived_mfa(authority: DerivedMfaAuthority) -> crate::errors::AppResult<()> {
+    if !may_derive(authority.mfa_enabled, authority.verified) {
+        return Err(crate::errors::AppError::MfaStepUpRequired);
+    }
+    Ok(())
+}
 /// New purpose is authoritative. Absent purpose is accepted only for legacy
 /// completed sessions; the old server's MFA sentinel is always denied there.
 pub fn authenticated(filter: Document) -> Document {
@@ -23,8 +65,8 @@ pub fn pending(filter: Document, legacy: bool) -> Document {
     doc! {"$and": [filter, purpose]}
 }
 
-/// Validate live user authority for MCP, requiring the exact assured parent
-/// only when MFA is enabled. Legacy or sid-less authority is then rejected.
+/// Validate live user authority for MCP, accepting grandfathered devices while
+/// retaining exact-parent revocation and explicit-unverified rejection.
 pub async fn mfa_assurance(
     db: &mongodb::Database,
     user_id: &str,
@@ -62,8 +104,12 @@ pub(crate) async fn mfa_assurance_for_active_user(
     } else {
         None
     };
-    let assured = live.as_ref().is_some_and(|row| row.mfa_assured);
-    if !assured {
+    // Sid-less authority can only come from old issuers. Its JWT/MCP expiry
+    // bounds access; first refresh binds it to a fixed-lifetime legacy session.
+    if session_id.is_none() {
+        return Ok(false);
+    }
+    if !live.as_ref().is_some_and(satisfies_mfa) {
         Box::pin(reject_unassured(
             db,
             user_id,
@@ -77,12 +123,12 @@ pub(crate) async fn mfa_assurance_for_active_user(
             "MFA verification required; sign in again".into(),
         ));
     }
-    Ok(assured)
+    Ok(live.is_some_and(|row| classification(&row) == MfaAssurance::Verified))
 }
 
 /// Retire stale authority once. The conditional session update, refresh/MCP
 /// cascade and audit commit together; repeated or concurrent rejections cannot
-/// flood the audit chain. Sid-less authority has no durable session identity.
+/// flood the audit chain. Legacy and exempt authority never match this update.
 pub async fn reject_unassured(
     db: &mongodb::Database,
     user_id: &str,
@@ -92,13 +138,6 @@ pub async fn reject_unassured(
     ua: Option<&str>,
 ) -> crate::errors::AppResult<()> {
     let Some(id) = session_id else {
-        db.collection::<Document>(REFRESH_TOKENS)
-            .update_many(
-                doc! {"user_id": user_id, "client_id": uuid::Uuid::nil().to_string(),
-                "session_id": null, "revoked": false},
-                doc! {"$set": {"revoked": true}},
-            )
-            .await?;
         return Ok(());
     };
     let context = (
@@ -116,7 +155,7 @@ pub async fn reject_unassured(
                 .collection::<Document>(SESSIONS)
                 .update_one(
                     authenticated(doc! {"_id": id, "user_id": user, "revoked": false,
-                    "mfa_assured": {"$ne": true}}),
+                    "mfa_assured": false, "mfa_exemption": null}),
                     doc! {"$set": {"revoked": true}},
                 )
                 .session(&mut *tx)

@@ -8,7 +8,7 @@ Think Duo Mobile, Microsoft Authenticator, or Authy — but bound to your own se
 
 - **Approves auth challenges.** When a service requests access (login, OAuth grant, MFA step-up, admin action), the backend pushes a notification to this app. You see the request details — who, what, when, where — and tap approve or deny.
 - **Manages granted permissions.** View every grant you've issued (per-service, per-scope), and revoke any of them.
-- **Preserves MFA assurance.** NyxID MFA uses TOTP or a single-use recovery code after password or Google/GitHub/Apple sign-in. Social MFA callbacks carry a five-minute challenge in the URI fragment; the app keeps it in memory and verifies it before storing any session. App approvals derive from an existing human session that satisfied MFA. Legacy sessions without assurance must sign in again.
+- **Preserves MFA assurance.** NyxID MFA uses TOTP or a single-use recovery code after password or Google/GitHub/Apple sign-in. Social MFA callbacks carry a five-minute challenge in the URI fragment; the app keeps it in memory and verifies it before storing any session. App approvals derive from an existing human session that satisfied MFA. Legacy sessions keep working until normal expiry. Mobile social MFA is controlled by the code-declared `auth:mobile-mfa` flag (default off), resolved for the person with live org overrides at sign-in. While off, a social first-factor holder can sign in without an MFA code; password mobile login always requires MFA. Existing mobile exemptions survive a flag flip. Device/app identity approvals and login-code minting still require a verified approver; error 2003 is a 403 that preserves the session. When `/users/me.capabilities.enabled_features` includes the flag, the app shows an authenticator/recovery step-up prompt and retries the original action after verification; otherwise it shows the server message. Missing capabilities on old backends means off. No automatic approvals.
 - **Stays signed in securely.** Tokens persist in the OS secure enclave (iOS Keychain via `expo-secure-store`, Android EncryptedSharedPreferences).
 
 For end users this is a companion app to whatever website / service uses NyxID as its identity provider. For NyxID operators this is what your tenants install.
@@ -293,6 +293,7 @@ All under `/api/v1` on the configured `*_API_BASE_URL`:
 | --- | --- |
 | `POST /auth/login` | Email + password login |
 | `POST /auth/mfa/verify` | MFA second-factor verification |
+| `POST /auth/mfa/step-up` | Upgrade the current live session before approving another sign-in |
 | `POST /auth/device/preview` | Preview a login request's requester context |
 | `POST /auth/device/approve` | Approve a device login with the human session |
 | `POST /auth/device/deny` | Reject a device login with the human session |
@@ -326,3 +327,19 @@ All under `/api/v1` on the configured `*_API_BASE_URL`:
 - `src/lib/auth/sessionStore.ts` — SecureStore wrapper
 - `src/app/linking.ts` — deep link → screen routing
 - `src/lib/notifications/pushNotifications.ts` — APNs / FCM registration + payload handling
+
+### MFA rollout notes
+
+No new environment variables are required. Enable `auth:mobile-mfa` globally,
+for org cohorts or per person after compatible app builds are distributed and
+all API replicas are upgraded. Existing legacy/exempt sessions keep their normal
+expiry; step-up never extends it. Sid-less legacy refreshes acquire a fixed
+30-day session on first refresh. Old-replica in-flight device/login codes and
+login approvals lacking assurance fail closed; restart those requests. New
+server challenges remain authoritative for sign-in UI even before capabilities
+are available. Account/request changes discard pending step-up retries.
+
+Drain pre-change API replicas before relying on existing-device preservation:
+those binaries still reject and revoke legacy/mobile-exempt authority. Deploy
+the web step-up UI after all replicas support the route. A backend rollback
+restores that older rejection policy for these sessions.

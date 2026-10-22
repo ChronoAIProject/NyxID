@@ -161,6 +161,7 @@ CLI text errors preserve the existing `Error: ...` line and append the accepted 
 | 2000 | `authentication_failed`    | 401         | Wrong email/password or invalid MFA code |
 | 2001 | `token_expired`            | 401         | JWT has expired                          |
 | 2002 | `mfa_required`             | 403         | MFA verification needed to complete login|
+| 2003 | `mfa_step_up_required` | 403 | Verify the current session before approving a sign-in on another device |
 | 3000 | `pkce_verification_failed` | 400         | PKCE code_verifier mismatch              |
 | 3001 | `invalid_redirect_uri`     | 400         | Redirect URI not registered for client   |
 | 3002 | `invalid_scope`            | 400         | Requested scope not allowed              |
@@ -993,7 +994,7 @@ OAuth callback handler. Called by the provider after user authorization.
 
 **Response (302 on success, web):** For users without MFA, redirects to the frontend root and sets the `nyx_session` cookie. For users with MFA enabled, no session is created: the callback sets the narrowly scoped, HttpOnly `nyx_mfa_challenge` cookie for five minutes and redirects to `/login?mfa=required` (with a trusted `return_to` value when an OAuth authorization is being resumed).
 
-**Response (302 on success, mobile):** For users without MFA, redirects to the provided deep link with `status=success`, `provider`, `user_id`, `access_token`, `refresh_token`, and `expires_in` query parameters. MFA users receive no tokens; the deep link fragment contains `status=mfa_required`, `provider`, and the short-lived `mfa_token` challenge. The app posts that token and a TOTP/recovery code to `/auth/mfa/verify`.
+**Response (302 on success, mobile):** For users without MFA, redirects to the provided deep link with `status=success`, `provider`, `user_id`, `access_token`, `refresh_token`, and `expires_in` query parameters. When `auth:mobile-mfa` is enabled for the signing-in person, MFA users receive no tokens; the deep link fragment contains `status=mfa_required`, `provider`, and the short-lived `mfa_token` challenge. The app posts that token and a TOTP/recovery code to `/auth/mfa/verify`. The flag defaults off: MFA users receive the normal success tokens with a persisted mobile-rollout exemption. Resolution includes live org overrides and occurs only at sign-in; a later flag flip does not revoke existing devices. While off, a social first-factor holder can sign in through mobile without an MFA code.
 
 **Response (302 on error):** Redirects to `{FRONTEND_URL}/login?error={error_key}`.
 
@@ -1018,7 +1019,7 @@ Possible error keys in the redirect:
 - `social_auth_conflict` is reserved for write-time identity collisions (for example, if the provider identity is already bound to another account)
 - New users created via social login have `email_verified = true` (provider verified the email) and no password set
 - Existing email/password accounts keep their password login path after social linking
-- Existing accounts with MFA enabled must complete MFA before either a browser session or mobile tokens are issued. The challenge token never appears in a web URL, audit row, log, or telemetry event.
+- Existing accounts with MFA enabled must complete MFA before a browser session is issued; mobile social MFA follows `auth:mobile-mfa` (default off). The challenge token never appears in a web URL, audit row, log, or telemetry event.
 
 ---
 
@@ -5567,7 +5568,7 @@ with `details.reason: "mfa_challenge_expired"` and clear the challenge cookie.
 A wrong code on a live challenge keeps the cookie and spends the existing attempt budget.
 Clients return to sign-in after terminal failures. The web form explicitly offers recovery codes.
 
-Social token exchange at `/oauth/token` uses OAuth error JSON (HTTP 400):
+When `auth:mobile-mfa` is enabled for the signing-in person, social id_token exchange (Google/GitHub/Apple native-mobile flow) at `/oauth/token` uses OAuth error JSON (HTTP 400):
 
 ```json
 { "error": "mfa_required", "error_description": "MFA required", "error_code": 2002, "session_token": "<five-minute-challenge>" }
@@ -5577,13 +5578,41 @@ No access/refresh token or session is issued in that response. Send `session_tok
 as `mfa_token` with `code` and `client: "token"` (or `"mobile"`) to MFA verify.
 Password login keeps its existing HTTP 403 error code 2002 response.
 
-Completed sessions record MFA assurance. A legacy session without assurance is
-rejected with HTTP 401 for a live MFA-enabled account by cookie/bearer auth,
-first-party refresh and MCP fallback; sign in again. Derived login-code, device
-approval/poll-web, CLI-token and approval keep-signed-in sessions inherit the exact
-parent/approval assurance. OAuth authorize, Agent Key approval and app approval
-require an accepted human session. Confirmation requires an identified session,
-marks it assured and signs out other devices transactionally. There is no startup cutoff.
+The default-off flag skips the social token-exchange MFA challenge and persists a mobile-exempt session. Password login, including `client: "mobile"`, always retains MFA. No environment variable controls this flag.
+
+Completed legacy sessions with absent/null assurance and mobile-exempt sessions keep authenticating through cookie, bearer, refresh and MCP fallback until normal expiry/revocation. Explicit unverified sessions are rejected for MFA accounts. A sid-less legacy first-party refresh acquires a fixed 30-day session on first refresh; successors cannot extend its expiry. In-flight legacy device codes, login codes and approvals without assurance fail closed.
+
+#### POST /api/v1/auth/mfa/step-up
+
+Verify the **current** session before authorizing a sign-in on another device.
+
+**Auth:** First-party human cookie session or first-party bearer with `sid`. API keys, service accounts, delegated/relay and OAuth-client tokens receive the standard HTTP 403 credential-type denial. Sid-less bearers cannot step up.
+
+```json
+{ "code": "123456" }
+```
+
+Accepts TOTP or a single-use recovery code using the login verifier, replay protection and shared per-account rate budget (10 attempts per 300 seconds). Success atomically sets verified assurance and removes any exemption from this live session, with a metadata-only `mfa_step_up` audit. It does not issue tokens or extend expiry.
+
+**Response (200):** `{ "message": "Session verified" }`.
+
+**Errors:** HTTP 400 for MFA not enabled or wrong/replayed/consumed codes; HTTP 429 when the shared verification budget is exhausted; HTTP 401 for expired/revoked session authority.
+
+For MFA accounts, device approval, Agent Key approval, login-code minting, CLI-token and app identity approval from legacy/mobile-exempt authority return:
+
+```json
+{
+  "error": "mfa_step_up_required",
+  "error_code": 2003,
+  "message": "Verify with your authenticator to approve sign-ins on other devices"
+}
+```
+
+This is HTTP 403 and does not expire the approver session. Verify through step-up and retry the original action. Web shows an inline authenticator/recovery prompt; mobile shows it only when `/users/me.capabilities.enabled_features` includes `auth:mobile-mfa`, otherwise it displays the server message. Enrollment continues to verify the current session and sign out other devices.
+
+The CLI reports `mfa_step_up_required` with exit code 23 for an old in-flight
+delivery that lacks verified approval. Verify the approving session, then start
+a new login or generate a fresh login code; the old delivery remains fail-closed.
 
 #### POST /api/v1/auth/mfa/cancel
 

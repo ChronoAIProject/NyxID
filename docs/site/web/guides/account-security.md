@@ -30,15 +30,19 @@ Store your backup codes in a secure location (password manager, printed and lock
 
 After entering your email and password on the login page, NyxID prompts for a
 6-digit TOTP code. Social sign-in (Google, GitHub, or Apple) prompts for the
-same MFA form before creating a session. Mobile social sign-in keeps the
-short-lived challenge in the deep-link fragment and never receives tokens until
-the code is verified. Choose **Use a recovery code** when your authenticator is
+same MFA form before creating a session. Mobile social sign-in follows a staged rollout: when enabled for your account,
+the app keeps the challenge in the deep-link fragment and verifies your code
+before storing a session. During the rollout, mobile social sign-in can continue
+without this second step. Email/password sign-in on mobile still requires MFA. Choose **Use a recovery code** when your authenticator is
 unavailable; each recovery code is single-use.
 
-Sessions from before MFA enforcement may ask you to sign in again. NyxID checks
-MFA assurance on every human session request, refresh, and session-backed MCP
-connection. Device approval, login codes, CLI tokens and app approval inherit
-the MFA assurance of the human session that approved them.
+Devices signed in before the MFA enforcement rollout keep working until their
+normal session expiry or revocation. A new sign-in on another device still needs
+MFA: when approving a device, issuing a login code, or connecting the CLI, an
+older session may ask you to **Verify this session**. Enter your authenticator
+or a single-use recovery code; NyxID then retries the action without signing
+you out. The mobile app offers this prompt only after MFA rollout is enabled
+for your account; otherwise it shows the verification requirement.
 
 ### Disable MFA
 
@@ -73,7 +77,8 @@ If your account uses social sign-in (Google / GitHub / Apple) and you never set 
 
 ## Sessions
 
-Every sign-in creates a session. Sessions expire after 7 days of inactivity (refresh token TTL). Active sessions stay alive with automatic token refresh on every page load.
+Every sign-in creates a session with a fixed 30-day expiry. Refresh tokens rotate
+automatically while that session is live; refresh does not extend the session expiry.
 
 ### View active sessions
 

@@ -4047,6 +4047,7 @@ async fn handle_account_tool(
     };
     let user = auth::AuthUser {
         mfa_assured: false,
+        mfa_enabled: false,
         org_agent_access: auth.org_agent_access.clone(),
         assistant_group_id: auth.assistant_group_id.clone(),
         assistant_agent_owner_id: auth.assistant_agent_owner_id.clone(),
@@ -6642,6 +6643,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mfa_fallback_accepts_legacy_and_mobile_exempt_parent_without_rewriting_it() {
+        let db = crate::test_utils::connect_transaction_test_database("existing_mcp_parents").await;
+        let mut state = crate::test_utils::test_app_state(db.clone());
+        state.mcp_sessions = std::sync::Arc::new(
+            crate::models::mcp_session::McpSessionStore::with_db(db.clone()),
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut user = crate::test_utils::test_user(&id, crate::models::user::UserType::Person);
+        user.mfa_enabled = true;
+        db.collection::<User>(USERS).insert_one(user).await.unwrap();
+        for legacy in [true, false] {
+            let tokens = crate::services::token_service::create_mobile_social_tokens(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &id,
+                None,
+                None,
+                !legacy,
+            )
+            .await
+            .unwrap();
+            if legacy {
+                db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id": &tokens.session_id},
+                        doc! {"$unset": {"mfa_assured": ""}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            let sid = state
+                .mcp_sessions
+                .create_with_parent_session(&id, true, true, Some(&tokens.session_id))
+                .await
+                .unwrap()
+                .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert("mcp-session-id", sid.parse().unwrap());
+            for _ in 0..2 {
+                assert!(authenticate_mcp(&state, &headers, true).await.is_ok());
+            }
+            headers.insert(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {}", tokens.access_token).parse().unwrap(),
+            );
+            assert!(authenticate_mcp(&state, &headers, true).await.is_ok());
+            let row = db
+                .collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+                .find_one(doc! {"_id": &tokens.session_id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!row.get_bool("revoked").unwrap());
+            if legacy {
+                assert!(!row.contains_key("mfa_assured"));
+            } else {
+                assert_eq!(row.get_str("mfa_exemption").unwrap(), "mobile_rollout");
+            }
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn non_mfa_fallback_survives_revoked_or_missing_parent() {
         let db = crate::test_utils::connect_transaction_test_database("non_mfa_mcp_parent").await;
         let mut state = crate::test_utils::test_app_state(db.clone());
@@ -6728,7 +6793,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 authenticate_mcp(&state, &headers, true).await.is_ok(),
-                parent_id == Some(unrelated.session_id.as_str())
+                parent_id.is_none() || parent_id == Some(unrelated.session_id.as_str())
             );
             if parent_id == Some(unrelated.session_id.as_str()) {
                 db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
@@ -7547,6 +7612,7 @@ mod tests {
         let mcp_auth = McpAuthContext::user(actor_id.clone(), AuthMethod::AccessToken);
         let proxy_auth = AuthUser {
             mfa_assured: false,
+            mfa_enabled: false,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,

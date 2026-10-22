@@ -80,8 +80,10 @@ pub async fn mint(
     actor: &str,
     mut selection: Option<Selection>,
     expiry: Option<DateTime<Utc>>,
-    mfa_assured: bool,
+    authority: super::session_authority::DerivedMfaAuthority,
 ) -> AppResult<MintedCode> {
+    super::session_authority::require_derived_mfa(authority)?;
+    let mfa_assured = authority.verified;
     limit(db, "login-code-mint-owner", actor, 5).await?;
     let created_at = Utc::now();
     let expiry = if let Some(selection) = &mut selection {
@@ -253,10 +255,8 @@ pub async fn redeem(
         .find_one(doc! {"_id": &row.user_id, "is_active": true})
         .await?
         .ok_or(AppError::LoginCodeInvalid)?;
-    if user.mfa_enabled && !row.mfa_assured {
-        return Err(AppError::Unauthorized(
-            "MFA verification required; sign in again".into(),
-        ));
+    if !super::session_authority::may_derive(user.mfa_enabled, row.mfa_assured) {
+        return Err(AppError::MfaStepUpRequired);
     }
     let account = if row.selection.is_none() && row.device_request_id.is_none() {
         Some(
@@ -454,6 +454,7 @@ async fn handoff_request(db: &Database, filter: bson::Document) -> AppResult<Aut
     if row.agent_key_grant.is_none() {
         return Err(AppError::LoginCodeInvalid);
     }
+    device::require_delivery_mfa(db, &row).await?;
     Ok(row)
 }
 

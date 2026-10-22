@@ -13,6 +13,22 @@ pub enum SessionPurpose {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MfaExemption {
+    MobileRollout,
+    LegacyMigration,
+}
+
+/// Authentication accepts existing devices; derivation requires verified MFA.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MfaAssurance {
+    Verified,
+    Unverified,
+    Legacy,
+    MobileExempt,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     #[serde(rename = "_id")]
@@ -24,10 +40,12 @@ pub struct Session {
     /// Completed sessions leave this unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mfa_method: Option<String>,
-    /// A completed session may authenticate an MFA-enabled account only after
-    /// this assurance was established by a successful MFA step.
+    /// Absent/null means a pre-assurance session. Every current writer sets an
+    /// explicit bool, including the bounded migration of sid-less refreshes.
     #[serde(default)]
-    pub mfa_assured: bool,
+    pub mfa_assured: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mfa_exemption: Option<MfaExemption>,
     /// SHA-256 hash of the session token stored in the cookie
     pub token_hash: String,
     pub ip_address: Option<String>,
@@ -67,7 +85,8 @@ mod tests {
         Session {
             purpose: Some(crate::models::session::SessionPurpose::Authenticated),
             mfa_method: None,
-            mfa_assured: false,
+            mfa_assured: Some(false),
+            mfa_exemption: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             token_hash: "abcdef0123456789".to_string(),

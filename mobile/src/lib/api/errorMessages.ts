@@ -8,7 +8,7 @@ import { ApiError, isApiError } from "./ApiError";
  *
  * Error code ranges (from backend AppError):
  *   1000-1008  General (bad_request, unauthorized, forbidden, etc.)
- *   2000-2002  Auth (authentication_failed, token_expired, mfa_required)
+ *   2000-2003  Auth (authentication_failed, token_expired, mfa_required, mfa_step_up_required)
  *   3000-3004  OAuth (pkce, redirect_uri, scope, consent, grant_type)
  *   4000-4007  RBAC (role, group, consent, slug, hierarchy)
  *   5000-5001  Service accounts
@@ -98,6 +98,9 @@ export function resolveErrorMessage(error: unknown): string {
 }
 
 export function resolveAuthDeviceErrorMessage(error: unknown): string {
+  if (isApiError(error) && error.statusCode === 403 && error.errorCode === 2003 && error.errorKey === "mfa_step_up_required") {
+    return error.message;
+  }
   if (isApiError(error) && error.errorCode >= 11200 && error.errorCode <= 11207) {
     const mapped = ERROR_MESSAGES[error.errorCode];
     if (mapped) return mapped;

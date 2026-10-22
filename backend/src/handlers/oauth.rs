@@ -2750,10 +2750,6 @@ async fn token_inner(
             // - provider present: social token exchange (provider-specific token type validation)
             // - provider absent + access_token type: delegated token exchange
             if let Some(provider) = body.provider.as_deref() {
-                // TODO(telemetry): social branch blocked — see TELEMETRY.md §6.5
-                // (auth.token_exchanged). `SocialTokenExchangeResponse` does not
-                // carry `user_id`, so no distinct_id is available at this site.
-                // Lift once §6.5 is resolved and the service response is extended.
                 let result = social_token_exchange_service::exchange_social_token(
                     &state.db,
                     &state.config,
@@ -2768,6 +2764,16 @@ async fn token_inner(
                 )
                 .await?;
 
+                if result.mobile_mfa_exempt {
+                    emit_event(
+                        state.telemetry.as_deref(),
+                        &result.user_id_for_telemetry,
+                        None,
+                        tele,
+                        TelemetryEvent::AuthMobileMfaExempted,
+                    )
+                    .await;
+                }
                 Ok(Json(TokenResponse {
                     access_token: result.access_token,
                     token_type: "Bearer".to_string(),
