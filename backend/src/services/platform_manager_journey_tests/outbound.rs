@@ -701,8 +701,8 @@ async fn concurrent_saved_reply_notice_snapshots_reuse_the_winner() {
         let (a, b) = delivery::TEST_BEFORE_NOTICE_SNAPSHOT
             .scope(Arc::new(tokio::sync::Barrier::new(2)), async {
                 tokio::join!(
-                    j.deliver(&destination, &reply, body.clone()),
-                    j.deliver(&destination, &reply, body.clone())
+                    Box::pin(j.deliver(&destination, &reply, body.clone())),
+                    Box::pin(j.deliver(&destination, &reply, body.clone()))
                 )
             })
             .await;
