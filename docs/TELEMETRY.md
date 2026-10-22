@@ -32,6 +32,13 @@ The server maintains the authoritative runtime taxonomy in `backend/src/telemetr
 
 Backend typed event properties use `backend/src/telemetry/schema.rs`, then the egress scrubber. Surface, application version, environment and optional client version are added centrally. Raw credentials, authorization headers, MFA/recovery codes, request bodies, form contents, messages, search terms and raw exceptions must not be added to events. Scrubbing is defense in depth, not permission or an anonymity guarantee. Backend event callers remain subject to inventory and review as features change.
 
+Mobile social MFA exemptions emit the typed `auth.mobile_mfa_exempted` event
+with only `mfa: skipped_mobile_rollout`. It uses the existing account permission
+and pre-authentication gates; this rollout does not grant analytics permission.
+Redirect login records a metadata-only `social_login` audit independently.
+
+Social token exchange emits `auth.token_exchanged` with the short canonical `subject_token_type` (`id_token` or `access_token`) and `exchange_provider` after successful provider verification, using the exchanged person as the subject. A rollout exemption also emits `auth.mobile_mfa_exempted`. Both use the existing device/account consent gates: pre-auth protocols and missing/disabled consent do not dispatch account-linked events. The native exchange writes one `social_token_exchange` audit with provider, client, session and MFA outcome; redirect login retains its `social_login` audit.
+
 The backend's `telemetry::dispatch_inventory_tests` enumerates direct `track` calls, durable dispatch admission, queue-job construction and vendor capture endpoints across Rust source, including test callers. A new call site fails the inventory test until its consent boundary has been reviewed. Runtime regressions separately exercise the live database and vendor boundary, including withdrawal across independent app states sharing a database, database failure and device restrictions. Product-analytics denial does not suppress security audit writes.
 
 ## Server configuration

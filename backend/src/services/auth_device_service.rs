@@ -371,7 +371,8 @@ pub async fn poll_for_browser(
     let mut browser = Session {
         purpose: Some(crate::models::session::SessionPurpose::Authenticated),
         mfa_method: None,
-        mfa_assured: false,
+        mfa_assured: Some(false),
+        mfa_exemption: None,
         id: Uuid::new_v4().to_string(),
         user_id: delivery.user_id.clone(),
         token_hash: cookie_hash.to_owned(),
@@ -410,12 +411,12 @@ pub async fn poll_for_browser(
                 .find_one(super::session_authority::authenticated(doc! {"_id": &original_id,
                     "user_id": &browser.user_id, "revoked": false}))
                 .session(&mut *session).await?.ok_or(AppError::AuthDeviceCodeAlreadyDelivered)?;
-            browser.mfa_assured = parent.mfa_assured;
+            browser.mfa_assured = Some(parent.mfa_assured == Some(true));
             let user = db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
                 .find_one(doc! {"_id": &browser.user_id, "is_active": true})
                 .session(&mut *session).await?.ok_or(AppError::AuthDeviceCodeDenied)?;
-            if user.mfa_enabled && !browser.mfa_assured {
-                return Err(AppError::Unauthorized("MFA verification required; sign in again".into()));
+            if !super::session_authority::may_derive(user.mfa_enabled, browser.mfa_assured == Some(true)) {
+                return Err(AppError::AuthDeviceCodeDenied);
             }
             db.collection::<Session>(SESSIONS).update_one(doc! {"_id": &original_id},
                 doc! {"$set": {"revoked": true}}).session(&mut *session).await?;
@@ -493,12 +494,28 @@ async fn poll_internal(
         AuthDeviceCodeStatus::Expired => PollClaim::Expired,
         AuthDeviceCodeStatus::Delivered => PollClaim::AlreadyDelivered,
         AuthDeviceCodeStatus::Approved => {
+            require_delivery_mfa(db, &row).await?;
             deliver_approved_claim(&collection, &row, now, encryption, consume).await?
         }
     };
 
     record_poll_outcome(&row.id, poll_claim_outcome(&outcome));
     Ok(outcome)
+}
+
+/// Old approval records must not acquire a grandfathered descendant merely
+/// because the session they prepared predates assurance. This check belongs to
+/// delivery, independently of the completed-session authentication policy.
+pub(super) async fn require_delivery_mfa(db: &Database, row: &AuthDeviceCode) -> AppResult<()> {
+    let user = db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id": row.approved_user_id.as_deref(), "is_active": true})
+        .await?
+        .ok_or(AppError::AuthDeviceCodeDenied)?;
+    if !super::session_authority::may_derive(user.mfa_enabled, row.mfa_assured) {
+        return Err(AppError::AuthDeviceCodeDenied);
+    }
+    Ok(())
 }
 
 #[tracing::instrument(name = "auth_device.preview", skip_all, fields(row_id))]
@@ -558,8 +575,10 @@ pub async fn approve(
     encryption_keys: &EncryptionKeys,
     hmac_key: &[u8],
     input: ApproveInput,
-    mfa_assured: bool,
+    authority: super::session_authority::DerivedMfaAuthority,
 ) -> AppResult<()> {
+    super::session_authority::require_derived_mfa(authority)?;
+    let mfa_assured = authority.verified;
     let started_at = std::time::Instant::now();
     let normalized = normalize_user_code(&input.user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
@@ -1939,7 +1958,7 @@ mod tests {
                     approver_ip: None,
                     approver_user_agent: None,
                 },
-                false
+                crate::services::session_authority::DerivedMfaAuthority::new(false, false)
             ),
             deny(
                 &db,
@@ -2035,7 +2054,7 @@ mod tests {
                 approver_ip: Some("203.0.113.77".to_string()),
                 approver_user_agent: Some("nyxid-cli/0.8.0".to_string()),
             },
-            false,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false),
         )
         .await
         .expect("approve");
@@ -2151,7 +2170,7 @@ mod tests {
                 approver_ip: None,
                 approver_user_agent: None,
             },
-            false,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false),
         )
         .await;
 
@@ -2194,7 +2213,7 @@ mod tests {
                 approver_ip: None,
                 approver_user_agent: None,
             },
-            false,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false),
         )
         .await;
 
@@ -2243,7 +2262,7 @@ mod tests {
                 approver_ip: None,
                 approver_user_agent: None,
             },
-            false,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false),
         )
         .await;
 
@@ -2301,7 +2320,7 @@ mod tests {
                 &encryption_keys,
                 TEST_HMAC_KEY,
                 approve_input(),
-                false
+                crate::services::session_authority::DerivedMfaAuthority::new(false, false)
             ),
             approve(
                 &db,
@@ -2310,7 +2329,7 @@ mod tests {
                 &encryption_keys,
                 TEST_HMAC_KEY,
                 approve_input(),
-                false
+                crate::services::session_authority::DerivedMfaAuthority::new(false, false)
             )
         );
 
@@ -2487,7 +2506,7 @@ mod tests {
                 encrypted_access: b"encrypted-access".to_vec(),
                 encrypted_refresh: b"encrypted-refresh".to_vec(),
                 expires_in: 900,
-                approved_user_id: "approved-user-id".to_string(),
+                approved_user_id: row.approved_user_id.clone().unwrap(),
                 approved_session_id: "approved-session-id".to_string(),
             }
         );
@@ -2534,6 +2553,13 @@ mod tests {
             status,
             AuthDeviceCodeStatus::Approved | AuthDeviceCodeStatus::Delivered
         );
+        let approved_user_id = if has_approval {
+            let id = Uuid::new_v4().to_string();
+            seed_user(db, &id).await;
+            Some(id)
+        } else {
+            None
+        };
         let row = AuthDeviceCode {
             login_approval_id: None,
             mfa_assured: false,
@@ -2570,7 +2596,7 @@ mod tests {
             client_device_memory: None,
             client_ip_hmac: None,
             last_polled_at: None,
-            approved_user_id: has_approval.then(|| "approved-user-id".to_string()),
+            approved_user_id,
             approved_session_id: has_approval.then(|| "approved-session-id".to_string()),
             agent_key_grant: None,
             purge_at: None,

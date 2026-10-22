@@ -1497,6 +1497,29 @@ pub(super) async fn inspect_pending(
     })
 }
 
+/// Retired native entries retain their primary key association. This permits
+/// only idempotent DELETE acknowledgement, without reopening entry authority.
+pub(crate) async fn acknowledge_retired_binding(
+    db: &mongodb::Database,
+    key: &ApiKey,
+    binding: &str,
+) -> AppResult<Option<super::nyxbot_gateway_release_service::RetiredAcknowledgement>> {
+    use super::nyxbot_gateway_release_service::RetiredAcknowledgement as Ack;
+    if key.purpose != crate::models::api_key::ApiKeyPurpose::SharedEntryTransport {
+        return Ok(None);
+    }
+    let rows = db.collection::<PlatformEntryGateway>(GATEWAYS);
+    if rows.find_one(doc! {"provider_api_key_id":&key.id,"credential_owner_id":&key.user_id,"binding_id":binding,"state":"retired"}).await?.is_none() {return Ok(None);}
+    let live=rows.find_one(doc! {"state":{"$in":["prepared","active"]},"$or":[{"provider_api_key_id":&key.id},{"binding_id":binding}]}).await?.is_some()
+        || db.collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME).find_one(doc! {"status":{"$in":["pending","active"]},
+            "$or":[{"agent_api_key_id":&key.id},{"pending_agent_api_key_id":&key.id},{"binding_id":binding}]}).await?.is_some();
+    Ok(Some(if live {
+        Ack::ConflictingLiveReference
+    } else {
+        Ack::Acknowledged
+    }))
+}
+
 #[cfg(test)]
 mod future_size_tests {
     use super::*;

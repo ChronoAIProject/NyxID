@@ -661,6 +661,7 @@ pub async fn list(
 
 #[derive(Serialize)]
 pub struct HistoryResponse {
+    cma_operations: Vec<CmaOperationResponse>,
     conversation: ConversationResponse,
     messages: Vec<MessageResponse>,
     acknowledgements: Vec<AcknowledgementResponse>,
@@ -672,6 +673,23 @@ pub struct HistoryResponse {
     /// NyxID resumes the thread by itself when each happens.
     waiting: Vec<super::nyxbot::WaitingItem>,
     before_seq: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct CmaOperationResponse {
+    id: String,
+    turn_id: String,
+    kind: crate::models::async_service_operation::CmaOperationKind,
+    operation_id: Option<String>,
+    agent_id: Option<String>,
+    idempotency_key: Option<String>,
+    status: Option<String>,
+    phase: Option<String>,
+    state: String,
+    reason: Option<String>,
+    monitor_name: String,
+    created_at: DateTime<Utc>,
+    checked_at: Option<DateTime<Utc>>,
 }
 #[derive(Serialize)]
 pub struct ChatApprovalResponse {
@@ -765,6 +783,39 @@ pub async fn history(
     .await?;
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
     let agent_id = conversation.agent_id.clone();
+    let cma_operations = crate::services::cma_operation::cards(&state.db, &user_id, &id)
+        .await?
+        .into_iter()
+        .filter_map(|row| {
+            let cma = row.cma?;
+            let monitor_name = agents
+                .iter()
+                .find(|agent| agent.id == row.agent_id)
+                .map(|agent| {
+                    agent
+                        .display_name
+                        .as_deref()
+                        .unwrap_or(&agent.name)
+                        .to_owned()
+                })
+                .unwrap_or_else(|| "NyxBot".into());
+            Some(CmaOperationResponse {
+                id: row.id,
+                turn_id: row.turn_id,
+                kind: cma.kind,
+                operation_id: row.operation_id,
+                agent_id: cma.agent_id,
+                idempotency_key: cma.idempotency_key,
+                status: cma.status,
+                phase: cma.phase,
+                state: row.state,
+                reason: row.reason,
+                monitor_name,
+                created_at: row.created_at,
+                checked_at: cma.checked_at,
+            })
+        })
+        .collect();
     let agent_available = agents.iter().any(|agent| {
         agent_id
             .as_deref()
@@ -828,6 +879,7 @@ pub async fn history(
     }
     Box::pin(mark_expired_attachments(&state.db, &user_id, attachments)).await?;
     Ok(Json(HistoryResponse {
+        cma_operations,
         conversation,
         acknowledgements: acknowledgements.into_iter().map(Into::into).collect(),
         approvals: approvals.into_iter().map(Into::into).collect(),

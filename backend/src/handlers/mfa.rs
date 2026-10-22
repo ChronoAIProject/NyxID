@@ -94,6 +94,30 @@ pub struct MfaDisableResponse {
 
 // --- Handlers ---
 
+/// POST /api/v1/auth/mfa/step-up. The requesting device keeps its session.
+pub async fn step_up(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<MfaConfirmRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    let session_id = auth_user.session_id.ok_or_else(|| {
+        AppError::Forbidden("An identified first-party session is required".into())
+    })?;
+    let user_id = auth_user.user_id.to_string();
+    let factor = mfa_service::step_up(
+        &state.db,
+        &state.encryption_keys,
+        &user_id,
+        &session_id.to_string(),
+        &body.code,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
+    mfa_service::notify_recovery_use(&state, &user_id, factor);
+    Ok(Json(serde_json::json!({"message": "Session verified"})))
+}
+
 /// POST /api/v1/auth/mfa/setup
 ///
 /// Begin TOTP enrollment. Returns the secret and QR code URL.

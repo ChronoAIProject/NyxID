@@ -1170,6 +1170,7 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
         let now = chrono::Utc::now();
         let watch = AsyncServiceOperation {
             secret_context_versions: Default::default(),
+            cma: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: row.user_id.clone(),
             conversation_id: row.id.clone(),
@@ -1179,6 +1180,7 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
             service_id: "test-service".into(),
             submit_endpoint_id: "submit".into(),
             contract: AsyncOperationContract {
+                presentation: None,
                 status_operation: "status".into(),
                 result_operation: "result".into(),
                 cancel_operation: None,

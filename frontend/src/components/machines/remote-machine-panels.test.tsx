@@ -529,3 +529,165 @@ it("uses actual owner history cancellation acknowledgment without claiming physi
     ),
   ).toBeInTheDocument();
 });
+
+it("reports the loaded job page and filters finished results with the real API state", async () => {
+  http.get.mockResolvedValue({
+    jobs: [
+      {
+        id,
+        node_id: id,
+        runtime_generation: 2,
+        state: "finished",
+        created_at: job.created_at,
+        expires_at: job.expires_at,
+        finished_at: job.finished_at,
+        binding: {
+          kind: "external",
+          principal: job.subject,
+          grant_id: id,
+          grant_revision: 7,
+        },
+        services: [],
+        output_persisted: false,
+        exit_code: 1,
+      },
+    ],
+    next_cursor: "older-jobs",
+  });
+  renderPanel(<RemoteMachineJobs machineId={id} />);
+  expect(
+    await screen.findByText("Loaded 1 job on this page."),
+  ).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("combobox", { name: "Status" }));
+  expect(
+    screen.queryByRole("option", { name: "succeeded" }),
+  ).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("option", { name: "finished" }));
+  await userEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+  await waitFor(() =>
+    expect(
+      http.get.mock.calls.some(([path]) =>
+        String(path).includes("state=finished"),
+      ),
+    ).toBe(true),
+  );
+  expect(
+    screen.getByText(/Finished includes all recorded exit results/),
+  ).toBeInTheDocument();
+  await userEvent.click(
+    (await screen.findAllByRole("button", { name: "View job" }))[0]!,
+  );
+  expect(screen.getByText("Exit code").nextElementSibling).toHaveTextContent(
+    "1",
+  );
+});
+
+it.each([
+  "runtime billing contract not found",
+  "Not found: runtime billing contract not found",
+])(
+  "treats an explicitly missing free current contract as a normal empty state: %s",
+  async (message) => {
+    http.get.mockImplementation(async (path: string) => {
+      if (path.includes("/billing/runs"))
+        return { runs: [], next_offset: null };
+      throw new ApiError(404, {
+        error: "not_found",
+        error_code: 1003,
+        message,
+      });
+    });
+    renderPanel(<RemoteMachineBilling machineId={id} billingState="free" />);
+    expect(
+      await screen.findByText(/No current paid runtime contract/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        /Runtime billing details are unavailable on this server/,
+      ),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("0 Credits")).not.toBeInTheDocument();
+  },
+);
+
+it("keeps an unsupported free billing read distinct from no current contract", async () => {
+  http.get.mockRejectedValue(
+    new ApiError(404, {
+      error: "not_found",
+      error_code: 1004,
+      message: "Not mounted",
+    }),
+  );
+  renderPanel(<RemoteMachineBilling machineId={id} billingState="free" />);
+  expect(
+    await screen.findByText(
+      /Runtime billing details are unavailable on this server/,
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByText(/No current paid runtime contract/),
+  ).not.toBeInTheDocument();
+});
+
+it.each([
+  "runtime contract not found",
+  "Validation error: runtime contract not found",
+])(
+  "distinguishes the missing historical contract response and can return to current billing: %s",
+  async (message) => {
+    const historicalId = "22222222-2222-4222-8222-222222222222";
+    http.get.mockImplementation(async (path: string) => {
+      if (path.includes("/billing/runs"))
+        return { runs: [], next_offset: null };
+      if (path.includes(`run_id=${historicalId}`))
+        throw new ApiError(400, {
+          error: "validation_error",
+          error_code: 1008,
+          message,
+        });
+      return runtimeBillingFixture();
+    });
+    renderPanel(<RemoteMachineBilling machineId={id} runId={historicalId} />);
+    expect(
+      await screen.findByText(/Selected historical contract was not found/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        /Runtime billing details are unavailable on this server/,
+      ),
+    ).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "View current contract" }),
+    );
+    expect(
+      await screen.findByText("0.000000000001 Credits"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Reserved (includes pending)")).toBeInTheDocument();
+  },
+);
+
+it.each([
+  "runtime billing contract not found",
+  "Not found: runtime billing contract not found",
+])(
+  "does not claim free billing when a paid current contract is missing: %s",
+  async (message) => {
+    http.get.mockImplementation(async (path: string) => {
+      if (path.includes("/billing/runs"))
+        return { runs: [], next_offset: null };
+      throw new ApiError(404, {
+        error: "not_found",
+        error_code: 1003,
+        message,
+      });
+    });
+    renderPanel(<RemoteMachineBilling machineId={id} billingState="running" />);
+    expect(
+      await screen.findByText(/No current runtime contract was found/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/No current paid runtime contract/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("0 Credits")).not.toBeInTheDocument();
+  },
+);

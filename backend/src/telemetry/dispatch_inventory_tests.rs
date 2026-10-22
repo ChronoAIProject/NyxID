@@ -41,6 +41,13 @@ fn all_track_and_vendor_dispatch_paths_are_reviewed() {
     let mut found = Inventory::new();
     visit(&root, &root, &mut found);
     let expected: Inventory = [
+        // Local test capture exercises successful provider exchange through
+        // live account/device consent and verifies pre-auth dispatch denial.
+        (
+            "handlers/oauth.rs",
+            "social_exchange_emits_canonical_telemetry_and_one_outer_audit",
+            1,
+        ),
         (
             "services/telemetry_erasure_service.rs",
             "held_capture_across_deletion_settles_before_vendor_delete",

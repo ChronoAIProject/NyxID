@@ -157,6 +157,33 @@ Media artifacts have an 8,000,000-character inline cap. Current history rows do
 not carry media, so an artifact is visible in the live local message but is not
 reconstructed after reload.
 
+### CMA delegation cards
+
+NyxBot and specialist threads render a `CmaOperationCard` beneath the assistant
+reply when an owner chat key actually invokes a supported CMA operation. The
+card comes from the durable MCP watch, never assistant text or a promised task
+plan. It shows the CMA identity, operation and agent IDs when available, a safe
+idempotency key, the invoking assistant's name, and the last observed status.
+Provisioning success is **Agent ready**; only a completed Responses operation is
+**Completed**. Progress stages describe submission, provisioning or activity,
+and readiness; they do not infer implementation or deployment milestones.
+
+History returns an owner/thread-scoped `cma_operations` metadata snapshot,
+including settled operations whose initiating turn is on an older message page.
+The transport attaches each card by `turn_id` after projecting stored and live
+messages. While a watch is submitting, waiting or cancelling, the selected
+thread refreshes history every five seconds, including after its assistant reply
+settles. Server polling continues independently of the page. Cards restore from
+history after reload and remain in the thread that made the call.
+
+Approval, connection, paused, failed, timeout and unavailable states remain
+distinct. A failed result download preserves an already confirmed CMA outcome.
+Stopping a watch says **Tracking stopped** and explains that CMA may still be
+running, since these adapters declare no upstream cancel operation. Card
+metadata is retained for 30 days; encrypted result retention stays at four hours.
+See [CMA operation contracts](../API_DISCOVERY.md#cma-operation-cards) for the
+supported endpoints and tracking limits.
+
 ## Long transcripts
 
 Rows re-render only when their message or the page's projection version changes,

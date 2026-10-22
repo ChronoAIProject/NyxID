@@ -268,6 +268,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
       - run: cargo fmt -p nyxid-permissions --check
       - run: cargo clippy -p nyxid-permissions --all-targets --locked -- -D warnings
       - run: cargo test -p nyxid-permissions --locked
@@ -396,6 +398,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
       - name: Check Clippy with resource samples
         run: python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --all-targets -- -D warnings
 
@@ -409,65 +413,7 @@ jobs:
     name: Backend Test
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
-    runs-on: ubuntu-latest
-    # A measured run compiled for 28 minutes and was still passing tests at
-    # 90 minutes. Match coverage's budget for the full compile and suite.
-    timeout-minutes: 120
-    # Reduce debug-information volume while retaining locations and backtraces.
-    # Resource samples distinguish future compilation shutdowns from test failures.
-    env:
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
-    steps:
-      - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
-      - name: Start transaction-capable MongoDB
-        run: bash .github/scripts/start-test-mongodb.sh
-      - name: Install system dependencies
-        timeout-minutes: 5
-        run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: backend
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.146
-
-      - name: Check RCI backend boundary
-        run: bash scripts/check-rci-backend-boundary.sh
-
-      - name: Run backend tests
-        run: python3 .github/scripts/ci_resources.py backend-test cargo nextest run -p nyxid -p nyxid-service-adapters --profile ci
-      - name: Test MongoDB diagnostics
-        if: failure() || cancelled()
-        continue-on-error: true
-        run: bash .github/scripts/dump-test-mongodb.sh
-
-      - name: Publish test summary
-        if: always()
-        uses: test-summary/action@v2.6
-        with:
-          paths: target/nextest/ci/junit.xml
-          show: fail
-
-      - name: Upload backend test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results-backend
-          path: target/nextest/ci/junit.xml
-          if-no-files-found: warn
-
-      - name: Upload resource samples
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: resources-backend-test
-          path: ${{ runner.temp }}/nyxid-ci-resources
-          if-no-files-found: ignore
-          retention-days: 14
+    uses: ./.github/workflows/backend-tests.yml
 
   # Keep the standalone test-profile build and smoke assertion. It exercises
   # a different Cargo feature-unification path from the combined nextest run.
@@ -492,6 +438,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: backend-billing-smoke
       - name: Billing route coverage smoke
         run: python3 .github/scripts/ci_resources.py billing-smoke cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
@@ -527,6 +474,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: backend-image-inputs
       - name: Build backend image binary
         run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
@@ -626,6 +574,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: cli
       - uses: taiki-e/install-action@v2
         with:
@@ -691,6 +640,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: features-${{ matrix.cache-suffix }}
       - name: Build with --features ${{ matrix.features }}
         run: python3 .github/scripts/ci_resources.py features-${{ matrix.cache-suffix }} cargo build -p nyxid --features ${{ matrix.features }}
@@ -786,6 +736,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: wizard-freshness
       - name: Verify wizard bundle freshness
         run: cargo test -p nyxid-cli --test wizard_bundle_freshness
@@ -821,8 +772,8 @@ jobs:
   #   2. Emit a machine-readable line-% number + an lcov report.
   #   3. On pull_request events, also compare with the BASE branch so the
   #      comment can show a per-component line-% delta (AC #4). Backend base
-  #      measurement runs in parallel and reuses an exact-commit report when
-  #      available. Base results remain best-effort and never gate the head.
+  #      reports reuse an exact-commit measurement when available; a cache miss
+  #      reports N/A. Base results remain best-effort and never gate the head.
   #   4. Upload the report + a tiny `coverage-<component>.json` summary as a CI
   #      artifact (AC #6). The summary files feed the PR-comment job.
   #
@@ -846,123 +797,26 @@ jobs:
   coverage-backend:
     name: Coverage (Backend)
     needs: changes
-    # Cache a report for every rollup tip, including documentation-only pushes.
+    # Publish exact-commit baselines on rollup tips and full publish gates.
     if: inputs.force-all || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rollup-')) || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
-    runs-on: ubuntu-latest
-    # A live suite exceeded 45 minutes on a slow hosted runner, and by late
-    # October 2026 compile plus tests took 80 minutes. Allow headroom for
-    # compilation, complete test execution and export without retrying tests.
-    timeout-minutes: 120
-    # Coverage counters do not require full DWARF; retain line locations.
-    # Resource samples record whether compilation approaches runner limits.
-    env:
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
-      # Merge per-test coverage into four profiles per binary to bound disk use.
-      LLVM_PROFILE_FILE_NAME: "nyxid-%4m.profraw"
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Identify coverage measurement inputs
-        id: coverage-identity
-        run: python3 .github/scripts/coverage_identity.py
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
-      - name: Start transaction-capable MongoDB
-        run: bash .github/scripts/start-test-mongodb.sh
-      - name: Install system dependencies
-        timeout-minutes: 5
-        run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: coverage-backend
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
+    uses: ./.github/workflows/backend-tests.yml
+    with:
+      coverage: true
 
-      # Head: instrument + measure WITHOUT the gate, emitting an lcov report and
-      # a one-line summary JSON. The threshold is enforced as the final step in
-      # this job (below) so the report, summary, and base delta are always
-      # produced — even on a regression — and surface in the PR comment.
-      # `report` is package-scoped so the % isn't diluted by the rest of the
-      # workspace (whose tests this job does not run).
-      # Match backend-test's process isolation and bounded, no-retry CI profile.
-      - name: Measure (head)
-        run: >-
-          python3 .github/scripts/ci_resources.py coverage-test
-          cargo llvm-cov nextest --package nyxid --profile ci --no-report
-      - name: Test MongoDB diagnostics
-        if: failure() || cancelled()
-        continue-on-error: true
-        run: bash .github/scripts/dump-test-mongodb.sh
-      - name: Export head coverage
-        run: |
-          cargo llvm-cov report --package nyxid --lcov --output-path coverage-backend.lcov
-          cargo llvm-cov report --package nyxid --json --summary-only --output-path coverage-backend.raw.json
-
-      - name: Build head summary JSON
-        run: |
-          python3 .github/scripts/coverage_summary.py \
-            backend "Backend (nyxid)" 73 \
-            coverage-backend.raw.json coverage-backend.json
-
-      # Push and publish runs make their measured head available to PRs whose
-      # base is this exact commit. Recipe or runner-image changes invalidate it.
-      - name: Prepare reusable base report
-        if: github.event_name != 'pull_request'
-        run: cp coverage-backend.raw.json coverage-backend.base.json
-      - name: Cache reusable base report
-        if: github.event_name != 'pull_request' && steps.coverage-identity.outputs.reusable == 'true'
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: coverage-backend.base.json
-          key: coverage-backend-base-v2-${{ github.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
-
-      # Re-reads the existing profdata (no re-run). The report and summary are
-      # produced before a regression fails the job and remain available to the
-      # PR comment.
-      - name: Enforce coverage gate (head)
-        run: cargo llvm-cov report --package nyxid --fail-under-lines 73
-
-      - name: Upload coverage artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ github.event_name == 'pull_request' && 'backend-coverage-head' || 'coverage-backend' }}
-          path: |
-            coverage-backend.lcov
-            coverage-backend.json
-          if-no-files-found: warn
-
-      - name: Upload resource samples
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: resources-coverage-backend
-          path: ${{ runner.temp }}/nyxid-ci-resources
-          if-no-files-found: ignore
-          retention-days: 14
-
-  # The base percentage is informational. Reuse only a report for the exact
-  # base SHA, measurement recipe and runner image; otherwise measure afresh
-  # as before on the base commit, in parallel with PR-head coverage.
+  # Base coverage is an informational comparison, not a correctness gate.
+  # Reuse an exact source/recipe/runner OS report from a trusted push/publish run.
+  # Try the exact-SHA cache, then a published baseline; otherwise report N/A.
+  # Head coverage always executes all current tests; never rerun the base suite.
   coverage-backend-base:
     name: Coverage (Backend Base)
+    permissions:
+      contents: read
+      actions: read
     needs: changes
     if: github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     continue-on-error: true
-    runs-on: ubuntu-latest
-    # Same headroom as PR-head coverage; slow runners exceeded 90 minutes.
-    timeout-minutes: 120
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
-      LLVM_PROFILE_FILE_NAME: "nyxid-%4m.profraw"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - name: Identify coverage measurement inputs
@@ -975,75 +829,49 @@ jobs:
         with:
           path: coverage-backend.base.json
           key: coverage-backend-base-v2-${{ github.event.pull_request.base.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
-      - name: Checkout base tree
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: base-coverage
-      - name: Prepare backend memory reserve
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        run: bash .github/scripts/prepare-backend-runner.sh
-      - name: Start transaction-capable MongoDB
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        run: bash .github/scripts/start-test-mongodb.sh
-      - name: Install system dependencies
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 5
-        run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        with:
-          key: coverage-backend-base
-      - uses: taiki-e/install-action@v2
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        with:
-          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
-      - name: Measure base branch
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        working-directory: base-coverage
-        run: >-
-          python3 "$GITHUB_WORKSPACE/.github/scripts/ci_resources.py" coverage-test
-          cargo llvm-cov nextest --package nyxid --profile ci
-          --config-file "$GITHUB_WORKSPACE/.config/nextest.toml" --no-report
-      - name: Test MongoDB diagnostics
-        if: (failure() || cancelled()) && steps.base-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        run: bash "$GITHUB_WORKSPACE/.github/scripts/dump-test-mongodb.sh"
-      - name: Export base coverage
-        if: steps.base-cache.outputs.cache-hit != 'true'
-        working-directory: base-coverage
-        run: |
-          cargo llvm-cov report --package nyxid --json --summary-only \
-            --output-path "$GITHUB_WORKSPACE/coverage-backend.base.json"
-      - name: Cache measured base report
+      - name: Look up published baseline for the exact base SHA
         if: steps.base-cache.outputs.cache-hit != 'true' && steps.coverage-identity.outputs.reusable == 'true'
+        id: base-run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: >-
+          python3 .github/scripts/coverage_base_lookup.py select
+          --repository "$GITHUB_REPOSITORY" --sha "$BASE_SHA"
+      - name: Download published baseline
+        if: steps.base-run.outputs.run-id != ''
+        id: base-download
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/download-artifact@v4
         with:
-          path: coverage-backend.base.json
-          key: coverage-backend-base-v2-${{ github.event.pull_request.base.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
+          artifact-ids: ${{ steps.base-run.outputs.artifact-id }}
+          merge-multiple: true
+          run-id: ${{ steps.base-run.outputs.run-id }}
+          github-token: ${{ github.token }}
+          path: published-baseline
+      - name: Verify published baseline measurement identity
+        if: steps.base-download.outcome == 'success'
+        id: base-artifact
+        env:
+          FINGERPRINT: ${{ steps.coverage-identity.outputs.fingerprint }}
+          REUSABLE: ${{ steps.coverage-identity.outputs.reusable }}
+        run: >-
+          python3 .github/scripts/coverage_base_lookup.py verify
+          --directory published-baseline --fingerprint "$FINGERPRINT"
+          --reusable "$REUSABLE"
+      - name: Report unavailable baseline
+        if: steps.base-cache.outputs.cache-hit != 'true' && steps.base-artifact.outputs.available != 'true'
+        run: >-
+          echo 'Base coverage delta: N/A (no report for this exact base commit,
+          measurement recipe and runner OS). Head tests and coverage remain required.'
+          >> "$GITHUB_STEP_SUMMARY"
       - name: Upload base report
-        if: always()
+        if: steps.base-cache.outputs.cache-hit == 'true' || steps.base-artifact.outputs.available == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: backend-base-report
           path: coverage-backend.base.json
-          if-no-files-found: warn
-
-      - name: Upload resource samples
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: resources-coverage-backend-base
-          path: ${{ runner.temp }}/nyxid-ci-resources
-          if-no-files-found: ignore
-          retention-days: 14
+          if-no-files-found: error
 
   # Restore the original PR artifact contract after the parallel base lookup.
   # This is informational; the coverage-backend job remains the threshold gate.
@@ -1103,6 +931,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: coverage-cli
       - uses: taiki-e/install-action@v2
         with:

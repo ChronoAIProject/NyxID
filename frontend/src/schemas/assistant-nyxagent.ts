@@ -2,6 +2,7 @@ import { platformThreadSchema, platformTurnOriginSchema } from "./platform-perso
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
 import { machineReceiptSchema } from "./machine-activity";
+import { cmaOperationSchema } from "./cma-operation";
 
 const conversationId = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 
@@ -253,6 +254,7 @@ export const nyxAgentWaitingSchema = z.object({
 export type NyxAgentWaiting = z.infer<typeof nyxAgentWaitingSchema>;
 
 export const nyxAgentHistorySchema = z.object({
+  cma_operations: z.array(cmaOperationSchema).default([]),
   conversation: nyxAgentConversationSchema,
   messages: z.array(nyxAgentMessageSchema),
   acknowledgements: z.array(nyxAgentAcknowledgementSchema).default([]),

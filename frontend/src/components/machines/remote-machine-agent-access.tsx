@@ -6,7 +6,6 @@ import {
   useSetNyxBotAgentGrants,
 } from "@/hooks/use-nyxbot-agents";
 import { useMachineAccess } from "@/hooks/use-machine-access";
-import { useMachineSettings } from "@/hooks/use-machines";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
@@ -27,7 +26,6 @@ import {
 import { ErrorBanner } from "@/components/shared/error-banner";
 
 const membershipSchema = z.object({ assigned: z.boolean() });
-const confirmSchema = z.object({ confirm: z.enum(["none", "changes", "all"]) });
 
 export function RemoteMachineAgentAccess({
   node,
@@ -55,10 +53,7 @@ export function RemoteMachineAgentAccess({
         grant does not bypass a paused runtime or funding requirement.
       </p>
       {node ? (
-        <OwnerConfirmation
-          key={`${node.id}:${node.machine_confirm}`}
-          node={node}
-        />
+        <OwnerConfirmation node={node} />
       ) : (
         <p className="text-12 text-muted-foreground">
           Confirmation settings will be available when the Node record can be
@@ -98,7 +93,7 @@ export function RemoteMachineAgentAccess({
           ) : null}
           {selected ? (
             <AgentAssignment
-              key={`${selected.id}:${selected.machines?.includes(machineId)}`}
+              key={`${userId}:${machineId}:${selected.id}`}
               machineId={machineId}
               agent={selected}
             />
@@ -110,75 +105,29 @@ export function RemoteMachineAgentAccess({
 }
 
 function OwnerConfirmation({ node }: { readonly node: NodeInfo }) {
-  const mutation = useMachineSettings(node.id);
-  const form = useAppForm<z.infer<typeof confirmSchema>>({
-    resolver: zodResolver(confirmSchema),
-    defaultValues: { confirm: node.machine_confirm ?? "none" },
-  });
-  const [error, setError] = useState<string>();
   return (
-    <form
+    <section
       aria-label="Remote machine owner confirmation"
       className="space-y-3 rounded-lg border border-border p-3"
-      onSubmit={form.handleSubmit(async (data) => {
-        setError(undefined);
-        try {
-          await mutation.mutateAsync({
-            machine_confirm: data.confirm,
-            allow_single_user_saved_logins: false,
-            acknowledge_single_user_risk: false,
-          });
-          form.reset(data);
-        } catch (cause) {
-          setError(
-            cause instanceof Error
-              ? cause.message
-              : "Could not update confirmations.",
-          );
-        }
-      })}
     >
-      <label className="block space-y-2 text-12">
-        <span>Owner confirmation policy</span>
-        <Select
-          value={form.watch("confirm")}
-          onValueChange={(value) =>
-            form.setValue(
-              "confirm",
-              value as z.infer<typeof confirmSchema>["confirm"],
-            )
-          }
-        >
-          <SelectTrigger aria-label="Remote machine owner confirmation policy">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="none">
-              No machine-specific confirmation
-            </SelectItem>
-            <SelectItem value="changes">Confirm changes</SelectItem>
-            <SelectItem value="all">Confirm every operation</SelectItem>
-          </SelectContent>
-        </Select>
-      </label>
+      <div className="flex flex-wrap items-center gap-2 text-12">
+        <span className="font-medium">Owner confirmation policy</span>
+        <span className="rounded-md border border-border bg-muted px-2 py-0.5">
+          {node.machine_confirm === "changes"
+            ? "Confirm changes"
+            : node.machine_confirm === "all"
+              ? "Confirm every operation"
+              : node.machine_confirm === "none"
+                ? "No machine-specific confirmation"
+                : "Not reported"}
+        </span>
+      </div>
       <p className="text-12 text-muted-foreground">
-        Only the owner changes this policy. Other applicable Assistant
-        confirmation rules still apply. External work requiring confirmation
-        must remain blocked until the server supports it.
+        Read from the current Node record. This hosted machine detail view does
+        not save confirmation settings; applicable Assistant confirmation rules
+        still apply to each operation.
       </p>
-      {error ? (
-        <p role="alert" className="text-12 text-destructive">
-          {error}
-        </p>
-      ) : null}
-      <Button
-        type="submit"
-        disabled={mutation.isPending || !form.formState.isDirty}
-        isLoading={mutation.isPending}
-      >
-        Save confirmation policy
-      </Button>
-    </form>
+    </section>
   );
 }
 
@@ -191,11 +140,17 @@ function AgentAssignment({
 }) {
   const mutation = useSetNyxBotAgentGrants();
   const query = useMachineAccess(agent.id);
+  const assigned = agent.machines?.includes(machineId) ?? false;
   const form = useAppForm<z.infer<typeof membershipSchema>>({
     resolver: zodResolver(membershipSchema),
-    defaultValues: { assigned: agent.machines?.includes(machineId) ?? false },
+    defaultValues: { assigned },
+    values: { assigned },
   });
   const [error, setError] = useState<string>();
+  const [savedAssignment, setSavedAssignment] = useState<boolean>();
+  const membershipSaved =
+    savedAssignment !== undefined && savedAssignment === assigned;
+  const [capabilitySaveFailed, setCapabilitySaveFailed] = useState(false);
   const assignment = query.data?.find((row) => row.node_id === machineId);
   return (
     <div className="space-y-3">
@@ -210,17 +165,29 @@ function AgentAssignment({
           aria-label="Specialist machine membership"
           onSubmit={form.handleSubmit(async (data) => {
             setError(undefined);
+            setCapabilitySaveFailed(false);
             try {
-              await mutation.mutateAsync({
+              const grants = {
                 id: agent.id,
                 services: agent.services,
                 account_read: agent.account_read,
                 machines: data.assigned
                   ? [...new Set([...(agent.machines ?? []), machineId])]
                   : (agent.machines ?? []).filter((id) => id !== machineId),
-              });
+                ...(agent.logins !== undefined ? { logins: agent.logins } : {}),
+                ...(agent.guest_access
+                  ? { guest_access: agent.guest_access }
+                  : {}),
+              };
+              await mutation.mutateAsync(grants);
               form.reset(data);
-              await query.refetch();
+              setSavedAssignment(data.assigned);
+              const refreshed = await query.refetch();
+              if (refreshed.error) {
+                setError(
+                  "Assignment was saved, but the current capability state could not be refreshed.",
+                );
+              }
             } catch (cause) {
               setError(
                 cause instanceof Error
@@ -249,6 +216,20 @@ function AgentAssignment({
               {error}
             </p>
           ) : null}
+          {membershipSaved && !error ? (
+            <p role="status" className="text-12 text-success">
+              Machine assignment saved. Review the capability state below; a
+              capability save is a separate operation and does not roll back
+              this assignment.
+            </p>
+          ) : null}
+          {membershipSaved && capabilitySaveFailed ? (
+            <p role="alert" className="text-12 text-warning">
+              Assignment succeeded, but capability changes failed. The
+              assignment remains in place; reload the current capability state
+              and retry editing when it is available.
+            </p>
+          ) : null}
           <Button
             type="submit"
             disabled={
@@ -272,6 +253,12 @@ function AgentAssignment({
           key={`${agent.id}:${assignment.revision}`}
           agentId={agent.id}
           machine={assignment}
+          onSaveError={() => {
+            setCapabilitySaveFailed(true);
+          }}
+          onSaveSuccess={() => {
+            setCapabilitySaveFailed(false);
+          }}
         />
       ) : (
         <p className="text-12 text-muted-foreground">
@@ -285,9 +272,13 @@ function AgentAssignment({
 function HostedCapabilities({
   agentId,
   machine,
+  onSaveError,
+  onSaveSuccess,
 }: {
   readonly agentId: string;
   readonly machine: MachineAccess;
+  readonly onSaveError?: () => void;
+  readonly onSaveSuccess?: () => void;
 }) {
   const enabled = useFeature(FEATURE_FLAG.MACHINE_CAPABILITIES);
   return (
@@ -310,6 +301,8 @@ function HostedCapabilities({
         machine={machine}
         agentId={agentId}
         disabled={!enabled}
+        onSaveError={onSaveError}
+        onSaveSuccess={onSaveSuccess}
       />
       {machine.revocation_pending ? (
         <p role="status" className="text-12 text-warning">
