@@ -3,9 +3,57 @@ use crate::models::mcp_notification::COLLECTION_NAME as MCP_NOTIFICATIONS;
 use crate::models::mcp_session::{MCP_SESSION_COLLECTION, MCP_SESSION_SLOT_COLLECTION};
 use crate::models::refresh_token::COLLECTION_NAME as REFRESH_TOKENS;
 use crate::models::session::COLLECTION_NAME as SESSIONS;
+use crate::models::session::{MfaAssurance, MfaExemption, Session};
 use crate::models::user::COLLECTION_NAME as USERS;
 use bson::{Document, doc};
 use futures::TryStreamExt;
+
+pub fn classification(session: &Session) -> MfaAssurance {
+    match (session.mfa_assured, session.mfa_exemption) {
+        (Some(true), _) => MfaAssurance::Verified,
+        (_, Some(MfaExemption::MobileRollout)) => MfaAssurance::MobileExempt,
+        (None, _) | (_, Some(MfaExemption::LegacyMigration)) => MfaAssurance::Legacy,
+        (Some(false), None) => MfaAssurance::Unverified,
+    }
+}
+
+pub fn satisfies_mfa(session: &Session) -> bool {
+    classification(session) != MfaAssurance::Unverified
+}
+
+pub fn may_derive(mfa_enabled: bool, verified: bool) -> bool {
+    !mfa_enabled || verified
+}
+
+/// Account policy and exact session/proof assurance already resolved by the
+/// caller. Unknown policy cannot authorize derivation. Derivation never reloads
+/// a person or resolves a feature flag.
+#[derive(Clone, Copy, Debug)]
+pub struct DerivedMfaAuthority {
+    pub mfa_enabled: Option<bool>,
+    pub verified: bool,
+}
+
+impl DerivedMfaAuthority {
+    pub fn new(mfa_enabled: bool, verified: bool) -> Self {
+        Self {
+            mfa_enabled: Some(mfa_enabled),
+            verified,
+        }
+    }
+}
+
+pub fn require_derived_mfa(authority: DerivedMfaAuthority) -> crate::errors::AppResult<()> {
+    let mfa_enabled = authority.mfa_enabled.ok_or_else(|| {
+        crate::errors::AppError::Forbidden(
+            "A first-party human account session is required to approve sign-ins".into(),
+        )
+    })?;
+    if !may_derive(mfa_enabled, authority.verified) {
+        return Err(crate::errors::AppError::MfaStepUpRequired);
+    }
+    Ok(())
+}
 /// New purpose is authoritative. Absent purpose is accepted only for legacy
 /// completed sessions; the old server's MFA sentinel is always denied there.
 pub fn authenticated(filter: Document) -> Document {
@@ -23,8 +71,9 @@ pub fn pending(filter: Document, legacy: bool) -> Document {
     doc! {"$and": [filter, purpose]}
 }
 
-/// Validate live user authority for MCP, requiring the exact assured parent
-/// only when MFA is enabled. Legacy or sid-less authority is then rejected.
+/// Validate live user authority for MCP, accepting grandfathered devices while
+/// retaining exact-parent revocation and explicit-unverified rejection.
+#[cfg(test)]
 pub async fn mfa_assurance(
     db: &mongodb::Database,
     user_id: &str,
@@ -38,6 +87,56 @@ pub async fn mfa_assurance(
         .ok_or_else(|| AppError::Unauthorized("User account is inactive; sign in again".into()))
         .map(|user| (user.id, user.mfa_enabled))?;
     mfa_assurance_for_active_user(db, &user_id, mfa_enabled, session_id).await
+}
+
+/// Parent-less fallback predates assurance. Its sliding idle timeout must not
+/// extend the fixed grandfathering window for an MFA account.
+pub async fn mcp_fallback_assurance(
+    db: &mongodb::Database,
+    mcp_session_id: &str,
+    session: &crate::models::mcp_session::McpSessionAccess,
+) -> crate::errors::AppResult<bool> {
+    use crate::errors::AppError;
+    let user = db
+        .collection::<crate::models::user::User>(USERS)
+        .find_one(doc! {"_id": &session.user_id, "is_active": true})
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("User account is inactive; sign in again".into()))?;
+    if user.mfa_enabled
+        && session.parent_session_id.is_none()
+        && session.created_at + chrono::Duration::seconds(super::token_service::SESSION_TTL_SECS)
+            <= chrono::Utc::now()
+    {
+        let context = (db.clone(), user.id.clone(), mcp_session_id.to_owned());
+        super::transaction_service::run_db_only(db, &context, |tx, c| Box::pin(async move {
+            let (db, user, id) = c;
+            let removed = db.collection::<Document>(MCP_SESSION_COLLECTION)
+                .delete_one(doc! {"_id": id, "user_id": user, "parent_session_id": null,
+                    "session_fallback_allowed": true, "created_at": {"$lte": bson::DateTime::from_chrono(
+                        chrono::Utc::now() - chrono::Duration::seconds(super::token_service::SESSION_TTL_SECS))}})
+                .session(&mut *tx).await?;
+            if removed.deleted_count == 0 { return Ok(()); }
+            for collection in [MCP_SESSION_SLOT_COLLECTION, MCP_NOTIFICATIONS] {
+                db.collection::<Document>(collection).delete_many(doc! {"session_id": id})
+                    .session(&mut *tx).await?;
+            }
+            super::audit_service::log_actor_event_in_transaction(db, tx,
+                &super::audit_service::AuditActor {user_id: user.clone(), ip_address: None,
+                    user_agent: None, api_key_id: None, api_key_name: None},
+                "mfa_unassured_session_rejected",
+                serde_json::json!({"session_id": id, "source": "mcp_legacy_expired"})).await
+        })).await?;
+        return Err(AppError::Unauthorized(
+            "MFA verification required; sign in again".into(),
+        ));
+    }
+    mfa_assurance_for_active_user(
+        db,
+        &user.id,
+        user.mfa_enabled,
+        session.parent_session_id.as_deref(),
+    )
+    .await
 }
 
 /// Apply assurance to an active user already validated in this authentication
@@ -62,8 +161,12 @@ pub(crate) async fn mfa_assurance_for_active_user(
     } else {
         None
     };
-    let assured = live.as_ref().is_some_and(|row| row.mfa_assured);
-    if !assured {
+    // Sid-less bearer authority is bounded by JWT expiry. Fallback separately
+    // enforces its fixed creation-time bound before reaching this predicate.
+    if session_id.is_none() {
+        return Ok(false);
+    }
+    if !live.as_ref().is_some_and(satisfies_mfa) {
         Box::pin(reject_unassured(
             db,
             user_id,
@@ -77,12 +180,12 @@ pub(crate) async fn mfa_assurance_for_active_user(
             "MFA verification required; sign in again".into(),
         ));
     }
-    Ok(assured)
+    Ok(live.is_some_and(|row| classification(&row) == MfaAssurance::Verified))
 }
 
 /// Retire stale authority once. The conditional session update, refresh/MCP
 /// cascade and audit commit together; repeated or concurrent rejections cannot
-/// flood the audit chain. Sid-less authority has no durable session identity.
+/// flood the audit chain. Legacy and exempt authority never match this update.
 pub async fn reject_unassured(
     db: &mongodb::Database,
     user_id: &str,
@@ -92,13 +195,6 @@ pub async fn reject_unassured(
     ua: Option<&str>,
 ) -> crate::errors::AppResult<()> {
     let Some(id) = session_id else {
-        db.collection::<Document>(REFRESH_TOKENS)
-            .update_many(
-                doc! {"user_id": user_id, "client_id": uuid::Uuid::nil().to_string(),
-                "session_id": null, "revoked": false},
-                doc! {"$set": {"revoked": true}},
-            )
-            .await?;
         return Ok(());
     };
     let context = (
@@ -116,7 +212,7 @@ pub async fn reject_unassured(
                 .collection::<Document>(SESSIONS)
                 .update_one(
                     authenticated(doc! {"_id": id, "user_id": user, "revoked": false,
-                    "mfa_assured": {"$ne": true}}),
+                    "mfa_assured": false, "mfa_exemption": null}),
                     doc! {"$set": {"revoked": true}},
                 )
                 .session(&mut *tx)

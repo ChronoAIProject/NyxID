@@ -360,7 +360,7 @@ pub async fn admin(
     auth: AuthUser,
     Query(q): Query<AdminQuery>,
 ) -> AppResult<Json<AdminResponse>> {
-    super::admin_helpers::require_admin_or_operator(&state, &auth, "admin.assistant.feedback")
+    super::admin_helpers::require_admin_usage_read(&state, &auth, "admin.assistant.feedback")
         .await?;
     let mut filter = doc! {};
     if let Some(v) = q.vote {

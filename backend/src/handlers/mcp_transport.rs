@@ -1313,10 +1313,8 @@ async fn authenticate_mcp_or_public(
         if !session.session_fallback_allowed {
             return Err(mcp_401(&state.config.base_url));
         }
-        Box::pin(crate::services::session_authority::mfa_assurance(
-            &state.db,
-            &session.user_id,
-            session.parent_session_id.as_deref(),
+        Box::pin(crate::services::session_authority::mcp_fallback_assurance(
+            &state.db, sid, &session,
         ))
         .await
         .map_err(|_| mcp_401(&state.config.base_url))?;
@@ -3275,9 +3273,15 @@ fn dispatch_service_tool<'a>(
         }
 
         let async_watch = if endpoint.async_operation.is_some() {
-            if let Some(chat) = auth.chat.as_ref() {
-                match crate::services::async_service_operation::reserve(
-                    &state.db, chat, service, endpoint,
+            if let Some(chat) = auth.chat.as_ref().filter(|chat| {
+                !chat.guest
+                    || endpoint
+                        .async_operation
+                        .as_ref()
+                        .is_none_or(|contract| contract.presentation.is_none())
+            }) {
+                match crate::services::async_service_operation::reserve_with_arguments(
+                    &state.db, chat, service, endpoint, &arguments,
                 )
                 .await
                 {
@@ -4047,6 +4051,7 @@ async fn handle_account_tool(
     };
     let user = auth::AuthUser {
         mfa_assured: false,
+        mfa_enabled: None,
         org_agent_access: auth.org_agent_access.clone(),
         assistant_group_id: auth.assistant_group_id.clone(),
         assistant_agent_owner_id: auth.assistant_agent_owner_id.clone(),
@@ -4589,9 +4594,19 @@ async fn handle_meta_call_tool(
     };
 
     let async_watch = if endpoint.async_operation.is_some() {
-        if let Some(chat) = auth.chat.as_ref() {
-            match crate::services::async_service_operation::reserve(
-                &state.db, chat, service, endpoint,
+        if let Some(chat) = auth.chat.as_ref().filter(|chat| {
+            !chat.guest
+                || endpoint
+                    .async_operation
+                    .as_ref()
+                    .is_none_or(|contract| contract.presentation.is_none())
+        }) {
+            match crate::services::async_service_operation::reserve_with_arguments(
+                &state.db,
+                chat,
+                service,
+                endpoint,
+                &inner_args,
             )
             .await
             {
@@ -6642,6 +6657,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mfa_fallback_accepts_legacy_and_mobile_exempt_parent_without_rewriting_it() {
+        let db = crate::test_utils::connect_transaction_test_database("existing_mcp_parents").await;
+        let mut state = crate::test_utils::test_app_state(db.clone());
+        state.mcp_sessions = std::sync::Arc::new(
+            crate::models::mcp_session::McpSessionStore::with_db(db.clone()),
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut user = crate::test_utils::test_user(&id, crate::models::user::UserType::Person);
+        user.mfa_enabled = true;
+        db.collection::<User>(USERS).insert_one(user).await.unwrap();
+        for legacy in [true, false] {
+            let tokens = crate::services::token_service::create_mobile_social_tokens(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &id,
+                None,
+                None,
+                !legacy,
+            )
+            .await
+            .unwrap();
+            if legacy {
+                db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id": &tokens.session_id},
+                        doc! {"$unset": {"mfa_assured": ""}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            let sid = state
+                .mcp_sessions
+                .create_with_parent_session(&id, true, true, Some(&tokens.session_id))
+                .await
+                .unwrap()
+                .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert("mcp-session-id", sid.parse().unwrap());
+            for _ in 0..2 {
+                assert!(authenticate_mcp(&state, &headers, true).await.is_ok());
+            }
+            headers.insert(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {}", tokens.access_token).parse().unwrap(),
+            );
+            assert!(authenticate_mcp(&state, &headers, true).await.is_ok());
+            let row = db
+                .collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+                .find_one(doc! {"_id": &tokens.session_id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!row.get_bool("revoked").unwrap());
+            if legacy {
+                assert!(!row.contains_key("mfa_assured"));
+            } else {
+                assert_eq!(row.get_str("mfa_exemption").unwrap(), "mobile_rollout");
+            }
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn non_mfa_fallback_survives_revoked_or_missing_parent() {
         let db = crate::test_utils::connect_transaction_test_database("non_mfa_mcp_parent").await;
         let mut state = crate::test_utils::test_app_state(db.clone());
@@ -6681,6 +6760,79 @@ mod tests {
             .unwrap();
         assert!(authenticate_mcp(&state, &headers, true).await.is_ok());
         db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn parentless_mfa_fallback_has_fixed_bound_and_single_atomic_rejection() {
+        use crate::models::mcp_session::{
+            MCP_SESSION_COLLECTION, MCP_SESSION_SLOT_COLLECTION, McpSessionStore,
+        };
+        Box::pin(async {
+            use mongodb::event::{EventHandler, command::CommandEvent};
+            use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+            let reads = Arc::new(AtomicUsize::new(0));
+            let recorded = reads.clone();
+            let handler = EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event
+                    && event.command.get_str("find").ok() == Some(USERS) {
+                    recorded.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            let db = crate::test_utils::connect_transaction_test_database_with_command_handler("mcp_legacy_fixed_bound", handler).await;
+            let mut state = crate::test_utils::test_app_state(db.clone());
+            state.mcp_sessions = std::sync::Arc::new(McpSessionStore::with_db(db.clone()));
+            let id = uuid::Uuid::new_v4().to_string();
+            let mut user = crate::test_utils::test_user(&id, crate::models::user::UserType::Person);
+            user.mfa_enabled = true;
+            db.collection::<User>(USERS).insert_one(user).await.unwrap();
+            for (mfa, age_offset, allowed) in [(true, -60, true), (true, 60, false), (false, 60, true)] {
+                db.collection::<User>(USERS).update_one(doc! {"_id": &id}, doc! {"$set": {"mfa_enabled": mfa}}).await.unwrap();
+                let sid = state.mcp_sessions.create_with_parent_session(&id, true, true, None).await.unwrap().unwrap();
+                let created = chrono::Utc::now() - chrono::Duration::seconds(crate::services::token_service::SESSION_TTL_SECS + age_offset);
+                db.collection::<bson::Document>(MCP_SESSION_COLLECTION).update_one(doc! {"_id": &sid},
+                    doc! {"$set": {"created_at": bson::DateTime::from_chrono(created),
+                        "last_active_at": bson::DateTime::now(),
+                        "expires_at": bson::DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::days(30))}}).await.unwrap();
+                let notifications = db.collection::<bson::Document>(crate::models::mcp_notification::COLLECTION_NAME);
+                notifications.insert_one(doc! {"_id": uuid::Uuid::new_v4().to_string(), "session_id": &sid}).await.unwrap();
+                let snapshot = state.mcp_sessions.get_for_auth(&sid).await.unwrap().unwrap();
+                let mut headers = HeaderMap::new(); headers.insert("mcp-session-id", sid.parse().unwrap());
+                let (first, second) = tokio::join!(authenticate_mcp(&state, &headers, true), authenticate_mcp(&state, &headers, true));
+                assert_eq!(first.is_ok(), allowed); assert_eq!(second.is_ok(), allowed);
+                assert_eq!(authenticate_mcp(&state, &headers, true).await.is_ok(), allowed);
+                assert_eq!(state.mcp_sessions.get_for_auth(&sid).await.unwrap().is_some(), allowed);
+                let audit_count = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                    .count_documents(doc! {"event_type": "mfa_unassured_session_rejected", "event_data.session_id": &sid}).await.unwrap();
+                assert_eq!(audit_count, u64::from(!allowed));
+                if !allowed {
+                    // A second replica may already have loaded the deleted row.
+                    assert!(crate::services::session_authority::mcp_fallback_assurance(&db, &sid, &snapshot).await.is_err());
+                    assert_eq!(db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                        .count_documents(doc! {"event_type": "mfa_unassured_session_rejected", "event_data.session_id": &sid}).await.unwrap(), 1);
+                    assert_eq!(db.collection::<bson::Document>(MCP_SESSION_SLOT_COLLECTION).count_documents(doc! {"session_id": &sid}).await.unwrap(), 0);
+                    assert_eq!(notifications.count_documents(doc! {"session_id": &sid}).await.unwrap(), 0);
+                }
+            }
+            // Adding fallback age enforcement must not add a user read to bearer auth.
+            db.collection::<User>(USERS).update_one(doc! {"_id": &id},
+                doc! {"$set": {"mfa_enabled": true}}).await.unwrap();
+            let tokens = crate::services::token_service::create_session_and_issue_tokens(&db, &state.config, &state.jwt_keys, &id, None, None).await.unwrap();
+            db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+                .update_one(doc! {"_id": &tokens.session_id},
+                    doc! {"$set": {"mfa_assured": true}}).await.unwrap();
+            let mut bearer = HeaderMap::new();
+            bearer.insert(axum::http::header::AUTHORIZATION, format!("Bearer {}", tokens.access_token).parse().unwrap());
+            reads.store(0, Ordering::SeqCst);
+            assert!(authenticate_mcp(&state, &bearer, true).await.is_ok());
+            assert_eq!(reads.load(Ordering::SeqCst), 1);
+            let sid = state.mcp_sessions.create_with_parent_session(&id, true, true, None).await.unwrap().unwrap();
+            let access = state.mcp_sessions.get_for_auth(&sid).await.unwrap().unwrap();
+            // Inactive accounts fail before either fallback or derivation policy.
+            db.collection::<User>(USERS).update_one(doc! {"_id": &id}, doc! {"$set": {"is_active": false}}).await.unwrap();
+            assert!(matches!(crate::services::session_authority::mcp_fallback_assurance(&db, &sid, &access).await,
+                Err(crate::errors::AppError::Unauthorized(message)) if message.contains("inactive")));
+            db.drop().await.unwrap();
+        }).await;
     }
 
     #[tokio::test]
@@ -6728,7 +6880,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 authenticate_mcp(&state, &headers, true).await.is_ok(),
-                parent_id == Some(unrelated.session_id.as_str())
+                parent_id.is_none() || parent_id == Some(unrelated.session_id.as_str())
             );
             if parent_id == Some(unrelated.session_id.as_str()) {
                 db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
@@ -7547,6 +7699,7 @@ mod tests {
         let mcp_auth = McpAuthContext::user(actor_id.clone(), AuthMethod::AccessToken);
         let proxy_auth = AuthUser {
             mfa_assured: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,

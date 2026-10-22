@@ -202,6 +202,14 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    for keys in [
+        doc! {"agent_api_key_id":1,"binding_id":1,"owner_user_id":1},
+        doc! {"resource_id":1,"kind":1,"owner_user_id":1},
+    ] {
+        db.collection::<Document>(crate::models::platform_bot_config::CLEANUP_COLLECTION)
+            .create_index(IndexModel::builder().keys(keys).build())
+            .await?;
+    }
     Ok(())
 }
 
@@ -410,6 +418,9 @@ async fn convert_locked(
             let mut channels = db.collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
                 .find(doc! {"channel_bot_id": &bot_id}).session(&mut *session).await?;
             while let Some(channel) = channels.next(&mut *session).await.transpose()? {
+                if ["gateway_setup_release_id","pending_agent_api_key_id","pending_route_api_key_id"].iter().any(|field|channel.get_str(field).is_ok()) {
+                    return Err(AppError::Conflict("Wait for the channel transport setup to finish or retire before conversion".into()));
+                }
                 if let Ok(id) = channel.get_str("_id") {
                     channel_ids.push(id.into());
                     if channel.get_str("transport").ok() == Some("gateway") && channel.get_str("gateway_channel_id").is_ok() {
@@ -599,6 +610,7 @@ async fn queue_cleanup(
     let mut machine_jobs = Vec::new();
     let mut gateway_channel_id = None;
     let mut gateway_version = None;
+    let (mut record_id, mut binding_id, mut agent_api_key_id) = (None, None, None);
     if kind == "conversation" {
         if let Some(conversation) = db
             .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
@@ -680,6 +692,9 @@ async fn queue_cleanup(
             .await?
             .ok_or_else(|| AppError::Conflict("Gateway identity unavailable".into()))?;
         gateway_channel_id = row.get_str("gateway_channel_id").ok().map(str::to_owned);
+        record_id = row.get_str("gateway_record_id").ok().map(str::to_owned);
+        binding_id = row.get_str("binding_id").ok().map(str::to_owned);
+        agent_api_key_id = row.get_str("agent_api_key_id").ok().map(str::to_owned);
         gateway_version = row
             .get_i64("gateway_version")
             .ok()
@@ -704,6 +719,9 @@ async fn queue_cleanup(
         machine_node_ids,
         gateway_channel_id,
         gateway_version,
+        record_id,
+        binding_id,
+        agent_api_key_id,
         completed: false,
         claim_id: None,
         retry_at: now,
@@ -1324,11 +1342,14 @@ mod tests {
         let channels = state
             .db
             .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME);
-        channels.insert_one(doc! {"_id": &link, "channel_bot_id": &bot, "user_id": &actor, "status": "active", "transport": "gateway", "gateway_channel_id": "old-remote", "gateway_version": 7_i64}).await.unwrap();
+        channels.insert_one(doc! {"_id": &link, "channel_bot_id": &bot, "user_id": &actor, "status": "active", "transport": "gateway", "gateway_channel_id": "old-remote", "gateway_version": 7_i64, "gateway_record_id":"captured-record", "binding_id":"captured-binding", "agent_api_key_id":"captured-agent"}).await.unwrap();
         convert(&state.db, &actor, &bot, &funding).await.unwrap();
         let task = claim_cleanup(&state.db).await.unwrap().unwrap();
         assert_eq!(task.gateway_channel_id.as_deref(), Some("old-remote"));
         assert_eq!(task.gateway_version, Some(7));
+        assert_eq!(task.record_id.as_deref(), Some("captured-record"));
+        assert_eq!(task.binding_id.as_deref(), Some("captured-binding"));
+        assert_eq!(task.agent_api_key_id.as_deref(), Some("captured-agent"));
         channels.delete_one(doc! {"_id": &link}).await.unwrap();
         Mock::given(method("GET"))
             .and(path("/channels/old-remote"))
@@ -1577,4 +1598,32 @@ pub(crate) async fn display_names(
             Some((row.get_str("_id").ok()?.to_owned(), label.to_owned()))
         })
         .collect())
+}
+
+/// Legacy conversion tasks may recover proof only from their exact retained
+/// retired channel; missing proof never authorizes an inactive credential.
+pub(crate) async fn retired_gateway_proof(
+    db: &Database,
+    task: &crate::models::platform_bot_config::PlatformBotCleanup,
+) -> AppResult<Option<(String, String)>> {
+    if task.kind != "gateway" {
+        return Ok(None);
+    }
+    match (&task.agent_api_key_id, &task.binding_id) {
+        (Some(key), Some(binding)) if !key.is_empty() && !binding.is_empty() => {
+            return Ok(Some((key.clone(), binding.clone())));
+        }
+        (None, None) => {}
+        _ => return Ok(None),
+    }
+    let Some(row)=db.collection::<crate::models::nyxbot_channel::NyxbotChannel>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .find_one(doc! {"_id":&task.resource_id,"user_id":&task.owner_user_id,"status":{"$nin":["pending","active"]},
+            "last_error":"platform_conversion","gateway_channel_id":&task.gateway_channel_id,"gateway_version":task.gateway_version}).await? else {return Ok(None);};
+    let (Some(key), Some(binding)) = (row.agent_api_key_id, row.binding_id) else {
+        return Ok(None);
+    };
+    db.collection::<Document>(crate::models::platform_bot_config::CLEANUP_COLLECTION).update_one(
+        doc! {"_id":&task.id,"agent_api_key_id":bson::Bson::Null,"binding_id":bson::Bson::Null},
+        doc! {"$set":{"agent_api_key_id":&key,"binding_id":&binding,"record_id":row.gateway_record_id}}).await?;
+    Ok(Some((key, binding)))
 }

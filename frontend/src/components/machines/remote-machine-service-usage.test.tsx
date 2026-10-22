@@ -1,5 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAuthStore } from "@/stores/auth-store";
@@ -242,4 +249,43 @@ it("labels metering-only rows as uncharged", async () => {
   );
   expect(await screen.findByText("Not charged")).toBeInTheDocument();
   expect(screen.getByText("Metering only")).toBeInTheDocument();
+});
+
+it("keeps billable zero estimates, unavailable amounts and metering-only usage distinct", async () => {
+  transport.mockResolvedValueOnce(
+    json({
+      ...payload,
+      rows: [
+        { ...row, service_slug: "zero-service", estimated_credits: "0" },
+        { ...row, service_slug: "unknown-service", estimated_credits: null },
+        {
+          ...row,
+          service_slug: "metered-service",
+          billable: false,
+          estimated_credits: null,
+        },
+      ],
+    }),
+  );
+  mount();
+  await userEvent.click(
+    screen.getByRole("button", { name: "Load service usage" }),
+  );
+  const zero = within(
+    (await screen.findByText("zero-service")).closest("article")!,
+  );
+  expect(zero.getByText("Billable")).toBeInTheDocument();
+  expect(zero.getByText("Zero estimate")).toBeInTheDocument();
+  expect(zero.getByText("0 Credits")).toHaveAttribute("title", "0 Credits");
+  const unknown = within(
+    screen.getByText("unknown-service").closest("article")!,
+  );
+  expect(unknown.getByText("Amount unknown")).toBeInTheDocument();
+  expect(unknown.getByText("Unavailable Credits")).toBeInTheDocument();
+  const metered = within(
+    screen.getByText("metered-service").closest("article")!,
+  );
+  expect(metered.getByText("Metering only")).toBeInTheDocument();
+  expect(metered.getByText("Not charged")).toBeInTheDocument();
+  expect(metered.queryByText("Amount unknown")).not.toBeInTheDocument();
 });

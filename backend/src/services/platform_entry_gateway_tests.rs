@@ -516,3 +516,113 @@ async fn authenticated_gateway_allows_benign_touches_but_fences_rotation_revocat
 
 #[path = "platform_entry_gateway_setup_tests.rs"]
 pub(crate) mod setup;
+
+#[tokio::test]
+async fn retired_native_primary_acknowledges_only_exact_delete_without_restoring_authority() {
+    use axum::extract::{Path, State};
+    let server = MockServer::start().await;
+    let (state, bot, receipt) =
+        crate::services::platform_native_reply_service::tests::discord_fixture(&server.uri()).await;
+    ensure_indexes(&state.db).await.unwrap();
+    let (mut provider, raw) = transport_key(&bot.user_id);
+    provider.is_active = false;
+    crate::services::api_key_mutation_service::insert_one(&state.db, &provider, None)
+        .await
+        .unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut configuration = receipt.configuration;
+    configuration.transport = EntryTransport::NyxagentGateway {
+        channel_id: id.clone(),
+        gateway_channel_id: "cmaeg1.ch.retired-native".into(),
+        gateway_version: 1,
+    };
+    let now = Utc::now();
+    let row = PlatformEntryGateway {
+        id,
+        profile_id: receipt.profile_id,
+        configuration,
+        configured_by: bot.user_id.clone(),
+        credential_owner_id: bot.user_id,
+        route_api_key_id: uuid::Uuid::new_v4().to_string(),
+        route_id: uuid::Uuid::new_v4().to_string(),
+        provider_api_key_id: provider.id,
+        callback_url: format!("{}/callback", server.uri()),
+        binding_id: Some("native-binding".into()),
+        gateway_base: server.uri(),
+        setup_state: "observed".into(),
+        setup_attempt_id: uuid::Uuid::new_v4().to_string(),
+        setup_dispatch_deadline: None,
+        request_policy: json!({}),
+        request_hash: "retired-captured-request".into(),
+        creation_fingerprint: "retired-captured-identity".into(),
+        request_ciphertext: vec![],
+        state: "retired".into(),
+        revision: 1,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .collection::<PlatformEntryGateway>(GATEWAYS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        format!("Bearer {}", raw.as_str()).parse().unwrap(),
+    );
+    assert_eq!(
+        nyxbot::delete_binding(
+            State(state.clone()),
+            Path("native-binding".into()),
+            headers.clone()
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_ne!(
+        nyxbot::delete_binding(
+            State(state.clone()),
+            Path("wrong-binding".into()),
+            headers.clone()
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert!(authenticate(&state, &headers).await.is_err());
+    assert_ne!(
+        nyxbot::put_binding(
+            State(state.clone()),
+            Path("native-binding".into()),
+            headers,
+            axum::Json(json!({}))
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<PlatformEntryGateway>(GATEWAYS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        "retired"
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>(crate::models::nyxbot_gateway_release::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    state.db.drop().await.unwrap();
+}

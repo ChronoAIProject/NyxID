@@ -31,7 +31,7 @@ export function MachineCapabilities({ agentId, disabled = false }: { readonly ag
     {query.data?.map(machine => <MachineCapabilityForm key={`${machine.node_id}:${machine.revision}`} machine={machine} agentId={agentId} disabled={disabled} capabilityEditing={enabled} contextEnabled={contextsEnabled} />)}
   </section>;
 }
-export function MachineCapabilityForm({ machine, agentId, disabled = false, capabilityEditing = true, contextEnabled = false }: { readonly machine: MachineAccess; readonly agentId: string; readonly disabled?: boolean; readonly capabilityEditing?: boolean; readonly contextEnabled?: boolean }) {
+export function MachineCapabilityForm({ machine, agentId, disabled = false, capabilityEditing = true, contextEnabled = false, onSaveError, onSaveSuccess }: { readonly machine: MachineAccess; readonly agentId: string; readonly disabled?: boolean; readonly capabilityEditing?: boolean; readonly contextEnabled?: boolean; readonly onSaveError?: () => void; readonly onSaveSuccess?: () => void }) {
   const mutation = useSetMachineAccess(agentId);
   const contextMutation = useRequestMachineContext(agentId);
   const [error, setError] = useState<string>();
@@ -62,8 +62,8 @@ export function MachineCapabilityForm({ machine, agentId, disabled = false, capa
   };
   return <form className="space-y-3 rounded-lg border p-4" aria-label={`${machine.name} capabilities`} onSubmit={form.handleSubmit(async selection => {
     setError(undefined);
-    try { await mutation.mutateAsync({ node: machine.node_id, selection }); form.reset(selection); }
-    catch { setError("Could not save capabilities. Reload if access changed."); }
+    try { await mutation.mutateAsync({ node: machine.node_id, selection }); form.reset(selection); onSaveSuccess?.(); }
+    catch { setError("Could not save capabilities. Reload if access changed."); onSaveError?.(); }
   })}>
     <div className="flex flex-wrap items-center gap-2"><span className="text-13 font-medium">{machine.name}</span><Badge variant="secondary">{needsSelection ? "Owner selection required" : machine.mode === "separated" ? "Separate workspace and browser" : "Shared legacy"}</Badge></div>
     <p className="text-12 text-muted-foreground">{needsSelection ? "Execution is blocked until the owner records a supported choice or explicitly approves legacy access." : machine.mode === "separated" ? "This agent has its own workspace and browser profiles. Use a separate machine container or VM per agent for stronger separation; containers still share their host kernel." : "Workspace and browser sessions are shared with other agents in shared legacy mode on this machine."}</p>

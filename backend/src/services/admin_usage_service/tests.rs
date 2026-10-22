@@ -483,7 +483,7 @@ async fn ranking_is_paged_in_mongo_and_all_metrics_and_lanes_remain_visible() {
 }
 
 #[tokio::test]
-async fn handler_allows_admin_and_operator_and_rejects_regular_users() {
+async fn handler_allows_admin_operator_and_usage_viewer_and_rejects_regular_users() {
     let db = connect_test_database("admin_usage_auth")
         .await
         .expect("MongoDB required");
@@ -491,25 +491,32 @@ async fn handler_allows_admin_and_operator_and_rejects_regular_users() {
         .await
         .unwrap();
     let state = test_app_state(db.clone());
-    for (admin, operator) in [(false, false), (true, false), (false, true)] {
+    let usage_viewer = db
+        .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+        .find_one(doc! { "slug": crate::models::role::USAGE_VIEWER_ROLE_SLUG })
+        .await
+        .unwrap()
+        .expect("seeded Usage Viewer role")
+        .id;
+    for (admin, operator, viewer) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
         let uid = uuid::Uuid::new_v4().to_string();
         let mut user = test_user(&uid, UserType::Person);
         user.is_admin = admin;
         user.is_operator = operator;
-        let role = if admin {
-            "admin"
-        } else if operator {
-            "operator"
-        } else {
-            "user"
-        };
         let roles = crate::services::role_service::get_platform_role_ids(&db)
             .await
             .unwrap();
-        if role == "admin" {
+        if admin {
             user.role_ids.push(roles.admin);
-        } else if role == "operator" {
+        } else if operator {
             user.role_ids.push(roles.operator);
+        } else if viewer {
+            user.role_ids.push(usage_viewer.clone());
         }
         db.collection::<crate::models::user::User>("users")
             .insert_one(user)
@@ -528,12 +535,12 @@ async fn handler_allows_admin_and_operator_and_rejects_regular_users() {
             axum::extract::Query(query()),
         )
         .await;
-        if admin || operator {
+        if admin || operator || viewer {
             assert_eq!(nyxbot_result.unwrap().0.totals.requests, 0);
         } else {
             assert!(matches!(nyxbot_result, Err(AppError::Forbidden(_))));
         }
-        if admin || operator {
+        if admin || operator || viewer {
             assert_eq!(result.unwrap().0.totals.requests, 0);
         } else {
             assert!(matches!(result, Err(AppError::Forbidden(_))));
@@ -3438,5 +3445,201 @@ async fn nyxbot_daily_top_membership_matches_exact_period_order_at_zero_null_tie
         other.model.usage.gross_cost,
         Some(crate::models::credits::Credits::ZERO)
     );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn analytics_models_preserve_unattributed_usage_and_shared_filters_after_folding() {
+    use super::analytics::{AnalyticsQuery, get_analytics};
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+    let db = connect_test_database("usage_models").await.unwrap();
+    let now = hour(Utc::now());
+    let actor = uuid::Uuid::new_v4().to_string();
+    let owner = uuid::Uuid::new_v4().to_string();
+    for (model, tokens, age, person, service) in [
+        (Some("model-a"), 100, 2, actor.as_str(), "chrono-llm-public"),
+        (Some("model-b"), 60, 3, actor.as_str(), "chrono-llm-public"),
+        (None, 20, 4, actor.as_str(), "chrono-llm-public"),
+        (Some("model-a"), 999, 2, owner.as_str(), "chrono-llm-public"),
+        (Some("model-a"), 999, 2, actor.as_str(), "deepseek"),
+        (
+            Some("model-a"),
+            999,
+            30,
+            actor.as_str(),
+            "chrono-llm-public",
+        ),
+    ] {
+        let mut row = meter(person, &owner, service, tokens);
+        row.insert("model", model);
+        if model == Some("model-b") {
+            // Generic inference reports model identity separately from pricing.
+            row.insert("model", Bson::Null);
+            row.insert("reported_model", "model-b");
+        }
+        row.insert(
+            "created_at",
+            bson::DateTime::from_chrono(now - chrono::Duration::hours(age)),
+        );
+        row.insert(
+            "token_breakdown",
+            doc! { "prompt_tokens": tokens, "completion_tokens": 0_i64 },
+        );
+        insert(&db, row).await;
+    }
+    for folded in [false, true] {
+        if folded {
+            fold_once(&db, now).await.unwrap();
+        }
+        let result = get_analytics(
+            &db,
+            AnalyticsQuery {
+                from: Some((now - chrono::Duration::hours(24)).to_rfc3339()),
+                to: Some(now.to_rfc3339()),
+                actors: Some(actor.clone()),
+                owners: Some(owner.clone()),
+                services: Some("chrono-llm-public".into()),
+                measure: Some("total_tokens".into()),
+                breakdown: Some("model".into()),
+                ..Default::default()
+            }
+            .validate(now)
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.total, Some(180));
+        assert_eq!(result.totals.requests, 3);
+        assert_eq!(
+            result
+                .slices
+                .iter()
+                .map(|s| (s.label.as_str(), s.value))
+                .collect::<Vec<_>>(),
+            vec![
+                ("model-a", Some(100)),
+                ("model-b", Some(60)),
+                ("Unattributed", Some(20))
+            ]
+        );
+        assert_eq!(
+            result
+                .series
+                .iter()
+                .map(|s| s.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["model-a", "model-b", "Unattributed"]
+        );
+        assert_eq!(
+            result
+                .series
+                .iter()
+                .flat_map(|s| &s.points)
+                .map(|p| p.value.unwrap())
+                .sum::<i64>(),
+            180
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn analytics_groups_models_across_services_with_shared_filters_before_and_after_folding() {
+    use super::analytics::{AnalyticsQuery, get_analytics};
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+
+    let db = connect_test_database("usage_models_across_services")
+        .await
+        .unwrap();
+    let end = hour(Utc::now());
+    let actor = uuid::Uuid::new_v4().to_string();
+    let owner = uuid::Uuid::new_v4().to_string();
+    let other = uuid::Uuid::new_v4().to_string();
+    for (service, model, tokens, who, account, hours) in [
+        (
+            "chrono-llm-public",
+            Some("deepseek-chat"),
+            100,
+            &actor,
+            &owner,
+            2,
+        ),
+        ("deepseek", Some("deepseek-chat"), 200, &actor, &owner, 3),
+        (
+            "chrono-llm-public",
+            Some("another-model"),
+            50,
+            &actor,
+            &owner,
+            2,
+        ),
+        ("deepseek", None, 10, &actor, &owner, 2),
+        ("deepseek", Some("deepseek-chat"), 900, &other, &owner, 2),
+        ("deepseek", Some("deepseek-chat"), 900, &actor, &other, 2),
+        ("deepseek", Some("deepseek-chat"), 900, &actor, &owner, 26),
+    ] {
+        let mut row = meter(who, account, service, tokens);
+        row.insert("model", model.map(Bson::from).unwrap_or(Bson::Null));
+        row.insert(
+            "created_at",
+            bson::DateTime::from_chrono(end - chrono::Duration::hours(hours)),
+        );
+        row.insert(
+            "token_breakdown",
+            doc! { "prompt_tokens": tokens, "completion_tokens": 0_i64 },
+        );
+        insert(&db, row).await;
+    }
+    let query = || AnalyticsQuery {
+        from: Some((end - chrono::Duration::hours(24)).to_rfc3339()),
+        to: Some(end.to_rfc3339()),
+        actors: Some(actor.clone()),
+        owners: Some(owner.clone()),
+        measure: Some("total_tokens".into()),
+        breakdown: Some("model".into()),
+        ..Default::default()
+    };
+    for folded in [false, true] {
+        if folded {
+            while fold_once(&db, end).await.unwrap() > 0 {}
+        }
+        let result = get_analytics(&db, query().validate(end).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(result.total, Some(360));
+        assert_eq!(result.slices.len(), 3);
+        assert_eq!(result.slices[0].label, "deepseek-chat");
+        assert_eq!(result.slices[0].value, Some(300));
+        assert_eq!(result.slices[1].label, "another-model");
+        assert_eq!(result.slices[2].label, "Unattributed");
+        assert_eq!(
+            result.slices.iter().map(|s| &s.label).collect::<Vec<_>>(),
+            result.series.iter().map(|s| &s.label).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            result.points.iter().map(|p| p.value.unwrap()).sum::<i64>(),
+            360
+        );
+        let model_series = result
+            .series
+            .iter()
+            .find(|s| s.label == "deepseek-chat")
+            .unwrap();
+        assert_eq!(
+            model_series
+                .points
+                .iter()
+                .map(|p| p.value.unwrap())
+                .sum::<i64>(),
+            300
+        );
+        let mut service_query = query();
+        service_query.services = Some("deepseek".into());
+        let direct = get_analytics(&db, service_query.validate(end).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(direct.total, Some(210));
+        assert_eq!(direct.slices[0].value, Some(200));
+    }
     db.drop().await.unwrap();
 }

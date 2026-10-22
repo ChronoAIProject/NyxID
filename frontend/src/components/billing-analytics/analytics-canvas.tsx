@@ -119,6 +119,36 @@ function AnalyticsPanelCard({
         </div>
         {children}
       </div>
+      <div className="mb-3">
+        <AnalyticsSelect
+          label="Group by"
+          ariaLabel={`Break down ${panel.title || "panel"} by`}
+          value={panel.breakdown}
+          options={Object.entries(BREAKDOWN_LABELS).map(([value, label]) => ({
+            value,
+            label,
+          }))}
+          onChange={(breakdown) =>
+            onChange({
+              ...view,
+              panels: view.panels.map((item) =>
+                item.id === panel.id
+                  ? {
+                      ...item,
+                      breakdown: breakdown as AnalyticsPanel["breakdown"],
+                    }
+                  : item,
+              ),
+            })
+          }
+        />
+        {panel.breakdown === "model" && (
+          <p className="mt-1 text-11 text-muted-foreground">
+            Recorded model. Filter a service to inspect its models.
+            Older usage without a model appears as Unattributed.
+          </p>
+        )}
+      </div>
       {filterError(view.filters) ? (
         <div
           className={cn(
@@ -150,7 +180,10 @@ function AnalyticsPanelCard({
           data={query.data}
           panel={panel}
           onSelect={
-            panel.breakdown === "credential_class" ? undefined : drilldown
+            panel.breakdown === "credential_class" ||
+            panel.breakdown === "model"
+              ? undefined
+              : drilldown
           }
           compact={compact}
         />

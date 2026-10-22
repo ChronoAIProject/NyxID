@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub enum ClientEventName {
+    #[serde(rename = "nyxbot.error")]
+    NyxbotError,
     #[serde(rename = "ui.dialog_opened")]
     UiDialogOpened,
     #[serde(rename = "ui.dialog_step_completed")]
@@ -76,6 +78,7 @@ pub enum ClientEventName {
 impl ClientEventName {
     pub fn name(self) -> &'static str {
         match self {
+            Self::NyxbotError => "nyxbot.error",
             Self::UiDialogOpened => "ui.dialog_opened",
             Self::UiDialogStepCompleted => "ui.dialog_step_completed",
             Self::UiDialogAbandoned => "ui.dialog_abandoned",
@@ -112,6 +115,20 @@ impl ClientEventName {
     }
     fn fields(self) -> &'static [&'static str] {
         match self {
+            Self::NyxbotError => &[
+                "error_code",
+                "engine",
+                "stage",
+                "route",
+                "http_status",
+                "upstream_error_code",
+                "request_id",
+                "correlation_id",
+                "trace_id",
+                "conversation_id",
+                "turn_id",
+                "duration_ms",
+            ],
             Self::UiDialogOpened => &["dialog_id", "entry_point"],
             Self::UiDialogStepCompleted => &["dialog_id", "step", "total_steps"],
             Self::UiDialogAbandoned => &["dialog_id", "final_step", "duration_ms"],
@@ -173,6 +190,9 @@ impl std::fmt::Debug for ClientEvent {
 
 impl ClientEvent {
     fn valid_property(&self, field: &str, value: &Value) -> bool {
+        if matches!(self.name, ClientEventName::NyxbotError) {
+            return valid_nyxbot_property(field, value);
+        }
         let known = |values: &[&str]| value.as_str().is_some_and(|v| values.contains(&v));
         let integer = |max: u64| value.as_u64().is_some_and(|v| v <= max);
         let mobile = self.name.name().starts_with("ui.mobile_");
@@ -478,7 +498,16 @@ impl ClientEvent {
             // omitted, even if the client schema still carries them locally.
             let allowed = self.valid_property(field, value);
             if allowed {
-                result[*field] = value.clone();
+                if matches!(self.name, ClientEventName::NyxbotError) && field.ends_with("_id") {
+                    // Correlation stays useful without exporting raw request or conversation IDs.
+                    use sha2::{Digest, Sha256};
+                    let fingerprint = hex::encode(Sha256::digest(
+                        value.as_str().unwrap().to_ascii_lowercase().as_bytes(),
+                    ));
+                    result[format!("{field}_hash")] = json!(fingerprint);
+                } else {
+                    result[*field] = value.clone();
+                }
             }
         }
         super::scrub::scrub_value(&mut result);
@@ -486,9 +515,136 @@ impl ClientEvent {
     }
 }
 
+fn valid_nyxbot_property(field: &str, value: &Value) -> bool {
+    let known = |values: &[&str]| value.as_str().is_some_and(|v| values.contains(&v));
+    match field {
+        "error_code" => known(&[
+            "NYXBOT_UNKNOWN_ERROR",
+            "NYXBOT_RESOURCE_ERROR",
+            "NYXBOT_HTTP_UNAUTHORIZED",
+            "NYXBOT_HTTP_FORBIDDEN",
+            "NYXBOT_HTTP_RATE_LIMITED",
+            "NYXBOT_HTTP_SERVER_ERROR",
+            "NYXBOT_HTTP_ERROR",
+            "NYXBOT_RUN_ERROR",
+            "NYXBOT_START_TIMEOUT",
+            "NYXBOT_STREAM_TIMEOUT",
+            "NYXBOT_PROTOCOL_ERROR",
+            "NYXBOT_STREAM_ERROR",
+            "NYXBOT_NETWORK_ERROR",
+        ]),
+        "engine" => known(&["nyxagent", "aevatar", "direct", "unknown"]),
+        "stage" => known(&["request", "stream", "runtime", "resource"]),
+        "route" => known(&[
+            "/assistant",
+            "/assistant/:resource",
+            "/assistant/chat",
+            "/assistant/nyxagent/turns",
+            "/assistant/nyxagent/:resource",
+            "/assistant/direct/completions",
+            "/assistant/direct/models",
+            "/assistant/direct/skills",
+            "/assistant/direct/efforts",
+            "/assistant/conversations",
+            "/assistant/conversations/:id",
+            "/assistant/conversations/:id/state",
+            "/assistant/wire-logs/:id",
+        ]),
+        "http_status" => value.as_u64().is_some_and(|v| (100..=599).contains(&v)),
+        "duration_ms" => value.as_u64().is_some_and(|v| v <= 86_400_000),
+        "upstream_error_code" => {
+            value.as_u64().is_some_and(|v| v <= 1_000_000)
+                || known(&[
+                    "other",
+                    "unknown_error",
+                    "upstream_failed",
+                    "idle_timeout",
+                    "outcome_unknown",
+                    "credential_invalid",
+                    "model_not_configured",
+                    "model_unavailable",
+                    "model_interrupted",
+                    "session_busy",
+                    "queue_timeout",
+                    "capacity_exceeded",
+                    "turn_lost",
+                    "internal_error",
+                    "assistant_unavailable",
+                    "first_byte_timeout",
+                    "invalid_stream",
+                    "output_too_large",
+                    "nyxid_error",
+                    "stale_response",
+                    "context_unavailable",
+                ])
+        }
+        "request_id" | "correlation_id" | "trace_id" | "conversation_id" | "turn_id" => {
+            let Some(id) = value.as_str().filter(|v| v.len() <= 128) else {
+                return false;
+            };
+            let bare = match field {
+                "conversation_id" => ["nyxa-", "nyxid-chat-", "chatc-", "direct-"]
+                    .iter()
+                    .find_map(|prefix| id.strip_prefix(prefix))
+                    .unwrap_or(id),
+                "turn_id" => id.strip_prefix("turn-").unwrap_or(id),
+                _ => id,
+            };
+            uuid::Uuid::parse_str(bare).is_ok()
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nyxbot_error_preserves_codes_and_hashes_only_valid_correlation_ids() {
+        use sha2::{Digest, Sha256};
+        let trace = "76dd13d5-e7cf-4c63-a33b-26036d2a495d";
+        let event: ClientEvent = serde_json::from_value(json!({"name":"nyxbot.error", "props":{
+            "error_code":"NYXBOT_RUN_ERROR", "engine":"nyxagent", "stage":"stream",
+            "route":"/assistant/nyxagent/turns", "http_status":200,
+            "upstream_error_code":"assistant_unavailable", "trace_id":trace,
+            "conversation_id":"nyxa-11111111111111111111111111111111", "duration_ms":100,
+            "request_id":"sk-credential", "turn_id":"private message", "correlation_id":"https://private.test"
+        }})).unwrap();
+        let props = event.properties().unwrap();
+        assert_eq!(props["error_code"], "NYXBOT_RUN_ERROR");
+        assert_eq!(props["http_status"], 200);
+        assert_eq!(
+            props["trace_id_hash"],
+            hex::encode(Sha256::digest(trace.as_bytes()))
+        );
+        assert!(props.get("conversation_id_hash").is_some());
+        for field in [
+            "trace_id",
+            "conversation_id",
+            "request_id_hash",
+            "turn_id_hash",
+            "correlation_id_hash",
+        ] {
+            assert!(props.get(field).is_none(), "unexpected property: {field}");
+        }
+        let serialized = props.to_string();
+        assert!(!serialized.contains("private"));
+        assert!(!serialized.contains(trace));
+    }
+
+    #[test]
+    fn nyxbot_catchall_has_a_finite_taxonomy_and_rejects_free_text() {
+        let event: ClientEvent = serde_json::from_value(json!({"name":"nyxbot.error", "props":{
+            "error_code":"NYXBOT_UNKNOWN_ERROR", "engine":"unknown", "stage":"runtime", "route":"/assistant",
+            "upstream_error_code":"secret", "request_id":"not-an-id", "message":"private text"
+        }})).unwrap();
+        assert_eq!(
+            event.properties().unwrap(),
+            json!({
+                "error_code":"NYXBOT_UNKNOWN_ERROR", "engine":"unknown", "stage":"runtime", "route":"/assistant"
+            })
+        );
+    }
     #[test]
     fn rejects_unknown_names_and_drops_uncollected_or_secret_fields() {
         assert!(

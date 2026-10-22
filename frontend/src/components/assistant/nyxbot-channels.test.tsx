@@ -19,7 +19,13 @@ vi.mock("@/hooks/use-channel-bots", () => ({
   useChannelBots: () => ({ data: data.bots, isPending: false }),
 }));
 vi.mock("@/hooks/use-orgs", () => ({ useOrgs: () => ({ data: [] }) }));
-vi.mock("./nyxbot-channel-chats", () => ({ ChannelChats: () => null }));
+vi.mock("./nyxbot-channel-chats", () => ({
+  ChannelChats: ({ agents }: { agents: readonly AssistantAgent[] }) => (
+    <div data-testid="channel-chat-agents">
+      {agents.map((agent) => <span key={agent.id}>{agent.name}</span>)}
+    </div>
+  ),
+}));
 beforeEach(() => {
   data.channels = []; data.bots = []; data.pending = false;
   data.connect.mockResolvedValue({ channel_agent: { bot_label: "Receipts" }, link: {
@@ -56,8 +62,8 @@ it.each([undefined, "ok"])("keeps legacy and healthy status %s quiet", (status) 
 
 
 const at = "2026-10-01T00:00:00Z";
-function agent(id: string, status = "idle") {
-  return assistantAgentSchema.parse({ id, name: id, kind: "specialist", status, created_at: at, last_active_at: at });
+function agent(id: string, status = "idle", owner_kind?: "person" | "org") {
+  return assistantAgentSchema.parse({ id, name: id, kind: "specialist", owner_kind, status, created_at: at, last_active_at: at });
 }
 function connection(status: string, error?: string) {
   return nyxAgentChannelAgentSchema.parse({ id: "channel", channel_bot_id: "bot", platform: "lark",
@@ -102,10 +108,34 @@ it.each(["missing", "destroyed", "pending"])("disables reconnect when target is 
   expect(screen.getByRole("button", { name: "Reconnect" })).toBeDisabled();
 });
 
+it("does not offer organization specialists as new channel targets", async () => {
+  data.bots = [{ id: "new-bot", label: "New bot", platform: "lark" }];
+  render(<ChannelBotsManager agents={[agent("personal"), agent("org", "idle", "org")]} />);
+  await userEvent.setup().click(screen.getByRole("combobox", { name: "Agent for New bot" }));
+  expect(screen.getByRole("option", { name: "personal" })).toBeVisible();
+  expect(screen.queryByRole("option", { name: "org" })).not.toBeInTheDocument();
+});
+
+it("does not offer organization specialists as per-chat targets", () => {
+  data.channels = [connection("active")];
+  render(<ChannelBotsManager agents={[agent("first"), agent("org", "idle", "org")]} />);
+  expect(screen.getByTestId("channel-chat-agents")).toHaveTextContent("first");
+  expect(screen.getByTestId("channel-chat-agents")).not.toHaveTextContent("org");
+});
+
+it("does not offer organization specialists when relinking connected bots", async () => {
+  data.channels = [connection("active")];
+  render(<ChannelBotsManager agents={[agent("first"), agent("org", "idle", "org")]} />);
+  await userEvent.setup().click(screen.getByRole("combobox", { name: "Agent for Receipts" }));
+  expect(screen.getByRole("option", { name: "first" })).toBeVisible();
+  expect(screen.queryByRole("option", { name: "org" })).not.toBeInTheDocument();
+});
+
 it.each([
   ["gateway_not_authenticated", "The channel gateway could not authenticate NyxBot. Try reconnecting. If this continues, contact an administrator."],
   ["gateway_permission_required", "The channel gateway has not authorized NyxBot to manage this connection. An administrator needs to check the gateway configuration."],
   ["gateway_unavailable", "The channel gateway is temporarily unavailable. Try again shortly."],
+  ["setup_interrupted", "This connection changed while it was being set up. Reconnect to try again."],
   ["gateway_provider_not_registered", "The Agent Event Gateway has not registered NyxBot as a provider yet (operator step). Telegram bots cannot use NyxBot until it is."],
   ["gateway_rejected_request", "The channel gateway rejected this connection request. Contact an administrator."],
   ["gateway_conflict", "The channel gateway reported a conflicting connection. Contact an administrator."],

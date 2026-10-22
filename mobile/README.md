@@ -8,7 +8,13 @@ Think Duo Mobile, Microsoft Authenticator, or Authy — but bound to your own se
 
 - **Approves auth challenges.** When a service requests access (login, OAuth grant, MFA step-up, admin action), the backend pushes a notification to this app. You see the request details — who, what, when, where — and tap approve or deny.
 - **Manages granted permissions.** View every grant you've issued (per-service, per-scope), and revoke any of them.
-- **Preserves MFA assurance.** NyxID MFA uses TOTP or a single-use recovery code after password or Google/GitHub/Apple sign-in. Social MFA callbacks carry a five-minute challenge in the URI fragment; the app keeps it in memory and verifies it before storing any session. App approvals derive from an existing human session that satisfied MFA. Legacy sessions without assurance must sign in again.
+- **Preserves MFA assurance.**
+
+  - Password MFA always requires a TOTP or single-use recovery code. Server social challenges last five minutes and stay in memory until verification.
+  - `auth:mobile-mfa` defaults off and resolves for the person, including live org overrides, at social sign-in. While off, a social first-factor holder can sign in without an MFA code.
+  - Legacy and mobile-exempt sessions keep working until expiry; enabling the flag preserves existing exemptions.
+  - Device/app identity and Agent Key approvals, and login-code minting, require verified authority. Error 2003 preserves the session.
+  - With the flag enabled in `/users/me.capabilities.enabled_features`, the app offers authenticator/recovery step-up and retries after verification. Otherwise it directs the user to the NyxID website to verify and approve or create a login code. Missing old-backend capabilities means off. No automatic approvals.
 - **Stays signed in securely.** Tokens persist in the OS secure enclave (iOS Keychain via `expo-secure-store`, Android EncryptedSharedPreferences).
 
 For end users this is a companion app to whatever website / service uses NyxID as its identity provider. For NyxID operators this is what your tenants install.
@@ -293,6 +299,7 @@ All under `/api/v1` on the configured `*_API_BASE_URL`:
 | --- | --- |
 | `POST /auth/login` | Email + password login |
 | `POST /auth/mfa/verify` | MFA second-factor verification |
+| `POST /auth/mfa/step-up` | Upgrade the current live session before approving another sign-in |
 | `POST /auth/device/preview` | Preview a login request's requester context |
 | `POST /auth/device/approve` | Approve a device login with the human session |
 | `POST /auth/device/deny` | Reject a device login with the human session |
@@ -326,3 +333,27 @@ All under `/api/v1` on the configured `*_API_BASE_URL`:
 - `src/lib/auth/sessionStore.ts` — SecureStore wrapper
 - `src/app/linking.ts` — deep link → screen routing
 - `src/lib/notifications/pushNotifications.ts` — APNs / FCM registration + payload handling
+
+### MFA rollout notes
+
+No new environment variables are required. Enable `auth:mobile-mfa` globally,
+for org cohorts or per person after compatible app builds are distributed and
+all API replicas are upgraded. Existing legacy/exempt sessions keep their normal
+expiry; step-up never extends it. Sid-less legacy refreshes acquire a fixed
+30-day session on first refresh. Old-replica in-flight device/login codes and
+login approvals lacking assurance fail closed; restart those requests. New
+server challenges remain authoritative for sign-in UI even before capabilities
+are available. Account/request changes discard pending step-up retries.
+
+Skipped mobile MFA records metadata-only `mfa: skipped_mobile_rollout` in a
+`social_login` audit for redirect sign-in or a `social_token_exchange` audit for
+native exchange. Both paths emit `auth.mobile_mfa_exempted` through the existing
+telemetry consent gates.
+
+#1970 is unreleased and is not included in v0.73.0. Production replicas at
+v0.73.0 or earlier never enforced session assurance. During a mixed upgrade,
+sessions those replicas issue (including MFA-less web social sign-ins) lack
+assurance and upgraded replicas treat them as existing devices. Rolling back
+to v0.73.0 removes social MFA enforcement. Only environments that ran unreleased
+#1970 builds have rejecting replicas to drain. Deploy the web step-up UI only
+after all API replicas support the route.

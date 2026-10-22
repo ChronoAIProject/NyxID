@@ -307,6 +307,26 @@ Compact headlines compute their displayed digits with integer arithmetic. Chart
 geometry may use Number projections; money labels retain exact decimals. CLI
 output prefers exact amounts, including top-up verification arithmetic.
 
+### Usage dashboard filters and models
+
+The admin Usage page keeps its shared filters directly below the heading. Users
+select request actors; Users / organizations selects billing owners. Service and
+UTC time filters apply to summary totals, all charts, and the List tab. Platform
+keys are billed to the acting person, so filtering an organization as billing
+owner does not mean filtering all activity by its members. The NyxBot tab and its
+assistant reply feedback retain their own filters.
+
+Analytics supports `breakdown=model` using the existing meter and rollup model
+dimension. Each chart exposes a Group by selector; new workspaces start with a
+Tokens by model panel. Select Chrono LLM as the service to inspect its models.
+Model reporting reuses the existing pricing-model / provider-reported-model
+projection; reporting never writes a model into the pricing or Lago event path.
+A recorded model does not prove an underlying provider, fallback, or model
+revision. Those details need an upstream reporting contract. Existing records
+without a model remain Unattributed; no historical model identities are inferred
+or backfilled. Provider input/output/cache token counts keep their existing
+accounting semantics.
+
 ## Deviations
 
 - Decimal128 cannot represent the full i128 picocredit range; the accepted range
