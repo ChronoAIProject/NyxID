@@ -1640,7 +1640,7 @@ fn auth_dto_debug_never_discloses_credentials_but_wire_format_is_preserved() {
 #[cfg(test)]
 mod refresh_outcome_tests {
     use super::*;
-    use axum::response::IntoResponse;
+    use axum::{http::StatusCode, response::IntoResponse};
     use mongodb::bson::doc;
     #[tokio::test]
     async fn refresh_handler_preserves_plain_database_faults() {
