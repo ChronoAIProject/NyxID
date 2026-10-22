@@ -13,7 +13,7 @@ store-failure-output = true
 # These tests observe real MongoDB work against wall-clock deadlines.
 # Keep concurrent fixture creation and cleanup out of their observation windows.
 [[profile.ci.overrides]]
-filter = "test(=handlers::assistant_nyxagent::tests::capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot) | test(=handlers::assistant_nyxagent::tests::capacity_retry_after_never_extends_trigger_grace_deadline)"
+filter = "test(=handlers::assistant_nyxagent::tests::capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot) | test(=handlers::assistant_nyxagent::tests::capacity_retry_after_never_extends_trigger_grace_deadline) | test(=handlers::assistant_nyxagent::tests::expired_or_nearly_expired_run_grace_preserves_dispatch_and_response_bounds)"
 threads-required = "num-cpus"
 
 # These tests require positive live-consent reads within the production 200ms

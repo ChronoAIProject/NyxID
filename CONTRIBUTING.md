@@ -349,7 +349,7 @@ When a runner exits with code 143 during compilation, inspect the last completed
 step before treating it as a test failure. Repeated shutdowns at the same compile
 stage need a build-resource correction rather than repeated full-workflow retries.
 
-The CI profile schedules the capacity-wait heartbeat, trigger grace deadline,
+The CI profile schedules the capacity-wait heartbeat, trigger grace deadline/recovery,
 and bounded analytics admission tests alone to keep concurrent database creation
 and cleanup out of their timing windows. Head and
 base coverage use the same checked-out nextest configuration, which is included
