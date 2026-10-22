@@ -184,6 +184,8 @@ async fn org_gateway_refusal_leaves_relay_route_keys_and_settings_unchanged() {
     assert_eq!(after.route_api_key_id, before.route_api_key_id);
     assert_eq!(after.route_id, before.route_id);
     assert_eq!(after.owner_sender_ids, before.owner_sender_ids);
+    assert_eq!(after.link_code_hash, before.link_code_hash);
+    assert_eq!(after.link_code_expires_at, before.link_code_expires_at);
     assert!(after.pending_agent_api_key_id.is_none() && after.pending_route_api_key_id.is_none());
     assert!(after.gateway_fallback_at.is_some());
     assert_eq!(
@@ -535,7 +537,7 @@ async fn pending_org_return_waits_for_stale_cleanup_before_retrying() {
     // After the stale interval, cleanup deletes the org-owned prepared key
     // before a fresh return can replace the working gateway route.
     channels.update_one(doc! {"_id": &row.id}, doc! {"$set": {
-        "relay_attempted_at": bson::DateTime::from_chrono(Utc::now() - ChronoDuration::minutes(MOVE_STALE_MINUTES + 1))
+        "relay_attempted_at": bson::DateTime::from_chrono(Utc::now() - ChronoDuration::minutes(releases::SETUP_MINUTES + 1))
     }}).await.unwrap();
     switch_to_gateway(&state).await.unwrap();
     let recovered = load_channel(&state, OWNER, &row.id).await.unwrap();

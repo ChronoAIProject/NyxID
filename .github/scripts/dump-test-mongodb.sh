@@ -21,3 +21,11 @@ echo "--- kernel OOM messages"
 sudo dmesg 2>/dev/null | grep -iE 'out of memory|oom-kill|killed process' | tail -n 20 || true
 echo "--- mongod log tail"
 docker logs --tail 200 "$name" 2>&1 | tail -n 200
+# The tail cannot explain a stall that happened minutes earlier. Keep the full
+# server log (slow-operation and checkpoint lines included) beside the resource
+# samples, which the job already uploads as an artifact.
+if [ -n "${RUNNER_TEMP:-}" ]; then
+  mkdir -p "$RUNNER_TEMP/nyxid-ci-resources"
+  docker logs "$name" > "$RUNNER_TEMP/nyxid-ci-resources/mongod.log" 2>&1 || true
+  echo "full mongod log: $(wc -l < "$RUNNER_TEMP/nyxid-ci-resources/mongod.log") lines saved to the resource artifact"
+fi

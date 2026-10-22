@@ -9070,3 +9070,30 @@ An actor-scoped request UUID freezes payload and recipients. Retrying the same
 payload resumes safely; reusing the UUID for different settings returns conflict.
 See [exact allocation accounting](BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim)
 for rollout, activation, journal and recovery guarantees.
+
+## NyxBot gateway release review
+
+All routes require a live platform admin. Delegated `account:read` access is denied
+by the existing `/admin` route class. Responses contain captured public identity,
+state, revision and versions; they omit credentials, key IDs/hashes, ciphertext and
+remote response bodies. See [gateway lifecycle](CHANNEL_EVENT_GATEWAY.md#nyxbot-gateway-retirement-and-recovery).
+
+| Method | Path | Request and response |
+| --- | --- | --- |
+| GET | `/api/v1/admin/nyxbot-gateway-releases` | Optional `after` UUID cursor, `limit` (default 50, capped at 100), comma-separated `states` (default `due,review_required`). Returns `{items, next_cursor}` ordered by ID. |
+| POST | `/api/v1/admin/nyxbot-gateway-releases/{id}/inspect` | Returns `{captured, observation}` with captured revision and a fresh sanitized observation; does not change captured authority. |
+| POST | `/api/v1/admin/nyxbot-gateway-releases/{id}/resolve` | Body `{revision, observation, action, dispatch_drained?}`. Echo the inspected observation and revision; returns 204 after a live admin check and fresh matching observation. |
+
+Observation `status` is `missing`, `matching` (with `channel_id`, `version`),
+`changed` (with optional `version`), `malformed`, `destination_changed`,
+`live_reference` or `owner_unavailable`. Resolution actions are `retry_original`,
+`preserve_changed`, `confirm_missing`. Only `review_required` records can be
+resolved. `retry_original` accepts `matching`, or `missing` while the channel
+identity is still unknown. `preserve_changed` accepts every status except
+`matching` and `missing`; it settles as `preserved` without deleting anything,
+records the observation status in audit metadata, and leaves `gateway_released`
+false. `confirm_missing` accepts `missing`. For an uncertain create, it also
+requires the 24-hour dispatch window to have elapsed and `dispatch_drained: true`;
+absence alone never proves no creation. A stale revision/observation returns
+conflict; an invalid action returns validation failure. Authority/storage
+unavailability is retryable. No action deletes a replacement version.

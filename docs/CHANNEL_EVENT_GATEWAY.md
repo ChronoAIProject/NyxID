@@ -711,3 +711,81 @@ CMA responses fixture was not run locally. TypeScript SDK: 2,833 tests passed.
 Gateway/core and Rust SDK all-target/all-feature Clippy on Rust 1.96.1, formatting,
 SDK lint/typecheck/build/docs, OpenAPI/schema coverage and source-size checks
 passed. No media/edit or additional-platform thread capability was added.
+
+## NyxBot gateway retirement and recovery
+
+NyxBot records cleanup responsibility before dispatching a gateway create and
+before removing local references. This is lifecycle cleanup; it adds no message
+or event delivery retries. Creation reserves a UUID record ID and its deterministic
+provider binding in `nyxbot_gateway_releases`, with a fixed 30-minute provisional
+deadline. Each acknowledged channel identity and positive version is persisted
+before the next external operation. Activation consumes the provisional record in
+the same transaction as adoption; it leaves no cleanup obligation for a healthy
+connection.
+
+Disconnect, org access loss, fallback, transport changes and abandoned setup
+commit local retirement, key revocation, route retirement and cleanup responsibility
+together. Local retirement completes even when the gateway is unavailable. The
+existing `gateway_released` response reports confirmed remote release; a queued
+obligation alone does not make it true. Explicit preservation leaves it false.
+CMA deletes in this order: authenticate the creator, check owner/version,
+unbind the provider, delete the remote record. A
+retained primary provider key can acknowledge only DELETE of its exact retired
+binding, without restoring key or provider authority. Other provider operations
+continue to require live authority. Platform-conversion cleanup and native entry
+retirement retain their own exact proofs and remain responsible for their resources.
+
+| Release state | Meaning |
+| --- | --- |
+| `provisional` | Setup owns a reserved identity until adoption or its deadline. |
+| `due` | Local authority is retired; exact remote cleanup is queued or leased. |
+| `review_required` | Automatic effects stopped because authority, identity or outcome needs review. |
+| `settled` | Confirmed release/absence, cancelled undispatched setup, or explicit preservation. Retained for deduplication and unbind acknowledgement. |
+
+An independent worker runs every 30 seconds, handles at most ten obligations per
+pass with two concurrent operations per replica, and uses 120-second database-time
+leases. Retries back off from 30 seconds to one hour. Every completion is fenced
+by claim, revision, state and lease. Recovery reads `/channel-records/{record_id}`
+and validates owner, provider, binding and relay source. It never creates a record
+or replaces the captured deletion version with an observed version. Destination
+drift, version changes, malformed identity and live-reference conflicts require
+review. An uncertain POST that remains unobserved for 24 hours requires review:
+that deadline is not proof that creation never happened.
+
+Administrators use the [release review API](API.md#nyxbot-gateway-release-review)
+to inspect a sanitized observation and resolve its exact revision. `retry_original`
+requeues the original authority for a matching identity, or resumes record-ID
+recovery for an unknown identity observed as missing. `preserve_changed` accepts
+any observation other than `matching` or `missing`, including a changed record,
+live reference, changed destination, unavailable owner or malformed identity.
+It settles as `preserved` without deleting anything, records the observation status
+in audit metadata, and leaves `gateway_released` false. `confirm_missing` settles
+confirmed absence; an uncertain create also requires 24 hours since dispatch and
+explicit attestation that the original dispatch has drained. There is no operation
+to delete an observed replacement version.
+
+Filter audit events by `nyxbot_gateway_release_queued`,
+`nyxbot_gateway_release_settled`, `nyxbot_gateway_release_review_required`,
+`nyxbot_gateway_release_reviewed`, `nyxbot_channel_continuity_restored` and
+`nyxbot_gateway_release_reconcile_pass_completed`. These metadata events commit
+with their transitions. Retries do not add audit events. Review transition logs
+contain only obligation ID, local channel ID and a stable reason.
+
+An hourly, resumable keyset scan processes at most 100 retained-identity retired
+rows per step. It excludes live adoptions and platform-conversion resources;
+settled obligations prevent repeated release. It does not enumerate remote
+inventory or guess identities missing from local history. The creator bearer
+retains its PR1 owner-wide channel management scope; CMA still enforces owner
+identity, and cleanup additionally pins destination, record and acknowledged
+version. It is not a token restricted to one channel.
+
+### Deployment and rollback
+
+Startup creates release and reconciliation indexes before workers start. Deploy
+normally across replicas; no global mutation freeze is needed.
+**Retained-identity orphans converge automatically, including retirements
+during rollout. Complete obligation coverage begins once all old lifecycle writers
+and their in-flight operations have drained**. Old transport-return, fallback,
+uncertain-create and stale pending-move paths can erase or never store remote
+identity. Before rollback to PR1, drain release workers; retain release records
+and continuity lineage fields.

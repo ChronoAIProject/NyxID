@@ -213,3 +213,5 @@ pub mod call_adapters;
 pub mod platform_help;
 
 pub mod telegram_managers;
+
+pub mod nyxbot_gateway_releases;
