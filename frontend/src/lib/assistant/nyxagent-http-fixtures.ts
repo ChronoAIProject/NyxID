@@ -164,6 +164,7 @@ function conversation(id: string, title: string, model: string, now: string): Ny
 
 function emptyHistory(id: string, title: string, model: string, now: string): NyxAgentHistory {
   return {
+    cma_operations: [],
     conversation: conversation(id, title, model, now),
     messages: [],
     acknowledgements: [],

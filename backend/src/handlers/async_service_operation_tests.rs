@@ -53,6 +53,10 @@ impl AsyncFixture {
                         None
                     };
                     Json(match uri.path() {
+                        "/api/v1/agents" => json!({"id":"lifecycle-1","status":"queued"}),
+                        "/api/v1/agent-lifecycle/lifecycle-1" => json!({"id":"lifecycle-1","status":status_phase,"agent_id":"agt_coffee","phase":"agent_startup"}),
+                        "/api/v1/agents/agt_coffee/input" => json!({"queued":true}),
+                        "/api/v1/agents/agt_coffee" => json!({"id":"agt_coffee","status":status_phase}),
                         "/executions" => json!({
                             "operation_id": if distinct_operations {
                                 format!("op-{}", uuid::Uuid::new_v4())
@@ -169,6 +173,226 @@ impl AsyncFixture {
             .unwrap()
             .unwrap()
     }
+}
+
+async fn cma_fixture() -> AsyncFixture {
+    let a = AsyncFixture::new().await;
+    let db = &a.f.state.db;
+    let instance = db
+        .collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&a.service})
+        .await
+        .unwrap()
+        .unwrap();
+    let catalog_id = instance.catalog_service_id.unwrap();
+    db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(doc! {"_id":&catalog_id}, doc! {"$set":{"slug":"cma"}})
+        .await
+        .unwrap();
+    let endpoints = db.collection::<crate::models::service_endpoint::ServiceEndpoint>(
+        crate::models::service_endpoint::COLLECTION_NAME,
+    );
+    let template = endpoints
+        .find_one(doc! {"service_id":&catalog_id})
+        .await
+        .unwrap()
+        .unwrap();
+    for (name, method, path, parameters, body) in [
+        (
+            "post_api_v1_agents",
+            "POST",
+            "/api/v1/agents",
+            json!([{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string"}}]),
+            Some(
+                json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}),
+            ),
+        ),
+        (
+            "get_api_v1_agent_lifecycle_by_id",
+            "GET",
+            "/api/v1/agent-lifecycle/{id}",
+            json!([{"name":"id","in":"path","required":true,"schema":{"type":"string"}}]),
+            None,
+        ),
+        (
+            "post_agent_input",
+            "POST",
+            "/api/v1/agents/{id}/input",
+            json!([
+                {"name":"id","in":"path","required":true,"schema":{"type":"string"}},
+                {"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string"}},
+            ]),
+            Some(
+                json!({"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}),
+            ),
+        ),
+        (
+            "get_agent",
+            "GET",
+            "/api/v1/agents/{id}",
+            json!([{"name":"id","in":"path","required":true,"schema":{"type":"string"}}]),
+            None,
+        ),
+    ] {
+        let mut endpoint = template.clone();
+        endpoint.id = uuid::Uuid::new_v4().to_string();
+        endpoint.name = name.into();
+        endpoint.method = method.into();
+        endpoint.path = path.into();
+        endpoint.parameters = Some(parameters);
+        endpoint.request_body_schema = body;
+        endpoint.request_body_required = method == "POST";
+        endpoint.request_content_type = (method == "POST").then(|| "application/json".into());
+        endpoint.async_operation = None;
+        endpoints.insert_one(&endpoint).await.unwrap();
+    }
+    a
+}
+
+#[tokio::test]
+async fn cma_submission_tracks_status_after_turn_settlement_and_projects_only_metadata() {
+    let a = cma_fixture().await;
+    let db = &a.f.state.db;
+    *a.phase.lock().unwrap() = "running".into();
+    let auth = authenticate(&a.f).await;
+    // Exercise the universal MCP dispatch path, including its inner arguments.
+    let response = call(&a.f, &auth, "sandbox__post_api_v1_agents", json!({"Idempotency-Key":"coffee-site-20261022","name":"Coffee","profile":{"system_prompt":"private prompt"}})).await;
+    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    let watch = a.watch().await;
+    assert_eq!(
+        watch.cma.as_ref().unwrap().idempotency_key.as_deref(),
+        Some("coffee-site-20261022")
+    );
+    assert_eq!(watch.operation_id.as_deref(), Some("lifecycle-1"));
+    assert!(watch.expires_at - watch.created_at >= chrono::Duration::days(30));
+    engine::finish_turn(
+        db,
+        &a.f.row,
+        &a.f.row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "CMA request submitted".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    a.due().await;
+    async_operations::sweep(&a.f.state).await.unwrap();
+    let running = a.watch().await;
+    assert_eq!(running.state, "waiting");
+    assert_eq!(
+        running.cma.as_ref().unwrap().status.as_deref(),
+        Some("running")
+    );
+    assert!(running.cma.as_ref().unwrap().checked_at.is_some());
+    *a.phase.lock().unwrap() = "succeeded".into();
+    a.due().await;
+    async_operations::sweep(&a.f.state).await.unwrap();
+    let finished = a.watch().await;
+    assert_eq!(finished.reason.as_deref(), Some("completed"));
+    assert_eq!(
+        finished.cma.as_ref().unwrap().agent_id.as_deref(),
+        Some("agt_coffee")
+    );
+    let cards = crate::services::cma_operation::cards(db, &a.f.owner, &a.f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(cards.len(), 1);
+    assert!(cards[0].result_encrypted.is_none());
+    assert!(
+        !bson::to_document(&cards[0])
+            .unwrap()
+            .to_string()
+            .contains("private prompt")
+    );
+    assert!(
+        crate::services::cma_operation::cards(db, "another-owner", &a.f.row.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cma_agent_input_waits_for_activity_before_settling_ready() {
+    let a = cma_fixture().await;
+    *a.phase.lock().unwrap() = "ready".into();
+    let auth = authenticate(&a.f).await;
+    // Concrete MCP dispatch captures the path ID even though the queued receipt
+    // has no operation ID. The lifecycle test exercises universal dispatch.
+    let response = direct_call(
+        &a.f,
+        &auth,
+        "sandbox__post_agent_input",
+        json!({"id":"agt_coffee","text":"private task","Idempotency-Key":"input-1"}),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["result"]["isError"], false, "{result}");
+    let watch = a.watch().await;
+    assert!(watch.operation_id.is_none());
+    assert_eq!(
+        watch.cma.as_ref().unwrap().agent_id.as_deref(),
+        Some("agt_coffee")
+    );
+    for key in ["input-1", "input-2"] {
+        let response = direct_call(
+            &a.f,
+            &auth,
+            "sandbox__post_agent_input",
+            json!({"id":"agt_coffee","text":"private task","Idempotency-Key":key}),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["result"]["isError"], false, "{result}");
+    }
+    assert_eq!(
+        a.f.state
+            .db
+            .collection::<bson::Document>(WATCHES)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        2
+    );
+
+    a.due().await;
+    async_operations::sweep(&a.f.state).await.unwrap();
+    let ready = a.watch().await;
+    assert_eq!(ready.state, "waiting");
+    assert!(!ready.cma.as_ref().unwrap().seen_working);
+
+    *a.phase.lock().unwrap() = "working".into();
+    a.due().await;
+    async_operations::sweep(&a.f.state).await.unwrap();
+    let working = a.watch().await;
+    assert_eq!(working.state, "waiting");
+    assert!(working.cma.as_ref().unwrap().seen_working);
+
+    *a.phase.lock().unwrap() = "ready".into();
+    a.due().await;
+    async_operations::sweep(&a.f.state).await.unwrap();
+    let finished = a.watch().await;
+    assert_eq!(finished.reason.as_deref(), Some("completed"));
+    assert_eq!(
+        finished.cma.as_ref().unwrap().status.as_deref(),
+        Some("ready")
+    );
 }
 
 #[tokio::test]

@@ -407,6 +407,7 @@ pub mod tool_publication_service;
 pub mod tools_service;
 
 pub mod async_service_operation;
+pub mod cma_operation;
 pub mod service_preference_service;
 pub mod tool_twin_service;
 

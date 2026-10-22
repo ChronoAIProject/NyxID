@@ -3275,9 +3275,15 @@ fn dispatch_service_tool<'a>(
         }
 
         let async_watch = if endpoint.async_operation.is_some() {
-            if let Some(chat) = auth.chat.as_ref() {
-                match crate::services::async_service_operation::reserve(
-                    &state.db, chat, service, endpoint,
+            if let Some(chat) = auth.chat.as_ref().filter(|chat| {
+                !chat.guest
+                    || endpoint
+                        .async_operation
+                        .as_ref()
+                        .is_none_or(|contract| contract.presentation.is_none())
+            }) {
+                match crate::services::async_service_operation::reserve_with_arguments(
+                    &state.db, chat, service, endpoint, &arguments,
                 )
                 .await
                 {
@@ -4589,9 +4595,19 @@ async fn handle_meta_call_tool(
     };
 
     let async_watch = if endpoint.async_operation.is_some() {
-        if let Some(chat) = auth.chat.as_ref() {
-            match crate::services::async_service_operation::reserve(
-                &state.db, chat, service, endpoint,
+        if let Some(chat) = auth.chat.as_ref().filter(|chat| {
+            !chat.guest
+                || endpoint
+                    .async_operation
+                    .as_ref()
+                    .is_none_or(|contract| contract.presentation.is_none())
+        }) {
+            match crate::services::async_service_operation::reserve_with_arguments(
+                &state.db,
+                chat,
+                service,
+                endpoint,
+                &inner_args,
             )
             .await
             {
