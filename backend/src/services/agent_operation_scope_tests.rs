@@ -1412,14 +1412,9 @@ async fn guest_policy_off_raw_approval_uses_resolved_authority_without_agent_loo
         super::approval_service::ApprovalOutcome::Denied,
         super::approval_service::ApprovalOutcome::Allowed { required: true },
     ] {
-        let error = super::agent_operation_scope_service::check_guest_approval(
-            &f.state.db,
-            true,
-            Some(&chat),
-            &outcome,
-        )
-        .await
-        .unwrap_err();
+        let error =
+            super::agent_operation_scope_service::check_guest_approval(true, Some(&chat), &outcome)
+                .unwrap_err();
         assert!(
             matches!(&error, crate::errors::AppError::ApiKeyScopeForbidden(message) if message == "Guest calls cannot request or use owner approvals")
         );
