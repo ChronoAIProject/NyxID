@@ -73,23 +73,35 @@ async fn run_main() {
         node::custody::worker();
     }
     let profile = selected_profile(&matches);
+    let saved_session_diagnostic = matches!(
+        &cli.command,
+        Commands::Session {
+            command: cli::SessionCommands::Status { .. }
+        }
+    );
 
     // Only an explicit choice for this saved account/deployment can admit an
     // event. Account permission is fetched afresh after the command finishes.
-    let mut tele_client = if matches!(cli.command, Commands::Telemetry { .. }) {
-        None
-    } else {
-        telemetry::TelemetryClient::init(profile.as_deref())
-    };
+    let mut tele_client =
+        if saved_session_diagnostic || matches!(cli.command, Commands::Telemetry { .. }) {
+            None
+        } else {
+            telemetry::TelemetryClient::init(profile.as_deref())
+        };
 
     let (group, sub) = command_names(&cli.command);
 
     // Best-effort: detect partially-installed skills (caused by older CLI
     // binaries that predate per-topic references) and refresh them before the
     // user's command runs. Failures here never block the command.
-    skill_self_heal::maybe_self_heal(&cli.command).await;
-
-    let update_notice = update_check::start_update_notice(&cli.command);
+    if !saved_session_diagnostic {
+        skill_self_heal::maybe_self_heal(&cli.command).await;
+    }
+    let update_notice = if saved_session_diagnostic {
+        None
+    } else {
+        update_check::start_update_notice(&cli.command)
+    };
     let result = run(cli).await;
 
     if let Some(client) = tele_client.as_mut() {
@@ -138,6 +150,9 @@ async fn run_main() {
         if let Some(readiness) = e.downcast_ref::<commands::admin_tools::PendingReadiness>() {
             // The command already emitted the complete structured readiness report.
             std::process::exit(readiness.exit_code);
+        }
+        if let Some(status) = e.downcast_ref::<commands::session::SessionStatusExit>() {
+            std::process::exit(status.0);
         }
         eprintln!("{}", error_format::render_error(&e, json_output_from_argv));
         // 3: a human must log in again; 4: renewal outcome unknown, retry later.

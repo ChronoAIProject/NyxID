@@ -1104,10 +1104,23 @@ pub enum SessionCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Diagnose the saved profile without renewing it or prompting for login.
+    /// Ignores --access-token, --access-token-env, NYXID_API_KEY and other
+    /// credential overrides. Refresh usability is not tested; renew_by is a
+    /// deadline derived from known expiries. Exit 3 = locally dead credentials
+    /// or an explicitly ended server session; 1 = profile storage error.
+    Status {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Renew the saved session now (rotates the refresh token) without a
     /// browser. Exit 0 = renewed; 3 = a human must `nyxid login`
-    /// (refresh token expired/revoked/unknown); 4 = could not reach the
-    /// server, retry later.
+    /// (refresh_token_expired, session_expired, session_ended,
+    /// refresh_token_revoked, refresh_token_not_found, refresh_rejected,
+    /// agent_key_does_not_refresh); 4 = refresh_unavailable (network,
+    /// rotation conflict, uncertain response, lock or storage failure).
+    /// Renew well before the saved refresh token expires. Grace recovery
+    /// requires the original JWT to remain valid and a recoverable chain.
     Refresh {
         #[command(flatten)]
         auth: AuthArgs,

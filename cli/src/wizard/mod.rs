@@ -46,6 +46,34 @@ pub struct ProxyContext {
     pub base_url_root: String,
     pub access_token: String,
     pub profile: Option<String>,
+    pub(crate) credential_source: crate::auth::AccessTokenSource,
+    pub refresh_eligible: bool,
+    pub login_generation: Option<String>,
+}
+
+impl ProxyContext {
+    async fn from_auth(auth: &crate::cli::AuthArgs) -> Result<Self> {
+        let _lock = if crate::auth::resolve_access_token_override(auth).is_none() {
+            Some(crate::auth::acquire_refresh_lock_async(auth.profile.as_deref()).await?)
+        } else {
+            None
+        };
+        let resolved = crate::auth::resolve_access_token_with_source(auth)?;
+        let destination = auth.resolved_base_url()?;
+        if resolved.source.allows_session_refresh()
+            || resolved.source == crate::auth::AccessTokenSource::SavedAgentKey
+        {
+            crate::auth::validate_profile_destination(auth.profile.as_deref(), &destination)?;
+        }
+        Ok(Self {
+            base_url_root: destination.trim_end_matches('/').into(),
+            access_token: resolved.token,
+            profile: auth.profile.clone(),
+            credential_source: resolved.source,
+            refresh_eligible: resolved.source.allows_session_refresh(),
+            login_generation: crate::auth::login_generation(auth.profile.as_deref()),
+        })
+    }
 }
 
 /// CLI-supplied prefill for the ai-key wizard. Any field set here is
@@ -381,13 +409,7 @@ pub async fn run_ai_key_wizard(
     let base_url = auth.resolved_base_url()?;
 
     let outcome = if is_wizard_eligible() {
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth).await?;
         run_flow("ai-key", proxy, prefill).await?
     } else {
         let prefill_json = pairing::prefill_ai_key(&prefill);
@@ -483,14 +505,7 @@ pub async fn run_node_register_token_wizard(
     }
 
     let outcome = if is_wizard_eligible() {
-        let base_url = auth.resolved_base_url()?;
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth).await?;
         server::run_flow(
             server::FlowKind::NodeRegisterToken,
             proxy,
@@ -570,14 +585,7 @@ pub async fn run_api_key_create_wizard(
     }
 
     let outcome = if is_wizard_eligible() {
-        let base_url = auth.resolved_base_url()?;
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth).await?;
         server::run_flow(
             server::FlowKind::ApiKeyCreate,
             proxy,
@@ -716,14 +724,7 @@ async fn run_rotation_wizard(
     let display_name_for_summary = prefill.display_name.clone();
 
     let outcome = if is_wizard_eligible() {
-        let base_url = auth.resolved_base_url()?;
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth).await?;
         server::run_flow(flow_kind, proxy, server::PrefillData::Rotate(prefill)).await?
     } else {
         // Map the local-server FlowKind to the pairing-transport
@@ -877,14 +878,7 @@ pub async fn run_service_account_create_wizard(
     }
 
     let outcome = if is_wizard_eligible() {
-        let base_url = auth.resolved_base_url()?;
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth).await?;
         server::run_flow(
             server::FlowKind::ServiceAccountCreate,
             proxy,
@@ -969,14 +963,7 @@ pub async fn run_developer_app_create_wizard(
     }
 
     let outcome = if is_wizard_eligible() {
-        let base_url = auth.resolved_base_url()?;
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth).await?;
         server::run_flow(
             server::FlowKind::DeveloperAppCreate,
             proxy,
@@ -1061,14 +1048,7 @@ pub async fn run_mfa_setup_wizard(
     }
 
     let outcome = if is_wizard_eligible() {
-        let base_url = auth.resolved_base_url()?;
-        let access_token = crate::auth::resolve_access_token(auth)?;
-        let base_url_root = base_url.trim_end_matches('/').to_string();
-        let proxy = ProxyContext {
-            base_url_root,
-            access_token,
-            profile: auth.profile.clone(),
-        };
+        let proxy = ProxyContext::from_auth(auth).await?;
         server::run_flow(
             server::FlowKind::MfaSetup,
             proxy,
@@ -1371,6 +1351,9 @@ mod context_debug_tests {
             base_url_root: "https://example.invalid".into(),
             access_token: secret.into(),
             profile: None,
+            credential_source: crate::auth::AccessTokenSource::SavedSession,
+            refresh_eligible: true,
+            login_generation: None,
         };
         assert!(!format!("{context:?}").contains(secret));
     }
