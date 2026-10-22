@@ -7,6 +7,7 @@ use crate::{
         channel_platform::{InboundAttachment, InboundMessage},
     },
 };
+use futures::TryStreamExt;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::*};
 
 static INGESTION_ORIGINS: std::sync::LazyLock<
@@ -1822,18 +1823,21 @@ async fn channel_media_chunked_unknown_understated_bodies_retry_once_and_recheck
         } else {
             assert!(input.contains("input_image"), "{input}");
         }
-        let attempts = state
+        // Admission rows are keyed per wall-clock minute, so a slow retry can
+        // land in the next minute's row. Count every admitted attempt.
+        let attempts: i32 = state
             .db
             .collection::<bson::Document>("assistant_upload_limits")
-            .find_one(doc! {})
+            .find(doc! {})
             .await
             .unwrap()
-            .unwrap();
-        assert_eq!(
-            attempts.get_i32("attempts").unwrap(),
-            2,
-            "failed attempt and retry both admitted"
-        );
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get_i32("attempts").unwrap())
+            .sum();
+        assert_eq!(attempts, 2, "failed attempt and retry both admitted");
         provider.abort();
         server.abort();
     }

@@ -1189,6 +1189,9 @@ mod tests {
             .await
             .unwrap();
         let permission = consent::set(&db, &user, true).await.unwrap();
+        // `begin` is a majority-write transaction bounded by its production
+        // 250 ms deadline; require a responsive server before measuring it.
+        crate::test_utils::await_responsive_majority_io(&db).await;
         let held = dispatch::begin(&db, &user, &permission.revision)
             .await
             .unwrap();
