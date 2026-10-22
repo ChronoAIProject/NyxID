@@ -16,10 +16,25 @@ path = "junit.xml"
 store-success-output = false
 store-failure-output = true
 
-# This test observes real MongoDB heartbeats against wall-clock deadlines.
-# Keep concurrent fixture creation and cleanup out of its observation window.
+# These tests observe real MongoDB work against wall-clock deadlines.
+# Keep concurrent fixture creation and cleanup out of their observation windows.
 [[profile.ci.overrides]]
-filter = "test(=handlers::assistant_nyxagent::tests::capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot)"
+filter = "test(=handlers::assistant_nyxagent::tests::capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot) | test(=handlers::assistant_nyxagent::tests::capacity_retry_after_never_extends_trigger_grace_deadline) | test(=handlers::assistant_nyxagent::tests::expired_or_nearly_expired_run_grace_preserves_dispatch_and_response_bounds) | test(=handlers::assistant_nyxagent::tests::lost_session_rebinds_with_recap_and_same_turn_id)"
+threads-required = "num-cpus"
+
+# Stream-bound tests use 400ms/500ms deadlines and one measures settlement
+# against a four-second ceiling. They need the same isolation as the recovery
+# tests above so unrelated database setup/drop work cannot consume those bounds.
+[[profile.ci.overrides]]
+filter = """
+test(=handlers::assistant_nyxagent::tests::delayed_headers_fail_as_first_byte_with_internal_stage) |
+test(=handlers::assistant_nyxagent::tests::keepalives_before_created_satisfy_first_byte_and_the_turn_completes) |
+test(=handlers::assistant_nyxagent::tests::keepalive_only_stream_fails_on_no_progress_with_its_response_id) |
+test(=handlers::assistant_nyxagent::tests::tool_progress_events_reset_the_no_progress_bound) |
+test(=handlers::assistant_nyxagent::tests::silent_transport_fails_on_the_idle_bound) |
+test(=handlers::assistant_nyxagent::tests::unreachable_upstream_fails_at_connect) |
+test(=handlers::assistant_nyxagent::tests::capacity_refusals_recover_after_old_retry_limit_and_slow_proof_respects_first_byte_bound)
+"""
 threads-required = "num-cpus"
 
 # These tests require positive live-consent reads within the production 200ms
@@ -27,5 +42,5 @@ threads-required = "num-cpus"
 # MongoDB fixture churn cannot turn their healthy-admission preconditions into
 # intentional fail-closed drops. Keep the real deadlines and all assertions.
 [[profile.ci.overrides]]
-filter = "test(=telemetry::tests::track_enqueues_scrubbed_capture_job_with_common_properties) | test(=telemetry::tests::track_silently_drops_when_channel_is_full) | test(=telemetry::tests::dispatch_checks_live_revision_across_independent_clients)"
+filter = "test(=telemetry::tests::track_enqueues_scrubbed_capture_job_with_common_properties) | test(=telemetry::tests::track_silently_drops_when_channel_is_full) | test(=telemetry::tests::dispatch_checks_live_revision_across_independent_clients) | test(=services::analytics_dispatch_service::tests::retained_uncertainty_is_bounded_without_expiring_proof_and_accepted_rows_are_removed)"
 threads-required = "num-cpus"

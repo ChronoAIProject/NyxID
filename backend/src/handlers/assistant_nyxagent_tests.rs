@@ -1309,6 +1309,17 @@ async fn lost_session_rebinds_with_recap_and_same_turn_id() {
     let reset_at = saved
         .context_reset_at
         .expect("rebind records reset timestamp");
+    assert_eq!(messages.len(), 4);
+    assert!(
+        messages[3].error_code.is_none(),
+        "session recovery must complete before checking reset ordering: code={:?}, stage={:?}",
+        messages[3].error_code,
+        messages[3]
+            .error_detail
+            .as_ref()
+            .map(|detail| &detail.stage),
+    );
+    assert_eq!(saved.context_reset_reason.as_deref(), Some("session_lost"));
     assert!(messages[2].created_at <= reset_at);
     assert!(messages[3].created_at > reset_at);
     let calls = calls.lock().await;

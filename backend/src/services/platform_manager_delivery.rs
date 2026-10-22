@@ -367,6 +367,35 @@ fn append_card_notices(
     Ok(render_saved_text(&rendered))
 }
 
+async fn pin_notice_card_ids(
+    db: &Database,
+    delivery_id: &str,
+    ids: &[&str],
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<()> {
+    // Concurrent renderers may pin the same ordered snapshot. Expression
+    // equality compares the whole array, rather than matching nested elements.
+    let deliveries = db.collection::<bson::Document>(COLLECTION_NAME);
+    let update = deliveries.update_one(
+        doc! {
+            "_id": delivery_id,
+            "$or": [
+                {"notice_card_ids": {"$exists": false}},
+                {"$expr": {"$eq": ["$notice_card_ids", {"$literal": ids}]}},
+            ],
+        },
+        doc! {"$set": {"notice_card_ids": ids}},
+    );
+    let changed = match session {
+        Some(tx) => update.session(tx).await?,
+        None => update.await?,
+    };
+    if changed.matched_count != 1 {
+        return Err(AppError::Conflict("Reply notice snapshot changed".into()));
+    }
+    Ok(())
+}
+
 pub(crate) async fn render_personal(
     state: &AppState,
     message: &AssistantMessage,
@@ -439,20 +468,13 @@ pub(crate) async fn render_personal(
             barrier.wait().await;
         }
         let ids: Vec<_> = cards.iter().map(|card| card.id.as_str()).collect();
-        // Concurrent renderers may pin the same plan. Accept that exact
-        // snapshot again, but never overwrite a different renderer's plan.
-        let update = deliveries.update_one(
-            doc! {"_id":saved.get_str("_id").map_err(|_| refused())?,
-            "$or":[{"notice_card_ids":{"$exists":false}}, {"notice_card_ids":&ids}]},
-            doc! {"$set":{"notice_card_ids":&ids}},
-        );
-        let changed = match session {
-            Some(tx) => update.session(tx).await?,
-            None => update.await?,
-        };
-        if changed.matched_count != 1 {
-            return Err(AppError::Conflict("Reply notice snapshot changed".into()));
-        }
+        pin_notice_card_ids(
+            &state.db,
+            saved.get_str("_id").map_err(|_| refused())?,
+            &ids,
+            session,
+        )
+        .await?;
     }
     let thread = thread.ok_or_else(refused)?;
     let entry = &thread.platform_thread.as_ref().ok_or_else(refused)?.entry;
@@ -3119,6 +3141,69 @@ mod native_render_tests {
         assert!(!rendered.contains("/assistant?c="));
         assert!(rendered.contains("Action:"));
         assert!(!rendered.contains("Reply yes"));
+    }
+}
+
+#[cfg(test)]
+mod notice_snapshot_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn notice_snapshots_accept_only_identical_concurrent_initialization() {
+        let db = crate::test_utils::connect_transaction_test_database("notice_snapshot").await;
+        let rows = db.collection::<bson::Document>(COLLECTION_NAME);
+        for ids in [vec![], vec!["card-a", "$card-b"]] {
+            let id = uuid::Uuid::new_v4().to_string();
+            rows.insert_one(doc! {"_id": &id}).await.unwrap();
+            let (first, second) = tokio::join!(
+                pin_notice_card_ids(&db, &id, &ids, None),
+                pin_notice_card_ids(&db, &id, &ids, None),
+            );
+            first.unwrap();
+            second.unwrap();
+            // A stale renderer with the same snapshot also succeeds inside a transaction.
+            let mut tx = db.client().start_session().await.unwrap();
+            tx.start_transaction().await.unwrap();
+            pin_notice_card_ids(&db, &id, &ids, Some(&mut tx))
+                .await
+                .unwrap();
+            tx.commit_transaction().await.unwrap();
+            for different in [vec!["replacement"], vec!["$card-b", "card-a"]] {
+                assert!(matches!(
+                    pin_notice_card_ids(&db, &id, &different, None).await,
+                    Err(AppError::Conflict(_))
+                ));
+            }
+            let stored = rows.find_one(doc! {"_id": &id}).await.unwrap().unwrap();
+            assert_eq!(
+                stored.get_array("notice_card_ids").unwrap(),
+                &ids.iter()
+                    .map(|id| bson::Bson::from(*id))
+                    .collect::<Vec<_>>()
+            );
+        }
+        for malformed in [
+            bson::Bson::Null,
+            bson::Bson::from("card-a"),
+            bson::Bson::Int32(1),
+            bson::Bson::Array(vec![bson::Bson::Array(vec!["card-a".into()])]),
+        ] {
+            let id = uuid::Uuid::new_v4().to_string();
+            rows.insert_one(doc! {"_id": &id, "notice_card_ids": &malformed})
+                .await
+                .unwrap();
+            assert!(matches!(
+                pin_notice_card_ids(&db, &id, &["card-a"], None).await,
+                Err(AppError::Conflict(_))
+            ));
+            let stored = rows.find_one(doc! {"_id": &id}).await.unwrap().unwrap();
+            assert_eq!(stored.get("notice_card_ids"), Some(&malformed));
+        }
+        assert!(matches!(
+            pin_notice_card_ids(&db, "missing-delivery", &[], None).await,
+            Err(AppError::Conflict(_))
+        ));
+        db.drop().await.unwrap();
     }
 }
 
