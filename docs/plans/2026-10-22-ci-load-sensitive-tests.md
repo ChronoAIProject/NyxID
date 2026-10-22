@@ -128,8 +128,13 @@ performance comparison.
 
 The main publish gate inspected during this investigation (`39792090328`)
 passed both backend suites but failed because `oracle-worker-test` was cancelled.
-PR #2017 addresses that cold browser setup timeout and merged at
-2026-10-22 15:16 UTC; this change does not duplicate it.
+PR #2017 addresses that cold browser setup timeout but merged into
+`chore/retire-builtin-oracle`, not main. The first hosted run of this follow-up
+(`39846645748`, job `120061721689`) reproduced the same 15-minute timeout:
+Chromium setup took 10m53s, syntax and unit tests passed, and GitHub cancelled
+the still-running browser suite after 4m09s. This follow-up therefore also
+applies #2017's 30-minute job budget to main. It changes neither browser test
+assertions nor their individual deadlines.
 
 Cache usage observed during this follow-up: 165 entries, 11,934,166,536 bytes.
 That is a point-in-time measurement, not a post-change performance result.

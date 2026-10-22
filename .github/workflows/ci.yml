@@ -343,7 +343,8 @@ jobs:
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.oracle_worker == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Cold Chromium dependency downloads need room alongside the browser suite.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: integrations/oracle/cdp-worker
