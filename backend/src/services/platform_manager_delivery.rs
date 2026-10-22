@@ -400,7 +400,7 @@ pub(crate) async fn render_personal(
     }
     let collection = state.db.collection::<AssistantAcknowledgement>(ACKS);
     let conversations = state.db.collection::<AssistantConversation>(CONVERSATIONS);
-    let (mut cards, thread): (Vec<AssistantAcknowledgement>, Option<AssistantConversation>) =
+    let (cards, thread): (Vec<AssistantAcknowledgement>, Option<AssistantConversation>) =
         match session.as_deref_mut() {
             Some(session) => {
                 let mut cursor = collection
@@ -439,38 +439,20 @@ pub(crate) async fn render_personal(
             barrier.wait().await;
         }
         let ids: Vec<_> = cards.iter().map(|card| card.id.as_str()).collect();
-        // Concurrent renders share the first persisted snapshot. Losing its
-        // initialization race is ordinary deduplication, not a delivery error.
-        let update = deliveries
-            .find_one_and_update(
-                doc! {"_id":saved.get_str("_id").map_err(|_| refused())?},
-                vec![doc! {"$set":{"notice_card_ids":{"$ifNull":[
-                    "$notice_card_ids", {"$literal":ids}
-                ]}}}],
-            )
-            .return_document(mongodb::options::ReturnDocument::After);
-        let pinned = match session.as_deref_mut() {
+        // Concurrent renderers may pin the same plan. Accept that exact
+        // snapshot again, but never overwrite a different renderer's plan.
+        let update = deliveries.update_one(
+            doc! {"_id":saved.get_str("_id").map_err(|_| refused())?,
+            "$or":[{"notice_card_ids":{"$exists":false}}, {"notice_card_ids":&ids}]},
+            doc! {"$set":{"notice_card_ids":&ids}},
+        );
+        let changed = match session {
             Some(tx) => update.session(tx).await?,
             None => update.await?,
-        }
-        .ok_or_else(refused)?;
-        let ids = pinned.get_array("notice_card_ids").map_err(|_| refused())?;
-        let query = collection
-            .find(doc! {"_id":{"$in":ids}, "user_id":&message.user_id,
-            "conversation_id":&message.conversation_id})
-            .sort(doc! {"created_at":1,"_id":1})
-            .limit(65);
-        cards = match session {
-            Some(tx) => {
-                query
-                    .session(&mut *tx)
-                    .await?
-                    .stream(tx)
-                    .try_collect()
-                    .await?
-            }
-            None => query.await?.try_collect().await?,
         };
+        if changed.matched_count != 1 {
+            return Err(AppError::Conflict("Reply notice snapshot changed".into()));
+        }
     }
     let thread = thread.ok_or_else(refused)?;
     let entry = &thread.platform_thread.as_ref().ok_or_else(refused)?.entry;

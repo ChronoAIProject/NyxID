@@ -826,7 +826,7 @@ pub(crate) async fn settle_persisted_delete(
                 doc!{"$inc":{"billing_evidence_fence":1_i64}}).session(&mut *session).await?;
             if changed.matched_count!=1{return Err(AppError::Conflict("delete_stop_evidence_raced".into()));}
             if stop.kind == crate::models::remote_machine::DeleteStopKind::ControlPlaneWorkloadAbsent
-                && !super::remote_machine_operation_service::creation_responsibilities_terminal_in_session(&db_owned,session,&snapshot).await?
+                && !super::remote_machine_operation_service::delete_creation_responsibilities_terminal_in_session(&db_owned,session,&snapshot).await?
             {
                 return Err(AppError::Conflict("creation_result_unknown".into()));
             }
@@ -1320,7 +1320,7 @@ pub async fn finalize_never_submitted(
                 let touched=db_owned.collection::<Document>(MACHINES).update_one(doc!{"_id":&snapshot.node_id,"revision":snapshot.revision,"resource_state":{"$in":["stopping","deleting"]}},doc!{"$inc":{"never_submitted_evidence_fence":1_i64}}).session(&mut *session).await?;
                 if touched.matched_count!=1{return Err(AppError::Conflict("unsubmitted_runtime_raced".into()));}
                 if snapshot.resource_state == ResourceState::Deleting
-                    && !super::remote_machine_operation_service::creation_responsibilities_terminal_in_session(&db_owned,session,&snapshot).await? {
+                    && !super::remote_machine_operation_service::delete_creation_responsibilities_terminal_in_session(&db_owned,session,&snapshot).await? {
                     return Err(AppError::Conflict("creation_result_unknown".into()));
                 }
                 let current=db_owned.collection::<MachineRuntimeRun>(RUN_COLLECTION).find_one(doc!{"_id":&run.id}).session(&mut *session).await?.ok_or(AppError::MachineNotAllowed)?;

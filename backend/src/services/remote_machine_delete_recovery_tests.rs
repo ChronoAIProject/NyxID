@@ -4210,3 +4210,322 @@ async fn sandbox_cascade_delete_follows_durable_original_stop_and_namespace_obse
     f.slot_retained().await;
     f.db.drop().await.unwrap();
 }
+
+/// Raw documents are intentional: Option<Submission> erases missing vs null.
+async fn missing_submission_effects(f: &RecoveryFixture) -> Vec<Document> {
+    let template =
+        f.db.collection::<Document>(OUTBOX_COLLECTION)
+            .find_one(doc! {"machine_id":&f.machine.node_id,"kind":"create_sandbox"})
+            .await
+            .unwrap()
+            .unwrap();
+    let mut effects = Vec::new();
+    let historical_operation = Uuid::new_v4().to_string();
+    for index in 0..6 {
+        let mut effect = template.clone();
+        effect.insert("_id", Uuid::new_v4().to_string());
+        effect.insert("effect_digest", Uuid::new_v4().to_string());
+        effect.insert("operation_id", &historical_operation);
+        effect.insert(
+            "kind",
+            if index == 0 {
+                "create_sandbox"
+            } else {
+                "update_sandbox_deadline"
+            },
+        );
+        effect.insert("state", "applied");
+        effect.insert("attempts", index * 7);
+        effect.insert(
+            "created_at",
+            bson::DateTime::from_millis(978307200000 + index),
+        );
+        effect.remove("submission");
+        if index % 2 == 0 {
+            effect.insert("claim_id", bson::Bson::Null);
+            effect.insert("claimed_until", bson::Bson::Null);
+        } else {
+            effect.remove("claim_id");
+            effect.remove("claimed_until");
+        }
+        effects.push(effect);
+    }
+    f.db.collection::<Document>(OUTBOX_COLLECTION)
+        .insert_many(effects.clone())
+        .await
+        .unwrap();
+    effects
+}
+
+#[tokio::test]
+async fn missing_submission_delete_compatibility_raw_bson_matrix_and_strict_context() {
+    let f = recovery_fixture("delete_missing_matrix", true).await;
+    let effects = missing_submission_effects(&f).await;
+    let current = f.current().await;
+    assert!(
+        operations::delete_creation_responsibilities_terminal(&f.db, &current)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !operations::creation_responsibilities_terminal(&f.db, &current)
+            .await
+            .unwrap()
+    );
+    let id = effects[0].get_str("_id").unwrap();
+    for state in ["pending", "claimed", "retry", "dead"] {
+        f.db.collection::<Document>(OUTBOX_COLLECTION)
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{"state":state,"attempts":1_i64}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            !operations::delete_creation_responsibilities_terminal(&f.db, &current)
+                .await
+                .unwrap(),
+            "{state}"
+        );
+    }
+    f.db.collection::<Document>(OUTBOX_COLLECTION)
+        .update_one(doc! {"_id":id}, doc! {"$set":{"state":"applied"}})
+        .await
+        .unwrap();
+    for field in ["claim_id", "claimed_until"] {
+        for value in [
+            bson::Bson::String("active-or-expired-claim".into()),
+            bson::Bson::Int32(0),
+            bson::Bson::Array(vec![]),
+            bson::Bson::Document(doc! {}),
+            bson::Bson::DateTime(bson::DateTime::from_chrono(
+                Utc::now() - chrono::Duration::hours(1),
+            )),
+        ] {
+            let mut set = doc! {};
+            set.insert(field, value);
+            f.db.collection::<Document>(OUTBOX_COLLECTION)
+                .update_one(doc! {"_id":id}, doc! {"$set":set})
+                .await
+                .unwrap();
+            assert!(
+                !operations::delete_creation_responsibilities_terminal(&f.db, &current)
+                    .await
+                    .unwrap(),
+                "{field}"
+            );
+        }
+        let mut set = doc! {};
+        set.insert(field, bson::Bson::Null);
+        f.db.collection::<Document>(OUTBOX_COLLECTION)
+            .update_one(doc! {"_id":id}, doc! {"$set":set})
+            .await
+            .unwrap();
+    }
+    let original_submission =
+        f.db.collection::<Document>(OUTBOX_COLLECTION)
+            .find_one(doc! {"machine_id":&current.node_id,"submission":{"$type":"object"}})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_document("submission")
+            .unwrap()
+            .clone();
+    let mut wrong_request = original_submission.clone();
+    wrong_request.insert("request_id", "wrong");
+    let mut wrong_uid = original_submission.clone();
+    wrong_uid.insert("request_id", id);
+    wrong_uid.insert("result_sandbox_uid", "wrong");
+    let mut outstanding = original_submission.clone();
+    outstanding.insert("request_id", id);
+    outstanding.insert("completed_at", bson::Bson::Null);
+    for submission in [
+        bson::Bson::Null,
+        bson::Bson::Document(doc! {}),
+        bson::Bson::String("invalid".into()),
+        bson::Bson::Array(vec![]),
+        bson::Bson::Int32(1),
+        bson::Bson::Document(wrong_request),
+        bson::Bson::Document(wrong_uid),
+        bson::Bson::Document(outstanding),
+    ] {
+        f.db.collection::<Document>(OUTBOX_COLLECTION)
+            .update_one(doc! {"_id":id}, doc! {"$set":{"submission":submission}})
+            .await
+            .unwrap();
+        assert!(
+            !operations::delete_creation_responsibilities_terminal(&f.db, &current)
+                .await
+                .unwrap()
+        );
+    }
+    f.db.collection::<Document>(OUTBOX_COLLECTION)
+        .update_one(doc! {"_id":id}, doc! {"$unset":{"submission":""}})
+        .await
+        .unwrap();
+    for defect in 0..8 {
+        let mut invalid = current.clone();
+        match defect {
+            0 => invalid.resource_state = ResourceState::Ready,
+            1 => invalid.writer_admitted = true,
+            2 => invalid.deletion_basis = None,
+            3 => invalid.revision += 1,
+            4 => invalid.active_operation_id = Some(Uuid::new_v4().to_string()),
+            5 => invalid.writer_fence.push('x'),
+            6 => invalid.runtime_generation += 1,
+            _ => invalid.credential_epoch += 1,
+        }
+        assert!(
+            !operations::delete_creation_responsibilities_terminal(&f.db, &invalid)
+                .await
+                .unwrap(),
+            "context {defect}"
+        );
+    }
+    // No version/time/attempt or machine-ID whitelist; another authorized
+    // original delete gets exactly the same raw BSON treatment.
+    let other = recovery_fixture("delete_missing_other", true).await;
+    missing_submission_effects(&other).await;
+    assert!(
+        operations::delete_creation_responsibilities_terminal(&other.db, &other.current().await)
+            .await
+            .unwrap()
+    );
+    other.db.drop().await.unwrap();
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_submission_delete_recovery_final_transaction_rollback_and_late_scan_agree() {
+    let f = recovery_fixture("delete_missing_finality", true).await;
+    let effects = missing_submission_effects(&f).await;
+    let late_pvc = f.cluster.lock().unwrap().pvc.clone().unwrap();
+    assert!(f.step().await.is_err());
+    {
+        let mut cluster = f.cluster.lock().unwrap();
+        cluster.sandbox = None;
+        cluster.pvc = None;
+    }
+    let slot =
+        f.db.collection::<Document>(lifecycle::FREE_SLOTS)
+            .find_one(doc! {"_id":&f.machine.owner_id})
+            .await
+            .unwrap()
+            .unwrap();
+    f.db.collection::<Document>(lifecycle::FREE_SLOTS)
+        .update_one(
+            doc! {"_id":&f.machine.owner_id},
+            doc! {"$set":{"state":"released"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        f.step().await.is_err(),
+        "invalid slot must abort final transaction"
+    );
+    let pending = f.current().await;
+    assert!(pending.delete_recovery.as_ref().unwrap().creation_terminal);
+    assert!(pending.delete_recovery.as_ref().unwrap().resources_complete);
+    assert_eq!(pending.resource_state, ResourceState::Deleting);
+    let before_machine = collection_documents(&f.db, MACHINE_COLLECTION).await;
+    let before_operations = collection_documents(
+        &f.db,
+        crate::models::remote_machine_operation::COLLECTION_NAME,
+    )
+    .await;
+    let before_nodes = collection_documents(&f.db, crate::models::node::COLLECTION_NAME).await;
+    let before_audit = collection_documents(&f.db, crate::models::audit_log::COLLECTION_NAME).await;
+    assert!(
+        crate::services::remote_machine_native::finalize_persisted_delete(&f.db, &pending)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        before_machine,
+        collection_documents(&f.db, MACHINE_COLLECTION).await
+    );
+    assert_eq!(
+        before_operations,
+        collection_documents(
+            &f.db,
+            crate::models::remote_machine_operation::COLLECTION_NAME
+        )
+        .await
+    );
+    assert_eq!(
+        before_nodes,
+        collection_documents(&f.db, crate::models::node::COLLECTION_NAME).await
+    );
+    assert_eq!(
+        before_audit,
+        collection_documents(&f.db, crate::models::audit_log::COLLECTION_NAME).await
+    );
+    f.db.collection::<Document>(lifecycle::FREE_SLOTS)
+        .replace_one(doc! {"_id":&f.machine.owner_id}, slot)
+        .await
+        .unwrap();
+    // A new unresolved request after recovery's milestone must be caught by
+    // the transaction's fresh outbox query, even alongside all six exceptions.
+    let mut unresolved = effects[0].clone();
+    let blocker = Uuid::new_v4().to_string();
+    unresolved.insert("_id", &blocker);
+    unresolved.insert("kind", "update_sandbox_deadline");
+    unresolved.insert("effect_digest", Uuid::new_v4().to_string());
+    unresolved.insert("submission", bson::Bson::Null);
+    f.db.collection::<Document>(OUTBOX_COLLECTION)
+        .insert_one(unresolved)
+        .await
+        .unwrap();
+    assert!(
+        crate::services::remote_machine_native::finalize_persisted_delete(&f.db, &pending)
+            .await
+            .is_err()
+    );
+    f.slot_retained().await;
+    assert_eq!(f.current().await.resource_state, ResourceState::Deleting);
+    assert!(f.step().await.is_err());
+    assert_eq!(
+        f.current()
+            .await
+            .delete_recovery
+            .unwrap()
+            .blocker
+            .as_deref(),
+        Some("creation_result_unknown")
+    );
+    f.db.collection::<Document>(OUTBOX_COLLECTION)
+        .delete_one(doc! {"_id":blocker})
+        .await
+        .unwrap();
+    f.step().await.unwrap();
+    f.finish_assertions().await;
+    let invariants = FinalizedInvariants::capture(&f).await;
+    advance(&f.manager, &f.current().await).await.unwrap();
+    assert!(
+        f.current()
+            .await
+            .delete_recovery
+            .as_ref()
+            .unwrap()
+            .blocker
+            .is_none()
+    );
+    f.cluster.lock().unwrap().pvc = Some(late_pvc);
+    assert!(advance(&f.manager, &f.current().await).await.is_err());
+    invariants.assert_unchanged(&f).await;
+    f.cluster.lock().unwrap().pvc = None;
+    advance(&f.manager, &f.current().await).await.unwrap();
+    invariants.assert_unchanged(&f).await;
+    for effect in effects {
+        assert_eq!(
+            f.db.collection::<Document>(OUTBOX_COLLECTION)
+                .find_one(doc! {"_id":effect.get_str("_id").unwrap()})
+                .await
+                .unwrap()
+                .unwrap(),
+            effect,
+            "compatibility never fabricates or rewrites old request history"
+        );
+    }
+    f.db.drop().await.unwrap();
+}
