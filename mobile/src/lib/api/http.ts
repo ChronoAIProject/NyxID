@@ -1,3 +1,4 @@
+import { guestApprovalLabel, guestApprovalMode } from "../guestApproval";
 import { createSessionRefresh } from "../auth/sessionRefresh";
 import Constants from "expo-constants";
 import { guardedJsonTransport } from "./guardedTransport";
@@ -109,8 +110,10 @@ type BackendApprovalRequestItem = {
   resource?: string | null;
   verb?: string | null;
   approval_mode: ApprovalMode;
+  guest?: { platform: string; chat_title: string; sender_name: string; agent_name: string } | null;
   status: string;
   created_at: string;
+  expires_at: string;
   // Org context — optional so responses from older backends still
   // parse. `from_org_policy` is the authoritative flag; `org_id` and
   // `org_name` are only set when the flag is true.
@@ -345,19 +348,20 @@ function mapBackendRequestToChallenge(item: BackendApprovalRequestItem): Challen
 
   return {
     id: item.id,
-    title: sanitizeDisplayValue(item.service_name, "Unknown Service"),
+    title: `${item.guest ? "Guest request: " : ""}${sanitizeDisplayValue(item.service_name, "Unknown Service")}`,
+    guest: item.guest,
     action,
     resource,
-    approval_mode: item.approval_mode,
+    approval_mode: guestApprovalMode(item.guest, item.approval_mode),
     risk_level: deriveRiskLevel(action),
     status: mapChallengeStatus(item.status),
     created_at: item.created_at,
-    expires_at: deriveChallengeExpiry(item.created_at),
+    expires_at: item.guest ? item.expires_at : deriveChallengeExpiry(item.created_at),
     summary,
     request_context: {
       client: sanitizeDisplayValue(item.requester_type, "Unknown"),
       location: sanitizeDisplayValue(
-        item.requester_label ?? item.service_slug,
+        item.guest ? guestApprovalLabel(item.guest) : item.requester_label ?? item.service_slug,
         "Unknown"
       ),
     },

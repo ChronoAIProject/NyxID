@@ -44,7 +44,7 @@ JSON/form Git bodies retain bounded override inspection; receive-pack is a write
 
 The verb default applies only after explicit per-service/granular and org policy
 resolution. Explicit true still gates reads, explicit false allows writes, Deny
-still wins over Session bypass, and guests are refused whenever approval would
+still wins over Session bypass, and guests with the default refuse policy are refused whenever approval would
 be required. Auto-connected behavior and scheduled/durable authorization remain
 unchanged. See [the all-replica cutover](SECURITY_ROLLOUT_READINESS.md#required-approval-and-delivery)
 before relying on new-user write approval. The design history below describes
@@ -566,3 +566,36 @@ reconciliation must resolve the ambiguity outside this approval identity.
    `ServiceApprovalConfig`, the org's `rules` + `default_effect` are the complete policy;
    personal rules are not unioned in. Preserves the current absolute-org-wins contract
    and keeps first-match precedence unambiguous. Personal rules govern personal services.
+
+
+### Specialist guest requests
+
+A specialist with `guest_policy.enabled=true` may use `guest_policy.escalation=ask_owner` to request one explicit
+owner decision for a beyond-level or approval-gated foreground MCP service call.
+`ApprovalRequest.guest` binds the live specialist/conversation/turn, endpoint and
+materialized request digest, and carries bounded, sanitized guest display context.
+The suspended call revalidates the live turn, grants, operation scopes, endpoint
+contract and approval policy, including that the policy remains ON, before
+atomically consuming the approval. Switching OFF while pending prevents execution;
+guest-marked approval records retain their decision and no-remember protections
+regardless of the switch. Replays
+and identical new calls require a new decision. No reusable grant satisfies or
+results from this path, regardless of the service's mode; duration decisions fail.
+The owner's Full access setting never auto-approves a guest. Only the personal
+specialist's owner can decide; a thread key cannot decide its request. Organization
+specialists do not answer guests and refuse guest settings.
+
+Guest labels appear in push, Telegram, web and mobile, with no remember control.
+There is one pending request per thread and a rolling cap of 20 per specialist per
+hour. A known decision releases its lease even if live revalidation refuses the
+call. Uncertain creation/poll/consume persistence retains the lease to its deadline.
+Raw HTTP/LLM escalation and durable async watches refuse with
+`guest_escalation_unavailable` (12104) only under `ask_owner`. Under absent/default
+`refuse`, async watch admission retains `Forbidden("Guests cannot create async watches")`
+and async MCP calls retain the existing guest refusal. Guest WebSockets require effective `all`
+and every existing scope/approval gate; read/use refuse with 12104 under ask-owner
+or the legacy scope-refusal code under refuse. These rules apply only with policy
+ON; OFF preserves main-era errors, MCP async ordering, redirects and WebSockets,
+ignoring saved default/escalation/share values. Upgrade every API/execution/approval
+replica before enabling any specialist. Node upgrades are needed only for ON guest
+HTTP; existing no-redirect rules remain in force. See chat §12a for transport limits.

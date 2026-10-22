@@ -932,6 +932,7 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
     };
     let guest = as_chat(
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            guest_policy: Default::default(),
             invocation_controlled: false,
             invocation_id: None,
             report_to: None,
@@ -965,6 +966,7 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
 
     let webhook = as_chat(
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            guest_policy: Default::default(),
             invocation_controlled: false,
             invocation_id: None,
             report_to: None,
@@ -1393,4 +1395,29 @@ async fn receipt_bot_recipe_saves_real_lark_operations_and_checks_final_inputs()
         Err(AppError::BadRequest(message)) if message.contains("nonempty attachments")
     ));
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_policy_off_raw_approval_uses_resolved_authority_without_agent_lookup() {
+    let f =
+        crate::services::assistant_authority_tests::fixture("guest_off_approval_snapshot").await;
+    let mut chat = f.chat.clone();
+    chat.guest = true;
+    chat.guest_policy.default_access = crate::models::assistant_agent::GuestDefaultAccess::Read;
+    chat.guest_policy.escalation = crate::models::assistant_agent::GuestEscalation::AskOwner;
+    chat.guest_policy.share_skills = true;
+    // A lookup of this already-resolved OFF agent would now fail.
+    f.state.db.drop().await.unwrap();
+    for outcome in [
+        super::approval_service::ApprovalOutcome::Denied,
+        super::approval_service::ApprovalOutcome::Allowed { required: true },
+    ] {
+        let error =
+            super::agent_operation_scope_service::check_guest_approval(true, Some(&chat), &outcome)
+                .unwrap_err();
+        assert!(
+            matches!(&error, crate::errors::AppError::ApiKeyScopeForbidden(message) if message == "Guest calls cannot request or use owner approvals")
+        );
+        assert_eq!(error.error_code(), 9000);
+    }
 }

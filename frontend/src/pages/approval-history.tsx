@@ -1,3 +1,4 @@
+import { guestApprovalLabel } from "@/lib/guest-approval";
 import { useState } from "react";
 import { useApprovalRequests, useDecideApproval } from "@/hooks/use-approvals";
 import { ApiError } from "@/lib/api-client";
@@ -183,7 +184,9 @@ export function ApprovalHistoryPage() {
                       <p className="text-13 font-semibold text-foreground truncate">{request.service_name}</p>
                     )}
                     <p className="text-11 text-muted-foreground truncate">
-                      {request.requester_label ?? request.requester_type}
+                      {request.guest
+                        ? guestApprovalLabel(request.guest)
+                        : (request.requester_label ?? request.requester_type)}
                     </p>
                   </div>
                   {getStatusBadge(request.status)}
@@ -215,7 +218,9 @@ export function ApprovalHistoryPage() {
                         setDecideTarget({
                           id: request.id,
                           service: request.service_name,
-                          approvalMode: request.approval_mode,
+                          approvalMode: request.guest
+                            ? "per_request"
+                            : request.approval_mode,
                           action: "approve",
                         })
                       }
@@ -231,7 +236,9 @@ export function ApprovalHistoryPage() {
                         setDecideTarget({
                           id: request.id,
                           service: request.service_name,
-                          approvalMode: request.approval_mode,
+                          approvalMode: request.guest
+                            ? "per_request"
+                            : request.approval_mode,
                           action: "reject",
                         })
                       }
@@ -291,7 +298,9 @@ export function ApprovalHistoryPage() {
                     <TableCell>
                       <div className="flex flex-col gap-0.5">
                         <span>
-                          {request.requester_label ?? request.requester_type}
+                          {request.guest
+                            ? guestApprovalLabel(request.guest)
+                            : (request.requester_label ?? request.requester_type)}
                         </span>
                         <span className="text-11 text-muted-foreground">
                           {request.requester_type}
@@ -351,7 +360,9 @@ export function ApprovalHistoryPage() {
                                 setDecideTarget({
                                   id: request.id,
                                   service: request.service_name,
-                                  approvalMode: request.approval_mode,
+                                  approvalMode: request.guest
+                                    ? "per_request"
+                                    : request.approval_mode,
                                   action: "approve",
                                 })
                               }
@@ -366,7 +377,9 @@ export function ApprovalHistoryPage() {
                                 setDecideTarget({
                                   id: request.id,
                                   service: request.service_name,
-                                  approvalMode: request.approval_mode,
+                                  approvalMode: request.guest
+                                    ? "per_request"
+                                    : request.approval_mode,
                                   action: "reject",
                                 })
                               }

@@ -209,7 +209,7 @@ function ChallengeDetailSheet({
   const actionState = getChallengeActionState(shown);
   const riskColorMap = { high: colors.riskHigh.text, medium: colors.riskMedium.text, low: colors.riskLow.text };
   const riskColor = riskColorMap[shown.risk_level];
-  const isGrantMode = shown.approval_mode === "grant";
+  const isGrantMode = !shown.guest && shown.approval_mode === "grant";
 
   return (
     <Modal

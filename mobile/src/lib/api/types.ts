@@ -7,6 +7,7 @@ export type ChallengeItem = {
   action: string;
   resource: string;
   approval_mode: ApprovalMode;
+  guest?: { platform: string; chat_title: string; sender_name: string; agent_name: string } | null;
   risk_level: "low" | "medium" | "high";
   status: ChallengeStatus;
   created_at: string;

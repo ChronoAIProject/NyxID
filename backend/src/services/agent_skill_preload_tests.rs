@@ -41,6 +41,7 @@ impl Registry {
             specialty: None,
             grants: Default::default(),
             guest_access: Default::default(),
+            guest_policy: Default::default(),
             operation_scopes: Default::default(),
             skills: vec![SkillReference {
                 source: "ornn".into(),
@@ -346,4 +347,108 @@ async fn preload_route_rejects_non_human_credentials_before_reading_a_skill() {
         .await;
         assert!(result.is_err());
     }
+}
+
+#[tokio::test]
+async fn guest_shared_skills_supply_only_selected_preloads_and_never_nyxbot() {
+    let registry = Registry::new(&[
+        ("SKILL.md", b"Shared procedure"),
+        ("private.txt", b"Private extra"),
+    ]);
+    let mut agent = registry.agent();
+    agent.skill_metadata.get_mut(ID).unwrap().preload_paths = vec!["SKILL.md".into()];
+    assert!(instructions(&registry, &agent, true).await.is_empty());
+    agent.guest_policy.share_skills = true;
+    assert!(instructions(&registry, &agent, true).await.is_empty());
+    assert_eq!(registry.calls.load(Ordering::Relaxed), 0);
+    agent.guest_policy.enabled = true;
+    let shared = instructions(&registry, &agent, true).await;
+    assert!(shared.contains("Shared procedure"));
+    assert!(!shared.contains("Private extra"));
+    assert_eq!(registry.calls.load(Ordering::Relaxed), 1);
+    agent.kind = AgentKind::Nyxbot;
+    assert!(instructions(&registry, &agent, true).await.is_empty());
+    assert_eq!(registry.calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn guest_policy_changes_reset_instruction_binding_and_never_share_memory() {
+    use crate::services::assistant_instruction_context::Prepared;
+    let registry = Registry::new(&[("SKILL.md", b"Public guidance")]);
+    let mut agent = registry.agent();
+    let f = crate::services::assistant_authority_tests::fixture("guest_policy_context").await;
+    let mut row = f.row.clone();
+    row.guest_turn = true;
+    row.nyxagent_session_id = None;
+    let now = chrono::Utc::now();
+    agent
+        .memory
+        .push(crate::models::assistant_agent::MemoryNote {
+            id: "private".into(),
+            text: "PRIVATE OWNER MEMORY".into(),
+            created_at: now,
+            updated_at: now,
+        });
+    let before = Prepared::new(&[3; 32], &row, Some(&agent), &[]).unwrap();
+    let mut binding = before.binding.clone();
+    binding.session_id = "guest-session".into();
+    row.nyxagent_session_id = Some(binding.session_id.clone());
+    row.nyxagent_instruction_binding = Some(binding);
+    assert!(
+        !Prepared::new(&[3; 32], &row, Some(&agent), &[])
+            .unwrap()
+            .reset
+    );
+    agent.guest_policy.enabled = true;
+    agent.guest_policy.share_skills = true;
+    let after = Prepared::new(&[3; 32], &row, Some(&agent), &[]).unwrap();
+    assert!(after.reset);
+    assert_ne!(before.binding.fingerprint, after.binding.fingerprint);
+    assert!(
+        !after
+            .input_with_memory("", "question", true)
+            .contains("PRIVATE OWNER MEMORY")
+    );
+    assert!(!after.instructions().contains("PRIVATE OWNER MEMORY"));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_policy_off_preload_is_private_and_owner_failure_keeps_main_message() {
+    let f = crate::services::assistant_authority_tests::fixture("guest_off_preload").await;
+    let registry = Registry::new(&[("SKILL.md", b"private")]);
+    let mut agent = registry.agent();
+    agent.id = f.chat.agent_id.clone();
+    agent.user_id = f.row.user_id.clone();
+    agent.guest_policy.share_skills = true;
+    agent.guest_policy.escalation = crate::models::assistant_agent::GuestEscalation::AskOwner;
+    agent.guest_policy.default_access = crate::models::assistant_agent::GuestDefaultAccess::Read;
+    let mut row = f.row.clone();
+    row.guest_turn = true;
+    assert!(
+        crate::handlers::agent_skills::preload_for_turn(&f.state, &row, &agent)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    row.guest_turn = false;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            bson::doc! {"_id": &row.id},
+            bson::doc! {"$unset": {"active_turn":""}},
+        )
+        .await
+        .unwrap();
+    for enabled in [false, true] {
+        agent.guest_policy.enabled = enabled;
+        let error = crate::handlers::agent_skills::preload_for_turn(&f.state, &row, &agent)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::errors::AppError::Forbidden(message) if message == "Live owner turn required for skill preloading")
+        );
+    }
+    f.state.db.drop().await.unwrap();
 }

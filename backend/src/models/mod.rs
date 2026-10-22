@@ -142,6 +142,7 @@ pub mod assistant_channel_media;
 pub mod assistant_checkpoint;
 pub mod assistant_conversation;
 pub mod assistant_group;
+pub mod assistant_guest_escalation_budget;
 pub mod assistant_message;
 pub mod assistant_message_feedback;
 pub mod assistant_profile_route;

@@ -427,6 +427,10 @@ async fn joined_parents(db: &Database, job: &PersonalErasureJob, target: &str) -
                 ),
                 (m::assistant_agent_learning::CONFIG_COLLECTION_NAME, "_id"),
                 (
+                    crate::models::assistant_guest_escalation_budget::COLLECTION_NAME,
+                    "_id",
+                ),
+                (
                     m::assistant_agent_learning::RUNS_COLLECTION_NAME,
                     "agent_id",
                 ),

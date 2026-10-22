@@ -1047,7 +1047,7 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
         "guest_access": {"github": "use"}}))
     .await
     .unwrap();
-    assert_eq!(level().await, None);
+    assert_eq!(level().await, Some(GuestAccess::Use));
     settings::update(
         &state.db,
         OWNER,
@@ -1510,7 +1510,7 @@ fn grant_changes_merge_against_the_current_grants() {
         AgentGrants::default()
     );
     // Guest access: set per granted service, kept across other changes,
-    // dropped with the service, never stored for the default level.
+    // dropped with the service; named use levels stay explicit.
     let levels = |pairs: &[(&str, GuestAccess)]| {
         pairs
             .iter()
@@ -1527,7 +1527,11 @@ fn grant_changes_merge_against_the_current_grants() {
     .apply(&current, &none);
     assert_eq!(
         guests,
-        levels(&[("a", GuestAccess::All), ("p", GuestAccess::Read)])
+        levels(&[
+            ("a", GuestAccess::All),
+            ("b", GuestAccess::Use),
+            ("p", GuestAccess::Read)
+        ])
     );
     let (added, kept) = team::GrantChange::Add(AgentGrants {
         service_ids: ids(&["c"]),
@@ -1540,7 +1544,10 @@ fn grant_changes_merge_against_the_current_grants() {
         ..Default::default()
     })
     .apply(&added, &kept);
-    assert_eq!(kept, levels(&[("a", GuestAccess::All)]));
+    assert_eq!(
+        kept,
+        levels(&[("a", GuestAccess::All), ("b", GuestAccess::Use)])
+    );
     // The owner's replacement keeps levels for services it keeps, and sets
     // the ones it names.
     let (replaced, kept) = team::GrantChange::Replace {
@@ -1548,7 +1555,11 @@ fn grant_changes_merge_against_the_current_grants() {
             service_ids: ids(&["a", "c"]),
             ..Default::default()
         },
-        guests: levels(&[("c", GuestAccess::Read)]),
+        guests: [(
+            "c".into(),
+            crate::services::assistant_guest_policy::ServiceLevel::Read,
+        )]
+        .into(),
     }
     .apply(&removed, &kept);
     assert_eq!(
@@ -1557,10 +1568,17 @@ fn grant_changes_merge_against_the_current_grants() {
     );
     let (_, reset) = team::GrantChange::Replace {
         grants: replaced.clone(),
-        guests: levels(&[("a", GuestAccess::Use)]),
+        guests: [(
+            "a".into(),
+            crate::services::assistant_guest_policy::ServiceLevel::Use,
+        )]
+        .into(),
     }
     .apply(&replaced, &kept);
-    assert_eq!(reset, levels(&[("c", GuestAccess::Read)]));
+    assert_eq!(
+        reset,
+        levels(&[("a", GuestAccess::Use), ("c", GuestAccess::Read)])
+    );
     // A level left behind for a service no longer granted (a writer that
     // predates levels revoked it) does not come back with a new grant.
     let (_, regranted) = team::GrantChange::Add(AgentGrants {
@@ -4063,6 +4081,566 @@ async fn channel_target_preflight_conceals_unreadable_agents_and_rejects_destroy
 }
 
 #[tokio::test]
+async fn guest_policy_settings_authority_atomic_grants_and_defaults() {
+    use crate::models::assistant_agent::{GuestAccess, GuestDefaultAccess};
+    use crate::mw::auth::AuthMethod;
+    use crate::services::assistant_guest_policy::{self as policy, Patch};
+    let (state, _, server) = setup("guest_policy_settings").await;
+    let (_, chat) = orchestrator(&state).await;
+    assert!(
+        get_guest_access(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Path(chat.agent_id.clone())
+        )
+        .await
+        .is_err()
+    );
+    let github = connected(&state.db, OWNER, "github", "https://example.invalid").await;
+    spawn(
+        &state,
+        &chat,
+        json!({"name":"coder","description":"Works","services":["github"]}),
+    )
+    .await;
+    let agent = team::specialist(&state.db, OWNER, "coder").await.unwrap();
+    let dormant = patch_guest_access(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(agent.id.clone()),
+        Json(
+            serde_json::from_value(
+                json!({"default_access":"read", "escalation":"ask_owner", "share_skills":true}),
+            )
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(!dormant.guest_policy.enabled);
+    assert_eq!(dormant.effective_guest_policy, Default::default());
+    assert_eq!(dormant.services[&github].access, GuestAccess::Use);
+    let fetched = get_guest_access(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(agent.id.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(!fetched.guest_policy.enabled);
+    assert!(fetched.guest_policy.share_skills);
+    let patch = || {
+        serde_json::from_value::<Patch>(
+            json!({"enabled":true,"default_access":"read", "escalation":"ask_owner", "share_skills":true}),
+        )
+        .unwrap()
+    };
+    for method in [
+        AuthMethod::ApiKey,
+        AuthMethod::Delegated,
+        AuthMethod::Relay,
+        AuthMethod::ServiceAccount,
+    ] {
+        let mut auth = test_auth_user(OWNER);
+        auth.auth_method = method;
+        assert!(
+            patch_guest_access(
+                State(state.clone()),
+                auth.clone(),
+                Path(agent.id.clone()),
+                Json(patch())
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            get_guest_access(State(state.clone()), auth, Path(agent.id.clone()))
+                .await
+                .is_err()
+        );
+    }
+    let mut third_party = test_auth_user(OWNER);
+    third_party.auth_method = AuthMethod::AccessToken;
+    third_party.oauth_client_id = Some("app".into());
+    assert!(
+        patch_guest_access(
+            State(state.clone()),
+            third_party,
+            Path(agent.id.clone()),
+            Json(patch())
+        )
+        .await
+        .is_err()
+    );
+    assert!(serde_json::from_value::<Patch>(json!({"default_access":"all"})).is_err());
+    assert!(serde_json::from_value::<Patch>(json!({"future_setting":true})).is_err());
+    let (configured, grants) = tokio::join!(
+        patch_guest_access(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Path(agent.id.clone()),
+            Json(patch())
+        ),
+        team::set_grants(
+            &state.db,
+            OWNER,
+            &agent.id,
+            team::GrantChange::Replace {
+                grants: agent.grants.clone(),
+                guests: Default::default()
+            }
+        )
+    );
+    assert_eq!(
+        configured.unwrap().0.guest_policy.default_access,
+        GuestDefaultAccess::Read
+    );
+    grants.unwrap();
+    let agent = team::agent(&state.db, OWNER, &agent.id).await.unwrap();
+    assert_eq!(agent.guest_policy.default_access, GuestDefaultAccess::Read);
+    assert_eq!(agent.guest_level(&github), GuestAccess::Read);
+    let new_service = connected(&state.db, OWNER, "new-service", "https://example.invalid").await;
+    let agent = team::set_grants(
+        &state.db,
+        OWNER,
+        &agent.id,
+        team::GrantChange::Add(crate::models::assistant_agent::AgentGrants {
+            service_ids: vec![new_service.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(agent.guest_level(&new_service), GuestAccess::Read);
+    let agent = policy::update(
+        &state.db,
+        &state.node_ws_manager,
+        &crate::services::audit_service::AuditActor::from_auth_user(&test_auth_user(OWNER)),
+        &agent.id,
+        serde_json::from_value(json!({"services":{"github":"use"}})).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(agent.guest_policy.enabled);
+    assert_eq!(agent.guest_level(&github), GuestAccess::Use);
+    let agent = policy::update(
+        &state.db,
+        &state.node_ws_manager,
+        &crate::services::audit_service::AuditActor::from_auth_user(&test_auth_user(OWNER)),
+        &agent.id,
+        serde_json::from_value(json!({"services":{"github":"default"}})).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(agent.guest_level(&github), GuestAccess::Read);
+    assert!(!agent.guest_access.contains_key(&github));
+    assert!(
+        policy::update(
+            &state.db,
+            &state.node_ws_manager,
+            &crate::services::audit_service::AuditActor::from_auth_user(&test_auth_user(OWNER)),
+            &agent.id,
+            serde_json::from_value(json!({"services":{"new-service":"all"}})).unwrap()
+        )
+        .await
+        .is_ok()
+    );
+    // One Grants request clears a level in the same transaction as replacing grants.
+    let grant_request = |levels| {
+        serde_json::from_value::<GrantsRequest>(json!({
+            "services":["github", "new-service"], "account_read": false, "guest_access":levels,
+        }))
+        .unwrap()
+    };
+    let Json(saved) = set_agent_grants(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(agent.id.clone()),
+        Json(grant_request(json!({"github":"all"}))),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["id"], agent.id);
+    assert_eq!(
+        team::agent(&state.db, OWNER, &agent.id)
+            .await
+            .unwrap()
+            .guest_access[&github],
+        GuestAccess::All
+    );
+    let Json(saved) = set_agent_grants(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(agent.id.clone()),
+        Json(grant_request(json!({"github":"default"}))),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["id"], agent.id);
+    assert!(
+        !team::agent(&state.db, OWNER, &agent.id)
+            .await
+            .unwrap()
+            .guest_access
+            .contains_key(&github)
+    );
+    let before = team::agent(&state.db, OWNER, &agent.id).await.unwrap();
+    assert!(
+        set_agent_grants(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Path(agent.id.clone()),
+            Json(grant_request(json!({"unknown":"default"})))
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        before.guest_access,
+        team::agent(&state.db, OWNER, &agent.id)
+            .await
+            .unwrap()
+            .guest_access
+    );
+    assert_eq!(
+        before.grants,
+        team::agent(&state.db, OWNER, &agent.id)
+            .await
+            .unwrap()
+            .grants
+    );
+    for (field, value, expected) in [
+        (
+            "escalation",
+            "invalid",
+            "Invalid escalation; use refuse or ask_owner",
+        ),
+        (
+            "access",
+            "invalid",
+            "Invalid access; use read or use or all or default",
+        ),
+    ] {
+        let (value, error) = execute_tool(
+            &state,
+            &chat,
+            "nyxid__set_guest_access",
+            &json!({"subagent":"coder", "services":["github"], field:value, "share_skills":true}),
+        )
+        .await;
+        assert!(error);
+        assert!(
+            value["message"].as_str().unwrap().contains(expected),
+            "{value}"
+        );
+    }
+    let mut audit_auth = test_auth_user(OWNER);
+    audit_auth.ip_address = Some("192.0.2.7".into());
+    audit_auth.user_agent = Some("guest-policy-review".into());
+    let Json(view) = patch_guest_access(
+        State(state.clone()),
+        audit_auth,
+        Path(agent.id.clone()),
+        Json(Patch::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.agent_id, agent.id);
+    let audit = state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {"event_type":"assistant_guest_policy_changed", "ip_address":"192.0.2.7", "user_agent":"guest-policy-review"}).await.unwrap();
+    assert!(
+        audit.is_some(),
+        "REST audit retains the actual actor's request metadata"
+    );
+    // Settings must report the catalog fallback used by both MCP and raw calls.
+    let mut catalog_agent = agent.clone();
+    catalog_agent
+        .guest_access
+        .insert("catalog-override".into(), GuestAccess::All);
+    state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &github},
+            doc! {"$set": {"catalog_service_id":"catalog-override"}},
+        )
+        .await
+        .unwrap();
+    let view = policy::view(&state.db, &catalog_agent).await.unwrap();
+    assert_eq!(view.services[&github].access, GuestAccess::All);
+    assert_eq!(view.services[&github].source, "explicit");
+    state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &github},
+            doc! {"$unset": {"catalog_service_id":""}},
+        )
+        .await
+        .unwrap();
+    // Policy fields preserve the legacy bulk read/use behavior of the tool.
+    for access in ["read", "use"] {
+        let (value, error) = execute_tool(
+            &state,
+            &chat,
+            "nyxid__set_guest_access",
+            &json!({"subagent":"coder", "access":access, "escalation":"ask_owner"}),
+        )
+        .await;
+        assert!(!error, "{value}");
+        assert_eq!(value["services"][&github]["access"], access);
+        assert_eq!(value["services"][&new_service]["access"], access);
+    }
+    for access in ["all", "default"] {
+        let (_, error) = execute_tool(
+            &state,
+            &chat,
+            "nyxid__set_guest_access",
+            &json!({"subagent":"coder", "access":access, "escalation":"refuse"}),
+        )
+        .await;
+        assert!(error);
+        assert_eq!(
+            team::agent(&state.db, OWNER, &agent.id)
+                .await
+                .unwrap()
+                .guest_policy
+                .escalation,
+            crate::models::assistant_agent::GuestEscalation::AskOwner
+        );
+    }
+    let revoked = team::set_grants(
+        &state.db,
+        OWNER,
+        &agent.id,
+        team::GrantChange::Replace {
+            grants: Default::default(),
+            guests: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(revoked.guest_access.is_empty());
+    assert_eq!(
+        revoked.guest_policy.default_access,
+        GuestDefaultAccess::Read
+    );
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {"event_type":"assistant_guest_policy_changed"})
+            .await
+            .unwrap()
+            >= 3
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_policy_settings_resolve_only_granted_service_identities() {
+    use crate::models::assistant_agent::{AgentGrants, GuestAccess};
+    let (state, _, server) = setup("guest_policy_setting_identities").await;
+    let (_, chat) = orchestrator(&state).await;
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.slug = "shared-guest-service".into();
+    catalog.base_url = "https://example.invalid".into();
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let now = bson::DateTime::now();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME)
+        .insert_one(
+            doc! {"_id": Uuid::new_v4().to_string(), "service_id": &catalog.id,
+            "name":"read", "method":"GET", "path":"/one", "is_active":true,
+            "publication":"published", "created_at":now, "updated_at":now},
+        )
+        .await
+        .unwrap();
+    spawn(
+        &state,
+        &chat,
+        json!({"name":"catalog-worker", "description":"Works", "services":[catalog.id]}),
+    )
+    .await;
+    let agent = team::specialist(&state.db, OWNER, "catalog-worker")
+        .await
+        .unwrap();
+    assert_eq!(agent.grants.platform_service_ids, vec![catalog.id.clone()]);
+    assert!(agent.grants.service_ids.is_empty());
+    // Grant the catalog before an owner connection shadows it in ordinary
+    // discovery. Guest settings must keep resolving the existing catalog grant.
+    let connection = connected(
+        &state.db,
+        OWNER,
+        "shared-guest-service",
+        "https://example.invalid",
+    )
+    .await;
+    let view = patch_guest_access(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(agent.id.clone()),
+        Json(serde_json::from_value(json!({"services":{"shared-guest-service":"read"}})).unwrap()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(view.services[&catalog.id].access, GuestAccess::Read);
+    let current = team::agent(&state.db, OWNER, &agent.id).await.unwrap();
+    assert!(!current.guest_access.contains_key(&connection));
+    // The original tool arguments use the same granted-identity selector.
+    let (value, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__set_guest_access",
+        &json!({"subagent":"catalog-worker", "services":["shared-guest-service"], "access":"all"}),
+    )
+    .await;
+    assert!(!error, "{value}");
+    assert_eq!(
+        team::agent(&state.db, OWNER, &agent.id)
+            .await
+            .unwrap()
+            .guest_level(&catalog.id),
+        GuestAccess::All
+    );
+    team::set_grants(
+        &state.db,
+        OWNER,
+        &agent.id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![connection.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    // Both identities remain individually selectable when they share a slug.
+    let view = patch_guest_access(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(agent.id.clone()),
+        Json(
+            serde_json::from_value(json!({"services":{&catalog.id:"read", &connection:"all"}}))
+                .unwrap(),
+        ),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(view.services[&catalog.id].access, GuestAccess::Read);
+    assert_eq!(view.services[&connection].access, GuestAccess::All);
+    state
+        .db
+        .collection::<bson::Document>(SERVICES)
+        .update_one(doc! {"_id":&catalog.id}, doc! {"$set":{"is_active":false}})
+        .await
+        .unwrap();
+    let view = patch_guest_access(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(agent.id.clone()),
+        Json(serde_json::from_value(json!({"services":{&catalog.id:"default"}})).unwrap()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(view.services[&catalog.id].access, GuestAccess::Use);
+    assert_eq!(view.services[&catalog.id].source, "default");
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_policy_org_settings_are_refused_for_every_maintainer() {
+    use crate::services::assistant_guest_policy::{self as policy, Patch};
+    let f = crate::services::org_agent_tests::Fixture::new("guest_policy_org_refused").await;
+    let (agent, _) = f.create().await;
+    for actor in [&f.admin, &f.member] {
+        let actor =
+            crate::services::audit_service::AuditActor::from_auth_user(&test_auth_user(actor));
+        let error = policy::update(
+            &f.state.db,
+            &f.state.node_ws_manager,
+            &actor,
+            &agent.id,
+            Patch::default(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            matches!(&error, AppError::Forbidden(message) if message == "Organization specialists do not answer guests")
+        );
+        assert_eq!(error.error_code(), 1002);
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+        let error = team::set_grants(
+            &f.state.db,
+            &actor.user_id,
+            &agent.id,
+            team::GrantChange::Guests(
+                [(uuid::Uuid::new_v4().to_string(), GuestAccess::All)].into(),
+            ),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            matches!(&error, AppError::Forbidden(message) if message == "Organization agents cannot receive personal account access, saved logins or guest sharing")
+        );
+        assert_eq!(error.error_code(), 1002);
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+        // Clearing a level is also a guest-setting write, including the
+        // machine-wrapped replacement used by the Grants route.
+        let error = team::set_grants(
+            &f.state.db,
+            &actor.user_id,
+            &agent.id,
+            team::GrantChange::Machine {
+                base: Box::new(team::GrantChange::Replace {
+                    grants: agent.grants.clone(),
+                    guests: [(
+                        uuid::Uuid::new_v4().to_string(),
+                        policy::ServiceLevel::Default,
+                    )]
+                    .into(),
+                }),
+                machines: None,
+                logins: None,
+                mode: team::MachineGrantMode::Replace,
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            matches!(&error, AppError::Forbidden(message) if message == "Organization agents cannot receive personal account access, saved logins or guest sharing")
+        );
+        assert_eq!(error.error_code(), 1002);
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn personal_channel_targets_retain_owner_confirmation() {
     use crate::models::assistant_settings::AccessMode;
     let f = crate::services::org_agent_tests::Fixture::new("team_personal_channel_cards").await;
@@ -4124,4 +4702,57 @@ async fn personal_channel_targets_retain_owner_confirmation() {
         }
     }
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_policy_write_rechecks_personal_owner_in_transaction_and_destroy_removes_budget() {
+    let (state, _, server) = setup("guest_policy_write_owner_fence").await;
+    let (_, chat) = orchestrator(&state).await;
+    spawn(
+        &state,
+        &chat,
+        json!({"name":"helper", "description":"Help"}),
+    )
+    .await;
+    let agent = team::specialist(&state.db, OWNER, "helper").await.unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(doc! {"_id":OWNER}, doc! {"$set":{"is_active":false}})
+        .await
+        .unwrap();
+    let actor = crate::services::audit_service::AuditActor::from_auth_user(&test_auth_user(OWNER));
+    assert!(
+        crate::services::assistant_guest_policy::update(
+            &state.db,
+            &state.node_ws_manager,
+            &actor,
+            &agent.id,
+            serde_json::from_value(json!({"share_skills":true})).unwrap()
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        !team::agent(&state.db, OWNER, &agent.id)
+            .await
+            .unwrap()
+            .guest_policy
+            .share_skills
+    );
+    state
+        .db
+        .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(doc! {"_id":OWNER}, doc! {"$set":{"is_active":true}})
+        .await
+        .unwrap();
+    crate::services::guest_approval_service::reserve(&state.db, &agent.id, "thread", 60)
+        .await
+        .unwrap();
+    team::destroy(&state.db, OWNER, &agent.id).await.unwrap();
+    assert_eq!(state.db.collection::<crate::models::assistant_guest_escalation_budget::AssistantGuestEscalationBudget>(crate::models::assistant_guest_escalation_budget::COLLECTION_NAME)
+        .count_documents(doc! {"_id": &agent.id}).await.unwrap(), 0);
+    team::purge(&state.db, OWNER, &agent.id).await.unwrap();
+    server.abort();
+    state.db.drop().await.unwrap();
 }

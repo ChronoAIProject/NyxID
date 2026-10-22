@@ -163,6 +163,11 @@ pub enum AppError {
     )]
     AssistantTurnRequired,
 
+    #[error(
+        "Guest approval requires a foreground MCP call; this transport cannot bind and resume the exact request"
+    )]
+    GuestEscalationUnavailable,
+
     /// A NyxBot model selection names a model NyxAgent does not offer.
     #[error("The selected model is not available. Choose another model in the model selector.")]
     AssistantModelUnavailable,
@@ -852,6 +857,7 @@ impl AppError {
             Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
+            Self::GuestEscalationUnavailable => StatusCode::FORBIDDEN,
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
@@ -1082,6 +1088,7 @@ impl AppError {
             Self::ErasurePreparing => 12801,
             // 12101 is already the public upload-retention code.
             Self::AssistantTurnRequired => 12102,
+            Self::GuestEscalationUnavailable => 12104,
             Self::AssistantModelUnavailable => 12103,
             Self::AssistantAttachmentExpired => 12101,
             Self::ServiceConcurrencyLimited => 12600,
@@ -1353,6 +1360,7 @@ impl AppError {
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
+            Self::GuestEscalationUnavailable => "guest_escalation_unavailable",
             Self::AssistantModelUnavailable => "model_unavailable",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
@@ -3346,4 +3354,16 @@ fn error_debug_redacts_challenges_and_untrusted_message_details() {
         serde_json::to_value(response).unwrap()["session_token"],
         secret
     );
+}
+
+#[cfg(test)]
+mod guest_policy_error_tests {
+    use super::*;
+    #[test]
+    fn guest_escalation_unavailable_has_stable_transport_code() {
+        let error = AppError::GuestEscalationUnavailable;
+        assert_eq!(error.status_code(), StatusCode::FORBIDDEN);
+        assert_eq!(error.error_code(), 12104);
+        assert_eq!(error.error_key(), "guest_escalation_unavailable");
+    }
 }

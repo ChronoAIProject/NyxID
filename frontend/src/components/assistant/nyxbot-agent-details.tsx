@@ -63,6 +63,7 @@ import {
   useNyxBotAgent,
   useNyxBotSettings,
   useSetNyxBotAgentGrants,
+  useSetNyxBotGuestAccess,
   useUpdateNyxBotAgent,
 } from "@/hooks/use-nyxbot-agents";
 import { ApiError } from "@/lib/api-client";
@@ -86,6 +87,8 @@ import {
   assistantMemoryNoteSchema,
   ASSISTANT_AGENT_PERSONA_MAX,
   assistantAgentGrantsSchema,
+  assistantGuestPolicySchema,
+  type AssistantGuestPolicy,
   assistantAgentProfileSchema,
   nyxAgentAccessModeSchema,
   type AssistantAgent,
@@ -307,7 +310,7 @@ export function AgentDetailsSheet({
                 <>
                   <Section title="Access authority" description={accessAuthorityCopy(agent, requestMode)} />
                   <GrantsForm
-                    key={`${agent.id}:${agent.services.join(",")}:${String(agent.account_read)}:${JSON.stringify(agent.guest_access)}`}
+                    key={agent.id}
                     agent={agent}
                   />
                 </>
@@ -561,6 +564,37 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
 }
 
 function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
+  const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
+  return (
+    <Section
+      id={GRANTS_SECTION_ID}
+      title="Grants"
+      description="This specialist is sandboxed and cannot grant access itself. Saving replaces the current grants on every thread. When you talk to it directly, anything beyond them is reported to you as missing; only work NyxBot assigned, or work in a group NyxBot is in, asks NyxBot."
+    >
+      <ServiceGrantsForm
+        key={JSON.stringify([
+          agent.services,
+          agent.machines,
+          agent.logins,
+          agent.account_read,
+          agent.guest_access_explicit ?? agent.guest_access,
+        ])}
+        agent={agent}
+      />
+      {agent.owner_kind !== "org" ? (
+        <GuestPolicyForm key={JSON.stringify(agent.guest_policy)} agent={agent} />
+      ) : null}
+      {agent.can_maintain !== false ? (
+        <>
+          <AgentOperationScopes agentId={agent.id} disabled={readOnly} />
+          <MachineCapabilities agentId={agent.id} disabled={readOnly} />
+        </>
+      ) : null}
+    </Section>
+  );
+}
+
+function ServiceGrantsForm({ agent }: { readonly agent: AssistantAgent }) {
   const grants = useSetNyxBotAgentGrants();
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
   const form = useAppForm<AssistantAgentGrants>({
@@ -570,7 +604,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
       machines: agent.machines ?? [],
       logins: agent.logins ?? [],
       account_read: agent.account_read,
-      guest_access: agent.guest_access,
+      guest_access: agent.guest_access_explicit ?? agent.guest_access,
     },
   });
   const [error, setError] = useState<string>();
@@ -580,11 +614,14 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
     setError(undefined);
     // Send only the levels changed here, for services being granted: the
     // server keeps the others, and drops levels of services taken away.
-    const changed = Object.fromEntries(
-      values.services
-        .map((slug) => [slug, values.guest_access[slug] ?? "use"] as const)
-        .filter(([slug, level]) => level !== (agent.guest_access[slug] ?? "use")),
-    );
+    const changed: Record<string, AssistantGuestAccess | "default"> = {};
+    for (const slug of values.services) {
+      const level = values.guest_access[slug] ?? "default";
+      const previous = (agent.guest_access_explicit ?? agent.guest_access)[slug] ?? "default";
+      if (level !== previous) {
+        changed[slug] = level;
+      }
+    }
     try {
       await grants.mutateAsync({
         id: agent.id,
@@ -596,16 +633,15 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
       });
       form.reset(values);
     } catch (cause) {
-      setError(errorMessage(cause, "Could not save the grants. Try again."));
+      const message = errorMessage(
+        cause,
+        "Could not save the grants. Try again.",
+      );
+      setError(message);
     }
   }
 
   return (
-    <Section
-      id={GRANTS_SECTION_ID}
-      title="Grants"
-      description="This specialist is sandboxed and cannot grant access itself. Saving replaces the current grants on every thread. When you talk to it directly, anything beyond them is reported to you as missing; only work NyxBot assigned, or work in a group NyxBot is in, asks NyxBot."
-    >
       <Form {...form}>
         <form aria-label="Grants" noValidate onSubmit={form.handleSubmit(save)} className="space-y-3">
           <FormField
@@ -647,6 +683,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
                   <GuestAccessList
                     services={services}
                     value={field.value}
+                    defaultAccess={agent.guest_policy?.enabled ? agent.guest_policy.default_access : "use"}
                     onChange={field.onChange}
                     disabled={readOnly}
                   />
@@ -699,13 +736,6 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
           )}
         </form>
       </Form>
-      {agent.can_maintain !== false ? (
-        <>
-          <AgentOperationScopes agentId={agent.id} disabled={readOnly} />
-          <MachineCapabilities agentId={agent.id} disabled={readOnly} />
-        </>
-      ) : null}
-    </Section>
   );
 }
 
@@ -717,18 +747,222 @@ const GUEST_ACCESS_LABEL: Record<AssistantGuestAccess, string> = {
 
 /**
  * What people other than you may do with each granted service when they talk
- * to this agent in a group or shared chat. Anything behind your approval
- * stays yours at every level.
+ * to this agent in a group or shared chat, with explicit owner decisions for
+ * each escalation when the specialist's policy allows them.
  */
+function GuestPolicyForm({ agent }: { readonly agent: AssistantAgent }) {
+  const mutation = useSetNyxBotGuestAccess();
+  const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
+  const form = useAppForm<AssistantGuestPolicy>({
+    resolver: zodResolver(assistantGuestPolicySchema),
+    defaultValues: agent.guest_policy ?? {
+      enabled: false,
+      default_access: "use",
+      escalation: "refuse",
+      share_skills: false,
+    },
+  });
+  const enabled = form.watch("enabled");
+  const [error, setError] = useState<string>();
+  async function save(values: AssistantGuestPolicy) {
+    setError(undefined);
+    const patch = Object.fromEntries(
+      Object.entries(values).filter(
+        ([key]) =>
+          form.getFieldState(key as keyof AssistantGuestPolicy).isDirty,
+      ),
+    );
+    try {
+      await mutation.mutateAsync({ id: agent.id, ...patch });
+      form.reset(values);
+    } catch (cause) {
+      setError(
+        errorMessage(cause, "Could not save the guest policy. Try again."),
+      );
+    }
+  }
+  return (
+    <div
+      role="region"
+      aria-label="Guests"
+      className="space-y-3 border-t border-border pt-4"
+    >
+      <div className="space-y-1">
+        <p className="text-13 font-semibold">Guests</p>
+        <p className="text-12 text-muted-foreground">
+          Applies to every current and future chat this specialist answers.
+          Memory and account tools stay private. Each owner approval permits one
+          exact service call.
+        </p>
+      </div>
+      <Form {...form}>
+        <form
+          aria-label="Guest policy"
+          onSubmit={form.handleSubmit(save)}
+          className="space-y-3"
+        >
+          <FormField
+            control={form.control}
+            name="enabled"
+            render={({ field }) => (
+              <FormItem>
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <FormLabel>Guest policy</FormLabel>
+                    <FormDescription>
+                      Off keeps legacy guest access: unspecified services use
+                      Use, approvals stay private and skills are not shared.
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                      disabled={readOnly}
+                    />
+                  </FormControl>
+                </div>
+              </FormItem>
+            )}
+          />
+          <fieldset
+            disabled={!enabled || readOnly}
+            className="space-y-3 disabled:text-text-tertiary"
+          >
+            <FormField
+              control={form.control}
+              name="default_access"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Default guest level</FormLabel>
+                  <Select
+                    value={field.value}
+                    onValueChange={field.onChange}
+                    disabled={readOnly || !enabled}
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value="read">Read only</SelectItem>
+                      <SelectItem value="use">
+                        Use: read, create and act
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="escalation"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>When a guest asks for more</FormLabel>
+                  <Select
+                    value={field.value}
+                    onValueChange={field.onChange}
+                    disabled={readOnly || !enabled}
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value="refuse">Refuse</SelectItem>
+                      <SelectItem value="ask_owner">
+                        Ask me to approve
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <FormDescription>
+                    At most one pending request per guest thread and 20 requests
+                    per specialist per hour.
+                  </FormDescription>
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="share_skills"
+              render={({ field }) => (
+                <FormItem>
+                  <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
+                    <div>
+                      <FormLabel>Share skills with guests</FormLabel>
+                      <FormDescription>
+                        Include skill guidance and your selected preloads.
+                        Learning and editing skills remain private.
+                      </FormDescription>
+                    </div>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                        disabled={readOnly || !enabled}
+                      />
+                    </FormControl>
+                  </div>
+                </FormItem>
+              )}
+            />
+          </fieldset>
+          {error ? (
+            <p role="alert" className="text-12 text-destructive">
+              {error}
+            </p>
+          ) : null}
+          {!readOnly ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                className="h-auto whitespace-normal text-left"
+                onClick={() => {
+                  form.setValue("enabled", true);
+                  form.setValue("default_access", "use");
+                  form.setValue("escalation", "ask_owner");
+                  form.setValue("share_skills", true);
+                }}
+              >
+                Same as me for everyday work; ask me for the rest
+              </Button>
+              <div className="flex justify-end">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  size="sm"
+                  isLoading={mutation.isPending}
+                  disabled={!form.formState.isDirty}
+                >
+                  Save guest policy
+                </Button>
+              </div>
+            </>
+          ) : null}
+        </form>
+      </Form>
+    </div>
+  );
+}
+
 function GuestAccessList({
+  defaultAccess,
   services,
   value,
   onChange,
   disabled,
 }: {
   readonly services: readonly string[];
-  readonly value: Record<string, AssistantGuestAccess>;
-  readonly onChange: (value: Record<string, AssistantGuestAccess>) => void;
+  readonly value: Record<string, AssistantGuestAccess | "default">;
+  readonly defaultAccess: "read" | "use";
+  readonly onChange: (
+    value: Record<string, AssistantGuestAccess | "default">,
+  ) => void;
   readonly disabled?: boolean;
 }) {
   return (
@@ -741,8 +975,8 @@ function GuestAccessList({
           For people other than you in the agent&apos;s group and shared chats.
           &ldquo;Use&rdquo; lets them look things up, create and act (send a
           message, turn a light on), but not change or delete what already
-          exists. Anything behind your approval stays yours. You can also ask
-          NyxBot to change this.
+          exists. Calls beyond these levels follow the Guests policy below. You
+          can also ask NyxBot to change this.
         </p>
       </div>
       <ul aria-label="Guest access" className="space-y-1.5">
@@ -757,16 +991,22 @@ function GuestAccessList({
                 {slug}
               </label>
               <Select
-                value={value[slug] ?? "use"}
+                value={value[slug] ?? "default"}
                 disabled={disabled}
                 onValueChange={(level) =>
-                  onChange({ ...value, [slug]: level as AssistantGuestAccess })
+                  onChange({
+                    ...value,
+                    [slug]: level as AssistantGuestAccess | "default",
+                  })
                 }
               >
                 <SelectTrigger id={id} className="w-56">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="default">
+                    Default ({GUEST_ACCESS_LABEL[defaultAccess]})
+                  </SelectItem>
                   {(Object.keys(GUEST_ACCESS_LABEL) as AssistantGuestAccess[]).map((level) => (
                     <SelectItem key={level} value={level}>
                       {GUEST_ACCESS_LABEL[level]}

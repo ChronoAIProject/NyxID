@@ -568,6 +568,7 @@ async fn org_agent_threads_are_private_and_memory_is_shared() {
         let summary = team::summaries(&f.state.db, person, false, false, 0)
             .await
             .unwrap();
+        assert!(summary[0].guest_access.is_empty());
         assert_eq!(
             summary[0].home_conversation_id.as_deref(),
             Some(row.id.as_str())
@@ -822,6 +823,42 @@ async fn org_agent_grants_refuse_personal_cross_org_and_account_resources() {
     )
     .await
     .unwrap();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_agent_grants_preserve_legacy_forbidden_for_personal_resources() {
+    use crate::{errors::AppError, models::assistant_agent::GuestAccess};
+    use axum::response::IntoResponse;
+
+    let f = Fixture::new("org_agent_legacy_grant_refusals").await;
+    let (agent, _) = f.create().await;
+    for actor in [&f.admin, &f.member] {
+        for resource in ["guest_access", "account_read", "saved_logins", "combined"] {
+            let mut invalid = agent.clone();
+            if matches!(resource, "guest_access" | "combined") {
+                invalid
+                    .guest_access
+                    .insert(Uuid::new_v4().to_string(), GuestAccess::Use);
+            }
+            if matches!(resource, "account_read" | "combined") {
+                invalid.grants.account_read = true;
+            }
+            if matches!(resource, "saved_logins" | "combined") {
+                invalid.saved_login_ids.push(Uuid::new_v4().to_string());
+            }
+            let error = org_agents::validate_grants(&f.state.db, actor, &invalid)
+                .await
+                .unwrap_err();
+            assert!(matches!(&error, AppError::Forbidden(message)
+                if message == "Organization agents cannot receive personal account access, saved logins or guest sharing"));
+            assert_eq!(error.error_code(), 1002);
+            assert_eq!(
+                error.into_response().status(),
+                axum::http::StatusCode::FORBIDDEN
+            );
+        }
+    }
     f.state.db.drop().await.unwrap();
 }
 

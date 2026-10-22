@@ -38,6 +38,7 @@ export interface ConnectCardContentBlock {
 }
 
 export interface ApprovalCardContentBlock {
+  readonly guest?: import("./approvals").GuestApprovalContext | null;
   readonly type: "approval_card";
   readonly block_id: string;
   readonly approval_request_id: string;

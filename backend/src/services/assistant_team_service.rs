@@ -190,6 +190,7 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         specialty: None,
         grants: AgentGrants::default(),
         guest_access: BTreeMap::new(),
+        guest_policy: Default::default(),
         operation_scopes: Default::default(),
         operation_scope_revisions: Default::default(),
         created_by: "user".into(),
@@ -1161,6 +1162,7 @@ async fn create_specialist_inner(
             account_read: request.account_read,
         },
         guest_access: BTreeMap::new(),
+        guest_policy: Default::default(),
         operation_scopes: Default::default(),
         operation_scope_revisions: Default::default(),
         created_by: request.created_by.into(),
@@ -1506,7 +1508,7 @@ pub enum GrantChange {
     /// the guest access levels it names (others are kept).
     Replace {
         grants: AgentGrants,
-        guests: BTreeMap<String, GuestAccess>,
+        guests: BTreeMap<String, super::assistant_guest_policy::ServiceLevel>,
     },
     /// Add these targets, and account access when `account_read` is set.
     Add(AgentGrants),
@@ -1524,6 +1526,15 @@ pub enum MachineGrantMode {
 }
 
 impl GrantChange {
+    fn writes_guest_access(&self) -> bool {
+        match self {
+            Self::Machine { base, .. } => base.writes_guest_access(),
+            Self::Replace { guests, .. } => !guests.is_empty(),
+            Self::Guests(_) => true,
+            Self::Add(_) | Self::Remove(_) => false,
+        }
+    }
+
     /// The grants and guest access levels after this change.
     pub fn apply(
         &self,
@@ -1541,7 +1552,13 @@ impl GrantChange {
                 guests: levels,
             } => {
                 grants = replacement.clone();
-                guests.extend(levels.clone());
+                for (id, level) in levels {
+                    if let Some(level) = level.explicit() {
+                        guests.insert(id.clone(), level);
+                    } else {
+                        guests.remove(id);
+                    }
+                }
             }
             Self::Add(add) => {
                 for (list, ids) in [
@@ -1577,7 +1594,8 @@ impl GrantChange {
             .chain(&current.platform_service_ids)
             .collect();
         let named: HashSet<&String> = match self {
-            Self::Replace { guests: levels, .. } | Self::Guests(levels) => levels.keys().collect(),
+            Self::Replace { guests: levels, .. } => levels.keys().collect(),
+            Self::Guests(levels) => levels.keys().collect(),
             Self::Add(_) | Self::Remove(_) => HashSet::new(),
             Self::Machine { .. } => unreachable!("handled above"),
         };
@@ -1587,7 +1605,7 @@ impl GrantChange {
             .iter()
             .chain(&grants.platform_service_ids)
             .collect();
-        guests.retain(|id, level| granted.contains(id) && *level != GuestAccess::Use);
+        guests.retain(|id, _| granted.contains(id));
         (grants, guests)
     }
 }
@@ -1651,6 +1669,9 @@ pub async fn apply_grants_in_session(
     session: &mut ClientSession,
 ) -> AppResult<AssistantAgent> {
     let current = maintained_agent(db, owner, agent_id).await?;
+    if owner != current.user_id && change.writes_guest_access() {
+        return Err(AppError::Forbidden("Organization agents cannot receive personal account access, saved logins or guest sharing".into()));
+    }
     let collection = db.collection::<AssistantAgent>(AGENTS);
     let filter = doc! {"_id": agent_id, "user_id": &current.user_id, "kind": "specialist",
     "destroyed_at": bson::Bson::Null};
@@ -1805,16 +1826,26 @@ pub async fn set_grants_as(
     let db_owned = db.clone();
     let owner_owned = owner.to_owned();
     let agent_id = agent_id.to_owned();
-    let agent = session
+    let (old_guest_access, agent) = session
         .start_transaction()
         .and_run2(async move |session| {
-            let operation = Box::pin(apply_grants_in_session(
-                &db_owned,
-                &owner_owned,
-                &agent_id,
-                &change,
-                session,
-            ))
+            let operation = async {
+                let old = db_owned
+                    .collection::<AssistantAgent>(AGENTS)
+                    .find_one(doc! {"_id": &agent_id})
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+                let agent = Box::pin(apply_grants_in_session(
+                    &db_owned,
+                    &owner_owned,
+                    &agent_id,
+                    &change,
+                    session,
+                ))
+                .await?;
+                Ok((old.guest_access, agent))
+            }
             .await;
             transactions::transaction_result(operation)
         })
@@ -1840,6 +1871,18 @@ pub async fn set_grants_as(
         }),
     )
     .await;
+    if old_guest_access != agent.guest_access {
+        audit(
+            db,
+            owner,
+            "assistant_guest_policy_changed",
+            serde_json::json!({
+                "agent_id": &agent.id, "actor": approver_user_id,
+                "old_levels": old_guest_access, "new_levels": &agent.guest_access,
+            }),
+        )
+        .await;
+    }
     Ok(agent)
 }
 
@@ -1872,6 +1915,8 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     .await?
                     .ok_or_else(not_found)?;
                 db.collection::<bson::Document>(crate::models::channel_adapter::BINDINGS).update_many(doc!{"agent_id":&agent.id,"enabled":true},doc!{"$set":{"enabled":false},"$inc":{"revision":1}}).session(&mut *session).await?;
+                db.collection::<crate::models::assistant_guest_escalation_budget::AssistantGuestEscalationBudget>(crate::models::assistant_guest_escalation_budget::COLLECTION_NAME)
+                    .delete_one(doc! {"_id": &agent.id}).session(&mut *session).await?;
                 super::assistant_agent_learning::destroyed_in_session(db, &agent.id, session)
                     .await?;
                 Box::pin(super::machine_access_service::destroyed_in_session(
@@ -1999,6 +2044,11 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
         crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
     )
     .delete_many(doc! {"agent_id": &agent.id})
+    .await?;
+    db.collection::<crate::models::assistant_guest_escalation_budget::AssistantGuestEscalationBudget>(
+        crate::models::assistant_guest_escalation_budget::COLLECTION_NAME,
+    )
+    .delete_one(doc! {"_id": &agent.id})
     .await?;
     db.collection::<AssistantAgent>(AGENTS)
         .delete_one(doc! {"_id": &agent.id, "user_id": &agent.user_id})
@@ -2207,6 +2257,9 @@ pub struct AgentSummary {
     /// What guests may do with each granted service, by the name in
     /// `services`: `read`, `use` or `all`.
     pub guest_access: BTreeMap<String, &'static str>,
+    pub guest_policy: crate::models::assistant_agent::GuestPolicy,
+    pub effective_guest_policy: crate::models::assistant_agent::GuestPolicy,
+    pub guest_access_explicit: BTreeMap<String, &'static str>,
     pub pending_requests: Vec<RequestSummary>,
     pub last_reply: Option<ReplySummary>,
     pub home_conversation_id: Option<String>,
@@ -2326,7 +2379,7 @@ pub async fn request_summaries(
 async fn slug_names(
     db: &Database,
     agents: &[AssistantAgent],
-) -> AppResult<HashMap<String, String>> {
+) -> AppResult<(HashMap<String, String>, HashMap<String, String>)> {
     let user_services: Vec<String> = agents
         .iter()
         .flat_map(|agent| agent.grants.service_ids.clone())
@@ -2340,6 +2393,7 @@ async fn slug_names(
         .into_iter()
         .collect();
     let mut names = HashMap::new();
+    let mut catalogs = HashMap::new();
     for (collection, ids) in [
         (crate::models::user_service::COLLECTION_NAME, user_services),
         (crate::models::downstream_service::COLLECTION_NAME, platform),
@@ -2350,15 +2404,18 @@ async fn slug_names(
         let mut cursor = db
             .collection::<bson::Document>(collection)
             .find(doc! {"_id": {"$in": &ids}})
-            .projection(doc! {"slug": 1})
+            .projection(doc! {"slug": 1, "catalog_service_id": 1})
             .await?;
         while let Some(row) = cursor.try_next().await? {
             if let (Ok(id), Ok(slug)) = (row.get_str("_id"), row.get_str("slug")) {
                 names.insert(id.to_owned(), slug.to_owned());
+                if let Ok(catalog) = row.get_str("catalog_service_id") {
+                    catalogs.insert(id.to_owned(), catalog.to_owned());
+                }
             }
         }
     }
-    Ok(names)
+    Ok((names, catalogs))
 }
 
 async fn last_reply(
@@ -2411,7 +2468,7 @@ pub async fn summaries(
     if !include_nyxbot {
         rows.retain(|agent| !agent.is_nyxbot());
     }
-    let names = slug_names(db, &rows).await?;
+    let (names, catalogs) = slug_names(db, &rows).await?;
     let requests = pending_requests(db, owner).await?;
     let by_thread = request_agents(db, owner, &requests, &rows).await?;
     let running = running_agents(db, owner).await?;
@@ -2491,15 +2548,45 @@ pub async fn summaries(
                 })
                 .collect(),
             account_read: agent.grants.account_read,
+            guest_policy: agent.guest_policy.clone(),
+            effective_guest_policy: agent.effective_guest_policy(),
+            guest_access_explicit: agent
+                .guest_access
+                .iter()
+                .map(|(id, level)| {
+                    (
+                        if org_owned {
+                            id.clone()
+                        } else {
+                            names.get(id).cloned().unwrap_or_else(|| id.clone())
+                        },
+                        level.as_str(),
+                    )
+                })
+                .collect(),
             guest_access: agent
                 .grants
                 .service_ids
                 .iter()
-                .chain(&agent.grants.platform_service_ids)
                 .filter(|_| !org_owned)
+                .chain(
+                    agent
+                        .grants
+                        .platform_service_ids
+                        .iter()
+                        .filter(|_| !org_owned),
+                )
                 .map(|id| {
-                    let name = names.get(id).cloned().unwrap_or_else(|| id.clone());
-                    let level = agent.guest_access.get(id).copied().unwrap_or_default();
+                    let name = if org_owned {
+                        id.clone()
+                    } else {
+                        names.get(id).cloned().unwrap_or_else(|| id.clone())
+                    };
+                    let level = if agent.guest_policy.enabled {
+                        agent.guest_level_for(id, catalogs.get(id).map(String::as_str))
+                    } else {
+                        agent.guest_level(id)
+                    };
                     (name, level.as_str())
                 })
                 .collect(),

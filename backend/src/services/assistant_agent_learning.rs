@@ -1532,6 +1532,7 @@ mod tests {
             specialty: None,
             grants: Default::default(),
             guest_access: Default::default(),
+            guest_policy: Default::default(),
             operation_scopes: Default::default(),
             skills: Vec::new(),
             skills_revision: 0,

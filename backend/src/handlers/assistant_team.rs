@@ -1113,7 +1113,7 @@ pub(crate) async fn execute_tool(
 ) -> (Value, bool) {
     let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
     if chat.guest {
-        return (acks::guest_refusal(), true);
+        return (acks::guest_refusal_for(chat), true);
     }
     if !chat.is_orchestrator() && !assistant_team_tools::is_agent_tool(name) {
         return refusal(
@@ -1865,6 +1865,71 @@ async fn dispatch_agent_settings(
     Ok(match name {
         "set_guest_access" => {
             let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
+            if args.get("enabled").is_some()
+                || args.get("default").is_some()
+                || args.get("escalation").is_some()
+                || args.get("share_skills").is_some()
+                || args["access"] == "default"
+            {
+                let mut input = json!({});
+                for (tool, field) in [
+                    ("enabled", "enabled"),
+                    ("default", "default_access"),
+                    ("escalation", "escalation"),
+                    ("share_skills", "share_skills"),
+                ] {
+                    if let Some(value) = args.get(tool) {
+                        input[field] = value.clone();
+                    }
+                }
+                if let Some(access) = args.get("access") {
+                    let mut requested = string_list(args, "services");
+                    if requested.is_empty() {
+                        if matches!(access.as_str(), Some("read" | "use")) {
+                            requested = agent
+                                .grants
+                                .service_ids
+                                .iter()
+                                .chain(&agent.grants.platform_service_ids)
+                                .cloned()
+                                .collect();
+                        } else {
+                            return Err(AppError::ValidationError(
+                                "Name services for all access or clearing guest overrides".into(),
+                            ));
+                        }
+                    }
+                    input["services"] = json!(
+                        requested
+                            .into_iter()
+                            .map(|name| (name, access.clone()))
+                            .collect::<BTreeMap<_, _>>()
+                    );
+                }
+                let patch = serde_json::from_value(input)
+                    .map_err(|_| AppError::ValidationError("Invalid guest policy".into()))?;
+                let agent = Box::pin(crate::services::assistant_guest_policy::update(
+                    db,
+                    state.node_ws_manager.as_ref(),
+                    &crate::services::audit_service::AuditActor {
+                        user_id: owner.into(),
+                        ip_address: None,
+                        user_agent: None,
+                        api_key_id: Some(chat.api_key_id.clone()),
+                        api_key_name: None,
+                    },
+                    &agent.id,
+                    patch,
+                ))
+                .await?;
+                return Ok((
+                    serde_json::to_value(
+                        crate::services::assistant_guest_policy::view(db, &agent).await?,
+                    )
+                    .map_err(|_| AppError::Internal("Guest policy response failed".into()))?,
+                    false,
+                ));
+            }
             let access = args["access"]
                 .as_str()
                 .and_then(GuestAccess::parse)
@@ -1887,15 +1952,17 @@ async fn dispatch_agent_settings(
             if requested.is_empty() {
                 levels.extend(granted.iter().map(|id| ((*id).clone(), access)));
             } else {
-                let (targets, refused) = Box::pin(team::resolve_each_target(
-                    db,
-                    state.node_ws_manager.as_ref(),
-                    owner,
-                    &requested,
-                ))
+                let (targets, refused) = Box::pin(
+                    crate::services::assistant_guest_policy::resolve_each_target(
+                        db,
+                        state.node_ws_manager.as_ref(),
+                        &agent,
+                        &requested,
+                    ),
+                )
                 .await?;
                 not_set.extend(refused);
-                for (request, id) in &targets.ids_by_request {
+                for (request, id) in &targets {
                     if granted.contains(&id) {
                         levels.insert(id.clone(), access);
                     } else {
@@ -2989,7 +3056,7 @@ pub struct GrantsRequest {
     /// What guests may do with each of `services` (by the same name or ID);
     /// services left out keep their current level.
     #[serde(default)]
-    guest_access: BTreeMap<String, GuestAccess>,
+    guest_access: BTreeMap<String, crate::services::assistant_guest_policy::ServiceLevel>,
 }
 
 /// The owner sets a specialist's grants directly (replacing them), with
@@ -3502,6 +3569,43 @@ pub(crate) async fn operation_owner_card(
     ))
     .await?;
     Ok((acks::refusal(&card), true))
+}
+
+/// Metadata-only view; writes share the existing first-party maintainer gate.
+pub async fn get_guest_access(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<crate::services::assistant_guest_policy::View>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &actor).await?;
+    let agent = team::maintained_agent(&state.db, &actor, &id).await?;
+    Ok(Json(
+        crate::services::assistant_guest_policy::view(&state.db, &agent).await?,
+    ))
+}
+
+pub async fn patch_guest_access(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<crate::services::assistant_guest_policy::Patch>,
+) -> AppResult<Json<crate::services::assistant_guest_policy::View>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &actor).await?;
+    let agent = Box::pin(crate::services::assistant_guest_policy::update(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+        &id,
+        body,
+    ))
+    .await?;
+    Ok(Json(
+        crate::services::assistant_guest_policy::view(&state.db, &agent).await?,
+    ))
 }
 
 #[cfg(test)]

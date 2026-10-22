@@ -166,6 +166,7 @@ pub async fn claim(
         now + Duration::from_std(lease_ttl).unwrap_or_else(|_| Duration::seconds(i64::MAX / 4));
     let owner = NodeConnectionOwner {
         http_signature_v2: false,
+        http_guest_no_redirect: false,
         proxy_upload_v1: false,
         http_cancellation: false,
         instance_name: identity.instance_name.clone(),
@@ -267,6 +268,7 @@ pub async fn record_capabilities(
                 "$set": {
                     "machine": bson::to_bson(&machine).map_err(|_| crate::errors::AppError::Internal("Machine profile encoding failed".into()))?,
                     "connection_owner.http_signature_v2": capabilities.http_signature_v2,
+                    "connection_owner.http_guest_no_redirect": capabilities.http_guest_no_redirect,
                     "connection_owner.proxy_upload_v1": capabilities.proxy_upload_v1,
                     "connection_owner.http_cancellation": capabilities.http_cancellation,
                     "connection_owner.credential_ack_correlation": capabilities.credential_ack_correlation,

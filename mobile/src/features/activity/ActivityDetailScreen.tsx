@@ -279,7 +279,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   const grantDurationLabel = formatGrantDuration(settingsQuery.data?.grant_expiry_days);
   const riskColorMap = { high: colors.riskHigh.text, medium: colors.riskMedium.text, low: colors.riskLow.text };
   const riskColor = riskColorMap[data.risk_level];
-  const isGrantMode = data.approval_mode === "grant";
+  const isGrantMode = !data.guest && data.approval_mode === "grant";
 
   return (
     <ScreenContainer>

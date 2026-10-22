@@ -94,7 +94,7 @@ fn selected_files(
 }
 
 pub fn enabled(agent: &AssistantAgent, guest: bool) -> bool {
-    !guest
+    (!guest || agent.shares_guest_skills())
         && agent.destroyed_at.is_none()
         && agent.skills.iter().any(|pin| {
             !pin.disabled

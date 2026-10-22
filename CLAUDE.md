@@ -54,6 +54,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12101 `AssistantAttachmentExpired` (HTTP 410, `attachment_expired`): an assistant upload is no longer available under retention policy.
 - 12102 `AssistantTurnRequired` (HTTP 409, `assistant_turn_required`): a conversation key attempted execution without a live turn. (12101 is already reserved by upload retention.)
 - 12103 `AssistantModelUnavailable` (HTTP 400, `model_unavailable`): a NyxBot model selection names a model NyxAgent's live list does not offer; turn-time upstream model rejections settle with the same `model_unavailable` code.
+- 12104 `GuestEscalationUnavailable` (HTTP 403, `guest_escalation_unavailable`): applies only to guest turns with the specialist policy ON. Raw proxy/LLM escalation and durable async paths use it only under `ask_owner`; WebSockets require explicit `all`, with read/use using this code under `ask_owner` and legacy scope refusal under `refuse`. ON guest HTTP requires a node supporting no-redirect. Policy OFF preserves legacy transport behavior and errors.
 - 12200 `AdminUsageQueryTimeout` (HTTP 503): bounded admin usage aggregation timed out; retry with a narrower window or filters.
 - 12300 `WorkspaceDestinationsNotActivated` (HTTP 503): incomplete automatic Drive/Workspace editor reconciliation; excluded from proxy-fault telemetry
 - 12400-12422 machine nodes: 12400 `MachineCapabilityDisabled`, 12401 `MachineNotAllowed`, 12402 `MachinePathOutsideRoots`, 12403 `MachineJobNotFound`, 12404 `MachineConfirmationPending`, 12405 `MachineConfirmationDeclined`, 12406 `MachineComputerUnavailable`, 12407 `MachineLimitExceeded`, 12408 `MachineOwnerInControl`, 12409 `MachineNotIsolated`, 12410 `MachineLoginNotFound`, 12411 `MachineLoginOriginMismatch`, 12412 `MachineLoginWrongField`, 12413 `MachineBrowserUnavailable`, 12414 `MachineDriverRestarting`, 12415 `MachineComputerPermissionMissing`, 12416 `MachineComputerToolUnsupported`, 12417 `MachineDisplayUnavailable`, 12418 `MachineTurnStopped`, 12419 `MachineAuthorityUnsupported`, 12420 `MachinePermissionRevoked`, 12421 `MachineAuthorityStale`, 12422 `MachineAuthorityBusy`. Nodes also use 12419 for `separated_context_unavailable` and 12421 for `context_quarantine_pending`.
@@ -409,6 +410,8 @@ All NyxID replicas must be upgraded before any agent skill pin is disabled becau
 
 
 Automation turns share the engine and team pool, with admission fenced inside `begin_turn` and no trigger lookup on ordinary turns. Schedule tools are NyxBot-only; webhook thread isolation and confirmation rules are in Rule 14 and `docs/NYXBOT_SCHEDULES.md`.
+
+Specialists store `guest_policy` beside grants, with `enabled=false` by default. OFF preserves legacy guest levels (missing = use), refusals, redirects, WebSockets and private skills; saved default/escalation/share values are dormant. ON applies default read/use, single-use explicit owner escalation and optional shared skill guidance/preloads; memory and owner tools remain private. ON guest HTTP does not follow redirects and requires upgraded nodes; ON WebSockets need explicit all and still pass every existing gate. Upgrade all API/execution/approval replicas before enabling any specialist; only ON guest routing requires node upgrades. Keep new binaries for rollback to OFF. See chat §12a.
 
 ## Channel Bot Notes
 

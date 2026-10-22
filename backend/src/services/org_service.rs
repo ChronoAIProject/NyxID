@@ -802,6 +802,19 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     db.collection::<bson::Document>(crate::models::org_invite::COLLECTION_NAME)
         .delete_many(doc! { "org_user_id": org_user_id })
         .await?;
+    // Legacy guest budgets join their specialist owner. New org guest settings
+    // are refused, but erasure must still remove rows persisted by older writers.
+    let mut agents = db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find(doc! {"user_id": org_user_id})
+        .projection(doc! {"_id": 1})
+        .await?;
+    while let Some(agent) = agents.try_next().await? {
+        if let Ok(id) = agent.get_str("_id") {
+            db.collection::<crate::models::assistant_guest_escalation_budget::AssistantGuestEscalationBudget>(crate::models::assistant_guest_escalation_budget::COLLECTION_NAME)
+                .delete_one(doc! {"_id": id}).await?;
+        }
+    }
     // Hard-delete the org user record itself
     db.collection::<User>(USERS)
         .delete_one(doc! { "_id": org_user_id })
@@ -1521,6 +1534,29 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn guest_policy_org_erasure_removes_legacy_budget_rows() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("guest_org_budget_erasure").await;
+        let org = Uuid::new_v4().to_string();
+        let agent = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .insert_one(doc! {"_id": &agent, "user_id": &org})
+            .await
+            .unwrap();
+        super::super::guest_approval_service::reserve(&db, &agent, "thread", 60)
+            .await
+            .unwrap();
+        delete_org_user(&db, &org).await.unwrap();
+        assert_eq!(db.collection::<crate::models::assistant_guest_escalation_budget::AssistantGuestEscalationBudget>(crate::models::assistant_guest_escalation_budget::COLLECTION_NAME)
+            .count_documents(doc! {"_id": &agent}).await.unwrap(), 0);
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn org_client_cascade_fences_existing_machine_grants_and_sweeps_overflow() {
