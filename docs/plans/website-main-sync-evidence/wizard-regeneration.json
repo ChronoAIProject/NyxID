@@ -1,0 +1,108 @@
+{
+  "sourceCommit": "c99e2310366d5d13629b14dd3939786744e0b8cb",
+  "run": "https://github.com/aelf-hzz780/NyxID/actions/runs/39716036156",
+  "jobId": 119621344046,
+  "artifact": "https://github.com/aelf-hzz780/NyxID/actions/runs/39716036156/artifacts/12399831595",
+  "artifactDigest": "sha256:81efc8cd43ae4c36b44ac578b174380408ef80dec3c66dfb81441e41bbec17b3",
+  "downloadedDigestVerified": true,
+  "command": "npm run build:wizard",
+  "producer": "Unmodified install-wizard-bundle.mjs",
+  "manifestEntries": 178,
+  "computedFromCurrentSource": "8be48051a5b3f4ac469466fc5cf1e6922722ec35c8354ef60acaaf251acf7356",
+  "generatedRecordedHash": "8be48051a5b3f4ac469466fc5cf1e6922722ec35c8354ef60acaaf251acf7356",
+  "authoritativeCargoTest": "Not run in the producing run (stale committed hash); final source 58a45da9735cc6ce442a17ef501f5fea3e484789 passed the unchanged Rust test in run 39717322160. See final-verification.json.",
+  "files": [
+    {
+      "path": "cli/src/wizard/assets/index.html",
+      "beforeSha256": "edba6a5246c3e50a32824c2d40a4273e16b896822fd4db0d6b1ea0dc9b3f52cd",
+      "generatedSha256": "a586eb38fd3dbf1e0a8fcc44968953a17e401132b0938fce20223c5eb5cb05e1",
+      "changed": true,
+      "bytes": 988227
+    },
+    {
+      "path": "cli/src/wizard/assets/favicon.ico",
+      "beforeSha256": "047cb5dea2b351b1a452b3539b1c8544f36d6fd4d519897f2ce5861cdbafb7b0",
+      "generatedSha256": "047cb5dea2b351b1a452b3539b1c8544f36d6fd4d519897f2ce5861cdbafb7b0",
+      "changed": false,
+      "bytes": 4286
+    },
+    {
+      "path": "cli/src/wizard/assets/nyxid-coloured-logo.svg",
+      "beforeSha256": "6fd0c555629089fb4253083c26fccb3e2ec22e340351a0654080607673a10a40",
+      "generatedSha256": "6fd0c555629089fb4253083c26fccb3e2ec22e340351a0654080607673a10a40",
+      "changed": false,
+      "bytes": 4343
+    },
+    {
+      "path": "cli/src/wizard/assets/nyxid-coloured-logo-dark.svg",
+      "beforeSha256": "8274955ecf9404d02ac66bc84eae77caa50b7a265baeb4198b657e5da13eb47f",
+      "generatedSha256": "8274955ecf9404d02ac66bc84eae77caa50b7a265baeb4198b657e5da13eb47f",
+      "changed": false,
+      "bytes": 4347
+    },
+    {
+      "path": "cli/src/wizard/assets/nyxid-wordmark.svg",
+      "beforeSha256": "6fd0c555629089fb4253083c26fccb3e2ec22e340351a0654080607673a10a40",
+      "generatedSha256": "6fd0c555629089fb4253083c26fccb3e2ec22e340351a0654080607673a10a40",
+      "changed": false,
+      "bytes": 4343
+    },
+    {
+      "path": "cli/src/wizard/assets/nyxid-app-icon.svg",
+      "beforeSha256": "5d298f408ca908af6814aceca4e7e1ece08eb7413ae8739dc074a3195c6b6657",
+      "generatedSha256": "5d298f408ca908af6814aceca4e7e1ece08eb7413ae8739dc074a3195c6b6657",
+      "changed": false,
+      "bytes": 5198
+    },
+    {
+      "path": "cli/src/wizard/assets/fonts/OFL.txt",
+      "beforeSha256": "a3e5cdd67d4571dd0a24fcc968de0efde7ae97ef752daf0906e4767619dd7231",
+      "generatedSha256": "a3e5cdd67d4571dd0a24fcc968de0efde7ae97ef752daf0906e4767619dd7231",
+      "changed": false,
+      "bytes": 4605
+    },
+    {
+      "path": "cli/src/wizard/assets/fonts/dm-serif-display-400.woff2",
+      "beforeSha256": "f273cf2c9ce9bc7d6b0f4fcb8aee72f8cf5a249991308b6a144217e0760c5d3f",
+      "generatedSha256": "f273cf2c9ce9bc7d6b0f4fcb8aee72f8cf5a249991308b6a144217e0760c5d3f",
+      "changed": false,
+      "bytes": 17844
+    },
+    {
+      "path": "cli/src/wizard/bundle-meta/index.manifest",
+      "beforeSha256": "a52063c3c344fcc743ac392f7d13160014d37d8517363a906a8f402c1831e6c8",
+      "generatedSha256": "a52063c3c344fcc743ac392f7d13160014d37d8517363a906a8f402c1831e6c8",
+      "changed": false,
+      "bytes": 8761
+    },
+    {
+      "path": "cli/src/wizard/bundle-meta/index.hash",
+      "beforeSha256": "6d1c3f0aab48635bfe83b534cb5dbdca371abef8409deb6ea34b5c1bb818d2e4",
+      "generatedSha256": "56db9846537ad68a13dc5a6f10d7969ad60fa5156a04737085235404bb1ef12b",
+      "changed": true,
+      "bytes": 65
+    }
+  ],
+  "generatedHtmlBlockReview": {
+    "script": {
+      "blocks": 1,
+      "beforeHashes": [
+        "18815dab26d96edda13de4aa49383cc1f82f8ec815912919b11d349613816ae1"
+      ],
+      "generatedHashes": [
+        "18815dab26d96edda13de4aa49383cc1f82f8ec815912919b11d349613816ae1"
+      ],
+      "identical": true
+    },
+    "style": {
+      "blocks": 1,
+      "beforeHashes": [
+        "6d224c675c048ad55952868c8e77d78fdc09418579986289df6bc552645e5f83"
+      ],
+      "generatedHashes": [
+        "24161e618eaea55bb80ca520b14c604323617f118c4c798c88f740013e77c7aa"
+      ],
+      "identical": false
+    }
+  }
+}

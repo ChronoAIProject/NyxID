@@ -1,0 +1,36 @@
+Source: 58a45da9735cc6ce442a17ef501f5fea3e484789
+Run: https://github.com/aelf-hzz780/NyxID/actions/runs/39717322160
+
+default
+2026-10-22T03:32:06.6761566Z Ran 6 tests in 0.003s
+2026-10-22T03:33:10.8418571Z  Test Files  38 passed (38)
+2026-10-22T03:33:10.8420081Z       Tests  338 passed (338)
+2026-10-22T03:34:31.4412068Z Public artifact gate passed: 91 pages.
+2026-10-22T03:34:38.1234950Z Public HTTP gate passed: 227 serial checks.
+2026-10-22T03:34:38.1786259Z Public log privacy gate passed: request and referrer queries omitted.
+2026-10-22T03:35:20.8691207Z   10 passed (18.4s)
+
+on fixture
+2026-10-22T03:36:56.2811478Z Public artifact gate passed: 91 pages.
+2026-10-22T03:36:56.4365617Z Single help-desk fixture configuration verified; not production delivery or real task acceptance.
+2026-10-22T03:37:56.6349579Z   2 passed (7.4s)
+2026-10-22T03:37:56.6830214Z Single help-desk fixture configuration verified; not production delivery or real task acceptance.
+
+wizard rebuild
+2026-10-22T03:39:33.4340800Z install-wizard-bundle: wrote cli/src/wizard/assets/index.html
+2026-10-22T03:39:33.4342925Z install-wizard-bundle: wrote cli/src/wizard/assets/nyxid-wordmark.svg
+2026-10-22T03:39:33.4343879Z install-wizard-bundle: wrote cli/src/wizard/assets/favicon.ico
+2026-10-22T03:39:33.4344735Z install-wizard-bundle: wrote cli/src/wizard/assets/nyxid-app-icon.svg
+2026-10-22T03:39:33.4345667Z install-wizard-bundle: wrote cli/src/wizard/assets/nyxid-coloured-logo.svg
+2026-10-22T03:39:33.4346992Z install-wizard-bundle: wrote cli/src/wizard/assets/nyxid-coloured-logo-dark.svg
+2026-10-22T03:39:33.4347969Z install-wizard-bundle: wrote cli/src/wizard/bundle-meta/index.manifest (178 files)
+2026-10-22T03:39:33.4349197Z install-wizard-bundle: wrote cli/src/wizard/bundle-meta/index.hash (8be48051a5b3…)
+2026-10-22T03:39:35.3442577Z cmp /tmp/wizard-committed.hash ../cli/src/wizard/bundle-meta/index.hash
+
+authoritative Rust test
+2026-10-22T03:40:06.7323725Z ##[group]Run cargo test -p nyxid-cli --test wizard_bundle_freshness
+2026-10-22T03:40:06.7324344Z cargo test -p nyxid-cli --test wizard_bundle_freshness
+2026-10-22T03:42:26.5980008Z      Running tests/wizard_bundle_freshness.rs (target/debug/deps/wizard_bundle_freshness-38a5cb82409f4818)
+2026-10-22T03:42:26.6000887Z running 1 test
+2026-10-22T03:42:26.6201197Z test wizard_bundle_is_fresh ... ok
+2026-10-22T03:42:26.6202202Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
