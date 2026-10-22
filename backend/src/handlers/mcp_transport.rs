@@ -2314,6 +2314,17 @@ fn chat_activity_label(params: &serde_json::Value) -> String {
         .get("name")
         .and_then(|n| n.as_str())
         .unwrap_or("tool");
+    // A wrapped attached-skill read is still a skill read. Only compiled
+    // native names can escape the downstream-name privacy redaction.
+    let name = if name == "nyx__call_tool" {
+        params
+            .get("arguments")
+            .and_then(|arguments| arguments.get("tool_name"))
+            .and_then(|name| name.as_str())
+            .unwrap_or("tool")
+    } else {
+        name
+    };
     let native = name != "nyx__call_tool" && native_activity_names().contains(name);
     if native {
         name.to_owned()
@@ -7361,6 +7372,12 @@ mod tests {
                 chat_activity_label(&serde_json::json!({"name":name})),
                 *name
             );
+            assert_eq!(
+                chat_activity_label(&serde_json::json!({
+                    "name":"nyx__call_tool", "arguments":{"tool_name":name},
+                })),
+                *name
+            );
         }
         for name in [
             "github__private_text",
@@ -7377,6 +7394,12 @@ mod tests {
             assert_eq!(
                 chat_activity_label(
                     &serde_json::json!({"name":"nyx__call_tool","arguments":{"name":name}})
+                ),
+                "tool"
+            );
+            assert_eq!(
+                chat_activity_label(
+                    &serde_json::json!({"name":"nyx__call_tool","arguments":{"tool_name":name}})
                 ),
                 "tool"
             );
