@@ -349,10 +349,15 @@ When a runner exits with code 143 during compilation, inspect the last completed
 step before treating it as a test failure. Repeated shutdowns at the same compile
 stage need a build-resource correction rather than repeated full-workflow retries.
 
-The CI profile schedules the capacity-wait heartbeat test alone to keep
-concurrent database creation and cleanup out of its timing window. Head and
+The CI profile schedules the capacity-wait heartbeat, trigger grace deadline,
+and bounded analytics admission tests alone to keep concurrent database creation
+and cleanup out of their timing windows. Head and
 base coverage use the same checked-out nextest configuration, which is included
 in the coverage-cache fingerprint.
+Both coverage jobs set `RUST_MIN_STACK=16777216` (16 MiB) so instrumented native
+journeys can also run on base revisions predating their explicit stack helper.
+This changes test-thread capacity only; assertions, selection and thresholds stay
+the same. The workflow setting is included in the coverage-cache fingerprint.
 Backend test and coverage jobs allow 120 minutes for compilation and the full
 suite. Each test retains the CI profile's five-minute deadline and no retries.
 

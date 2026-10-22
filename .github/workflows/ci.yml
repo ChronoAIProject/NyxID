@@ -857,6 +857,9 @@ jobs:
     # Resource samples record whether compilation approaches runner limits.
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # Older base revisions lack the native journey's explicit stack helper.
+      # Use the same 16 MiB test-thread stack for both coverage measurements.
+      RUST_MIN_STACK: "16777216"
       # Merge per-test coverage into four profiles per binary to bound disk use.
       LLVM_PROFILE_FILE_NAME: "nyxid-%4m.profraw"
     steps:
@@ -962,6 +965,7 @@ jobs:
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      RUST_MIN_STACK: "16777216"
       LLVM_PROFILE_FILE_NAME: "nyxid-%4m.profraw"
     steps:
       - uses: actions/checkout@v6

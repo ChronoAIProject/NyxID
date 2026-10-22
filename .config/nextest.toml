@@ -10,10 +10,10 @@ path = "junit.xml"
 store-success-output = false
 store-failure-output = true
 
-# This test observes real MongoDB heartbeats against wall-clock deadlines.
-# Keep concurrent fixture creation and cleanup out of its observation window.
+# These tests observe real MongoDB work against wall-clock deadlines.
+# Keep concurrent fixture creation and cleanup out of their observation windows.
 [[profile.ci.overrides]]
-filter = "test(=handlers::assistant_nyxagent::tests::capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot)"
+filter = "test(=handlers::assistant_nyxagent::tests::capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot) | test(=handlers::assistant_nyxagent::tests::capacity_retry_after_never_extends_trigger_grace_deadline)"
 threads-required = "num-cpus"
 
 # These tests require positive live-consent reads within the production 200ms
@@ -21,5 +21,5 @@ threads-required = "num-cpus"
 # MongoDB fixture churn cannot turn their healthy-admission preconditions into
 # intentional fail-closed drops. Keep the real deadlines and all assertions.
 [[profile.ci.overrides]]
-filter = "test(=telemetry::tests::track_enqueues_scrubbed_capture_job_with_common_properties) | test(=telemetry::tests::track_silently_drops_when_channel_is_full) | test(=telemetry::tests::dispatch_checks_live_revision_across_independent_clients)"
+filter = "test(=telemetry::tests::track_enqueues_scrubbed_capture_job_with_common_properties) | test(=telemetry::tests::track_silently_drops_when_channel_is_full) | test(=telemetry::tests::dispatch_checks_live_revision_across_independent_clients) | test(=services::analytics_dispatch_service::tests::retained_uncertainty_is_bounded_without_expiring_proof_and_accepted_rows_are_removed)"
 threads-required = "num-cpus"
