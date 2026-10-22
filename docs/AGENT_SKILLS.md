@@ -30,7 +30,7 @@ expanded bytes, entry count and paths; reject traversal, symlinks, duplicate
 paths and malformed packages. Never extract to disk or execute scripts.
 
 Turn instructions contain exact root skill IDs in a tool-ready `skill` field,
-bounded names, one-line descriptions and exact versions, with an explicit
+bounded names, one-line descriptions and exact versions by default, with an explicit
 untrusted-guidance notice. The reader defaults to `SKILL.md`; `path: "/"`
 lists package files. Reuse already-read guidance within a session while current
 and fetch only the references needed for the task. Guest turns omit skills.
@@ -116,6 +116,50 @@ uses fixed read-only paths, and has a 30-second timeout per request.
 Native reads carry the calling thread key as an API-key requester, including
 live scoped-operation context; they never receive the browser-session approval
 bypass. Human UI reads retain ordinary browser-session behavior.
+
+## Preloading
+
+Every NyxBot and specialist bot, including organization-owned specialists,
+supports preloading through its Skills editor using the usual maintainer
+permissions. Each bot chooses which attached skills and files to preload.
+The editor offers **Preload settings** on each attached skill.
+Enable **Preload for every turn**, keep `SKILL.md`, and optionally list additional
+package-relative `.md` or `.txt` files, one per line. Save applies to the next
+turn, including existing conversations. Each skill may select at most eight
+unique text files; selected content across the agent is limited to 64 KiB of
+UTF-8 bytes. The editor displays the selected content's size separately from
+the compressed archive size. Disabling preloading uses an empty file list.
+
+`PUT /api/v1/assistant/nyxagent/agents/{id}/skills/{skill_id}/preload` is a
+first-party human-only, engine-gated maintenance operation with
+`{expected_revision, paths}`. It shares `skills_revision` with attachment,
+removal and re-pinning, verifies the attached package's SHA-256 and all selected
+files before saving, and stores only paths and byte counts in skill metadata.
+No bodies are stored on agents. Removing a pin removes its preload metadata;
+re-pinning or publishing an improved version resets that pin's preload settings.
+Disabling a pin suspends its preload without deleting the selection.
+
+For each owner turn, the host retrieves each selected package once through
+the same live, scoped Ornn reader as `skill_read`, verifies its exact version
+and hash, and adds the complete selected files as quoted, untrusted reference
+data before inference, with a 30-second bound on total preload preparation.
+The bot does not need a skill tool call for these files.
+The prepared content is reused by that turn's automatic continuations. There
+is no package cache or cross-person content reuse: automatic preloading still
+performs authorized server-side retrieval at turn preparation and does not
+eliminate that network latency. File contents consume model context tokens.
+Guest turns receive no skill contents and perform no preload reads.
+
+Preloaded content participates in the stable instruction fingerprint. A file
+selection, pin change, removal, disable or access failure can reset an existing
+upstream context before the next answer. An unavailable, tampered, oversized,
+missing or non-text selection omits that whole skill and supplies a fixed
+unavailable notice; it does not inject partial files or stop other work. Normal
+proxy approvals and operation restrictions remain authoritative. Audit records
+the agent/skill IDs, revision, file count and byte count, never file content.
+
+Upgrade all backend replicas before configuring preloads; older replicas omit
+the new context and can replace skill metadata without the new settings.
 
 ## Owner-requested authoring
 

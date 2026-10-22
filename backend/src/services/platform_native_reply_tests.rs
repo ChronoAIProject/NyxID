@@ -764,6 +764,7 @@ async fn committed_discord_help(
     let producers = crate::services::platform_manager_transport::compose(
         state.clone(),
         std::sync::Arc::new(NativeSettledHook),
+        crate::handlers::agent_skills::preload_context(state.clone()),
     );
     let lifecycle = LifecycleProducer {
         personal: producers.personal.clone(),
@@ -877,6 +878,7 @@ fn signed_discord_command_uses_real_admission_and_final_delivery_claim_once() {
             let producers = crate::services::platform_manager_transport::compose(
                 state.clone(),
                 std::sync::Arc::new(NativeSettledHook),
+                crate::handlers::agent_skills::preload_context(state.clone()),
             );
             assert_eq!(
                 delivery::sweep(
@@ -1098,6 +1100,7 @@ fn native_final_claim_and_terminal_persistence_share_one_deadline_without_resend
                 let producers = crate::services::platform_manager_transport::compose(
                     state.clone(),
                     Arc::new(NativeSettledHook),
+                    crate::handlers::agent_skills::preload_context(state.clone()),
                 );
                 assert_eq!(
                     delivery::sweep(
@@ -1235,6 +1238,7 @@ fn native_preparation_failure_cleanup_is_bounded_and_never_sends_late() {
             let producers = crate::services::platform_manager_transport::compose(
                 state.clone(),
                 Arc::new(NativeSettledHook),
+                crate::handlers::agent_skills::preload_context(state.clone()),
             );
             assert_eq!(
                 delivery::sweep(
@@ -1290,6 +1294,7 @@ fn retained_signed_native_receipt_produces_real_login_status_and_manager_admissi
             let producers = crate::services::platform_manager_transport::compose(
                 state.clone(),
                 std::sync::Arc::new(NativeSettledHook),
+                crate::handlers::agent_skills::preload_context(state.clone()),
             );
             let lifecycle = LifecycleProducer {
                 personal: producers.personal.clone(),

@@ -126,6 +126,7 @@ export function storedError(code: string | null, capacityWaitMs?: number | null)
   if (code === "model_unavailable") return "The selected model is unavailable. Choose another model in the model selector.";
   if (code === "model_interrupted") return "The model's response was interrupted. Some actions may already have completed — check them before retrying.";
   if (code === "session_busy") return "The assistant session is busy. Try again shortly.";
+  if (code === "queue_timeout") return "Your other NyxBot replies were still running, so this message was not started. Send it again.";
   if (code === "capacity_exceeded") {
     const waited = capacityWaitMs != null && capacityWaitMs > 0
       ? ` (waited ${formatCapacityWait(capacityWaitMs)})` : "";
@@ -711,7 +712,7 @@ export class NyxAgentTransport {
       });
     }
     if ((conversation?.active_turn?.waiting_for_capacity || conversation?.active_turn?.capacity_wait_note_origin === "nyxid_system") && this.acceptedTurns.get(conversation.id) !== conversation.active_turn?.turn_id) {
-      messages = messages.map((message) => message.status === "streaming" ? { ...message, waitingForCapacity: conversation.active_turn?.waiting_for_capacity, systemNote: conversation.active_turn?.capacity_wait_note_origin === "nyxid_system" ? "capacity_wait" : undefined, capacityWaitStartedAt: conversation.active_turn?.engine_request_started_at ?? conversation.active_turn?.capacity_wait_started_at, capacityWaitDeadline: conversation.active_turn?.capacity_wait_deadline } : message);
+      messages = messages.map((message) => message.status === "streaming" ? { ...message, waitingForCapacity: conversation.active_turn?.waiting_for_capacity, queued: conversation.active_turn?.queued, systemNote: conversation.active_turn?.capacity_wait_note_origin === "nyxid_system" ? "capacity_wait" : undefined, capacityWaitStartedAt: conversation.active_turn?.engine_request_started_at ?? conversation.active_turn?.capacity_wait_started_at, capacityWaitDeadline: conversation.active_turn?.capacity_wait_deadline } : message);
     }
     const resetAt = conversation?.context_reset_at;
     if (resetAt || live?.resetBeforeMessageId) {
@@ -877,7 +878,12 @@ export class NyxAgentTransport {
           body: {
             ...(id
               ? { conversation_id: id }
-              : { model, ...(options.agent ? { agent_id: options.agent.id } : {}) }),
+              : {
+                  // Let the server use the agent's configured profile unless the
+                  // owner made an explicit model selection for this new thread.
+                  ...(!options.agent || options.model ? { model } : {}),
+                  ...(options.agent ? { agent_id: options.agent.id } : {}),
+                }),
             text,
             ...(options.retryOf ? { retry_of: options.retryOf } : {}),
             ...(options.acknowledgementId ? { acknowledgement_id: options.acknowledgementId } : {}),
@@ -955,6 +961,7 @@ export class NyxAgentTransport {
                   activities: previous?.activities ?? [],
                   attachments: previous?.attachments ?? [],
                   waiting_for_capacity: !accepted && (event.waiting_for_capacity ?? false),
+                  queued: !accepted && event.status === "waiting" && (event.queued ?? false),
                   capacity_wait_note_origin: !accepted && event.status === "waiting" ? event.capacity_wait_note_origin ?? previous?.capacity_wait_note_origin : null,
                   engine_request_started_at: event.engine_request_started_at ?? previous?.engine_request_started_at,
                   capacity_wait_started_at: event.capacity_wait_started_at ?? previous?.capacity_wait_started_at,

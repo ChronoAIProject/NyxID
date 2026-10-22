@@ -844,6 +844,11 @@ its next turn when its stored fingerprint differs and receives the normal recap.
 Legacy sessions follow the reset-or-adopt migration rules below; this change
 does not force every legacy session to reset at deployment.
 
+Verified Notion block reads also support [compact section evidence and an
+optional `result_query`](10-source-resources.md#compact-notion-evidence).
+This separately implemented presentation step ranks the current returned block
+page; it does not synchronize a workspace or cache changing source facts.
+
 For media requests, the instructions distinguish a verified attachment from a
 link. An authorized operation must materialize the requested attachment;
 without one, the agent supplies a verified usable source link and explains the
@@ -1095,6 +1100,25 @@ History requests have a 15-second deadline and never pause the token reader;
 active turns retain a five-second polling backstop even with live notifications
 (two seconds without them). The notification stream reconnects after 45 seconds
 without bytes, including keepalive comments, and reports connecting while closed.
+
+Each person may have four browser turns running at once (shared with Direct
+model chat) and start 30 per minute. A NyxAgent turn sent while all four run is
+still admitted: it claims its conversation's turn fence, saves the user message
+and waits (`active_turn.queued_at`/`queue_deadline`) until one of the person's
+running slots frees, checking the cluster slot store every two seconds. Waiting
+turns start in arrival order, and a new turn joins the queue whenever another is
+already waiting. At most eight turns per person wait; a send beyond that is
+refused with 429. The stream opens with `turn.status` `waiting`, `queued: true`
+and the capacity-wait clock fields, which older clients already render;
+conversation responses report the same through `active_turn.queued` and the
+capacity-wait fields. A waiting turn holds a renewable queue place and keeps its
+heartbeat, so Stop, deletion and orphan recovery behave as for a running turn;
+steering is unavailable until it runs. Queuing extends the turn's lease by the queue wait, so waiting never
+shortens the turn, and the queue's own writes are time-bounded and raced with
+Stop. A turn still waiting after ten minutes settles as `queue_timeout`
+without calling NyxAgent or resetting the conversation's context; a turn that
+stops waiting gives its capacity back before it settles. Server-started turns
+use their own owner pools and never queue here.
 
 Stop sets a durable flag on the exact active turn. Its worker polls every 250 ms,
 drops the upstream stream, saves partial text as failed/error `cancelled`, clears
@@ -1664,6 +1688,13 @@ settings menu selects a thread's model with
 model for an agent's new threads with `PATCH /assistant/nyxagent/agents/{id}`
 (`model`), and NyxBot can change an agent's model with `nyxid__update_subagent`
 `model`, which the owner's access mode treats as a sensitive change.
+
+New threads with no explicit `model` inherit the selected agent's configured
+profile. The app omits the model for an agent draft unless the owner explicitly
+selected one; an explicit selection wins. Existing conversations retain their
+stored model when the agent default changes. This rule also applies to API
+turns, so a specialist's faster profile is not silently replaced by the global
+chat default.
 
 The default composer exposes a Thinking toggle: on selects `nyxagent/research`,
 off selects `nyxagent/chat`. `assistant:model-controls` (default off) replaces

@@ -1176,6 +1176,7 @@ async fn server_main() {
         services::platform_manager_transport::compose(
             state.clone(),
             handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+            handlers::agent_skills::preload_context(state.clone()),
         ),
     );
     handlers::trigger_scheduler::spawn(state.clone());

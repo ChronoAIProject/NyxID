@@ -533,6 +533,7 @@ impl Handshake {
         let producers = crate::services::platform_manager_transport::compose(
             state.clone(),
             Arc::new(UnusedOwnerHook),
+            crate::handlers::agent_skills::preload_context(state.clone()),
         );
         let actor = AuditActor {
             user_id: actor_id,

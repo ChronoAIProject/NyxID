@@ -42,9 +42,6 @@ use crate::{
     },
 };
 
-/// Channel turns are bounded per owner, separately from browser turns.
-pub const CHANNEL_TURNS_PER_OWNER: u32 = 2;
-
 /// The owner identity NyxID uses for turns it starts itself (specialist
 /// work, wake-ups, channel messages): the same person a browser turn acts for.
 pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
@@ -113,7 +110,7 @@ async fn acquire(state: &AppState, pool: Pool<'_>) -> AppResult<Option<DirectCha
         Pool::Channel { owner } => {
             state
                 .direct_chat_limiter
-                .try_acquire_pool("assistant_channel", owner, CHANNEL_TURNS_PER_OWNER)
+                .try_acquire_pool("assistant_channel", owner, team::CHANNEL_TURNS_PER_OWNER)
                 .await
         }
     }

@@ -4025,6 +4025,118 @@ async fn upstream_cancelled_image_round_keeps_completed_text() {
     state.db.drop().await.unwrap();
 }
 
+#[tokio::test]
+async fn http_turns_inherit_specialist_model_and_preserve_explicit_and_existing_choices() {
+    use crate::services::assistant_team_service as team;
+
+    async fn send(state: &AppState, body: Value) -> AssistantConversation {
+        let mut request = turn_request(None);
+        *request.body_mut() = Body::from(body.to_string());
+        let response = turns(State(state.clone()), test_auth_user(OWNER), request)
+            .await
+            .unwrap();
+        let stream = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let events: Vec<Value> = std::str::from_utf8(&stream)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect();
+        let status = events
+            .iter()
+            .find(|event| event["event"] == "turn.status")
+            .unwrap();
+        let completed = events
+            .iter()
+            .find(|event| event["event"] == "turn.completed")
+            .unwrap();
+        assert_eq!(completed["status"], "completed", "{completed}");
+        let row = engine::get(
+            &state.db,
+            OWNER,
+            status["conversation_id"].as_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(row.active_turn.is_none());
+        row
+    }
+
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let (specialist, _) = team::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        team::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "faq".into(),
+            description: "Answers restaurant questions".into(),
+            display_name: None,
+            persona: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &specialist.id},
+            doc! {"$set": {"model": "nyxagent/channel"}},
+        )
+        .await
+        .unwrap();
+
+    let default = send(&state, json!({"text": "hello"})).await;
+    assert_eq!(default.model, engine::DEFAULT_MODEL);
+    let inherited = send(
+        &state,
+        json!({"text": "opening hours?", "agent_id": specialist.id}),
+    )
+    .await;
+    assert_eq!(inherited.agent_id.as_deref(), Some(specialist.id.as_str()));
+    assert_eq!(inherited.model, "nyxagent/channel");
+    let explicit = send(
+        &state,
+        json!({"text": "research", "agent_id": specialist.id, "model": "nyxagent/research"}),
+    )
+    .await;
+    assert_eq!(explicit.model, "nyxagent/research");
+    let continued = send(
+        &state,
+        json!({"text": "continue", "conversation_id": explicit.id}),
+    )
+    .await;
+    assert_eq!(continued.id, explicit.id);
+    assert_eq!(continued.model, "nyxagent/research");
+    let models: Vec<String> = calls
+        .lock()
+        .await
+        .iter()
+        .filter_map(|call| call.body["model"].as_str())
+        .filter(|model| model.starts_with("nyxagent/"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        models,
+        [
+            engine::DEFAULT_MODEL,
+            "nyxagent/channel",
+            "nyxagent/research",
+            "nyxagent/research"
+        ]
+    );
+    server.abort();
+}
+
 /// The model selector validates against NyxAgent's live list, refuses busy
 /// threads, resets the context on a real change and audits who changed it.
 #[tokio::test]
@@ -4501,12 +4613,16 @@ async fn capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot() {
     assert!(turn.capacity_wait_deadline.is_some());
     assert!((Utc::now() - turn.heartbeat_at.unwrap()).num_seconds() < 15);
     assert_eq!(calls.lock().await.len(), 1);
-    let other = state.direct_chat_limiter.try_acquire(OWNER).await.unwrap();
+    // The waiting turn still holds one of the owner's running slots.
+    let mut others = Vec::new();
+    for _ in 1..crate::mw::rate_limit::DIRECT_CHAT_MAX_IN_FLIGHT {
+        others.push(state.direct_chat_limiter.try_acquire(OWNER).await.unwrap());
+    }
     assert!(matches!(
         state.direct_chat_limiter.try_acquire(OWNER).await,
         Err(AppError::RateLimited)
     ));
-    drop(other);
+    drop(others);
     // The durable wait is visible before the worker starts sleeping. Observe
     // retry arrival within its original admission deadline, then bound settlement
     // separately so that residual backoff does not consume the stream's budget.
@@ -5247,5 +5363,518 @@ async fn refused_admission_release_failure_stops_without_billing_attribution() {
     let (_, _, pause) =
         crate::services::trigger_schedule::failure_streak(None, 0, reply.error_code.as_deref());
     assert!(!pause);
+    server.abort();
+}
+
+async fn hold_running_slots(state: &AppState) -> Vec<crate::mw::rate_limit::DirectChatPermit> {
+    let mut running = Vec::new();
+    for _ in 0..crate::mw::rate_limit::DIRECT_CHAT_MAX_IN_FLIGHT {
+        running.push(state.direct_chat_limiter.try_acquire(OWNER).await.unwrap());
+    }
+    running
+}
+
+/// One claim attempt, as a waiting turn makes each poll.
+async fn try_take_slot(permit: &mut crate::mw::rate_limit::DirectChatPermit) -> bool {
+    let Some(claim) = permit.claim_slot() else {
+        return true;
+    };
+    match claim.await.unwrap().unwrap() {
+        Some(slot) => permit.take_slot(slot),
+        None => false,
+    }
+}
+
+/// Poll like a waiting turn until the permit trades its place for a slot.
+async fn take_slot(permit: &mut crate::mw::rate_limit::DirectChatPermit) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !try_take_slot(permit).await {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("a running slot within the timeout");
+}
+
+/// Pause running-slot claims on this test's thread.
+fn gate_claims() -> Arc<crate::mw::rate_limit::SlotClaimGate> {
+    let gate = Arc::new(crate::mw::rate_limit::SlotClaimGate {
+        arrived: tokio::sync::Notify::new(),
+        open: tokio::sync::Semaphore::new(0),
+    });
+    crate::mw::rate_limit::gate_slot_claims(Some(gate.clone()));
+    gate
+}
+
+/// Wait until every running slot can be claimed again, then free them. Probes
+/// the slot store directly, outside the per-minute request window.
+async fn running_slots_all_free(state: &AppState) {
+    use crate::mw::rate_limit::{DIRECT_CHAT_MAX_IN_FLIGHT, DIRECT_CHAT_NAMESPACE};
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut held = Vec::new();
+            while let Some(slot) = state
+                .cluster_slot_manager
+                .acquire(DIRECT_CHAT_NAMESPACE, OWNER, DIRECT_CHAT_MAX_IN_FLIGHT)
+                .await
+                .unwrap()
+            {
+                held.push(slot);
+            }
+            if held.len() == DIRECT_CHAT_MAX_IN_FLIGHT as usize {
+                return;
+            }
+            drop(held);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("no running slot stays claimed");
+}
+
+/// Await `arrived` within ten seconds, failing if `worker` finishes first.
+async fn claim_outstanding<T: std::fmt::Debug>(
+    gate: &crate::mw::rate_limit::SlotClaimGate,
+    worker: &mut tokio::task::JoinHandle<T>,
+) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            () = gate.arrived.notified() => {}
+            finished = worker => panic!("the wait ended before its claim: {finished:?}"),
+        }
+    })
+    .await
+    .expect("a claim within the timeout");
+}
+
+async fn queued_row(state: &AppState) -> AssistantConversation {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(row) = state
+                .db
+                .collection::<AssistantConversation>(
+                    crate::models::assistant_conversation::COLLECTION_NAME,
+                )
+                .find_one(doc! {"user_id": OWNER, "active_turn.queued_at": {"$ne": null}})
+                .await
+                .unwrap()
+            {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("turn queued")
+}
+
+#[tokio::test]
+async fn admission_queues_beyond_the_running_slots_and_refuses_a_full_queue() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let _running = hold_running_slots(&state).await;
+    assert!(matches!(
+        state.direct_chat_limiter.try_acquire(OWNER).await,
+        Err(AppError::RateLimited)
+    ));
+    let mut queued = Vec::new();
+    for _ in 0..crate::mw::rate_limit::DIRECT_CHAT_MAX_QUEUED {
+        let permit = state.direct_chat_limiter.admit(OWNER).await.unwrap();
+        assert!(permit.is_queued());
+        queued.push(permit);
+    }
+    assert!(matches!(
+        state.direct_chat_limiter.admit(OWNER).await,
+        Err(AppError::RateLimited)
+    ));
+    // Each person has their own running slots.
+    assert!(
+        !state
+            .direct_chat_limiter
+            .admit("other")
+            .await
+            .unwrap()
+            .is_queued()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_queued_permit_takes_the_first_running_slot_that_frees() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let mut running = hold_running_slots(&state).await;
+    let mut permit = state.direct_chat_limiter.admit(OWNER).await.unwrap();
+    assert!(permit.is_queued());
+    assert!(!try_take_slot(&mut permit).await);
+    drop(running.pop());
+    take_slot(&mut permit).await;
+    assert!(!permit.is_queued());
+    assert!(matches!(
+        state.direct_chat_limiter.try_acquire(OWNER).await,
+        Err(AppError::RateLimited)
+    ));
+    server.abort();
+}
+
+#[tokio::test]
+async fn queued_turns_take_freed_slots_in_arrival_order() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let mut running = hold_running_slots(&state).await;
+    // Back-to-back admissions, usually within one millisecond.
+    let mut first = state.direct_chat_limiter.admit(OWNER).await.unwrap();
+    let mut second = state.direct_chat_limiter.admit(OWNER).await.unwrap();
+    assert!(first.is_queued() && second.is_queued());
+    drop(running.pop());
+    // A newcomer that claims the free slot still queues behind the waiters.
+    let mut newcomer = state.direct_chat_limiter.admit(OWNER).await.unwrap();
+    assert!(newcomer.is_queued());
+    assert!(!try_take_slot(&mut second).await);
+    assert!(!try_take_slot(&mut newcomer).await);
+    take_slot(&mut first).await;
+    assert!(second.is_queued());
+    drop(running.pop());
+    assert!(!try_take_slot(&mut newcomer).await);
+    take_slot(&mut second).await;
+    drop(running.pop());
+    take_slot(&mut newcomer).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_turn_that_queues_during_an_admission_stays_ahead_of_it() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    // One running slot stays free throughout.
+    let mut running = Vec::new();
+    for _ in 1..crate::mw::rate_limit::DIRECT_CHAT_MAX_IN_FLIGHT {
+        running.push(state.direct_chat_limiter.try_acquire(OWNER).await.unwrap());
+    }
+    let gate = gate_claims();
+    let limiter = state.direct_chat_limiter.clone();
+    let admission = tokio::spawn(async move { limiter.admit(OWNER).await });
+    // The admission found the queue empty and is about to claim the free slot.
+    gate.arrived.notified().await;
+    let waiter = state
+        .cluster_slot_manager
+        .acquire(
+            crate::mw::rate_limit::DIRECT_CHAT_QUEUE_NAMESPACE,
+            OWNER,
+            crate::mw::rate_limit::DIRECT_CHAT_MAX_QUEUED,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    gate.open.add_permits(1);
+    let mut late = admission.await.unwrap().unwrap();
+    crate::mw::rate_limit::gate_slot_claims(None);
+    assert!(late.is_queued());
+    assert!(!try_take_slot(&mut late).await);
+    drop(waiter);
+    take_slot(&mut late).await;
+    server.abort();
+}
+
+async fn queued_turn(
+    state: &AppState,
+) -> (
+    AssistantConversation,
+    String,
+    crate::mw::rate_limit::DirectChatPermit,
+) {
+    let row = engine::begin_turn(
+        &state.db,
+        OWNER,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: None,
+            text: "hello".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
+    let permit = state.direct_chat_limiter.admit(OWNER).await.unwrap();
+    assert!(permit.is_queued());
+    (row, turn_id, permit)
+}
+
+#[tokio::test]
+async fn the_deadline_wins_over_an_outstanding_claim_and_its_slot_is_released() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let mut running = hold_running_slots(&state).await;
+    let (row, turn_id, mut permit) = queued_turn(&state).await;
+    let gate = gate_claims();
+    // The first claim starts one poll in; the deadline falls well after it.
+    let since = Utc::now();
+    let deadline = since
+        + chrono::Duration::from_std(crate::mw::rate_limit::DIRECT_CHAT_QUEUE_POLL).unwrap()
+        + chrono::Duration::seconds(3);
+    let mut waiting = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let result = crate::services::assistant_nyxagent_runtime::wait_for_running_slot(
+                &state,
+                &row,
+                &turn_id,
+                &mut permit,
+                since,
+                deadline,
+            )
+            .await;
+            (result.map_err(|error| error.code), permit.is_queued())
+        })
+    };
+    claim_outstanding(&gate, &mut waiting).await;
+    // A slot frees while the claim is outstanding, and the deadline passes.
+    drop(running.pop());
+    let (result, still_queued) = tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .expect("the deadline ends the wait")
+        .unwrap();
+    assert_eq!(result, Err("queue_timeout"));
+    assert!(!still_queued);
+    // The claim lands late; its slot goes back rather than to the turn.
+    gate.open.add_permits(1);
+    crate::mw::rate_limit::gate_slot_claims(None);
+    drop(running);
+    running_slots_all_free(&state).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn stop_wins_over_an_outstanding_claim() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let mut running = hold_running_slots(&state).await;
+    let (row, turn_id, mut permit) = queued_turn(&state).await;
+    let conversation_id = row.id.clone();
+    let gate = gate_claims();
+    let mut waiting = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let since = Utc::now();
+            let result = crate::services::assistant_nyxagent_runtime::wait_for_running_slot(
+                &state,
+                &row,
+                &turn_id,
+                &mut permit,
+                since,
+                since + chrono::Duration::minutes(10),
+            )
+            .await;
+            (result.map_err(|error| error.code), permit.is_queued())
+        })
+    };
+    claim_outstanding(&gate, &mut waiting).await;
+    drop(running.pop());
+    engine::request_stop(&state.db, OWNER, &conversation_id)
+        .await
+        .unwrap();
+    let (result, still_queued) = tokio::time::timeout(Duration::from_secs(3), waiting)
+        .await
+        .expect("Stop is observed while the claim is outstanding")
+        .unwrap();
+    assert_eq!(result, Err("cancelled"));
+    assert!(!still_queued);
+    gate.open.add_permits(1);
+    crate::mw::rate_limit::gate_slot_claims(None);
+    drop(running);
+    running_slots_all_free(&state).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn the_engine_request_start_clears_a_queue_marker_left_behind() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let _running = hold_running_slots(&state).await;
+    let (row, turn_id, _permit) = queued_turn(&state).await;
+    let since = Utc::now();
+    assert!(
+        engine::mark_queued(
+            &state.db,
+            &row,
+            &turn_id,
+            since,
+            since + chrono::Duration::minutes(10)
+        )
+        .await
+        .unwrap()
+    );
+    // The display clear was lost; the turn then starts its engine request.
+    crate::services::assistant_turn_observability::request_started(
+        &state.db,
+        &row,
+        Utc::now(),
+        Utc::now() + chrono::Duration::minutes(2),
+    )
+    .await
+    .unwrap();
+    let row = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+    let turn = row.active_turn.as_ref().unwrap();
+    assert!(turn.queued_at.is_none() && turn.queue_deadline.is_none());
+    let view = serde_json::to_value(ConversationResponse::from(row)).unwrap();
+    assert_eq!(view["active_turn"]["queued"], false);
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_stalled_queue_write_never_holds_the_turn() {
+    use crate::services::assistant_nyxagent_runtime::wait_queued;
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let _running = hold_running_slots(&state).await;
+    let (row, turn_id, mut permit) = queued_turn(&state).await;
+    let stalled = std::future::pending::<AppResult<bool>>;
+    // The deadline is observed while the write is outstanding.
+    let deadline = Utc::now() + chrono::Duration::milliseconds(300);
+    let error = tokio::time::timeout(
+        Duration::from_secs(3),
+        wait_queued(&state, &row, &turn_id, &mut permit, deadline, stalled()),
+    )
+    .await
+    .expect("the deadline ends a stalled write")
+    .unwrap_err();
+    assert_eq!(error.code, "queue_timeout");
+    // So is Stop.
+    engine::request_stop(&state.db, OWNER, &row.id)
+        .await
+        .unwrap();
+    let error = tokio::time::timeout(
+        Duration::from_secs(3),
+        wait_queued(
+            &state,
+            &row,
+            &turn_id,
+            &mut permit,
+            Utc::now() + chrono::Duration::minutes(10),
+            stalled(),
+        ),
+    )
+    .await
+    .expect("Stop ends a stalled write")
+    .unwrap_err();
+    assert_eq!(error.code, "cancelled");
+    server.abort();
+}
+
+#[tokio::test]
+async fn leaving_the_queue_frees_the_place_at_once() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let _running = hold_running_slots(&state).await;
+    let mut queued = Vec::new();
+    for _ in 0..crate::mw::rate_limit::DIRECT_CHAT_MAX_QUEUED {
+        queued.push(state.direct_chat_limiter.admit(OWNER).await.unwrap());
+    }
+    assert!(matches!(
+        state.direct_chat_limiter.admit(OWNER).await,
+        Err(AppError::RateLimited)
+    ));
+    queued[0].release();
+    assert!(!queued[0].is_queued());
+    let next = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match state.direct_chat_limiter.admit(OWNER).await {
+                Ok(permit) => break permit,
+                Err(AppError::RateLimited) => tokio::time::sleep(Duration::from_millis(20)).await,
+                Err(error) => panic!("{error}"),
+            }
+        }
+    })
+    .await
+    .expect("the freed place is reusable");
+    assert!(next.is_queued());
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_turn_beyond_the_running_limit_waits_queued_then_runs() {
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let mut running = hold_running_slots(&state).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let row = queued_row(&state).await;
+    let turn = row.active_turn.as_ref().unwrap();
+    assert_eq!(
+        (turn.queue_deadline.unwrap() - turn.queued_at.unwrap()).num_seconds(),
+        engine::TURN_QUEUE_WAIT_SECS as i64
+    );
+    // Clients that predate `queued` still see a waiting turn with its clock.
+    let view = serde_json::to_value(ConversationResponse::from(row.clone())).unwrap();
+    assert_eq!(view["active_turn"]["queued"], true);
+    assert_eq!(view["active_turn"]["waiting_for_capacity"], true);
+    assert_eq!(view["active_turn"]["steering_allowed"], false);
+    assert!(view["active_turn"]["capacity_wait_started_at"].is_string());
+    assert!(view["active_turn"]["capacity_wait_deadline"].is_string());
+    assert!(calls.lock().await.is_empty());
+
+    drop(running.pop());
+    let events = drain(response).await;
+    let queued = events.find("\"queued\":true").expect("queued status");
+    let started = events
+        .find("\"status\":\"running\"")
+        .expect("running status");
+    assert!(queued < started);
+    assert!(events.contains("\"status\":\"completed\""));
+    let row = settled(&state).await;
+    let reply = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(reply.error_code, None);
+    assert!(!calls.lock().await.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn stopping_a_queued_turn_cancels_it_without_calling_the_assistant() {
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let _running = hold_running_slots(&state).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let row = queued_row(&state).await;
+    let began = std::time::Instant::now();
+    stop(State(state.clone()), test_auth_user(OWNER), Path(row.id))
+        .await
+        .unwrap();
+    let events = drain(response).await;
+    assert!(began.elapsed() < Duration::from_secs(5));
+    assert!(events.contains("\"status\":\"cancelled\""));
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_queued_turn_gives_up_at_its_deadline_without_resetting_context() {
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let _running = hold_running_slots(&state).await;
+    let (row, turn_id, mut permit) = queued_turn(&state).await;
+    let error = crate::services::assistant_nyxagent_runtime::wait_for_running_slot(
+        &state,
+        &row,
+        &turn_id,
+        &mut permit,
+        Utc::now(),
+        Utc::now(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!((error.code, error.stage), ("queue_timeout", "queue"));
+    assert!(error.preserves_session());
+    // Settlement keeps the turn, but its queue place is already free.
+    assert!(!permit.is_queued());
+    assert!(calls.lock().await.is_empty());
     server.abort();
 }

@@ -307,6 +307,7 @@ impl Fixture {
         let producers = crate::services::platform_manager_transport::compose(
             self.state.clone(),
             Arc::new(NativeSettledHook),
+            crate::handlers::agent_skills::preload_context(self.state.clone()),
         );
         let lifecycle = LifecycleProducer {
             personal: producers.personal.clone(),

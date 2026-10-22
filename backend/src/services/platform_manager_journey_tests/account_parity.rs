@@ -753,7 +753,11 @@ async fn two_accounts_keep_real_credentials_memory_tools_payers_and_web_continui
     let identity = bindings::producer(j.state.clone());
     let inspected = Arc::new(InspectOwnerEgress {
         state: j.state.clone(),
-        inner: crate::services::assistant_nyxagent_egress::producer(j.state.clone(), identity),
+        inner: crate::services::assistant_nyxagent_egress::producer(
+            j.state.clone(),
+            identity,
+            crate::handlers::agent_skills::preload_context(j.state.clone()),
+        ),
         accounts: specs,
         observed: Mutex::new(vec![]),
         stage: Mutex::new("not_entered"),

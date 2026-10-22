@@ -50,6 +50,9 @@ pub const MAX_DESCRIPTION_CHARS: usize = 2048;
 pub const MAX_GRANT_TARGETS: usize = 32;
 /// Loop guards for server-started event turns.
 pub const EVENT_TURNS_PER_HOUR: u64 = 20;
+/// Channel turns run at once for one owner, across all their bots and chats,
+/// separately from browser turns.
+pub const CHANNEL_TURNS_PER_OWNER: u32 = 4;
 pub const MAX_EVENT_STREAK: i32 = 3;
 /// Bounded like `nyx__wait_for_connection`, below NyxAgent's 150 s call timeout.
 pub const MAX_WAIT_SECS: u64 = 120;

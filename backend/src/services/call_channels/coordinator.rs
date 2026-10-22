@@ -433,7 +433,11 @@ pub(crate) async fn turn_with_history(
 )> {
     let permit = state
         .direct_chat_limiter
-        .try_acquire_pool("assistant_channel", &b.user_id, 2)
+        .try_acquire_pool(
+            "assistant_channel",
+            &b.user_id,
+            crate::services::assistant_team_service::CHANNEL_TURNS_PER_OWNER,
+        )
         .await?
         .ok_or(AppError::VoiceQueueFull)?;
     let claim = session::admit(&state, b, s, event, text, history).await?;

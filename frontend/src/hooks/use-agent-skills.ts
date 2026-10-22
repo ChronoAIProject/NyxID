@@ -45,6 +45,29 @@ export function useSetAgentSkills(id: string) {
       ]),
   });
 }
+export function useSetSkillPreload(agentId: string, skillId: string) {
+  const client = useQueryClient();
+  const owner = useAuthStore((s) => s.user?.id);
+  return useMutation({
+    mutationFn: (selection: { expected_revision: number; paths: string[] }) =>
+      assistantJson(
+        `${base}/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(skillId)}/preload`,
+        {
+          method: "PUT",
+          body: selection,
+        },
+      ),
+    onSuccess: () =>
+      Promise.all([
+        client.invalidateQueries({
+          queryKey: ["agent-skills", owner, agentId],
+        }),
+        client.invalidateQueries({
+          queryKey: ["agent-skill-history", owner, agentId],
+        }),
+      ]),
+  });
+}
 export function useSkillSearch(query: string | null, page: number) {
   const owner = useAuthStore((s) => s.user?.id);
   return useQuery({

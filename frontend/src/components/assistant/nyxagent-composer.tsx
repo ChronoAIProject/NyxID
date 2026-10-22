@@ -19,12 +19,13 @@ import type { NyxAgentAccessMode, NyxAgentConversation } from "@/schemas/assista
 type UploadProps = ComponentProps<typeof UploadComposer>;
 type Props = Omit<UploadProps, "onSend"> & {
   readonly conversation?: NyxAgentConversation;
+  readonly agentModel?: string;
   readonly agentOverride?: NyxAgentAccessMode | null;
   readonly onSend: (...args: [...Parameters<UploadProps["onSend"]>, model?: string]) => Promise<void>;
 };
 
 /** Key by person + thread: pending guidance must never move with navigation. */
-export function NyxAgentComposer({ conversation, agentOverride, ...props }: Props) {
+export function NyxAgentComposer({ conversation, agentModel, agentOverride, ...props }: Props) {
   const [draftModel, setDraftModel] = useState<string>();
   const [connection, setConnection] = useState<KeyInfo>();
   const [connectionPickerOpen, setConnectionPickerOpen] = useState(false);
@@ -51,7 +52,7 @@ export function NyxAgentComposer({ conversation, agentOverride, ...props }: Prop
   return <UploadComposer {...props}
     footerControls={<ComposerSettings
       conversationId={conversation?.id}
-      model={conversation?.model ?? draftModel ?? "nyxagent/chat"}
+      model={conversation?.model ?? draftModel ?? agentModel ?? "nyxagent/chat"}
       onDraftModelChange={setDraftModel}
       agentOverride={agentOverride}
       active={props.active || props.sending || submitting}

@@ -49,7 +49,7 @@ several agents, routines/scheduled triggers, and cross-user agents.
 | --- | --- |
 | One NyxAgent conversation = one `assistant_conversations` row + one restricted `nyxid-assistant` key + encrypted raw key; NyxAgent binds its session to that key | A thread keeps its own key; an agent's authority is applied to every thread key |
 | Execution authority is the key (`allow_all_services`, `allowed_service_ids`, `allowed_platform_service_ids`, `assistant:account`), enforced in MCP (`chat_access`, gates, `ensure_service_in_scope`) | Specialist grants are enforced by NyxID, never by prompts |
-| Per-user turn limiter: 2 in flight, 10 starts per 60 s | Server-started turns need their own owner-level pool |
+| Per-user browser turn limiter: 4 running, 8 queued, 30 starts per 60 s | Server-started turns need their own owner-level pool |
 | NyxAgent per turn: 600 s, 40 tool calls, results truncated; NyxID calls time out at 150 s | Waiting is bounded (120 s) and completion wakes NyxBot later |
 | NyxAgent disables Codex multi-agent | Codex subagents would share one key and vanish; NyxID owns agents instead |
 | Turns are detached server tasks | NyxID can start turns itself for tasks, wake-ups and chat apps |
@@ -644,7 +644,7 @@ Telegram bots can be linked:
 `max_inflight` caps concurrent gateway calls to NyxID across all NyxBot
 channels; each running turn holds a slot for its whole duration. 256 equals
 the gateway-wide ceiling (`CMAEG_PROVIDER_MAX_INFLIGHT`) and `cma_codex`, and
-each provider has its own pool. NyxID still limits each owner to two
+each provider has its own pool. NyxID still limits each owner to four
 concurrent channel turns and queues the rest.
 
 ### 12a. Chats, groups and guests

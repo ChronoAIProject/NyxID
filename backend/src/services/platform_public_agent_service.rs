@@ -1006,7 +1006,8 @@ pub(crate) mod tests {
         let state = crate::test_utils::test_app_state(db.clone());
         let public = super::super::platform_manager_transport::compose(
             state.clone(),
-            crate::handlers::assistant_team::owner_turn_settled_hook(state),
+            crate::handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+            crate::handlers::agent_skills::preload_context(state),
         )
         .public
         .clone();

@@ -397,6 +397,7 @@ fn real_codex_native_v2_discovery_readiness_faq_search_read_signup_answer_use_ac
             let producers = crate::services::platform_manager_transport::compose(
                 state.clone(),
                 Arc::new(NoOwner),
+                crate::handlers::agent_skills::preload_context(state.clone()),
             );
             let readiness = producers
                 .public

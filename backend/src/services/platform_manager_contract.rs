@@ -813,6 +813,14 @@ pub trait PublicTurnProducer: Send + Sync {
 /// Part 3 supplies this service adapter over the existing metered proxy core.
 #[async_trait]
 pub trait NyxAgentEgress: Send + Sync {
+    async fn preload_skills(
+        &self,
+        _row: &crate::models::assistant_conversation::AssistantConversation,
+        _agent: &crate::models::assistant_agent::AssistantAgent,
+    ) -> AppResult<String> {
+        Ok(String::new())
+    }
+
     /// Optional human-channel display note after the durable acknowledgement.
     /// The adapter owns delivery authorization; the runtime cancels this task on acceptance.
     fn admission_acknowledged(

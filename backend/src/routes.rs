@@ -2553,6 +2553,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::agent_skills::preview_attached),
         )
         .route(
+            "/nyxagent/agents/{id}/skills/{skill_id}/preload",
+            put(handlers::agent_skills::set_preload),
+        )
+        .route(
             "/nyxagent/agents/{id}/skills/{skill_id}/improve",
             post(handlers::agent_skills::improve),
         )
@@ -3439,6 +3443,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             crate::services::platform_manager_transport::compose(
                 state.clone(),
                 crate::handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+                crate::handlers::agent_skills::preload_context(state.clone()),
             ),
         ))
     } else {

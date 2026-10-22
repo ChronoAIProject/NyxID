@@ -438,6 +438,7 @@ async fn service_tool_content(
     auth: &McpAuthContext,
     tool_name: &str,
     response: mcp_service::ToolResponse,
+    result_query: Option<&str>,
 ) -> (
     Vec<serde_json::Value>,
     bool,
@@ -473,7 +474,20 @@ async fn service_tool_content(
         let text = if is_error {
             format!("Error ({status}): {}", response.text)
         } else {
-            format!("{resource_note}{}", response.text)
+            let evidence = auth.chat.as_ref().and_then(|_| {
+                response.resources.as_ref().and_then(|read| {
+                    crate::services::notion_evidence::present(read, &response.text, result_query)
+                })
+            });
+            let unavailable = if result_query.is_some() && evidence.is_none() {
+                "Compact retrieval is unavailable for this source response; the ordinary source result follows.\n\n"
+            } else {
+                ""
+            };
+            format!(
+                "{resource_note}{unavailable}{}",
+                evidence.as_deref().unwrap_or(&response.text)
+            )
         };
         return (
             vec![serde_json::json!({ "type": "text", "text": text })],
@@ -3411,7 +3425,7 @@ fn dispatch_service_tool<'a>(
                 "source_policy": refusal,
             }).to_string();
             }
-            box_tool_future(|| service_tool_content(state, auth, tool_name, response)).await
+            box_tool_future(|| service_tool_content(state, auth, tool_name, response, None)).await
         } else if let Some((row, output)) = &resource {
             let result = box_tool_future(|| {
                 materialize_resource_content(state, auth, row, *output, response)
@@ -3429,7 +3443,7 @@ fn dispatch_service_tool<'a>(
                 ),
             }
         } else {
-            box_tool_future(|| service_tool_content(state, auth, tool_name, response)).await
+            box_tool_future(|| service_tool_content(state, auth, tool_name, response, None)).await
         };
         if !is_error
             && !matches!(
@@ -4301,6 +4315,23 @@ async fn handle_meta_call_tool(
         return tool_result(request_id, "tool_name too long (max 200 chars)", true);
     }
 
+    let result_query =
+        match crate::services::notion_evidence::validate_query(arguments.get("result_query")) {
+            Ok(query) => query,
+            Err(message) => return tool_result(request_id, message, true),
+        };
+    if result_query.is_some()
+        && (auth.chat.is_none()
+            || tool_name.starts_with("nyx__")
+            || tool_name.starts_with("nyxid__"))
+    {
+        return tool_result(
+            request_id,
+            "result_query is only supported for connected Notion block reads in chat",
+            true,
+        );
+    }
+
     // Accept arguments in multiple formats (LLMs are unpredictable):
     //   1. { "tool_name": "x", "arguments_json": "{\"foo\":1}" }  -- JSON string (preferred)
     //   2. { "tool_name": "x", "arguments": { "foo": 1 } }       -- nested object (legacy)
@@ -4327,7 +4358,7 @@ async fn handle_meta_call_tool(
             let mut flat = serde_json::Map::new();
             if let Some(obj) = arguments.as_object() {
                 for (k, v) in obj {
-                    if k != "tool_name" && k != "arguments_json" {
+                    if k != "tool_name" && k != "arguments_json" && k != "result_query" {
                         flat.insert(k.clone(), v.clone());
                     }
                 }
@@ -4433,6 +4464,18 @@ async fn handle_meta_call_tool(
         }
     };
 
+    if result_query.is_some()
+        && (endpoint.method != "GET"
+            || endpoint.path != "/v1/blocks/{block_id}/children"
+            || mcp_service::producer_operation_generation(service, endpoint).is_none())
+    {
+        return tool_result(
+            request_id,
+            "result_query requires a published Notion block-children GET",
+            true,
+        );
+    }
+
     if let Some(response) =
         box_tool_future(|| chat_service_gate(state, auth, service, request_id.clone())).await
     {
@@ -4459,6 +4502,15 @@ async fn handle_meta_call_tool(
             return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
         }
     };
+    if result_query.is_some()
+        && (prepared.method() != reqwest::Method::GET || prepared.carries_method_override())
+    {
+        return tool_result(
+            request_id,
+            "result_query requires a GET without a method override",
+            true,
+        );
+    }
     if let Err(error) =
         prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)
     {
@@ -4649,7 +4701,8 @@ async fn handle_meta_call_tool(
     let concurrency = response.concurrency.take();
     let is_policy_refusal = response.is_policy_refusal();
     let (content, is_error, failure) =
-        box_tool_future(|| service_tool_content(state, auth, tool_name, response)).await;
+        box_tool_future(|| service_tool_content(state, auth, tool_name, response, result_query))
+            .await;
     if !is_error
         && !matches!(
             service.source,
@@ -7112,7 +7165,8 @@ mod tests {
             let is_policy_refusal = provider_response.is_policy_refusal();
             assert!(!is_policy_refusal);
             let (content, is_error, failure) =
-                service_tool_content(&state, &auth, "catalog__operation", provider_response).await;
+                service_tool_content(&state, &auth, "catalog__operation", provider_response, None)
+                    .await;
             assert!(is_error);
             assert_eq!(
                 content[0]["text"],
