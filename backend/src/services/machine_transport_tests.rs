@@ -1066,6 +1066,14 @@ async fn machine_git_final_send_rejects_live_catalog_and_credential_drift() {
             let key = resolved.api_key_id.as_deref().unwrap();
             let before = resolved.credential_epoch;
             let replacement = format!("synthetic-replacement-{}", Uuid::new_v4());
+            // update_api_key is an exact-source compare-and-set; a touch still
+            // landing from resolution or revalidation must not race it.
+            crate::test_utils::await_row_quiescent(
+                &f.state.db,
+                crate::models::user_api_key::COLLECTION_NAME,
+                doc! {"_id": key},
+            )
+            .await;
             super::user_api_key_service::update_api_key(
                 &f.state.db,
                 &f.state.encryption_keys,

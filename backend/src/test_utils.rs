@@ -345,6 +345,39 @@ pub(crate) async fn connect_transaction_test_database_with_command_handler(
     db
 }
 
+/// Wait, briefly and bounded, until a row stops changing.
+///
+/// Exact-source edits (`record_storage::exact_document_predicate`,
+/// `credential_record_service::exact_source_filter`) compare the whole
+/// document, so a touch still landing from the previous step (a settled run's
+/// schedule advance, a credential revalidation) turns the edit into a spurious
+/// Conflict or NotFound. Tests that edit a row right after such a step observe
+/// two identical consecutive reads first; the edit itself is still exactly one
+/// compare-and-set against the unchanged production predicate.
+pub(crate) async fn await_row_quiescent(
+    db: &mongodb::Database,
+    collection: &str,
+    filter: Document,
+) {
+    const BUDGET: Duration = Duration::from_secs(10);
+    const QUIET: Duration = Duration::from_millis(150);
+    let rows = db.collection::<Document>(collection);
+    let started = std::time::Instant::now();
+    let mut previous = rows.find_one(filter.clone()).await.unwrap();
+    loop {
+        tokio::time::sleep(QUIET).await;
+        let current = rows.find_one(filter.clone()).await.unwrap();
+        if current == previous {
+            return;
+        }
+        assert!(
+            started.elapsed() < BUDGET,
+            "{collection} row {filter:?} kept changing for {BUDGET:?}"
+        );
+        previous = current;
+    }
+}
+
 /// Wait, within the shared readiness budget, until majority-acknowledged
 /// writes and linearizable reads on this database answer within 100 ms.
 ///

@@ -1337,6 +1337,8 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .await
         .unwrap();
     // Edits are exact-source CAS writes; the earlier run has advanced the row.
+    // Its advance may still be landing: read only once the row is quiet.
+    crate::test_utils::await_row_quiescent(&state.db, TRIGGERS, doc! {"_id": &trigger.id}).await;
     let current = state
         .db
         .collection::<Trigger>(TRIGGERS)

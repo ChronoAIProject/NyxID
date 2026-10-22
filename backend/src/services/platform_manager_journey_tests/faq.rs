@@ -177,6 +177,13 @@ async fn faq_limits_reset_and_admission_abort_or_mode_change_cannot_send() {
             .unwrap(),
         0
     );
+    // The sender limit counts within fixed 60-second wall-clock bins. Start
+    // the burst where the whole burst fits in one bin, otherwise a slow runner
+    // crossing the boundary resets the count before the 21st update.
+    let into_window = chrono::Utc::now().timestamp_millis().rem_euclid(60_000) as u64;
+    if into_window > 40_000 {
+        tokio::time::sleep(std::time::Duration::from_millis(60_050 - into_window)).await;
+    }
     for number in 301..321 {
         dispatch::admit_text_update(
             &j.state.db,

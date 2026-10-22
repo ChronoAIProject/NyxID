@@ -739,7 +739,10 @@ mod tests {
         let db =
             crate::test_utils::connect_transaction_test_database("native_entry_lease_heartbeat")
                 .await;
-        let stall = stall(std::time::Duration::from_millis(2700));
+        // The observation below sleeps 1.5 s inside the stall and then reads;
+        // a 2.7 s stall left 1.2 s for scheduling on a loaded runner and the
+        // operation finished (releasing the lease) before the second read.
+        let stall = stall(std::time::Duration::from_millis(6000));
         let run = TEST_LEASE_DURATION.scope(
             std::time::Duration::from_millis(900),
             TEST_INITIAL_OPERATION_STALL.scope(stall.clone(), ensure(&db)),
