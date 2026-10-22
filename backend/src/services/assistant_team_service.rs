@@ -176,6 +176,7 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
     }
     let now = Utc::now();
     let agent = AssistantAgent {
+        channel_checking_notice: false,
         skills: Vec::new(),
         skills_revision: 0,
         skill_metadata: BTreeMap::new(),
@@ -1072,6 +1073,7 @@ async fn create_specialist_inner(
     };
     let now = Utc::now();
     let agent = AssistantAgent {
+        channel_checking_notice: false,
         skills: Vec::new(),
         skills_revision: 0,
         skill_metadata: BTreeMap::new(),
@@ -1340,6 +1342,26 @@ pub async fn update_agent(
         .await?
         .ok_or_else(not_found)?;
     super::org_agent_service::audit_change(db, actor, &updated, "profile").await;
+    Ok(updated)
+}
+
+/// Human-maintained preference, independent of prompt text and execution grants.
+pub async fn set_channel_checking_notice(
+    db: &Database,
+    actor: &str,
+    id: &str,
+    enabled: bool,
+) -> AppResult<AssistantAgent> {
+    let current = maintained_agent(db, actor, id).await?;
+    if current.destroyed_at.is_some() {
+        return Err(AppError::Conflict("That agent was destroyed".into()));
+    }
+    let updated = db.collection::<AssistantAgent>(AGENTS)
+        .find_one_and_update(
+            doc! {"_id": &current.id, "user_id": &current.user_id, "destroyed_at": bson::Bson::Null},
+            doc! {"$set": {"channel_checking_notice": enabled, "updated_at": bson::DateTime::now()}},
+        ).return_document(ReturnDocument::After).await?.ok_or_else(not_found)?;
+    super::org_agent_service::audit_change(db, actor, &updated, "channel_checking_notice").await;
     Ok(updated)
 }
 
@@ -2141,6 +2163,7 @@ pub struct AgentSummary {
     pub model: String,
     /// The agent's own access mode; absent follows the owner's workspace mode.
     pub access_mode_override: Option<crate::models::assistant_settings::AccessMode>,
+    pub channel_checking_notice: bool,
     /// `running`, `idle`, or `destroyed`.
     pub status: &'static str,
     pub services: Vec<String>,
@@ -2464,6 +2487,7 @@ pub async fn summaries(
             created_by: agent.created_by.clone(),
             model: agent.model.clone(),
             access_mode_override: agent.access_mode_override,
+            channel_checking_notice: agent.channel_checking_notice,
             home_conversation_id: home_id,
             memory_count: if super::org_agent_service::can_maintain(&acl) {
                 agent.memory.len()

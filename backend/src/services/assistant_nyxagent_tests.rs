@@ -1166,6 +1166,8 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             capacity_wait_deadline: None,
             capacity_accepted_at: None,
             capacity_notice_claimed: false,
+            external_check_started: false,
+            checking_notice_claimed: false,
             retry_digests: Vec::new(),
             retry_of: None,
             activity_count: None,
@@ -7049,5 +7051,129 @@ async fn capacity_waits_accumulate_without_execution_time_and_acceptance_is_idem
     assert_eq!(db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
         .count_documents(doc! {"event_type":"assistant_turn_capacity_wait", "event_data.conversation_id": &row.id})
         .await.unwrap(), 2);
+    db.drop().await.unwrap();
+}
+
+/// Attached skill reads stay quiet even when slow; external checks retain
+/// their evidence after completion and after bounded activity eviction.
+#[tokio::test]
+async fn checking_notice_requires_external_work_and_five_seconds_and_claims_once() {
+    use crate::services::assistant_checking_notice as notice;
+    let db = connect_transaction_test_database("checking_notice").await;
+    let now = Utc::now();
+    let mut row = stale_test_row(now);
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.started_at = now;
+    turn.origin = TurnOrigin::Channel;
+    turn.asked_from = Some(ChannelOrigin {
+        thread: None,
+        nyxbot_channel_id: "channel".into(),
+        partition: "chat".into(),
+        platform: "telegram".into(),
+    });
+    row.channel = turn.asked_from.clone();
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    for label in [
+        "nyxid__skill_read",
+        "nyxid__get_agent_skills",
+        "nyx__search_tools",
+        "nyx__discover_services",
+        "nyx__list_connected_services",
+    ] {
+        test_activity_started_with_digest(&db, &row.user_id, &row.id, label, None)
+            .await
+            .unwrap();
+    }
+    assert!(
+        !notice::claim(&db, &row, now + chrono::Duration::seconds(10))
+            .await
+            .unwrap()
+    );
+    let call = test_activity_started_with_digest(&db, &row.user_id, &row.id, "tool", None)
+        .await
+        .unwrap()
+        .unwrap();
+    activity_finished_for_turn(
+        &db,
+        &row.user_id,
+        &row.id,
+        &row.active_turn.as_ref().unwrap().turn_id,
+        &call,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !notice::claim(&db, &row, now + chrono::Duration::milliseconds(4999))
+            .await
+            .unwrap()
+    );
+    for _ in 0..=MAX_TURN_ACTIVITIES {
+        test_activity_started_with_digest(&db, &row.user_id, &row.id, "nyxid__skill_read", None)
+            .await
+            .unwrap();
+    }
+    let due = now + chrono::Duration::seconds(5);
+    let (one, two) = tokio::join!(notice::claim(&db, &row, due), notice::claim(&db, &row, due));
+    assert_eq!(u8::from(one.unwrap()) + u8::from(two.unwrap()), 1);
+    assert!(
+        !notice::claim(&db, &row, due + chrono::Duration::seconds(10))
+            .await
+            .unwrap()
+    );
+    let saved = get(&db, &row.user_id, &row.id).await.unwrap();
+    assert!(saved.active_turn.unwrap().checking_notice_claimed);
+    assert_eq!(
+        db.collection::<bson::Document>(MESSAGES)
+            .count_documents(doc! {"conversation_id": &row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn checking_notice_is_fenced_by_stop_replacement_settlement_and_capacity_notice() {
+    use crate::services::assistant_checking_notice as notice;
+    let db = connect_transaction_test_database("checking_notice_fences").await;
+    let now = Utc::now();
+    for update in [
+        doc! {"$set": {"active_turn.stop_requested": true}},
+        doc! {"$set": {"active_turn.lease_expires_at": bson::DateTime::from_chrono(now - chrono::Duration::seconds(1))}},
+        doc! {"$set": {"active_turn.turn_id": "successor"}},
+        doc! {"$unset": {"active_turn": ""}},
+        doc! {"$set": {"active_turn.capacity_notice_claimed": true}},
+        doc! {"$set": {"active_turn.origin": "trigger"}},
+        doc! {"$set": {"active_turn.trigger_run_id": "scheduled"}},
+    ] {
+        let mut row = stale_test_row(now);
+        let turn = row.active_turn.as_mut().unwrap();
+        turn.started_at = now - chrono::Duration::seconds(10);
+        turn.external_check_started = true;
+        turn.origin = TurnOrigin::Channel;
+        turn.asked_from = Some(ChannelOrigin {
+            thread: None,
+            nyxbot_channel_id: "channel".into(),
+            partition: "chat".into(),
+            platform: "telegram".into(),
+        });
+        row.channel = turn.asked_from.clone();
+        db.collection::<AssistantConversation>(CONVERSATIONS)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(doc! {"_id": &row.id}, update)
+            .await
+            .unwrap();
+        assert!(!notice::claim(&db, &row, now).await.unwrap());
+    }
+    let app_row = stale_test_row(now);
+    assert!(notice::destination(&app_row).is_none());
     db.drop().await.unwrap();
 }

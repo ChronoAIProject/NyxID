@@ -1311,6 +1311,30 @@ kept synchronized for one rolling release; rows without `access_mode` migrate
 from its value (`true` means `autopilot`). Specialists may override the owner
 mode with `access_mode_override`.
 
+### Progress replies during external checks
+
+In an agent’s Profile, **Channel progress reply** enables the optional
+`channel_checking_notice` boolean. A first-party human maintainer can also set
+it through `PATCH /api/v1/assistant/nyxagent/agents/{id}`. Omitted fields preserve
+the current value; existing agents default to `false`. This applies to both
+NyxBot and specialists, including their authorized guest channel turns.
+
+When enabled, a channel turn that has started work beyond attached skill reads
+and tool discovery receives one interim reply after at least five seconds:
+“Got it, let me check and get back to you.” External work starting later receives
+the notice on the next 500 ms check, if the turn is still running. Network and
+provider delivery time are additional; this is not a hard delivery deadline.
+An attached FAQ read alone never triggers it. The trigger is observed tool
+activity, not a model’s estimate of whether it knows an answer.
+
+The task is cancelled when execution ends. A durable claim is fenced to the
+same live, unstopped turn, suppresses a second capacity/progress notice, and is
+never retried after an ambiguous send. It uses the existing live-authorized
+channel reply path. It adds no model/transcript text and does not claim or
+settle the eventual answer. Scheduled triggers, app-only threads, and the
+separate personal manager transport do not receive this channel notice.
+Only opted-in channel turns run the timer; other turns add no polling reads.
+
 ### Access modes
 
 NyxBot settings support `nyxmode`, `autopilot`, and `ask_every_time`. One shared action classifier covers account, team, service, meta (`nyx__*`), and machine tools. Owner cards describe the action, scope, and risk class; resource confirmations remain enforced in Auto and Ask every time; Full access bypasses them with receipts. Agent overrides require owner ACL, mode changes are owner-card actions, and `assistant_access_mode_changed` audit rows record the transition.

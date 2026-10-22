@@ -1552,6 +1552,34 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
         super::agent_skills::preload_for_turn(&self.state, row, agent).await
     }
 
+    fn checking_notice(&self, row: &AssistantConversation) -> Option<tokio::task::JoinHandle<()>> {
+        let origin = crate::services::assistant_checking_notice::destination(row)?;
+        let state = self.state.clone();
+        let row = row.clone();
+        Some(tokio::spawn(async move {
+            use crate::services::assistant_checking_notice as notice;
+            let turn = row.active_turn.as_ref().expect("claimed turn");
+            let remaining = (turn.started_at
+                + chrono::Duration::from_std(notice::DELAY).expect("bounded notice delay")
+                - Utc::now())
+            .to_std()
+            .unwrap_or_default();
+            tokio::time::sleep(remaining).await;
+            loop {
+                if notice::claim(&state.db, &row, Utc::now())
+                    .await
+                    .unwrap_or(false)
+                {
+                    // The ordinary progress path revalidates the channel, owner
+                    // and guest route without claiming the eventual answer.
+                    super::nyxbot::deliver_to(&state, &row, &origin, notice::TEXT, None).await;
+                    break;
+                }
+                tokio::time::sleep(notice::POLL_INTERVAL).await;
+            }
+        }))
+    }
+
     fn admission_acknowledged(
         &self,
         row: &AssistantConversation,

@@ -2683,6 +2683,8 @@ pub(crate) async fn begin_owner_turn_in_session(
         capacity_wait_deadline: None,
         capacity_accepted_at: None,
         capacity_notice_claimed: false,
+        external_check_started: false,
+        checking_notice_claimed: false,
         platform_reply: platform.map(|origin| {
             crate::models::assistant_conversation::PlatformReplyRouting::Captured {
                 origin: Box::new(origin.clone()),
@@ -4553,7 +4555,12 @@ pub const MAX_TURN_ACTIVITIES: i64 = 40;
 pub const MAX_ACTIVITY_LABEL_CHARS: usize = 120;
 
 fn append_activity(entry: bson::Document) -> Vec<bson::Document> {
+    let external =
+        super::assistant_checking_notice::requires_check(entry.get_str("label").unwrap_or("tool"));
     vec![doc! {"$set": {
+        "active_turn.external_check_started": {"$or": [
+            {"$ifNull": ["$active_turn.external_check_started", false]}, external,
+        ]},
         "active_turn.activities": {"$slice": [
             {"$concatArrays": [
                 {"$ifNull": ["$active_turn.activities", []]},

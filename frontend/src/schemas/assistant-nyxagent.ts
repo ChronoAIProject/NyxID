@@ -440,6 +440,7 @@ export const assistantAgentSchema = z.object({
   description: z.string().default(""),
   model: z.string().optional(),
   access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
+  channel_checking_notice: z.boolean().optional(),
   specialty: z.string().nullable().default(null),
   created_by: z.enum(["user", "nyxbot"]).catch("user"),
   status: assistantAgentStatusSchema,
@@ -571,6 +572,7 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         persona: agentPersona,
         model: z.string().optional(),
         access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
+        channel_checking_notice: z.boolean().optional(),
       })
     : z.object({
         name: agentName,
@@ -579,6 +581,7 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         persona: agentPersona,
         model: z.string().optional(),
         access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
+        channel_checking_notice: z.boolean().optional(),
       });
 }
 /** A PATCH to an agent: only the fields that changed. `null` clears the override. */
@@ -589,6 +592,7 @@ export type AssistantAgentUpdate = {
   persona?: string;
   model?: string;
   access_mode_override?: NyxAgentAccessMode | null;
+  channel_checking_notice?: boolean;
 };
 export type AssistantAgentProfile = {
   name: string;
@@ -597,6 +601,7 @@ export type AssistantAgentProfile = {
   persona: string;
   model?: string;
   access_mode_override?: "autopilot" | "nyxmode" | "ask_every_time" | null;
+  channel_checking_notice?: boolean;
 };
 
 export const assistantAgentGrantsSchema = z.object({

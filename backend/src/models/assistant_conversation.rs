@@ -346,6 +346,10 @@ pub struct ActiveTurn {
     #[serde(default)]
     pub capacity_notice_claimed: bool,
     #[serde(default)]
+    pub external_check_started: bool,
+    #[serde(default)]
+    pub checking_notice_claimed: bool,
+    #[serde(default)]
     pub platform_reply: Option<PlatformReplyRouting>,
     /// One platform worker may execute an admitted turn. A lost worker is
     /// settled by orphan recovery; its execution claim is never reopened.

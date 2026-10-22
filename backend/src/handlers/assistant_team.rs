@@ -2847,6 +2847,8 @@ pub async fn get_agent(
 pub struct UpdateAgentRequest {
     name: Option<String>,
     description: Option<String>,
+    #[serde(default)]
+    channel_checking_notice: Option<bool>,
     /// Empty clears it.
     #[serde(default)]
     display_name: Option<String>,
@@ -2906,10 +2908,14 @@ pub async fn update_agent(
         )
         .await?;
     }
+    if let Some(enabled) = body.channel_checking_notice {
+        agent = team::set_channel_checking_notice(&state.db, &owner, &agent.id, enabled).await?;
+    }
     Ok(Json(json!({"id": agent.id, "name": agent.name,
         "description": agent.description, "display_name": agent.display_name,
         "persona": agent.persona, "model": agent.model,
-        "access_mode_override": agent.access_mode_override})))
+        "access_mode_override": agent.access_mode_override,
+        "channel_checking_notice": agent.channel_checking_notice})))
 }
 
 #[derive(Deserialize)]
