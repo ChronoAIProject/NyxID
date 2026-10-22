@@ -43,14 +43,14 @@ jobs:
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
-          components: llvm-tools-preview
+          components: ${{ inputs.coverage && 'llvm-tools-preview' || '' }}
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
           key: ${{ inputs.coverage && 'coverage-backend' || 'backend' }}
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
+          tool: ${{ inputs.coverage && 'cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146' || 'cargo-nextest@0.9.146' }}
       - name: Check RCI backend boundary
         if: '!inputs.coverage'
         run: bash scripts/check-rci-backend-boundary.sh
@@ -226,6 +226,21 @@ jobs:
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-4
           path: results/shard-4
+      - name: Summarize available shard evidence
+        if: always()
+        run: >-
+          python3 .github/scripts/backend_test_summary.py results
+          --count "$SHARD_COUNT" --output backend-test-summary.json
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-diagnostics
+          path: |
+            backend-test-summary.json
+            results/*/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
       - name: Require every execution job to pass
         env:
           SHARD_RESULT: ${{ needs.run.result }}
