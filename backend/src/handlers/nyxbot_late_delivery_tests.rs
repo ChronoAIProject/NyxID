@@ -782,7 +782,7 @@ async fn checking_notice_arrives_after_five_seconds_without_consuming_final_answ
         .unwrap();
     f.state.db.collection::<bson::Document>(THREADS).update_one(
         doc! {"channel_id": &f.channel.id, "partition": PARTITION},
-        doc! {"$set": {"event_ref_ciphertext": reference, "event_ref_expires_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::hours(1))}},
+        doc! {"$set": {"event_ref_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: reference}, "event_ref_expires_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::hours(1))}},
     ).await.unwrap();
     let egress = crate::handlers::assistant_nyxagent::http_egress(
         f.state.clone(),
