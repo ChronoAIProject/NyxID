@@ -977,6 +977,9 @@ async fn complete_hosted_setup(state: &AppState, link_id: &str, bot_id: &str) {
 /// reported without the user coming back to say so.
 #[tokio::test]
 async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
+    use crate::errors::access_denial::{
+        ORGANIZATION_AGENT_CHANNEL_HINT, ORGANIZATION_AGENT_CHANNEL_MESSAGE,
+    };
     let (state, calls, server) = setup("nyxbot_setup_link").await;
     let team = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
         .await
@@ -1038,7 +1041,18 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         LEGACY_PROVENANCE,
     )
     .await;
-    assert!(matches!(foreign, Err(AppError::Forbidden(_))));
+    assert_eq!(
+        serde_json::to_value(foreign.unwrap_err().response_body()).unwrap(),
+        json!({
+            "error": "forbidden",
+            "error_code": 1002,
+            "message": format!("Forbidden: {ORGANIZATION_AGENT_CHANNEL_MESSAGE}"),
+            "details": {
+                "reason": "organization_agent_channel_unsupported",
+                "hint": ORGANIZATION_AGENT_CHANNEL_HINT,
+            },
+        })
+    );
     state
         .db
         .collection::<bson::Document>(CONVERSATIONS)
@@ -6288,4 +6302,83 @@ async fn gateway_connect_refuses_missing_identity_and_attach_version() {
     );
     upstream.abort();
     state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn channel_http_links_refuse_org_specialists_with_typed_guidance() {
+    use crate::errors::access_denial::{
+        ORGANIZATION_AGENT_CHANNEL_HINT, ORGANIZATION_AGENT_CHANNEL_MESSAGE,
+    };
+    use crate::services::{feature_flag_service as flags, org_agent_tests::Fixture};
+    use tower::ServiceExt;
+    let f = Fixture::new("nyxbot_org_channel_http").await;
+    let (agent, _) = f.create().await;
+    flags::set_platform_override(
+        &f.state.db,
+        flags::NYXAGENT_ENGINE_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &f.admin,
+    )
+    .await
+    .unwrap();
+    let token = crate::crypto::jwt::generate_access_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &Uuid::parse_str(&f.member).unwrap(),
+        "openid",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let app = Router::new()
+        .route("/api/v1/assistant/nyxagent/channels", post(connect_channel))
+        .route(
+            "/api/v1/assistant/nyxagent/channels/{id}",
+            axum::routing::patch(link_channel),
+        )
+        .with_state(f.state.clone());
+    for (method, path, body) in [
+        (
+            "POST",
+            "/api/v1/assistant/nyxagent/channels",
+            json!({"bot_id": Uuid::new_v4().to_string(), "agent_id": agent.id}),
+        ),
+        (
+            "PATCH",
+            "/api/v1/assistant/nyxagent/channels/existing-channel",
+            json!({"agent_id": agent.id}),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(body["error"], "forbidden");
+        assert_eq!(body["error_code"], 1002);
+        assert_eq!(
+            body["details"]["reason"],
+            "organization_agent_channel_unsupported"
+        );
+        assert_eq!(
+            body["message"],
+            format!("Forbidden: {ORGANIZATION_AGENT_CHANNEL_MESSAGE}")
+        );
+        assert_eq!(body["details"]["hint"], ORGANIZATION_AGENT_CHANNEL_HINT);
+    }
+    f.state.db.drop().await.unwrap();
 }

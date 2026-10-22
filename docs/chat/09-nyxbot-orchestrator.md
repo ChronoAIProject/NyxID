@@ -20,7 +20,7 @@ when you talk to NyxBot or in a group NyxBot is in (#1883). When NyxBot assigned
 the work, the specialist asks NyxBot for anything else and NyxBot decides from
 what the user asked. Conversations are
 **threads** of an agent, so the user can talk to NyxBot or any specialist, in the
-web app or through a channel bot linked to that agent (Telegram, Lark, ...).
+web app or, for NyxBot and personal specialists, through a linked channel bot (Telegram, Lark, ...).
 NyxID owns agents, threads, keys and wake-ups; NyxAgent runs each thread
 unchanged.
 
@@ -129,8 +129,10 @@ thread; returns started, busy or pool_full), `wait_for_subagents` (≤ 120 s),
 `create_group`, `list_groups`, `post_to_group`, `update_group`, `delete_group`,
 `settings_link` (the exact NyxID page for configuration the tools do not cover,
 such as creating an agent key, security, profile, billing, organizations or
-triggers), `channel_bot_setup_link`, `connect_channel_bot` (to NyxBot or a
+triggers), `channel_bot_setup_link`, `connect_channel_bot` (to NyxBot or a personal
 specialist), `link_channel_bot`, `list_channel_agents`, `disconnect_channel_bot`.
+The organization-specialist channel-target boundary and recovery contract are
+documented in [ORG_AGENTS.md](../ORG_AGENTS.md).
 `message_subagent` accepts a personal specialist name or ID, an organization
 specialist ID, or the qualified `org-slug/agent-name` shown by the roster. A
 bare name always prefers the person's specialist; an organization-only bare
@@ -362,9 +364,11 @@ Account deletion purges agents, settings, threads and channel records.
 
 ## 12. Channel bots
 
-Any channel bot can be linked to NyxBot or a specialist (`connect_channel_bot`,
+Any channel bot can be linked to NyxBot or a personal specialist (`connect_channel_bot`,
 settings, or relinked later); each chat becomes a thread of the linked agent
 (or of the chat's own agent, §12a), with that agent's authority and memory.
+See [ORG_AGENTS.md](../ORG_AGENTS.md) for the organization-specialist channel
+target boundary and recovery contract.
 
 - **Everything is answerable in the chat.** A chat app cannot show NyxID's cards
   or buttons, so channel threads are told to give every link as a full URL and
@@ -707,7 +711,7 @@ payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
 | `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing; a member who addresses it before the owner has talked there is told why, at most daily. |
 | `allow_posts` | off | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |
-| agent | the bot's agent | The chat reaches another agent; it starts a new thread with it, and relinking the bot leaves such chats alone. |
+| agent | the bot's agent | The chat reaches NyxBot or a personal specialist; it starts a new thread with it, and relinking the bot leaves such chats alone. Organization specialists are refused under the [organization-agent channel contract](../ORG_AGENTS.md) because their conversations are private member threads. |
 
 Per bot, `private_chats` (`nyxid__update_channel_access`) is `owner` (default)
 or `everyone`: anyone who messages the bot privately gets their own thread, as a
@@ -1008,7 +1012,7 @@ admin-settable at `/api/v1/admin/assistant/profile-routes` but inactive
 5. A direct message to a specialist does not wake NyxBot; it appears in NyxBot's
    next turn.
 6. NyxBot is one persistent personal agent (Muse / Grok Bot), not one
-   orchestrator per chat; chat apps link to NyxBot or any specialist.
+   orchestrator per chat; chat apps link to NyxBot or any personal specialist.
 
 ## Machine nodes and saved logins
 
