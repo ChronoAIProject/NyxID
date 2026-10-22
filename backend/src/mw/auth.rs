@@ -54,8 +54,9 @@ pub struct AuthUser {
     pub session_id: Option<Uuid>,
     /// Assurance from the live first-party session, never from JWT claims.
     pub mfa_assured: bool,
-    /// Live account policy loaded during authentication, without a second read.
-    pub mfa_enabled: bool,
+    /// Live policy from first-party human authentication, without a second read.
+    /// Other credential and synthetic contexts have no derivation authority.
+    pub mfa_enabled: Option<bool>,
     /// Space-separated scopes from the access token or API key (empty for session auth).
     pub scope: String,
     /// If this is a delegated request, the OAuth client_id of the acting service.
@@ -114,10 +115,10 @@ pub struct AuthUser {
 
 impl AuthUser {
     pub fn derived_mfa_authority(&self) -> crate::services::session_authority::DerivedMfaAuthority {
-        crate::services::session_authority::DerivedMfaAuthority::new(
-            self.mfa_enabled,
-            self.mfa_assured,
-        )
+        crate::services::session_authority::DerivedMfaAuthority {
+            mfa_enabled: self.mfa_enabled,
+            verified: self.mfa_assured,
+        }
     }
 }
 
@@ -892,7 +893,7 @@ pub(crate) async fn api_key_auth_user(
     };
     Ok(AuthUser {
         mfa_assured: false,
-        mfa_enabled: false,
+        mfa_enabled: None,
         user_id,
         session_id: None,
         scope: key.scopes.clone(),
@@ -978,7 +979,7 @@ pub(crate) async fn machine_external_gateway_auth_user(
                 .ok_or(AppError::MachinePermissionRevoked)?;
             AuthUser {
                 mfa_assured: false,
-                mfa_enabled: false,
+                mfa_enabled: None,
                 user_id: Uuid::parse_str(&user.id).map_err(|_| AppError::MachineNotAllowed)?,
                 session_id: None,
                 scope: "proxy machine".into(),
@@ -1188,7 +1189,7 @@ impl FromRequestParts<AppState> for AuthUser {
 
                         return Ok(AuthUser {
                             mfa_assured: false,
-                            mfa_enabled: false,
+                            mfa_enabled: None,
                             org_agent_access: None,
                             assistant_group_id: None,
                             assistant_agent_owner_id: None,
@@ -1404,7 +1405,9 @@ impl FromRequestParts<AppState> for AuthUser {
                     let oauth_lineage = jwt::authority_lineage(&claims);
                     return Ok(AuthUser {
                         mfa_assured,
-                        mfa_enabled: user.mfa_enabled,
+                        mfa_enabled: (first_party_session
+                            && user.user_type == crate::models::user::UserType::Person)
+                            .then_some(user.mfa_enabled),
                         org_agent_access: None,
                         assistant_group_id: None,
                         assistant_agent_owner_id,
@@ -1491,7 +1494,8 @@ impl FromRequestParts<AppState> for AuthUser {
                                 // data via the /oauth/userinfo endpoint instead.
                                 return Ok(AuthUser {
                                     mfa_assured: sess.mfa_assured == Some(true),
-                                    mfa_enabled: u.mfa_enabled,
+                                    mfa_enabled: (u.user_type == crate::models::user::UserType::Person)
+                                        .then_some(u.mfa_enabled),
                                     org_agent_access: None,
                                     assistant_group_id: None,
                                     assistant_agent_owner_id: None,
@@ -1978,6 +1982,225 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unknown_mfa_policy_never_authorizes_derivation() {
+        use crate::services::session_authority::require_derived_mfa;
+        for method in [
+            AuthMethod::Session,
+            AuthMethod::AccessToken,
+            AuthMethod::ApiKey,
+            AuthMethod::ServiceAccount,
+            AuthMethod::Delegated,
+            AuthMethod::Relay,
+        ] {
+            let mut auth = test_auth_user(method, "");
+            for verified in [false, true] {
+                auth.mfa_assured = verified;
+                assert_eq!(auth.mfa_enabled, None);
+                assert!(matches!(
+                    require_derived_mfa(auth.derived_mfa_authority()),
+                    Err(AppError::Forbidden(_))
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn non_human_authentication_has_no_derived_mfa_policy() {
+        use crate::services::{service_account_service, session_authority::require_derived_mfa};
+        let db =
+            crate::test_utils::connect_transaction_test_database("auth_unknown_mfa_policy").await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let raw_key = format!("nyxid_ag_{}", crate::crypto::token::generate_random_token());
+        let key =
+            delegated_fixture_api_key(&Uuid::new_v4().to_string(), &owner, &hash_token(&raw_key));
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(key)
+            .await
+            .unwrap();
+        let (sa, secret) = service_account_service::create_service_account(
+            &db,
+            "Derivation policy test",
+            None,
+            "account:read",
+            &[],
+            None,
+            &owner,
+        )
+        .await
+        .unwrap();
+        let sa_token = service_account_service::authenticate_client_credentials(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &sa.client_id,
+            &secret,
+            None,
+        )
+        .await
+        .unwrap()
+        .access_token;
+        let bearer = format!("Bearer {sa_token}");
+        for enabled in [false, true] {
+            db.collection::<User>(USERS)
+                .update_one(
+                    doc! {"_id": &owner},
+                    doc! {"$set": {"mfa_enabled": enabled}},
+                )
+                .await
+                .unwrap();
+            for (name, value, expected) in [
+                ("x-api-key", raw_key.as_str(), AuthMethod::ApiKey),
+                ("authorization", bearer.as_str(), AuthMethod::ServiceAccount),
+            ] {
+                let mut parts = request_parts_with_headers(&[(name, value)]);
+                let auth = AuthUser::from_request_parts(&mut parts, &state)
+                    .await
+                    .unwrap();
+                assert_eq!(auth.auth_method, expected);
+                assert_eq!(auth.mfa_enabled, None);
+                assert!(matches!(
+                    require_derived_mfa(auth.derived_mfa_authority()),
+                    Err(AppError::Forbidden(_))
+                ));
+            }
+            // This identity acts for a person, but did not authenticate as one.
+            let auth = crate::handlers::assistant_team::owner_auth(&owner).unwrap();
+            assert_eq!(auth.mfa_enabled, None);
+            assert!(matches!(
+                require_derived_mfa(auth.derived_mfa_authority()),
+                Err(AppError::Forbidden(_))
+            ));
+            assert!(matches!(
+                require_derived_mfa(
+                    crate::test_utils::test_auth_user(&owner).derived_mfa_authority()
+                ),
+                Err(AppError::Forbidden(_))
+            ));
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn first_party_humans_derive_with_live_policy_without_extra_user_reads() {
+        use crate::services::{session_authority::require_derived_mfa, token_service};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let reads = Arc::new(AtomicUsize::new(0));
+        let recorded = reads.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command.get_str("find").ok() == Some(USERS)
+            {
+                recorded.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+            "auth_known_mfa_policy",
+            handler,
+        )
+        .await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let tokens = token_service::create_session_and_issue_tokens(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &owner,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let cookie = format!(
+            "nyx_session={}",
+            crate::crypto::token::generate_random_token()
+        );
+        let cookie_token = cookie.strip_prefix("nyx_session=").unwrap();
+        let bearer = format!("Bearer {}", tokens.access_token);
+        for (enabled, verified, allowed) in [
+            (false, false, true),
+            (true, true, true),
+            (true, false, false),
+        ] {
+            db.collection::<User>(USERS)
+                .update_one(
+                    doc! {"_id": &owner},
+                    doc! {"$set": {"mfa_enabled": enabled}},
+                )
+                .await
+                .unwrap();
+            db.collection::<Session>(SESSIONS)
+                .update_one(
+                    doc! {"_id": &tokens.session_id},
+                    doc! {"$set": {
+                    "token_hash": hash_token(cookie_token), "mfa_assured": verified,
+                    "mfa_exemption": "mobile_rollout"}},
+                )
+                .await
+                .unwrap();
+            for (name, value, expected, expected_reads) in [
+                ("cookie", cookie.as_str(), AuthMethod::Session, 1),
+                ("authorization", bearer.as_str(), AuthMethod::AccessToken, 2),
+            ] {
+                let mut parts = request_parts_with_headers(&[(name, value)]);
+                reads.store(0, Ordering::SeqCst);
+                let auth = AuthUser::from_request_parts(&mut parts, &state)
+                    .await
+                    .unwrap();
+                assert_eq!(auth.auth_method, expected);
+                assert_eq!(auth.mfa_enabled, Some(enabled));
+                assert_eq!(auth.mfa_assured, verified);
+                let result = require_derived_mfa(auth.derived_mfa_authority());
+                if allowed {
+                    result.unwrap();
+                } else {
+                    assert!(matches!(result, Err(AppError::MfaStepUpRequired)));
+                }
+                assert_eq!(reads.load(Ordering::SeqCst), expected_reads);
+            }
+        }
+        // Even session-shaped credentials for an org are not human authority.
+        db.collection::<User>(USERS)
+            .update_one(
+                doc! {"_id": &owner},
+                doc! {"$set": {"user_type": "org", "mfa_enabled": false}},
+            )
+            .await
+            .unwrap();
+        for (name, value, expected_reads) in [
+            ("cookie", cookie.as_str(), 1),
+            ("authorization", bearer.as_str(), 2),
+        ] {
+            let mut parts = request_parts_with_headers(&[(name, value)]);
+            reads.store(0, Ordering::SeqCst);
+            let auth = AuthUser::from_request_parts(&mut parts, &state)
+                .await
+                .unwrap();
+            assert_eq!(auth.mfa_enabled, None);
+            assert!(matches!(
+                require_derived_mfa(auth.derived_mfa_authority()),
+                Err(AppError::Forbidden(_))
+            ));
+            assert_eq!(reads.load(Ordering::SeqCst), expected_reads);
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[test]
     fn relay_allowlists_only_narrow_the_live_parent_key() {
         let ids = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         assert_eq!(
@@ -2045,7 +2268,7 @@ mod tests {
     fn test_auth_user(auth_method: AuthMethod, scope: &str) -> AuthUser {
         AuthUser {
             mfa_assured: false,
-            mfa_enabled: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -3636,7 +3859,7 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let auth = AuthUser {
             mfa_assured: false,
-            mfa_enabled: false,
+            mfa_enabled: None,
             assistant_turn_fence: Some(Box::new(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
                     channel_adapter_origin: None,
@@ -3712,7 +3935,7 @@ mod tests {
             .unwrap();
         let mut auth = AuthUser {
             mfa_assured: false,
-            mfa_enabled: false,
+            mfa_enabled: None,
             assistant_turn_fence: Some(Box::new(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
                     channel_adapter_origin: None,
@@ -3840,7 +4063,7 @@ mod tests {
     fn api_key_auth_includes_key_identity() {
         let user = AuthUser {
             mfa_assured: false,
-            mfa_enabled: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,

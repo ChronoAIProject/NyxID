@@ -28,6 +28,38 @@ beforeEach(() => {
 const message =
   "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA.";
 describe("session step-up", () => {
+  it("cancels a pending action without requiring a page cancellation callback", async () => {
+    const retry = vi.fn().mockResolvedValue(undefined);
+    function Harness() {
+      const stepUp = useMfaStepUp("person:request");
+      return (
+        <>
+          <button onClick={() => stepUp.handle(
+            new ApiError(403, {
+              error: "mfa_step_up_required",
+              error_code: 2003,
+              message,
+            }),
+            retry,
+          )}>
+            Approve
+          </button>
+          {stepUp.prompt}
+        </>
+      );
+    }
+    render(<Harness />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+    expect(screen.getByRole("region", { name: "Verify this session" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.queryByRole("region", { name: "Verify this session" }),
+    ).not.toBeInTheDocument();
+    expect(retry).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("keeps a wrong-code failure inline and retries only after verification succeeds", async () => {
     const retry = vi.fn().mockResolvedValue(undefined);
     request

@@ -13,7 +13,7 @@ function isMfaStepUpRequired(error: unknown): error is ApiError {
 
 /** Each approval surface owns its pending action. Changing account/request
  * clears the prompt; verification never approves a different request. */
-export function useMfaStepUp(scope: string) {
+export function useMfaStepUp(scope: string, onCancel?: () => void) {
   const accountId = useAuthStore.getState().user?.id;
   const [pending, setPending] = useState<{
     retry: () => Promise<void>;
@@ -50,7 +50,10 @@ export function useMfaStepUp(scope: string) {
     pending?.scope === scope && pending.accountId === accountId ? (
       <MfaStepUpForm
         message={pending.message}
-        onCancel={() => setPending(null)}
+        onCancel={() => {
+          setPending(null);
+          onCancel?.();
+        }}
         onVerified={async () => {
           setPending((current) => (current === pending ? null : current));
           if (

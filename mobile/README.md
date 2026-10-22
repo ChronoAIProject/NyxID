@@ -345,6 +345,11 @@ login approvals lacking assurance fail closed; restart those requests. New
 server challenges remain authoritative for sign-in UI even before capabilities
 are available. Account/request changes discard pending step-up retries.
 
+Skipped mobile MFA records metadata-only `mfa: skipped_mobile_rollout` in a
+`social_login` audit for redirect sign-in or a `social_token_exchange` audit for
+native exchange. Both paths emit `auth.mobile_mfa_exempted` through the existing
+telemetry consent gates.
+
 #1970 is unreleased and is not included in v0.73.0. Production replicas at
 v0.73.0 or earlier never enforced session assurance. During a mixed upgrade,
 sessions those replicas issue (including MFA-less web social sign-ins) lack

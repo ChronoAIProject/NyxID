@@ -58,6 +58,39 @@ afterEach(() => {
 });
 
 describe("CliAuthPage", () => {
+  it("shows a terminal cancellation state without retrying the CLI callback", async () => {
+    storeState.isAuthenticated = true;
+    searchState.value = { port: "5555", state: "cancel-step-up" };
+    mockPost.mockRejectedValueOnce(
+      new ApiError(403, {
+        error: "mfa_step_up_required",
+        error_code: 2003,
+        message: "Verify this session with your authenticator.",
+      }),
+    );
+    render(<CliAuthPage />);
+    const user = userEvent.setup();
+    expect(
+      await screen.findByRole("region", { name: "Verify this session" }),
+    ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Verification cancelled. Run nyxid login again.",
+    );
+    expect(
+      screen.queryByRole("region", { name: "Verify this session" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Sending credentials to the NyxID CLI..."),
+    ).not.toBeInTheDocument();
+    expect(assignSpy).not.toHaveBeenCalled();
+    expect(mockPost).toHaveBeenCalledTimes(1);
+    expect(mockPost).toHaveBeenCalledWith("/auth/cli-token", {
+      client_ua: undefined,
+    });
+    expect(storeState.isAuthenticated).toBe(true);
+  });
+
   it("steps up inline and retries the CLI callback without signing out", async () => {
     storeState.isAuthenticated = true;
     searchState.value = { port: "5555", state: "step-up" };

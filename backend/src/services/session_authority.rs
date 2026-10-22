@@ -26,24 +26,30 @@ pub fn may_derive(mfa_enabled: bool, verified: bool) -> bool {
 }
 
 /// Account policy and exact session/proof assurance already resolved by the
-/// caller. Derivation never reloads a person or resolves a feature flag.
+/// caller. Unknown policy cannot authorize derivation. Derivation never reloads
+/// a person or resolves a feature flag.
 #[derive(Clone, Copy, Debug)]
 pub struct DerivedMfaAuthority {
-    pub mfa_enabled: bool,
+    pub mfa_enabled: Option<bool>,
     pub verified: bool,
 }
 
 impl DerivedMfaAuthority {
     pub fn new(mfa_enabled: bool, verified: bool) -> Self {
         Self {
-            mfa_enabled,
+            mfa_enabled: Some(mfa_enabled),
             verified,
         }
     }
 }
 
 pub fn require_derived_mfa(authority: DerivedMfaAuthority) -> crate::errors::AppResult<()> {
-    if !may_derive(authority.mfa_enabled, authority.verified) {
+    let mfa_enabled = authority.mfa_enabled.ok_or_else(|| {
+        crate::errors::AppError::Forbidden(
+            "A first-party human account session is required to approve sign-ins".into(),
+        )
+    })?;
+    if !may_derive(mfa_enabled, authority.verified) {
         return Err(crate::errors::AppError::MfaStepUpRequired);
     }
     Ok(())

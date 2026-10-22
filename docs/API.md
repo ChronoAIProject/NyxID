@@ -5580,6 +5580,8 @@ Password login keeps its existing HTTP 403 error code 2002 response.
 
 The default-off flag skips the social token-exchange MFA challenge and persists a mobile-exempt session. Password login, including `client: "mobile"`, always retains MFA. No environment variable controls this flag.
 
+Skipped mobile MFA records metadata-only `mfa: skipped_mobile_rollout` in the `social_login` audit for redirect sign-in or the `social_token_exchange` audit for native exchange. Both paths also emit `auth.mobile_mfa_exempted` through the existing telemetry consent gates.
+
 Completed legacy sessions with absent/null assurance and mobile-exempt sessions keep authenticating through cookie, bearer, refresh and MCP fallback until normal expiry/revocation. Parent-less legacy MCP fallback for MFA accounts has a fixed 30-day bound from creation, independent of its sliding idle expiry. Explicit unverified sessions are rejected for MFA accounts. A sid-less legacy first-party refresh acquires a fixed 30-day session on first refresh; successors cannot extend its expiry. In-flight legacy device codes, login codes and approvals without assurance fail closed.
 
 Third-party OAuth authorize/consent is SSO from existing IdP authority and accepts legacy/mobile-exempt sessions. Account management, such as API-key management, is also not a NyxID sign-in derivation. A new NyxID sign-in derived from an existing device requires verified authority for an MFA account.

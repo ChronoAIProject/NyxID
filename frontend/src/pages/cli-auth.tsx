@@ -20,10 +20,11 @@ export function CliAuthPage() {
     strict: false,
   }) as CliAuthSearch;
   const { user, isAuthenticated, isLoading } = useAuthStore();
+  const [error, setError] = useState<string | null>(null);
   const { handle: handleStepUp, prompt: stepUpPrompt } = useMfaStepUp(
     `${user?.id ?? ""}:${port}:${state}`,
+    () => setError("Verification cancelled. Run nyxid login again."),
   );
-  const [error, setError] = useState<string | null>(null);
   const callbackSent = useRef(false);
 
   useEffect(() => {
@@ -111,13 +112,17 @@ export function CliAuthPage() {
         <h2 className="text-lg font-semibold">
           CLI Authentication
         </h2>
-        <p className="text-12 text-muted-foreground">
-          Sending credentials to the NyxID CLI...
-        </p>
-        <p className="text-xs text-muted-foreground">
-          You can close this tab after you see a success message in your
-          terminal.
-        </p>
+        {!error && (
+          <>
+            <p className="text-12 text-muted-foreground">
+              Sending credentials to the NyxID CLI...
+            </p>
+            <p className="text-xs text-muted-foreground">
+              You can close this tab after you see a success message in your
+              terminal.
+            </p>
+          </>
+        )}
       </div>
     </div>
   );

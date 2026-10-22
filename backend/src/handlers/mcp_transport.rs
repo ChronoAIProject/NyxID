@@ -4045,7 +4045,7 @@ async fn handle_account_tool(
     };
     let user = auth::AuthUser {
         mfa_assured: false,
-        mfa_enabled: false,
+        mfa_enabled: None,
         org_agent_access: auth.org_agent_access.clone(),
         assistant_group_id: auth.assistant_group_id.clone(),
         assistant_agent_owner_id: auth.assistant_agent_owner_id.clone(),
@@ -7683,7 +7683,7 @@ mod tests {
         let mcp_auth = McpAuthContext::user(actor_id.clone(), AuthMethod::AccessToken);
         let proxy_auth = AuthUser {
             mfa_assured: false,
-            mfa_enabled: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,

@@ -3827,7 +3827,7 @@ mod tests {
     fn api_key_auth_user(api_key: &ApiKey) -> AuthUser {
         AuthUser {
             mfa_assured: false,
-            mfa_enabled: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -3862,7 +3862,7 @@ mod tests {
     fn auth_user_with_method(method: crate::mw::auth::AuthMethod) -> AuthUser {
         AuthUser {
             mfa_assured: false,
-            mfa_enabled: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,

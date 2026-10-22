@@ -2455,8 +2455,11 @@ fn refresh_token_grant_error(error: AppError) -> AppError {
     }
 }
 
-// Token exchanges emit their canonical auth event through the existing
-// device/account consent gates; authentication protocols remain pre-auth.
+// TODO(telemetry): all grant branches blocked — see TELEMETRY.md §6.5
+// (oauth.token_issued). The four `/oauth/token` grant-type branches
+// (`authorization_code`, `refresh_token`, `client_credentials`, social
+// `urn:ietf:params:oauth:grant-type:token-exchange`) do not emit
+// `OauthTokenIssued` in Part 2. Lift this once §6.5 is resolved.
 async fn token_inner(
     state: &AppState,
     tele: &TelemetryContext,
@@ -2767,7 +2770,11 @@ async fn token_inner(
                     None,
                     tele,
                     TelemetryEvent::AuthTokenExchanged {
-                        subject_token_type: subject_token_type.to_string(),
+                        // Provider verification has validated the token type.
+                        // Short canonical values survive telemetry scrubbing.
+                        subject_token_type: subject_token_type
+                            .trim_start_matches("urn:ietf:params:oauth:token-type:")
+                            .to_string(),
                         exchange_provider: Some(provider.to_string()),
                     },
                 )
@@ -4229,7 +4236,7 @@ mod tests {
                 assert_eq!(event["event"], "auth.token_exchanged");
                 assert_eq!(event["distinct_id"], id);
                 assert_eq!(event["properties"]["exchange_provider"], "google");
-                assert_eq!(event["properties"]["subject_token_type"], "urn:ietf:params:oauth:token-type:id_token");
+                assert_eq!(event["properties"]["subject_token_type"], "id_token");
                 if mfa {
                     let event = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv()).await.unwrap().unwrap();
                     assert_eq!(event["event"], "auth.mobile_mfa_exempted");
