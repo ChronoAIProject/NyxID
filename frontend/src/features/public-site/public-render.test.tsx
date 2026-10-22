@@ -20,6 +20,7 @@ describe("window-free public renderer", () => {
         expect(html).not.toContain("<!--$!-->");
         expect(meta.locale).toBe(locale);
         expect(meta.description.length).toBeGreaterThan(20);
+        expect(html).not.toMatch(/<script(?:\s|>)/);
         const head = metadataHead(meta);
         expect(head).toContain(`href="https://nyx.chrono-ai.fun${path}"`);
         expect(head).toContain('hreflang="zh-Hans"');

@@ -264,6 +264,7 @@ for (const page of release.pages) {
       page.indexable,
     );
     assert.ok(!html.includes("<!--$!-->"), "Suspended body");
+    assert.equal(doc.querySelectorAll('script:not([src]):not([type="application/ld+json"])').length, 0, "Public HTML must not need executable inline scripts under CSP");
     if (page.route.startsWith("/solutions/")) {
       const slug = page.route.slice(11);
       const enabled = release.visibility.solutions.includes(slug);

@@ -201,6 +201,8 @@ export function publicRouter(
     stringifySearch: stringifyPublicSearch,
     defaultPreload: false,
     defaultPendingMs: 10000,
-    scrollRestoration: true,
+    // SSG must not emit TanStack's self-removing inline restoration script.
+    // The browser router still restores client-side history after hydration.
+    scrollRestoration: !path,
   });
 }
