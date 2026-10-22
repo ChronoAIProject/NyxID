@@ -181,7 +181,7 @@ describe("AuthFlow — login", () => {
     expect(screen.getAllByText("or")).toHaveLength(1);
   });
 
-  it("submits credentials and navigates to the dashboard on success", async () => {
+  it("submits credentials and navigates to the Assistant on success", async () => {
     loginFn.mockResolvedValue({ mfaRequired: false });
     const user = userEvent.setup();
     render(<AuthFlow initialPanel={0} />);
@@ -194,15 +194,20 @@ describe("AuthFlow — login", () => {
         password: "correct horse",
       });
     });
-    expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" });
+    expect(mockNavigate).toHaveBeenCalledWith({ to: "/assistant" });
   });
 
-  it("preserves the approval code query when redirecting to a same-origin return_to", async () => {
+  it.each([
+    "/login/device?user_code=2ABCDEFGH",
+    "/dashboard?explicit=1",
+    "/oauth/authorize?client_id=app&state=review&scope=openid",
+    "/orgs/join/invitation",
+  ])("preserves the explicit same-origin return_to %s", async (path) => {
     loginFn.mockResolvedValue({ mfaRequired: false });
     const assignSpy = vi
       .spyOn(window.location, "assign")
       .mockImplementation(() => {});
-    const returnTo = `${window.location.origin}/login/device?user_code=2ABCDEFGH`;
+    const returnTo = `${window.location.origin}${path}`;
     const user = userEvent.setup();
     render(<AuthFlow initialPanel={0} returnTo={returnTo} />);
 
@@ -212,7 +217,7 @@ describe("AuthFlow — login", () => {
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 
-  it("ignores an untrusted-origin return_to and falls back to the dashboard", async () => {
+  it("ignores an untrusted-origin return_to and falls back to the Assistant", async () => {
     loginFn.mockResolvedValue({ mfaRequired: false });
     const assignSpy = vi
       .spyOn(window.location, "assign")
@@ -224,7 +229,7 @@ describe("AuthFlow — login", () => {
     await fillLoginAndSubmit(user);
 
     await waitFor(() =>
-      expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" }),
+      expect(mockNavigate).toHaveBeenCalledWith({ to: "/assistant" }),
     );
     expect(assignSpy).not.toHaveBeenCalled();
   });

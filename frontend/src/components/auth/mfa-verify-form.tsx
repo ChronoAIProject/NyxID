@@ -56,7 +56,7 @@ export function MfaVerifyForm({ returnTo, cookieChallenge = false }: MfaVerifyFo
         window.location.assign(trustedReturnTo);
         return;
       }
-      void navigate({ to: "/dashboard" as string });
+      void navigate({ to: "/assistant" as string });
     } catch (error) {
       if (error instanceof ApiError) {
         const details = error.errorResponse.details;

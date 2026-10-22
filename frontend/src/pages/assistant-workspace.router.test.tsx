@@ -150,6 +150,9 @@ vi.mock("@/components/assistant/assistant-engine-sidebar", async () => {
 vi.mock("@/pages/automations", () => ({
   AutomationsPage: () => <h2>Automation workspace content</h2>,
 }));
+vi.mock("@/pages/login", () => ({
+  LoginPage: () => <h2>Login route content</h2>,
+}));
 vi.mock("@/pages/machines", () => ({
   MachinesPage: () => <h2>Machine workspace content</h2>,
 }));
@@ -200,7 +203,11 @@ afterEach(() => {
 
 async function open(path: string) {
   const history = createMemoryHistory({ initialEntries: [path] });
-  const router = createRouter({ routeTree: appRouter.routeTree, history });
+  const router = createRouter({
+    routeTree: appRouter.routeTree,
+    history,
+    defaultNotFoundComponent: appRouter.options.defaultNotFoundComponent,
+  });
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -213,6 +220,54 @@ async function open(path: string) {
   await act(() => vi.dynamicImportSettled());
   return router;
 }
+
+it.each(["/", "/login", "/register"])("defaults signed-in %s to Assistant", async (path) => {
+  const router = await open(path);
+  await waitFor(() => expect(router.state.location.pathname).toBe("/assistant"));
+  expect(await screen.findByRole("heading", { name: "Chat background" })).toBeInTheDocument();
+});
+
+it.each(["/dashboard", "/dashboard?explicit=1"])(
+  "preserves a signed-out explicit Studio visit %s through the login return",
+  async (path) => {
+    useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: false });
+    const assign = vi.spyOn(window.location, "assign").mockImplementation(() => undefined);
+    const returnTo = `${window.location.origin}${path}`;
+    await open(path);
+
+    const loginPath = `/login?return_to=${encodeURIComponent(returnTo)}`;
+    expect(assign).toHaveBeenCalledWith(loginPath);
+    cleanup();
+
+    const previousUrl = window.location.href;
+    try {
+      window.history.replaceState({}, "", loginPath);
+      useAuthStore.setState({ user: person, isAuthenticated: true, isLoading: false });
+      await open(loginPath);
+      expect(assign).toHaveBeenLastCalledWith(returnTo);
+      expect(screen.queryByRole("heading", { name: "Chat background" })).not.toBeInTheDocument();
+    } finally {
+      window.history.replaceState({}, "", previousUrl);
+    }
+  },
+);
+
+it.each(["artifacts", "activity"])("keeps the unimplemented %s direct URL unavailable", async (view) => {
+  await open(`/assistant/${view}`);
+  expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+  expect(screen.queryByText("Artifacts")).not.toBeInTheDocument();
+  expect(screen.queryByText("Activity")).not.toBeInTheDocument();
+});
+
+it("shows the preview placeholders in the Calvin server capability cohort", async () => {
+  useAuthStore.setState({ user: { ...person, email: "calvin.tan@aelf.io", capabilities: {
+    ...person.capabilities,
+    enabled_features: [FEATURE_FLAG.NYXAGENT_ENGINE, FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW],
+  } } });
+  await open("/assistant");
+  expect(await screen.findByText("Artifacts")).toBeInTheDocument();
+  expect(screen.getByText("Activity")).toBeInTheDocument();
+});
 
 for (const nyxagent of [true, false]) {
   it.each([
@@ -239,9 +294,7 @@ for (const nyxagent of [true, false]) {
         "Automations",
         "Machines",
         "Plugins",
-        "Artifacts",
         "Approvals",
-        "Activity",
       ];
       const labels = expected.map((label) => within(sidebar).getByText(label));
       for (let index = 1; index < labels.length; index++) {
