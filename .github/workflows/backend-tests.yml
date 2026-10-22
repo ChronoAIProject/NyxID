@@ -20,6 +20,12 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # libtest runs each #[tokio::test] body on a 2 MiB thread by default. Debug
+  # builds keep a slot for every temporary of a long async test on that stack
+  # (the saved-reply journey test alone pins ~430 KiB plus ~400 KiB of fixture
+  # setup frames), and x86_64 frames exceeded 2 MiB after #1981. Production is
+  # unaffected: release builds reuse slots and tasks live on the heap.
+  RUST_MIN_STACK: 8388608
   LLVM_PROFILE_FILE_NAME: nyxid-%4m.profraw
   NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
 
