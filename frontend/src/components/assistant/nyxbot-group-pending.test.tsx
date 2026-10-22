@@ -4,7 +4,10 @@ import userEvent from "@testing-library/user-event";
 import { GroupPendingActions } from "@/components/assistant/nyxbot-group-view";
 import { assistantGroupMessagesSchema } from "@/schemas/assistant-nyxagent";
 import { api } from "@/lib/api-client";
-vi.mock("@/lib/api-client", () => ({ api: { put: vi.fn(), delete: vi.fn() } }));
+vi.mock("@/lib/api-client", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/api-client")>(),
+  api: { put: vi.fn(), delete: vi.fn() },
+}));
 
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...await importOriginal<typeof import("@tanstack/react-router")>(),

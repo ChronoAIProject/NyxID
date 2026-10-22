@@ -1,6 +1,6 @@
 /**
  * Canonical UI event schema — discriminated union of every named
- * `ui.*` event emitted from the frontend.
+ * UI event emitted from the frontend, including Nyxbot failures.
  *
  * Adding a new event = adding a variant. Unknown event names become a
  * compile-time error, which is how we enforce the allowlist called for
@@ -76,6 +76,36 @@ export type SecretContext = 'creation_modal' | 'detail_page' | 'settings';
 
 export type NavSource = 'sidebar' | 'breadcrumb' | 'tab' | 'quick_link';
 
+export type NyxbotErrorCode =
+  | 'NYXBOT_UNKNOWN_ERROR'
+  | 'NYXBOT_RESOURCE_ERROR'
+  | 'NYXBOT_HTTP_UNAUTHORIZED'
+  | 'NYXBOT_HTTP_FORBIDDEN'
+  | 'NYXBOT_HTTP_RATE_LIMITED'
+  | 'NYXBOT_HTTP_SERVER_ERROR'
+  | 'NYXBOT_HTTP_ERROR'
+  | 'NYXBOT_RUN_ERROR'
+  | 'NYXBOT_START_TIMEOUT'
+  | 'NYXBOT_STREAM_TIMEOUT'
+  | 'NYXBOT_PROTOCOL_ERROR'
+  | 'NYXBOT_STREAM_ERROR'
+  | 'NYXBOT_NETWORK_ERROR';
+
+export interface NyxbotErrorProperties {
+  readonly error_code: NyxbotErrorCode;
+  readonly engine: 'aevatar' | 'direct' | 'nyxagent' | 'unknown';
+  readonly stage: 'request' | 'stream' | 'runtime' | 'resource';
+  readonly route: string;
+  readonly http_status?: number;
+  readonly upstream_error_code?: string | number;
+  readonly request_id?: string;
+  readonly correlation_id?: string;
+  readonly trace_id?: string;
+  readonly conversation_id?: string;
+  readonly turn_id?: string;
+  readonly duration_ms?: number;
+}
+
 /**
  * `dialog_id` is a narrow enum so analytics has a bounded cardinality
  * of flow names. Add new wizards / dialogs here as they ship.
@@ -115,6 +145,7 @@ export type DialogId =
 // --- The discriminated union itself -----------------------------------
 
 export type UiEvent =
+  | { name: 'nyxbot.error'; props: NyxbotErrorProperties }
   // § Dialog / wizard opened
   | {
       name: 'ui.dialog_opened';
@@ -236,12 +267,13 @@ export type UiEvent =
     };
 
 /**
- * Names of every `ui.*` event the schema recognizes. Useful for runtime
+ * Names of every frontend event the schema recognizes. Useful for runtime
  * guards if/when we ever need them; primarily exported so CI-grep rules
  * can cross-check emission sites against the declared set.
  */
 export const UI_EVENT_NAMES = [
   'ui.assistant_feedback_submitted',
+  'nyxbot.error',
   'ui.dialog_opened',
   'ui.dialog_step_completed',
   'ui.dialog_abandoned',

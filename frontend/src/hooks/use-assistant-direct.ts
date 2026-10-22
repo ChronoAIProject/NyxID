@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
+import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
   directAssistantTransport,
   type DirectConversationSettings,
@@ -27,7 +27,7 @@ export function useDirectSkills() {
     queryKey: directCatalogKeys.skills,
     queryFn: async () =>
       directSkillsSchema.parse(
-        await api.get<unknown>("/assistant/direct/skills"),
+        await assistantJson<unknown>("/assistant/direct/skills"),
       ),
     staleTime: Number.POSITIVE_INFINITY,
   });
@@ -38,7 +38,7 @@ export function useDirectModels() {
     queryKey: directCatalogKeys.models,
     queryFn: async () =>
       directModelsSchema.parse(
-        await api.get<unknown>("/assistant/direct/models"),
+        await assistantJson<unknown>("/assistant/direct/models"),
       ),
     staleTime: Number.POSITIVE_INFINITY,
   });
@@ -49,7 +49,7 @@ export function useDirectEfforts() {
     queryKey: directCatalogKeys.efforts,
     queryFn: async () =>
       directEffortsSchema.parse(
-        await api.get<unknown>("/assistant/direct/efforts"),
+        await assistantJson<unknown>("/assistant/direct/efforts"),
       ),
     staleTime: Number.POSITIVE_INFINITY,
   });

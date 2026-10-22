@@ -18,6 +18,9 @@ import { recoverFromAssetError } from "./lib/chunk-recovery";
 import { shouldRetryQuery } from "./lib/query-retry";
 import { BuildUpdateBanner } from "./components/build-update-banner";
 import "./app.css";
+import { installNyxbotErrorFallback } from "./lib/assistant/error-telemetry";
+
+installNyxbotErrorFallback();
 
 // Vite raises this from `__vitePreload` when a chunk (or its CSS) cannot be
 // fetched, *before* the failure becomes a React.lazy rejection — so it catches

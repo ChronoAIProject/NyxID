@@ -14,6 +14,8 @@ import {
 import { useAuthStore } from "@/stores/auth-store";
 import { assistantRequestErrorMessage, withAssistantTrace } from "./request-error";
 import { billingError } from "./billing-error";
+import { captureNyxbotError, httpErrorCode, responseCorrelation, type ErrorCorrelation } from "./error-telemetry";
+import { getAssistantIdentityRevision } from "./identity";
 
 const DEBUG_REQUEST_HEADER = "X-NyxID-Debug-Upstream";
 const DEBUG_ID_HEADER = "X-NyxID-Debug-Upstream-Id";
@@ -34,6 +36,17 @@ export interface AssistantHttpRequest {
   readonly authorityGuard?: () => void;
   /** Foreground sends only; see `RequestOptions.creditsDenial`. */
   readonly creditsDenial?: CreditsDenialRequest;
+  /** A streaming turn's owner reports one terminal event. */
+  readonly reportErrors?: boolean;
+  readonly onError?: (error: unknown) => void;
+}
+
+export class AssistantHttpError extends ApiError {
+  readonly correlation: ErrorCorrelation;
+  constructor(response: Response, body: ApiErrorResponse) {
+    super(response.status, body);
+    this.correlation = responseCorrelation(response);
+  }
 }
 
 export interface AssistantHttpMockRequest {
@@ -212,6 +225,7 @@ async function mockResponse(
 async function withNetworkError<T>(
   request: () => Promise<T>,
   signal?: AbortSignal,
+  report?: (error: unknown) => void,
 ): Promise<T> {
   try {
     return await request();
@@ -219,11 +233,13 @@ async function withNetworkError<T>(
     if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
       throw error;
     }
-    throw new ApiError(0, {
+    const failure = new ApiError(0, {
       error: "network_error",
       error_code: -1,
       message: assistantRequestErrorMessage(0),
     });
+    report?.(failure);
+    throw failure;
   }
 }
 
@@ -232,7 +248,23 @@ export async function assistantHttp(
   options: AssistantHttpRequest = {},
 ): Promise<Response> {
   options.authorityGuard?.();
+  const identityRevision = getAssistantIdentityRevision();
   const method = options.method ?? "GET";
+  const startedAt = Date.now();
+  const engine = endpoint.startsWith("/assistant/direct/") ? "direct" : endpoint.startsWith("/assistant/nyxagent/") ? "nyxagent" : "aevatar";
+  const reportError = (error: unknown) => {
+    if (options.signal?.aborted || getAssistantIdentityRevision() !== identityRevision) return;
+    try { options.onError?.(error); } catch { /* Reporting cannot change the request. */ }
+    if (options.reportErrors === false) return;
+    const http = error instanceof ApiError ? error : undefined;
+    captureNyxbotError({
+      code: http ? httpErrorCode(http.status) : "NYXBOT_UNKNOWN_ERROR",
+      engine, stage: "request", endpoint, status: http?.status || undefined,
+      upstreamCode: http?.errorCode,
+      ...(error instanceof AssistantHttpError ? error.correlation : {}),
+      durationMs: Date.now() - startedAt,
+    }, error);
+  };
   const actorId = options.creditsDenial ? currentCreditsActor() : null;
   const init = buildFetchConfig({
     ...options,
@@ -245,12 +277,14 @@ export async function assistantHttp(
   const mocked = await withNetworkError(
     () => mockResponse(endpoint, init),
     options.signal,
+    reportError,
   );
   // Account changes are authority failures, not transport failures.
   options.authorityGuard?.();
   const response = mocked ?? (await withNetworkError(
     () => fetch(apiUrl(endpoint, options.apiBaseUrl), init),
     options.signal,
+    reportError,
   ));
   options.authorityGuard?.();
 
@@ -261,11 +295,7 @@ export async function assistantHttp(
   options.authorityGuard?.();
   // Classify the raw envelope: the parsed shape defaults a missing symbol.
   reportCreditsDenialHttp(options.creditsDenial, response.status, raw, actorId);
-  if (response.status === 401 && DEAD_SESSION_CODES.has(errorBody.error_code)) {
-    useAuthStore.getState().setUser(null);
-  }
-  redirectToConsent(errorBody);
-  throw new ApiError(response.status, {
+  const failure = new AssistantHttpError(response, {
     ...errorBody,
     message: withAssistantTrace(
       (response.status === 402 ? billingError(errorBody.error)?.message : undefined)
@@ -273,16 +303,38 @@ export async function assistantHttp(
       response.headers.get("X-NyxID-Trace-Id"),
     ),
   });
+  reportError(failure);
+  if (response.status === 401 && DEAD_SESSION_CODES.has(errorBody.error_code)) {
+    useAuthStore.getState().setUser(null);
+  }
+  redirectToConsent(errorBody);
+  throw failure;
 }
 
 export async function assistantJson<T>(
   endpoint: string,
   options: AssistantHttpRequest = {},
 ): Promise<T> {
+  const identityRevision = getAssistantIdentityRevision();
   const response = await assistantHttp(endpoint, options);
   options.authorityGuard?.();
   if (response.status === 204) return undefined as T;
-  const result = (await response.json()) as T;
+  let result: T;
+  try {
+    result = (await response.json()) as T;
+  } catch (error) {
+    options.authorityGuard?.();
+    if (!options.signal?.aborted && getAssistantIdentityRevision() === identityRevision) {
+      try { options.onError?.(error); } catch { /* Reporting cannot change the request. */ }
+      if (options.reportErrors !== false) captureNyxbotError({
+        code: "NYXBOT_PROTOCOL_ERROR",
+        engine: endpoint.startsWith("/assistant/nyxagent/") ? "nyxagent" : endpoint.startsWith("/assistant/direct/") ? "direct" : "aevatar",
+        stage: "request", endpoint, status: response.status,
+        ...responseCorrelation(response),
+      }, error);
+    }
+    throw error;
+  }
   options.authorityGuard?.();
   return result;
 }

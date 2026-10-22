@@ -7,7 +7,13 @@ import {
   normalizeBackendSseFrame,
   SsePayloadDecoder,
 } from "@/lib/assistant/sse-frame-normalizer";
-import { assistantHttp } from "@/lib/assistant/assistant-http";
+import {
+  assistantHttp,
+  AssistantHttpError,
+  type AssistantHttpRequest,
+} from "@/lib/assistant/assistant-http";
+import type { ErrorCorrelation } from "@/lib/assistant/error-telemetry";
+import { AssistantProtocolError } from "@/lib/assistant/errors";
 import type { AGUIEvent } from "@/lib/assistant/agui-types";
 import type { ActionReport } from "@/schemas/assistant-actions";
 
@@ -97,12 +103,20 @@ export type ChatCommand =
 export class ChatApiError extends Error {
   readonly code?: string | number;
   readonly status: number;
+  readonly correlation?: ErrorCorrelation;
 
-  constructor(message: string, status: number, code?: string | number) {
-    super(message);
+  constructor(
+    message: string,
+    status: number,
+    code?: string | number,
+    correlation?: ErrorCorrelation,
+    cause?: unknown,
+  ) {
+    super(message, { cause });
     this.name = "ChatApiError";
     this.code = code;
     this.status = status;
+    this.correlation = correlation;
   }
 }
 
@@ -115,6 +129,7 @@ function compactObject<T extends Record<string, unknown>>(value: T): T {
 export async function sendChatCommand(
   command: ChatCommand,
   signal: AbortSignal,
+  options: Pick<AssistantHttpRequest, "reportErrors" | "onError"> = {},
 ): Promise<Response> {
   const clientRequestId = command.clientRequestId.trim();
   const body = compactObject(
@@ -141,6 +156,7 @@ export async function sendChatCommand(
         key: `assistant:aevatar:${command.conversationId ?? "draft"}:${clientRequestId}`,
         payer: "unknown",
       },
+      ...options,
     });
   } catch (error) {
     if (error instanceof ApiError) {
@@ -148,6 +164,8 @@ export async function sendChatCommand(
         error.message,
         error.status,
         error.errorCode >= 0 ? error.errorCode : error.errorResponse.error,
+        error instanceof AssistantHttpError ? error.correlation : undefined,
+        error,
       );
     }
     throw error;
@@ -158,7 +176,8 @@ export async function* readChatStreamFrames(
   response: Response,
   options?: { readonly signal?: AbortSignal },
 ): AsyncGenerator<ChatStreamFrame, void, undefined> {
-  if (!response.body) throw new Error("Chat response has no readable stream.");
+  if (!response.body)
+    throw new AssistantProtocolError("Chat response has no readable stream.");
   const reader = response.body.getReader();
   const decoder = new SsePayloadDecoder();
   try {

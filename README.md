@@ -74,7 +74,7 @@ Viewer** role, without granting other admin access. See [Admin usage](docs/BILLI
 service, and time filters. Dashboard charts offer **Group by → Model** to inspect
 recorded model usage within a service. See [billing analytics](docs/BILLING_ANALYTICS.md#insight-controls-and-valid-data)
 for grouping, missing models, and filter semantics.
-Admins and operators can open **Usage → NyxBot** for cost and billing, token
+Admins, operators and Usage Viewers can open **Usage → NyxBot** for cost and billing, token
 traffic, and top billing accounts split by model, alongside active-session
 counts, turn outcomes, and reply feedback. See [NyxBot model usage](docs/BILLING_ANALYTICS.md#nyxbot-model-usage)
 for exact values, attribution, and historical coverage, and
