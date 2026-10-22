@@ -15722,3 +15722,219 @@ mod nyxagent_admission_tests {
         db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod nyxbot_readiness_tests {
+    use super::*;
+    use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
+    use crate::services::assistant_nyxagent as engine;
+    use axum::http::Method;
+    use axum::response::IntoResponse;
+    use axum::{Router, body::Body, http::Request, routing::post};
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn conversation_key_model_call_succeeds_with_gated_flags_on_and_readiness_unready() {
+        let f = crate::services::org_agent_tests::Fixture::new("nyxbot_model_call_readiness").await;
+        let db = f.state.db.clone();
+        let owner = f.admin.clone();
+        // Mirror prod: readiness-gated flags are globally on while the fleet
+        // readiness roster was never declared (security_replicas empty of this process).
+        for flag in [
+            "assistant:live-turn-gate",
+            "assistant:operation-scopes",
+            "assistant:org-agents",
+            "assistant:machine-capabilities",
+            "assistant:machine-contexts",
+        ] {
+            crate::services::feature_flag_service::set_platform_override(
+                &db,
+                flag,
+                &crate::services::feature_flag_service::FlagTarget::Global,
+                true,
+                &owner,
+            )
+            .await
+            .unwrap();
+        }
+
+        let upstream = Router::new().route(
+            "/{*path}",
+            post(|| async {
+                (
+                    [("content-type", "application/json")],
+                    r#"{"id":"resp_1","object":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#,
+                )
+                    .into_response()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let mut model = crate::models::downstream_service::test_helpers::dummy_service();
+        model.id = Uuid::new_v4().to_string();
+        model.slug = "chrono-llm-public".into();
+        model.name = "Chrono LLM (public)".into();
+        model.base_url = format!("http://{address}");
+        // Mirror prod: legacy public master-credential service (bearer master key).
+        model.auth_method = "bearer".into();
+        model.requires_user_credential = false;
+        model.service_category = "internal".into();
+        model.visibility = "public".into();
+        model.platform_key = None;
+        model.credential_encrypted = f
+            .state
+            .encryption_keys
+            .encrypt(b"operator-secret")
+            .await
+            .unwrap();
+        model.inference = Some(
+            serde_json::from_value(
+                serde_json::json!({"wire_protocol":"openai_responses","model_list":true}),
+            )
+            .unwrap(),
+        );
+        db.collection::<DownstreamService>(SERVICES)
+            .insert_one(&model)
+            .await
+            .unwrap();
+        // Mirror prod: the owner has an auto-connected catalog UserService for it.
+        let endpoint_id = Uuid::new_v4().to_string();
+        let user_service_id = Uuid::new_v4().to_string();
+        db.collection(crate::models::user_endpoint::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user_endpoint(
+                &endpoint_id,
+                &owner,
+                "chrono-llm-public",
+                &format!("http://{address}"),
+                None,
+                Some(&model.id),
+            ))
+            .await
+            .unwrap();
+        db.collection(crate::models::user_service::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user_service(
+                &user_service_id,
+                &owner,
+                "chrono-llm-public",
+                &endpoint_id,
+                Some(&model.id),
+                None,
+            ))
+            .await
+            .unwrap();
+        // Mirror prod: ordinary (non-autopilot) assistant settings.
+        db.collection::<mongodb::bson::Document>(
+            crate::models::assistant_settings::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"user_id": &owner},
+            doc! {"$set": {"access_mode": "nyxmode"}},
+        )
+        .await
+        .unwrap();
+
+        db.collection::<mongodb::bson::Document>(crate::models::security_replica::COLLECTION_NAME)
+            .delete_many(doc! {})
+            .await
+            .unwrap();
+        assert!(
+            !crate::services::security_readiness_service::report(&db, "assistant:live-turn-gate")
+                .await
+                .unwrap()
+                .ready
+        );
+
+        let input = serde_json::from_value::<engine::TurnRequest>(
+            serde_json::json!({"text":"Reply with the single word pong."}),
+        )
+        .unwrap();
+        let row = Box::pin(engine::begin_turn(
+            &db,
+            &owner,
+            &input,
+            &f.state.encryption_keys,
+        ))
+        .await
+        .unwrap();
+        let key = f.key(&row).await;
+        let credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &db,
+                &f.state.encryption_keys,
+                &owner,
+                &row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, _, credential_id) =
+            crate::services::key_service::validate_api_key(&db, &credential.raw_key)
+                .await
+                .unwrap();
+        let auth = crate::mw::auth::api_key_auth_user(&db, &key, credential_id, None, None)
+            .await
+            .unwrap();
+        assert!(
+            auth.assistant_chat.is_some(),
+            "conversation key must load chat authority"
+        );
+
+        let body = serde_json::json!({
+            "model":"gpt-6.1-sol","store":false,"stream":false,"instructions":"You are NyxBot.",
+            "input":[{"role":"user","content":[{"type":"input_text","text":"Reply with the single word pong."}]}],
+            "tools":[],"tool_choice":"auto","parallel_tool_calls":false,
+            "reasoning":{"effort":"medium","summary":"auto"},"include":["reasoning.encrypted_content"],
+            "prompt_cache_key":"thread-1","text":{"verbosity":"medium"}
+        })
+        .to_string();
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/proxy/s/chrono-llm-public/responses")
+            .header("content-type", "application/json")
+            .header("user-agent", "codex_cli_rs/0.1")
+            .body(Body::from(body))
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::OriginalUri(
+            "/api/v1/proxy/s/chrono-llm-public/responses"
+                .parse()
+                .unwrap(),
+        ));
+        request.extensions_mut().insert(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        );
+        let mut resolved_slug = String::new();
+        let result = Box::pin(proxy_request_by_slug_inner(
+            &f.state,
+            &auth,
+            "chrono-llm-public",
+            "responses",
+            request,
+            &mut resolved_slug,
+        ))
+        .await;
+        let response = result.expect("conversation-key model call must reach the upstream");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["id"], "resp_1");
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(
+                crate::models::security_replica::COLLECTION_NAME
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+            0,
+            "the successful request must not depend on a readiness heartbeat"
+        );
+        _server.abort();
+        db.drop().await.unwrap();
+    }
+}

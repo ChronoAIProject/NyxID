@@ -1,4 +1,10 @@
 import { createElement } from "react";
+import { capture } from "@/lib/telemetry";
+
+vi.mock("@/lib/telemetry", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/telemetry")>(),
+  capture: vi.fn(),
+}));
 import { render, screen } from "@testing-library/react";
 import { ChatMessageList } from "@/components/assistant/chat-message";
 import { nyxAgentHistorySchema } from "@/schemas/assistant-nyxagent";
@@ -168,6 +174,7 @@ function stream(): Response {
 }
 
 beforeEach(() => {
+  vi.mocked(capture).mockReset();
   transitionAssistantIdentity(null);
   transitionAssistantIdentity("owner");
 });
@@ -869,6 +876,9 @@ describe("NyxAgent server-backed transport", () => {
         1,
       );
       expect(requests.some((path) => path.endsWith("/stop"))).toBe(false);
+      expect(capture).toHaveBeenCalledExactlyOnceWith({ name: "nyxbot.error", props: expect.objectContaining({
+        error_code: "NYXBOT_STREAM_TIMEOUT", engine: "nyxagent", stage: "stream", http_status: 200,
+      }) });
     } finally {
       vi.useRealTimers();
     }
@@ -2356,4 +2366,84 @@ it.each([null, "unloaded-turn"])("keeps a linked receipt with %s anchor standalo
   await transport.history(id, undefined, receipt.id);
   await transport.history(id, undefined, receipt.id);
   expect(transport.session(id).messages.map((m) => m.id)).toEqual([`nyxagent-acknowledgement:${receipt.id}`, "a"]);
+});
+
+
+describe("Nyxbot native error telemetry", () => {
+  it.each([[403, "NYXBOT_HTTP_FORBIDDEN"], [500, "NYXBOT_HTTP_SERVER_ERROR"]])(
+    "reports HTTP %s once with the server trace and no private text", async (status, code) => {
+      const trace = "76dd13d5-e7cf-4c63-a33b-26036d2a495d";
+      globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+        ? new Response(JSON.stringify({ error_code: 1000, message: "private server diagnostic" }), {
+            status, headers: { "X-NyxID-Trace-Id": trace },
+          })
+        : json(history());
+      await expect(new NyxAgentTransport().send(id, "private prompt", vi.fn())).rejects.toThrow();
+      expect(capture).toHaveBeenCalledExactlyOnceWith({ name: "nyxbot.error", props: expect.objectContaining({
+        error_code: code, engine: "nyxagent", stage: "request", http_status: status,
+        trace_id: trace, conversation_id: id, upstream_error_code: 1000,
+      }) });
+      expect(JSON.stringify(vi.mocked(capture).mock.calls)).not.toContain("private");
+    },
+  );
+
+  it.each(["model_interrupted", "cancelled", null])("records live failure %s without recounting it on reload", async (code) => {
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+      ? chunked(sseBytes(runningStatus, { event: "turn.completed", turn_id: "turn", status: "failed",
+          error: code ? { code, message: "private runtime detail" } : null }))
+      : json(history());
+    const transport = new NyxAgentTransport();
+    await transport.send(id, "private prompt", vi.fn());
+    await transport.history(id);
+    expect(capture).toHaveBeenCalledTimes(code === "cancelled" ? 0 : 1);
+    if (code !== "cancelled") expect(capture).toHaveBeenCalledWith({ name: "nyxbot.error", props: expect.objectContaining({
+      error_code: "NYXBOT_RUN_ERROR", engine: "nyxagent", stage: "stream", http_status: 200,
+      upstream_error_code: code ?? "other", turn_id: "turn",
+    }) });
+    expect(JSON.stringify(vi.mocked(capture).mock.calls)).not.toContain("private");
+  });
+
+  it("reports an admission deadline once and never replays the submitted turn", async () => {
+    vi.useFakeTimers();
+    let turns = 0;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      if (endpoint.endsWith("/turns")) { turns++; return new Promise<Response>(() => undefined); }
+      return json(history());
+    };
+    try {
+      const pending = new NyxAgentTransport().send(id, "Question", vi.fn());
+      const rejected = expect(pending).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(45_001);
+      await rejected;
+      expect(turns).toBe(1);
+      expect(capture).toHaveBeenCalledExactlyOnceWith({ name: "nyxbot.error", props: expect.objectContaining({
+        error_code: "NYXBOT_START_TIMEOUT", engine: "nyxagent", stage: "request",
+      }) });
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+// Value: protects=live failed history outcomes emit once even when the reader is aborted;
+// fails_when=history settlement is mistaken for user cancellation; why_new=SSE terminal fixtures do not cover history;
+// seam=none; no_claim=live network or PostHog delivery.
+it.each(["model_interrupted", null, "cancelled"])("reports history-recovered live failure %s without recounting reload", async (code) => {
+  const page = history();
+  page.messages = page.messages.slice(0, 1);
+  let reader!: ReadableStreamDefaultController<Uint8Array>;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? new Response(new ReadableStream({ start(value) { reader = value; } })) : json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const sending = transport.send(id, "Question", vi.fn());
+  await vi.waitFor(() => expect(reader).toBeDefined());
+  reader.enqueue(sseBytes(runningStatus, { event: "message.started", message_id: "recovered", role: "assistant" }));
+  await vi.waitFor(() => expect(transport.getActiveTurnId(id)).toBe("turn"));
+  page.messages.push({ ...history().messages[1]!, id: "recovered", status: "failed", error_code: code });
+  await transport.history(id);
+  await sending;
+  await transport.history(id);
+  expect(capture).toHaveBeenCalledTimes(code === "cancelled" ? 0 : 1);
+  if (code !== "cancelled") expect(capture).toHaveBeenCalledWith({ name: "nyxbot.error", props: expect.objectContaining({
+    error_code: "NYXBOT_RUN_ERROR", upstream_error_code: code ?? "other", engine: "nyxagent", stage: "stream",
+  }) });
 });

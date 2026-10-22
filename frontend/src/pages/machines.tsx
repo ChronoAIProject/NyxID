@@ -303,6 +303,10 @@ export function MachinesPage() {
               operationId={search.operation}
               confirmationId={search.confirmation}
               machineId={remoteDetailId}
+              onClose={() => {
+                setSelectedId(undefined);
+                void navigate({ to: "/assistant/machines", search: {} });
+              }}
               initialMachine={selectedRemote}
               node={
                 nodes.error

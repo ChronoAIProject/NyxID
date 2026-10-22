@@ -451,9 +451,11 @@ Rollup `legacy_grant_cost` replaces legacy integer `legacy_grant`.
 ## NyxBot model usage
 
 The NyxBot tab at `/admin/usage` adds cost and traffic reporting to the existing
-activity, outcomes, and feedback views. `GET /api/v1/admin/assistant/model-usage`
-is restricted to admins and operators, including when an account separately has
-the Usage Viewer role. It uses the tab's positive UTC window of at most 31 days.
+activity, outcomes, and feedback views. The whole tab, including
+`GET /api/v1/admin/assistant/model-usage`, `/analytics`, and `/feedback`, has the
+same read access as the rest of Usage: admins, operators, and holders of
+`nyxid:admin:usage:read` (such as the Usage Viewer role). It uses the tab's
+positive UTC window of at most 31 days.
 An exact `model` filter (trimmed, case sensitive, 1–256 characters) or
 `unknown_model=true` applies to the entire billing/traffic snapshot and account
 rankings. Missing, empty, and whitespace-only recorded models share the unknown

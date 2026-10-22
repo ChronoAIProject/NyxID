@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { identify, initTelemetry, reset as resetTelemetry } from "@/lib/telemetry";
+import { capture, identify, initTelemetry, reset as resetTelemetry } from "@/lib/telemetry";
 import { useConsentStore } from "@/stores/consent-store";
 import {
   assignAssistantResponseConversation,
@@ -10,12 +10,30 @@ import { ApiError } from "@/lib/api-client";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
+import { transitionAssistantIdentity } from "./identity";
 
+vi.mock("@/lib/telemetry", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/telemetry")>();
+  return {
+    ...original,
+    capture: vi.fn(),
+  };
+});
 
 const ACTOR_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
 const WIRE_LOG_ID = "d7dbbf38-a31c-4331-8ddb-13fda5a70d12";
 
 describe("assistantHttp", () => {
+  it("reports malformed successful JSON without forwarding its body", async () => {
+    vi.mocked(capture).mockClear();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("private malformed body", { status: 200 })));
+    await expect(assistantJson("/assistant/nyxagent/models")).rejects.toThrow();
+    expect(capture).toHaveBeenCalledExactlyOnceWith({ name: "nyxbot.error", props: expect.objectContaining({
+      error_code: "NYXBOT_PROTOCOL_ERROR", engine: "nyxagent", http_status: 200,
+    }) });
+    expect(JSON.stringify(vi.mocked(capture).mock.calls)).not.toContain("private");
+  });
+
   it.each([
     ["insufficient_credits", "Add credits in Billing & Usage"],
     ["wallet_suspended", "Your billing wallet is suspended"],
@@ -74,6 +92,7 @@ describe("assistantHttp", () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.mocked(capture).mockClear();
     vi.unstubAllGlobals();
     globalThis.__nyxidAssistantHttpMock = undefined;
     resetTelemetry();
@@ -86,6 +105,106 @@ describe("assistantHttp", () => {
       totalBytes: 0,
       captureBytes: 0,
     });
+  });
+
+  it.each([
+    [403, "NYXBOT_HTTP_FORBIDDEN"],
+    [500, "NYXBOT_HTTP_SERVER_ERROR"],
+  ])(
+    "records HTTP %s once with trace headers and no error body",
+    async (status, code) => {
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValue(
+            new Response(
+              JSON.stringify({
+                error: "failure",
+                error_code: 9100,
+                message: "private error details",
+              }),
+              {
+                status,
+                headers: {
+                  "x-trace-id": "trace-123",
+                  "x-request-id": "request-123",
+                },
+              },
+            ),
+          ),
+      );
+
+      await expect(
+        assistantHttp("/assistant/chat", { method: "POST" }),
+      ).rejects.toBeInstanceOf(ApiError);
+      expect(capture).toHaveBeenCalledExactlyOnceWith({
+        name: "nyxbot.error",
+        props: expect.objectContaining({
+          error_code: code,
+          http_status: status,
+          trace_id: "trace-123",
+          request_id: "request-123",
+          upstream_error_code: 9100,
+        }),
+      });
+      expect(JSON.stringify(vi.mocked(capture).mock.calls)).not.toContain(
+        "private error details",
+      );
+    },
+  );
+
+  it("lets the turn observer report before a 401 clears identity, without duplicate transport events", async () => {
+    const order: string[] = [];
+    useAuthStore.setState({
+      setUser: () => {
+        order.push("clear");
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(
+            JSON.stringify({
+              error: "session_dead",
+              error_code: 1001,
+              message: "Sign in",
+            }),
+            { status: 401 },
+          ),
+        ),
+    );
+    await expect(
+      assistantHttp("/assistant/chat", {
+        reportErrors: false,
+        onError: () => {
+          order.push("report");
+        },
+      }),
+    ).rejects.toBeInstanceOf(ApiError);
+    expect(order).toEqual(["report", "clear"]);
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  it("records network failures but excludes aborted requests", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new TypeError("Failed to fetch")),
+    );
+    await expect(assistantHttp("/assistant/conversations")).rejects.toThrow();
+    expect(capture).toHaveBeenCalledExactlyOnceWith({
+      name: "nyxbot.error",
+      props: expect.objectContaining({ error_code: "NYXBOT_NETWORK_ERROR" }),
+    });
+    vi.mocked(capture).mockClear();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      assistantHttp("/assistant/conversations", { signal: controller.signal }),
+    ).rejects.toThrow();
+    expect(capture).not.toHaveBeenCalled();
   });
 
   it("uses cookie auth and conditionally identifies the UI client", async () => {
@@ -123,9 +242,10 @@ describe("assistantHttp", () => {
       ),
     );
 
-    await expect(
-      assistantHttp("/assistant/chat"),
-    ).rejects.toMatchObject({ status: 401, errorCode: -1 });
+    await expect(assistantHttp("/assistant/chat")).rejects.toMatchObject({
+      status: 401,
+      errorCode: -1,
+    });
     expect(setUser).not.toHaveBeenCalled();
   });
 
@@ -148,9 +268,9 @@ describe("assistantHttp", () => {
         ),
       );
 
-      await expect(
-        assistantHttp("/assistant/chat"),
-      ).rejects.toBeInstanceOf(ApiError);
+      await expect(assistantHttp("/assistant/chat")).rejects.toBeInstanceOf(
+        ApiError,
+      );
       expect(setUser).toHaveBeenCalledWith(null);
     },
   );
@@ -158,7 +278,9 @@ describe("assistantHttp", () => {
   it("adds debug capture only for non-list assistant requests", async () => {
     useAssistantWireLogStore.getState().setFeatureEnabled(true);
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
 
     await assistantHttp("/assistant/conversations");
@@ -178,7 +300,7 @@ describe("assistantHttp", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
-        new Response("data: {\"type\":\"RUN_FINISHED\"}\n\n", {
+        new Response('data: {"type":"RUN_FINISHED"}\n\n', {
           status: 200,
           headers: {
             "Content-Type": "text/event-stream",
@@ -232,6 +354,47 @@ function deferred<T>() {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+describe("originating-account telemetry", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.mocked(capture).mockClear();
+    globalThis.__nyxidAssistantHttpMock = undefined;
+    transitionAssistantIdentity("account-a");
+    useAssistantWireLogStore.setState({ featureEnabled: false, captureEnabled: false });
+  });
+
+  it.each([false, true])("does not report a late HTTP failure after an account transition (ABA: %s)", async (aba) => {
+    const response = deferred<Response>();
+    const fetchMock = vi.fn().mockReturnValue(response.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const pending = expect(assistantHttp("/assistant/nyxagent/conversations")).rejects.toMatchObject({ status: 403 });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    transitionAssistantIdentity("account-b");
+    if (aba) transitionAssistantIdentity("account-a");
+    response.resolve(new Response("{}", { status: 403 }));
+    await pending;
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("does not report late invalid JSON after an account transition (ABA: %s)", async (aba) => {
+    const body = deferred<unknown>();
+    const response = new Response("{}", { status: 200 });
+    const parse = vi.spyOn(response, "json").mockImplementation(async () => {
+      await body.promise;
+      throw new SyntaxError("private invalid response");
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    const pending = expect(assistantJson("/assistant/nyxagent/conversations")).rejects.toThrow(SyntaxError);
+    await vi.waitFor(() => expect(parse).toHaveBeenCalledOnce());
+    transitionAssistantIdentity("account-b");
+    if (aba) transitionAssistantIdentity("account-a");
+    body.resolve(null);
+    await pending;
+    expect(capture).not.toHaveBeenCalled();
+  });
+});
 
 function ownerAuthority() {
   useAuthStore.setState({ user: { id: "owner-one" } as User });

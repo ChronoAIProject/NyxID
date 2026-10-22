@@ -1,6 +1,6 @@
 import { formatCapacityWait } from "./capacity-wait";
 import { ApiError } from "@/lib/api-client";
-import { assistantHttp, assistantJson } from "@/lib/assistant/assistant-http";
+import { AssistantHttpError, assistantHttp, assistantJson } from "@/lib/assistant/assistant-http";
 import { billingError } from "@/lib/assistant/billing-error";
 import {
   applyDirectTurnEvent,
@@ -11,6 +11,7 @@ import { getAssistantIdentityUserId, subscribeAssistantIdentity } from "@/lib/as
 import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
 import { isAdmittedSendError, markAdmitted } from "@/lib/assistant/send-admission";
 import { withAssistantTrace } from "@/lib/assistant/request-error";
+import { captureNyxbotError, httpErrorCode, responseCorrelation, type ErrorCorrelation } from "./error-telemetry";
 import type { ChatImage, ChatSessionState, ChatMessage } from "@/lib/assistant/chat-types";
 import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
 import { deriveTurnStatus } from "@/lib/assistant/turn-status";
@@ -163,6 +164,13 @@ function active(row: NyxAgentConversation | undefined): boolean {
   return Boolean(row?.active_turn);
 }
 
+class NyxAgentDeadlineError extends Error {
+  constructor() {
+    super("The connection was interrupted. The assistant may still be working.");
+    this.name = "NyxAgentDeadlineError";
+  }
+}
+
 async function subscriptionDeadline<T>(
   operation: Promise<T>,
   milliseconds: number,
@@ -174,8 +182,9 @@ async function subscriptionDeadline<T>(
       operation,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-          controller.abort();
-          reject(new Error("The connection was interrupted. The assistant may still be working."));
+          const error = new NyxAgentDeadlineError();
+          controller.abort(error);
+          reject(error);
         }, milliseconds);
       }),
     ]);
@@ -883,6 +892,30 @@ export class NyxAgentTransport {
     let terminal = false;
     let responded = false;
     let traceId: string | null = null;
+    const startedAt = Date.now();
+    let errorReported = false;
+    let correlation: ErrorCorrelation = {};
+    const reportFailure = (error: unknown, upstreamCode?: string, turnId?: string) => {
+      if (errorReported || generation !== this.generation) return;
+      // Deadline aborts are failures; identity changes and user stops are not.
+      const recoveredFailure = turn.settled?.status === "failed" && turn.settled.error_code !== "cancelled";
+      if (controller.signal.aborted && !(controller.signal.reason instanceof NyxAgentDeadlineError) && !recoveredFailure) return;
+      errorReported = true;
+      const http = error instanceof ApiError ? error : undefined;
+      captureNyxbotError({
+        code: upstreamCode ? "NYXBOT_RUN_ERROR" : http ? httpErrorCode(http.status)
+          : controller.signal.reason instanceof NyxAgentDeadlineError ? (responded ? "NYXBOT_STREAM_TIMEOUT" : "NYXBOT_START_TIMEOUT")
+          : responded ? "NYXBOT_STREAM_ERROR" : "NYXBOT_UNKNOWN_ERROR",
+        engine: "nyxagent", stage: responded ? "stream" : "request", endpoint: `${ROOT}/turns`,
+        status: http?.status || (responded ? 200 : undefined),
+        upstreamCode: upstreamCode ?? http?.errorCode,
+        ...correlation,
+        ...(error instanceof AssistantHttpError ? error.correlation : {}),
+        ...(traceId ? { traceId } : {}),
+        conversationId: adopted ? key : undefined, turnId,
+        durationMs: Date.now() - startedAt,
+      }, error);
+    };
     try {
       const response = await subscriptionDeadline(
         assistantHttp(`${ROOT}/turns`, {
@@ -907,11 +940,14 @@ export class NyxAgentTransport {
             key: `assistant:nyxagent:${key}:${userMessageId}`,
             payer: "self",
           },
+          reportErrors: false,
+          onError: reportFailure,
         }),
         45_000,
         controller,
       );
       responded = true;
+      correlation = responseCorrelation(response);
       traceId = response.headers.get("X-NyxID-Trace-Id");
       this.current(generation);
       const responseId = response.headers.get("X-NyxID-Conversation-Id");
@@ -1031,6 +1067,9 @@ export class NyxAgentTransport {
             this.changed();
             if (event.event === "turn.completed") {
               terminal = true;
+              if (event.status === "failed" && event.error?.code !== "cancelled") {
+                reportFailure(undefined, event.error?.code ?? "other", event.turn_id);
+              }
               if (event.status === "failed" && event.error) {
                 onTurnFailed?.(key, event.turn_id, event.error.code);
               }
@@ -1053,11 +1092,15 @@ export class NyxAgentTransport {
       // A history refresh can prove completion before a stalled reader does.
       if (turn.settled) {
         terminal = true;
+        if (turn.settled.status === "failed" && turn.settled.error_code !== "cancelled") {
+          reportFailure(undefined, turn.settled.error_code ?? "other", turn.settled.turn_id);
+        }
         if (turn.settled.status === "failed" && turn.settled.error_code) {
           onTurnFailed?.(key, turn.settled.turn_id, turn.settled.error_code);
         }
         return;
       }
+      reportFailure(error);
       // After a 2xx the server has stored the message and bound its uploads:
       // every later failure (deadline, size, parse, mismatch, early end) is admitted.
       if (!responded) throw error;
