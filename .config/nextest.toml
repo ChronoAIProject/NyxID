@@ -23,3 +23,10 @@ threads-required = "num-cpus"
 [[profile.ci.overrides]]
 filter = "test(=telemetry::tests::track_enqueues_scrubbed_capture_job_with_common_properties) | test(=telemetry::tests::track_silently_drops_when_channel_is_full) | test(=telemetry::tests::dispatch_checks_live_revision_across_independent_clients)"
 threads-required = "num-cpus"
+
+# Mounted admission requires live OAuth authority before testing flag denial.
+# Concurrent fixture churn exhausted the real authority-read deadline in coverage;
+# keep that deadline and the 403/no-effects assertions while reserving test slots.
+[[profile.ci.overrides]]
+filter = "test(=routes::remote_machine_flag_tests::flag_absent_and_explicit_off_block_all_mounted_admission_before_effects_for_users_and_admins)"
+threads-required = "num-cpus"

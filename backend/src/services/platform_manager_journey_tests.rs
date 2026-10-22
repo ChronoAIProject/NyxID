@@ -282,18 +282,21 @@ impl Journey {
         }
         update
     }
-    async fn webhook(&self, update: &Value) {
-        let base = self.server.uri();
-        let status = crate::handlers::telegram_new::webhook_with_producers(
-            &self.state,
-            &telegram::service(&self.state, &base),
-            &telegram::headers(&self.state).await,
-            &serde_json::to_vec(update).unwrap(),
-            Some(self.producers.clone()),
-        )
-        .await
-        .unwrap();
-        assert_eq!(status, axum::http::StatusCode::OK);
+    fn webhook<'a>(&'a self, update: &'a Value) -> futures::future::BoxFuture<'a, ()> {
+        // Keep the webhook future out of the journey's test-thread stack.
+        Box::pin(async move {
+            let base = self.server.uri();
+            let status = crate::handlers::telegram_new::webhook_with_producers(
+                &self.state,
+                &telegram::service(&self.state, &base),
+                &telegram::headers(&self.state).await,
+                &serde_json::to_vec(update).unwrap(),
+                Some(self.producers.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(status, axum::http::StatusCode::OK);
+        })
     }
     async fn sends(&self) -> Vec<Value> {
         self.server

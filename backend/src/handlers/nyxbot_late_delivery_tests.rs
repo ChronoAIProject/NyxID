@@ -805,13 +805,23 @@ async fn checking_notice_arrives_after_five_seconds_without_consuming_final_answ
     );
     assert_eq!(status(&f).await, "waiting");
     assert!(!notice::claim(&f.state.db, &row, Utc::now()).await.unwrap());
-    f.state
-        .db
-        .collection::<bson::Document>(CONVERSATIONS)
-        .update_one(doc! {"_id": &row.id}, doc! {"$unset": {"active_turn": ""}})
+    assert!(
+        Box::pin(engine::finish_turn(
+            &f.state.db,
+            &row,
+            &row.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: "Useful answer".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        ))
         .await
-        .unwrap();
-    settled(&f, false).await;
+        .unwrap()
+        .is_none()
+    );
     delivery::detach(&f.state.db, &f.event.id).await.unwrap();
     late_delivery::sweep(&f.state).await.unwrap();
     late_delivery::sweep(&f.state).await.unwrap();
