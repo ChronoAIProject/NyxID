@@ -408,74 +408,92 @@ pub(crate) async fn render_personal(
     // decided/expired card must not change the plan after an accepted prefix.
     let deliveries = state.db.collection::<bson::Document>(COLLECTION_NAME);
     let saved_filter = doc! {"reference.reply_id": &message.id, "reference.kind": "reply"};
-    let snapshot = match session.as_deref_mut() {
-        Some(tx) => {
-            deliveries
-                .find_one(saved_filter.clone())
-                .session(tx)
-                .await?
-        }
-        None => deliveries.find_one(saved_filter.clone()).await?,
-    };
-    let ids = snapshot
-        .as_ref()
-        .and_then(|row| row.get_array("notice_card_ids").ok());
-    let mut filter = doc! {"user_id":&message.user_id,"conversation_id":&message.conversation_id,
-    "kind":"action","status":"pending","decider":"user","authored_skill":bson::Bson::Null,
-    "expires_at":{"$gt":bson::DateTime::now()}};
-    if let Some(ids) = ids {
-        filter = doc! {"_id": {"$in": ids}, "user_id": &message.user_id,
-        "conversation_id": &message.conversation_id};
-    }
     let collection = state.db.collection::<AssistantAcknowledgement>(ACKS);
     let conversations = state.db.collection::<AssistantConversation>(CONVERSATIONS);
-    let (cards, thread): (Vec<AssistantAcknowledgement>, Option<AssistantConversation>) =
-        match session.as_deref_mut() {
-            Some(session) => {
-                let mut cursor = collection
-                    .find(filter)
-                    .sort(doc! {"created_at":1,"_id":1})
-                    .limit(65)
-                    .session(&mut *session)
-                    .await?;
-                let cards = cursor.stream(&mut *session).try_collect().await?;
-                let thread = conversations
-                    .find_one(doc! {"_id":&message.conversation_id,"user_id":&message.user_id})
-                    .session(session)
-                    .await?;
-                (cards, thread)
-            }
-            None => (
-                collection
-                    .find(filter)
-                    .sort(doc! {"created_at":1,"_id":1})
-                    .limit(65)
+    // A concurrent render may pin a different plan first. Its pin is the plan,
+    // so a lost pin re-reads the snapshot once and renders the winner's plan.
+    let mut lost_pin = false;
+    let (cards, thread) = loop {
+        let snapshot = match session.as_deref_mut() {
+            Some(tx) => {
+                deliveries
+                    .find_one(saved_filter.clone())
+                    .session(tx)
                     .await?
-                    .try_collect()
-                    .await?,
-                conversations
-                    .find_one(doc! {"_id":&message.conversation_id,"user_id":&message.user_id})
-                    .await?,
-            ),
+            }
+            None => deliveries.find_one(saved_filter.clone()).await?,
         };
-    if ids.is_none()
-        && let Some(saved) = snapshot
-    {
-        #[cfg(test)]
-        if session.is_none()
-            && let Ok(barrier) = TEST_BEFORE_NOTICE_SNAPSHOT.try_with(Arc::clone)
-        {
-            barrier.wait().await;
+        let ids = snapshot
+            .as_ref()
+            .and_then(|row| row.get_array("notice_card_ids").ok());
+        let mut filter = doc! {"user_id":&message.user_id,"conversation_id":&message.conversation_id,
+        "kind":"action","status":"pending","decider":"user","authored_skill":bson::Bson::Null,
+        "expires_at":{"$gt":bson::DateTime::now()}};
+        if let Some(ids) = ids {
+            filter = doc! {"_id": {"$in": ids}, "user_id": &message.user_id,
+            "conversation_id": &message.conversation_id};
         }
-        let ids: Vec<_> = cards.iter().map(|card| card.id.as_str()).collect();
-        pin_notice_card_ids(
-            &state.db,
-            saved.get_str("_id").map_err(|_| refused())?,
-            &ids,
-            session,
-        )
-        .await?;
-    }
+        let (cards, thread): (Vec<AssistantAcknowledgement>, Option<AssistantConversation>) =
+            match session.as_deref_mut() {
+                Some(session) => {
+                    let mut cursor = collection
+                        .find(filter)
+                        .sort(doc! {"created_at":1,"_id":1})
+                        .limit(65)
+                        .session(&mut *session)
+                        .await?;
+                    let cards = cursor.stream(&mut *session).try_collect().await?;
+                    let thread = conversations
+                        .find_one(doc! {"_id":&message.conversation_id,"user_id":&message.user_id})
+                        .session(session)
+                        .await?;
+                    (cards, thread)
+                }
+                None => (
+                    collection
+                        .find(filter)
+                        .sort(doc! {"created_at":1,"_id":1})
+                        .limit(65)
+                        .await?
+                        .try_collect()
+                        .await?,
+                    conversations
+                        .find_one(doc! {"_id":&message.conversation_id,"user_id":&message.user_id})
+                        .await?,
+                ),
+            };
+        if ids.is_none()
+            && let Some(saved) = snapshot
+        {
+            // Tests meet twice between reading and pinning, so they can act
+            // in between. Only the first attempt waits.
+            #[cfg(test)]
+            if session.is_none()
+                && !lost_pin
+                && let Ok(barrier) = TEST_BEFORE_NOTICE_SNAPSHOT.try_with(Arc::clone)
+            {
+                barrier.wait().await;
+                barrier.wait().await;
+            }
+            let ids: Vec<_> = cards.iter().map(|card| card.id.as_str()).collect();
+            match pin_notice_card_ids(
+                &state.db,
+                saved.get_str("_id").map_err(|_| refused())?,
+                &ids,
+                session.as_deref_mut(),
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(AppError::Conflict(_)) if !lost_pin => {
+                    lost_pin = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        break (cards, thread);
+    };
     let thread = thread.ok_or_else(refused)?;
     let entry = &thread.platform_thread.as_ref().ok_or_else(refused)?.entry;
     append_card_notices(
