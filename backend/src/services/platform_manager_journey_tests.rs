@@ -931,19 +931,22 @@ async fn telegram_personal_link_saved_reply_web_history_and_unlink_journey() {
     );
     let body = delivery::render_saved(&saved, &j.state.config.frontend_url);
     let reference = DeliveryRef::Reply(reply.clone());
+    // Two delivery futures joined inline exceed the test thread's 2 MiB stack
+    // in debug and instrumented builds. Keep their state on the heap; the
+    // concurrent-delivery contract below is unchanged.
     let (a, b) = tokio::join!(
-        j.producers.transport.deliver_platform_reply(
+        Box::pin(j.producers.transport.deliver_platform_reply(
             &j.state.db,
             &destination,
             &reference,
             ReplyContent::Text(body.clone())
-        ),
-        j.producers.transport.deliver_platform_reply(
+        )),
+        Box::pin(j.producers.transport.deliver_platform_reply(
             &j.state.db,
             &destination,
             &reference,
             ReplyContent::Text(body.clone())
-        )
+        ))
     );
     assert!(a.is_ok() && b.is_ok(), "delivery results: {a:?}, {b:?}");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -1785,8 +1788,8 @@ async fn genuine_thread_event_saved_delivery_needs_no_ingress_and_keeps_single_c
     };
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     let (first, second) = tokio::join!(
-        notify_local(&j, &event_reply),
-        notify_local(&j, &event_reply)
+        Box::pin(notify_local(&j, &event_reply)),
+        Box::pin(notify_local(&j, &event_reply))
     );
     assert!(first.is_ok() && second.is_ok());
     let queued = j

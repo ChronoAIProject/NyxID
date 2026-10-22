@@ -679,28 +679,6 @@ pub(super) fn describe(chat: &NyxbotThread) -> String {
     }
 }
 
-/// Move a rebuilt connection's chats (and their threads' channel) and its
-/// private-chat access to the new connection. A new gateway channel names its
-/// private conversations anew (`conv_...`), so those start fresh threads, as
-/// they always did. When the connection now reaches another agent, chats
-/// without their own agent start new threads with it (as relinking does).
-pub(super) async fn carry_over(
-    state: &AppState,
-    owner: &str,
-    from: &NyxbotChannel,
-    to: &str,
-    agent_changed: bool,
-) -> AppResult<()> {
-    crate::services::channel_thread_follow_service::carry_over(
-        &state.db,
-        owner,
-        &from.id,
-        to,
-        agent_changed,
-    )
-    .await
-}
-
 // ---------------------------------------------------------------------------
 // Gateway admission
 // ---------------------------------------------------------------------------

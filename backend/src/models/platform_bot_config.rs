@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 pub const COLLECTION_NAME: &str = "platform_bot_configs";
 pub const CLEANUP_COLLECTION: &str = "platform_bot_cleanup";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PlatformBotCleanup {
     #[serde(rename = "_id")]
     pub id: String,
@@ -26,12 +26,28 @@ pub struct PlatformBotCleanup {
     pub gateway_channel_id: Option<String>,
     #[serde(default)]
     pub gateway_version: Option<i64>,
+    #[serde(default)]
+    pub record_id: Option<String>,
+    #[serde(default)]
+    pub binding_id: Option<String>,
+    #[serde(default)]
+    pub agent_api_key_id: Option<String>,
     pub completed: bool,
     pub claim_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub retry_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for PlatformBotCleanup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformBotCleanup")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .field("completed", &self.completed)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

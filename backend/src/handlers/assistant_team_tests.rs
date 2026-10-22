@@ -1905,7 +1905,11 @@ async fn refresh_turn(state: &AppState, start: TurnStart) -> (AssistantConversat
     )
     .await
     .unwrap();
-    let notices = tokio::time::timeout(Duration::from_secs(20), async {
+    // Settlement normally arrives within 2 s. CI run 39767925928 showed every
+    // concurrent engine test on the shard blocked 30-58 s at once with the
+    // runner's CPU and I/O idle (a server-side MongoDB wait, not load); keep the
+    // budget above such a stall. turn.completed is still required.
+    let notices = tokio::time::timeout(Duration::from_secs(90), async {
         let mut notices = 0;
         while let Ok(event) = receiver.recv().await {
             if event["code"] == "context_reset" {

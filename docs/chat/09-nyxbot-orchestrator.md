@@ -426,7 +426,7 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   platforms other than Telegram pins the bot's own user ID (Lark: its `open_id`,
   looked up with the bot's credentials) instead of a username; without it the
   gateway counts any mention of a bot as addressing it. If the
-  gateway refuses, its channel is released at its current version, the new keys
+  gateway refuses, exact-version cleanup is durably queued, the new keys
   are deleted and the bot stays exactly as it was (`gateway_fallback_at`),
   retried the next day; a manual connect never rebuilds a working bot just to
   change transport. A new bot on a listed platform the gateway refuses is
@@ -441,13 +441,15 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   images directly through its adapters on both transports, before the reply text. A message whose route the relay looked up
   just before the swap committed reaches NyxID's relay endpoint after it and is
   refused and reported like any lost message. A move whose replica stopped
-  midway leaves `pending_agent_api_key_id`/`pending_route_api_key_id`; the sweep
-  deletes those keys after 30 minutes. The swap needs MongoDB transactions (a
+  midway leaves `pending_agent_api_key_id`/`pending_route_api_key_id`; after
+  30 minutes, a retirement transaction captures its cleanup responsibility and
+  revokes those keys while preserving the working route. The swap needs MongoDB transactions (a
   replica set, as in production); on a standalone development database every
   move ends as `swap_failed` and the bot stays on its existing transport.
   A return to the relay builds a fresh route key beside the working gateway
-  connection and atomically swaps the channel and existing route before
-  releasing the gateway channel and deleting its provider key and old route key.
+  connection and atomically swaps the channel and existing route, revokes the
+  provider and old route keys, and captures exact gateway cleanup responsibility.
+  Remote release is attempted after that transaction commits.
   Both directions recheck the flag, org authority and active turns before the
   swap; a busy return retries after ten minutes. At most one move is attempted
   per sweep per replica, across both directions. Gateway private events retain
@@ -470,8 +472,8 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   Every gateway provider endpoint and relay inbound re-checks live org-admin
   membership, as do the sweep and asynchronous replies. Loss fails the link with
   `org_access_lost`, retains the existing metadata audit and link-status/watch
-  behaviour, removes the org route, releases the gateway channel, and deletes
-  active and pending keys under their respective owners. No event reaches the
+  behaviour, atomically retires the org route, queues exact gateway cleanup and
+  revokes active and pending keys under their respective owners. No event reaches the
   linking person's agent after that check fails. Telegram org bots always use
   the gateway. Lark/Feishu org bots use the linking person's media flag and
   the same owner-media rules as personal bots; live org-admin authority is
@@ -532,6 +534,32 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   are delivered to the chat through the gateway's `replyToEvent` while the newest
   event reference is valid, or through the relay reply API; messages that arrive
   while the agent is busy are queued and answered next instead of bounced.
+
+### Explicit reconnect continuity
+
+An explicit reconnect restores eligible history atomically with activation. The
+source is the latest disconnected connection for the same linking person and bot,
+with the same canonical platform and effective bot owner, no committed successor,
+and ordinary personal-route eligibility. An incompatible newest row is a boundary;
+NyxBot never skips it to recover older history. Failed attempts and platform
+conversion are not continuity sources. A failed activation consumes no predecessor
+and leaves no active destination.
+
+Verified owner sender IDs, private-chat policy, stable chat partitions and their
+settings carry forward. All `conv_*` partitions remain on the predecessor, as
+before. Changing the channel's agent invalidates inherited conversation bindings
+and stops followed children; otherwise suspended children stay unavailable until
+admitted again. Stable conversation `channel` and `reply_channel` metadata move
+independently. Every activation stores a fresh one-time owner-link hash with a
+24-hour expiry and returns its new code; predecessor link material is never copied.
+Lineage records the committed predecessor/successor relationship. Gateway group
+policy is marked due in the activation transaction, so a crash before inline sync
+is repaired by the existing sweep.
+
+Reconnect remains explicit. Gateway lifecycle cleanup is independent of reconnect
+and adds no message delivery retry. See [gateway retirement and recovery](../CHANNEL_EVENT_GATEWAY.md#nyxbot-gateway-retirement-and-recovery)
+for the release states, exact-version cleanup, retired-binding acknowledgement,
+operator review and deployment boundary.
 
 ### Channel turn delivery after the provider stream closes
 
