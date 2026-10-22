@@ -347,7 +347,7 @@ pub async fn verify_totp_setup(
                     doc! {"_id": current_session_id, "user_id": user_id,
                     "revoked": false, "expires_at": {"$gt": bson::DateTime::now()}},
                 ),
-                doc! {"$set": {"mfa_assured": true}},
+                doc! {"$set": {"mfa_assured": true}, "$unset": {"mfa_exemption": ""}},
             )
             .session(&mut session)
             .await

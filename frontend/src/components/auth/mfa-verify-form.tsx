@@ -25,10 +25,7 @@ interface MfaVerifyFormProps {
   readonly cookieChallenge?: boolean;
 }
 
-export function MfaVerifyForm({
-  returnTo,
-  cookieChallenge = false,
-}: MfaVerifyFormProps) {
+export function MfaVerifyForm({ returnTo, cookieChallenge = false }: MfaVerifyFormProps) {
   const navigate = useNavigate();
   const verifyMutation = useMfaVerify();
   const mfaToken = useAuthStore((s) => s.mfaToken);
@@ -63,12 +60,7 @@ export function MfaVerifyForm({
     } catch (error) {
       if (error instanceof ApiError) {
         const details = error.errorResponse.details;
-        if (
-          details &&
-          typeof details === "object" &&
-          "reason" in details &&
-          details.reason === "mfa_challenge_expired"
-        ) {
+        if (details && typeof details === "object" && "reason" in details && details.reason === "mfa_challenge_expired") {
           clearMfaState();
           const params = new URLSearchParams({ mfa: "expired" });
           const trustedReturnTo = resolveTrustedAuthReturnTo(returnTo);
@@ -90,9 +82,7 @@ export function MfaVerifyForm({
       try {
         await apiClient("/auth/mfa/cancel", { method: "POST" });
       } catch {
-        form.setError("root", {
-          message: "Could not cancel verification. Please try again.",
-        });
+        form.setError("root", { message: "Could not cancel verification. Please try again." });
         return;
       }
     }
@@ -109,12 +99,11 @@ export function MfaVerifyForm({
     <div className="space-y-6">
       <div className="flex flex-col items-center space-y-2 text-center">
         <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
-          <ShieldCheck
-            className="h-6 w-6 text-primary-text"
-            aria-hidden="true"
-          />
+          <ShieldCheck className="h-6 w-6 text-primary-text" aria-hidden="true" />
         </div>
-        <h1 className="text-28 font-normal tracking-tight">MFA verification</h1>
+        <h1 className="text-28 font-normal tracking-tight">
+          MFA verification
+        </h1>
         <p className="text-12 text-muted-foreground">
           {verifyMutation.sessionConfirmationPending
             ? "Verification was submitted. Confirm your session to continue."
@@ -150,9 +139,7 @@ export function MfaVerifyForm({
               className="w-full"
               isLoading={verifyMutation.isPending}
             >
-              {verifyMutation.sessionConfirmationPending
-                ? "Retry session check"
-                : "Verify"}
+              {verifyMutation.sessionConfirmationPending ? "Retry session check" : "Verify"}
             </Button>
             <Button
               type="button"

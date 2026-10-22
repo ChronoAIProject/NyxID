@@ -211,7 +211,9 @@ pub enum AppError {
     #[error("MFA required")]
     MfaRequired { session_token: String },
 
-    #[error("Verify with your authenticator to approve sign-ins on other devices")]
+    #[error(
+        "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."
+    )]
     MfaStepUpRequired,
 
     #[error("PKCE verification failed")]
@@ -1713,6 +1715,27 @@ impl From<crate::models::credits::CreditsError> for AppError {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn mfa_step_up_error_preserves_typed_403_with_actionable_message() {
+        let response = AppError::MfaStepUpRequired.into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !response
+                .headers()
+                .contains_key(axum::http::header::SET_COOKIE)
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error_code"], 2003);
+        assert_eq!(body["error"], "mfa_step_up_required");
+        assert_eq!(
+            body["message"],
+            "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."
+        );
+    }
+
     #[test]
     fn rate_refusal_preserves_bounded_retry_after_without_changing_the_error_contract() {
         use axum::response::IntoResponse;

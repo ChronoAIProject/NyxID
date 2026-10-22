@@ -5580,7 +5580,9 @@ Password login keeps its existing HTTP 403 error code 2002 response.
 
 The default-off flag skips the social token-exchange MFA challenge and persists a mobile-exempt session. Password login, including `client: "mobile"`, always retains MFA. No environment variable controls this flag.
 
-Completed legacy sessions with absent/null assurance and mobile-exempt sessions keep authenticating through cookie, bearer, refresh and MCP fallback until normal expiry/revocation. Explicit unverified sessions are rejected for MFA accounts. A sid-less legacy first-party refresh acquires a fixed 30-day session on first refresh; successors cannot extend its expiry. In-flight legacy device codes, login codes and approvals without assurance fail closed.
+Completed legacy sessions with absent/null assurance and mobile-exempt sessions keep authenticating through cookie, bearer, refresh and MCP fallback until normal expiry/revocation. Parent-less legacy MCP fallback for MFA accounts has a fixed 30-day bound from creation, independent of its sliding idle expiry. Explicit unverified sessions are rejected for MFA accounts. A sid-less legacy first-party refresh acquires a fixed 30-day session on first refresh; successors cannot extend its expiry. In-flight legacy device codes, login codes and approvals without assurance fail closed.
+
+Third-party OAuth authorize/consent is SSO from existing IdP authority and accepts legacy/mobile-exempt sessions. Account management, such as API-key management, is also not a NyxID sign-in derivation. A new NyxID sign-in derived from an existing device requires verified authority for an MFA account.
 
 #### POST /api/v1/auth/mfa/step-up
 
@@ -5604,15 +5606,13 @@ For MFA accounts, device approval, Agent Key approval, login-code minting, CLI-t
 {
   "error": "mfa_step_up_required",
   "error_code": 2003,
-  "message": "Verify with your authenticator to approve sign-ins on other devices"
+  "message": "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."
 }
 ```
 
-This is HTTP 403 and does not expire the approver session. Verify through step-up and retry the original action. Web shows an inline authenticator/recovery prompt; mobile shows it only when `/users/me.capabilities.enabled_features` includes `auth:mobile-mfa`, otherwise it displays the server message. Enrollment continues to verify the current session and sign out other devices.
+This is HTTP 403 and does not expire the approver session. Verify through step-up and retry the original action. Web shows an inline authenticator/recovery prompt; mobile shows it only when `/users/me.capabilities.enabled_features` includes `auth:mobile-mfa`, otherwise it directs the user to the NyxID website to verify and approve or create a login code. Enrollment continues to verify the current session and sign out other devices.
 
-The CLI reports `mfa_step_up_required` with exit code 23 for an old in-flight
-delivery that lacks verified approval. Verify the approving session, then start
-a new login or generate a fresh login code; the old delivery remains fail-closed.
+Requester-side device polls and browser handoff creation return terminal `auth_device_access_denied` (403 / 11204) when an old approval lacks verified authority; the browser stops polling and shows a denied request. Start a new request after verifying the approver. The CLI explicitly handles `mfa_step_up_required` with exit code 23 for login-code redemption of an old in-flight code; generate a new code from a verified session.
 
 #### POST /api/v1/auth/mfa/cancel
 

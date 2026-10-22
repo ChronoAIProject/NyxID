@@ -80,7 +80,9 @@ export function CliAuthPage() {
       <div className="flex min-h-screen items-center justify-center">
         <div className="flex max-w-sm flex-col items-center gap-4 text-center">
           <AlertCircle className="h-12 w-12 text-muted-foreground/50" />
-          <h2 className="text-lg font-semibold">Invalid CLI Auth Request</h2>
+          <h2 className="text-lg font-semibold">
+            Invalid CLI Auth Request
+          </h2>
           <p className="text-12 text-muted-foreground">
             This page is used by the NyxID CLI. Run{" "}
             <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
@@ -88,10 +90,7 @@ export function CliAuthPage() {
             </code>{" "}
             from your terminal.
           </p>
-          <Button
-            variant="outline"
-            onClick={() => void navigate({ to: "/dashboard" })}
-          >
+          <Button variant="outline" onClick={() => void navigate({ to: "/dashboard" })}>
             Go to Dashboard
           </Button>
         </div>
@@ -109,7 +108,9 @@ export function CliAuthPage() {
             {error}
           </p>
         )}
-        <h2 className="text-lg font-semibold">CLI Authentication</h2>
+        <h2 className="text-lg font-semibold">
+          CLI Authentication
+        </h2>
         <p className="text-12 text-muted-foreground">
           Sending credentials to the NyxID CLI...
         </p>

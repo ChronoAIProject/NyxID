@@ -416,7 +416,7 @@ pub async fn poll_for_browser(
                 .find_one(doc! {"_id": &browser.user_id, "is_active": true})
                 .session(&mut *session).await?.ok_or(AppError::AuthDeviceCodeDenied)?;
             if !super::session_authority::may_derive(user.mfa_enabled, browser.mfa_assured == Some(true)) {
-                return Err(AppError::MfaStepUpRequired);
+                return Err(AppError::AuthDeviceCodeDenied);
             }
             db.collection::<Session>(SESSIONS).update_one(doc! {"_id": &original_id},
                 doc! {"$set": {"revoked": true}}).session(&mut *session).await?;
@@ -512,9 +512,10 @@ pub(super) async fn require_delivery_mfa(db: &Database, row: &AuthDeviceCode) ->
         .find_one(doc! {"_id": row.approved_user_id.as_deref(), "is_active": true})
         .await?
         .ok_or(AppError::AuthDeviceCodeDenied)?;
-    super::session_authority::require_derived_mfa(
-        super::session_authority::DerivedMfaAuthority::new(user.mfa_enabled, row.mfa_assured),
-    )
+    if !super::session_authority::may_derive(user.mfa_enabled, row.mfa_assured) {
+        return Err(AppError::AuthDeviceCodeDenied);
+    }
+    Ok(())
 }
 
 #[tracing::instrument(name = "auth_device.preview", skip_all, fields(row_id))]

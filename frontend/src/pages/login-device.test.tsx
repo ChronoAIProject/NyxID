@@ -596,7 +596,7 @@ describe("three-step device approval", () => {
     let denied = false;
     const original = mocks.post.getMockImplementation()!;
     mocks.post.mockImplementation(async (path: string, body: unknown) => {
-      if (path.includes("/approve") && !denied) {denied = true; throw new ApiError(403, {error: "mfa_step_up_required", error_code: 2003, message: "Verify with your authenticator to approve sign-ins on other devices"});}
+      if (path.includes("/approve") && !denied) {denied = true; throw new ApiError(403, {error: "mfa_step_up_required", error_code: 2003, message: "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."});}
       return original(path, body);
     });
     if (flow === "device") {

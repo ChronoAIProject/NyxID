@@ -26,7 +26,7 @@ beforeEach(() => {
   identity.userId = "first-person";
 });
 const message =
-  "Verify with your authenticator to approve sign-ins on other devices";
+  "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA.";
 describe("session step-up", () => {
   it("keeps a wrong-code failure inline and retries only after verification succeeds", async () => {
     const retry = vi.fn().mockResolvedValue(undefined);

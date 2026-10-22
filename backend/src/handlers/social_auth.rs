@@ -983,7 +983,7 @@ async fn finish_social_sign_in(
                 state.telemetry.as_deref(),
                 &user.id,
                 None,
-                &tele_social,
+                tele_social,
                 TelemetryEvent::AuthLoggedIn {
                     method: provider.to_string(),
                     mfa_required: false,
@@ -1042,7 +1042,7 @@ async fn finish_social_sign_in(
                 state.telemetry.as_deref(),
                 &user.id,
                 None,
-                &tele_social,
+                tele_social,
                 TelemetryEvent::AuthLoggedIn {
                     method: provider.to_string(),
                     mfa_required: false,
@@ -1055,7 +1055,7 @@ async fn finish_social_sign_in(
                     state.telemetry.as_deref(),
                     &user.id,
                     None,
-                    &tele_social,
+                    tele_social,
                     TelemetryEvent::AuthMobileMfaExempted,
                 )
                 .await;

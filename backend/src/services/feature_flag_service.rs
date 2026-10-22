@@ -2523,6 +2523,7 @@ mod tests {
             shipped,
             vec![
                 "auth:invitation-code",
+                "auth:mobile-mfa",
                 "assistant:nyxagent-engine",
                 "assistant:model-controls",
                 "assistant:skill-pin-disable",
@@ -2815,6 +2816,47 @@ mod tests {
                 .expect("resolve after clear")
                 .contains(&"example_ui".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn mobile_mfa_required_resolves_live_org_override_for_person() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("mobile_mfa_org_override").await;
+        let org = Uuid::new_v4().to_string();
+        let person = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&person, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<crate::models::org_membership::OrgMembership>(
+            crate::models::org_membership::COLLECTION_NAME,
+        )
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            &person,
+            OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+        assert!(!mobile_mfa_required(&db, &person).await.unwrap());
+        set_platform_org_override(&db, &org, MOBILE_MFA_FLAG_KEY, true, &person)
+            .await
+            .unwrap();
+        assert!(mobile_mfa_required(&db, &person).await.unwrap());
+        db.collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+            .update_one(
+                doc! {"org_user_id": &org, "member_user_id": &person},
+                doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        assert!(!mobile_mfa_required(&db, &person).await.unwrap());
+        db.drop().await.unwrap();
     }
 
     #[test]

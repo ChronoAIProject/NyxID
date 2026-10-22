@@ -915,6 +915,11 @@ mod tests {
             ),
             (TelemetryEvent::AuthLoggedOut, "auth.logged_out", json!({})),
             (
+                TelemetryEvent::AuthMobileMfaExempted,
+                "auth.mobile_mfa_exempted",
+                json!({"mfa": "skipped_mobile_rollout"}),
+            ),
+            (
                 TelemetryEvent::AuthPasswordResetRequested,
                 "auth.password_reset_requested",
                 json!({}),

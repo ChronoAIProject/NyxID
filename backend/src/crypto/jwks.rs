@@ -153,6 +153,22 @@ impl JwksCache {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn seed_google_test_key(&self, decoding_key: DecodingKey) {
+        self.inner.write().await.insert(
+            GOOGLE_JWKS_URI.into(),
+            CachedJwks {
+                keys: vec![CachedKey {
+                    kid: None,
+                    decoding_key,
+                    algorithm: Algorithm::RS256,
+                }],
+                fetched_at: Instant::now(),
+                max_age: Duration::from_secs(JWKS_DEFAULT_TTL_SECS),
+            },
+        );
+    }
+
     /// Fetch JWKS keys for a given URI. Returns cached keys if still fresh.
     async fn get_keys(&self, jwks_uri: &str) -> AppResult<Vec<CachedKey>> {
         // Check cache (read lock)

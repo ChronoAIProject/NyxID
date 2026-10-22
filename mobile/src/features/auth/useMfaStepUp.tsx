@@ -8,7 +8,8 @@ import { spacing } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
 import { createDeviceLoginStyles } from "./deviceLoginStyles";
 import {
-  shouldOfferStepUp,
+  decideStepUp,
+  stepUpScopeIsCurrent,
   completeStepUp,
 } from "./mfaStepUp";
 
@@ -30,7 +31,7 @@ export function useMfaStepUp(scope: string) {
   }, [scope]);
   if (
     pending &&
-    (pending.scope !== scope || pending.generation !== authSessionGeneration())
+    !stepUpScopeIsCurrent(pending, scope, authSessionGeneration())
   )
     setPending(null);
   async function handle(
@@ -38,15 +39,10 @@ export function useMfaStepUp(scope: string) {
     retry: () => Promise<void>,
   ): Promise<boolean> {
     const isCurrent = () =>
-      active.current === scope && authSessionGeneration() === generation;
-    if (
-      !(await shouldOfferStepUp(
-        error,
-        () => mobileApi.getAccountProfile(),
-        isCurrent,
-      ))
-    )
-      return false;
+      stepUpScopeIsCurrent({ scope, generation }, active.current, authSessionGeneration());
+    const decision = await decideStepUp(error, () => mobileApi.getAccountProfile(), isCurrent);
+    if (decision === "discard") return true;
+    if (decision !== "prompt") return false;
     setPending({
       retry,
       message: error instanceof Error ? error.message : "Verification required",
@@ -56,8 +52,7 @@ export function useMfaStepUp(scope: string) {
     return true;
   }
   const prompt =
-    pending?.scope === scope &&
-    pending.generation === authSessionGeneration() ? (
+    pending && stepUpScopeIsCurrent(pending, scope, authSessionGeneration()) ? (
       <MfaStepUpPrompt
         message={pending.message}
         cancel={() => setPending(null)}
@@ -76,8 +71,7 @@ export function useMfaStepUp(scope: string) {
               await pending.retry();
             },
             () =>
-              active.current === pending.scope &&
-              authSessionGeneration() === pending.generation,
+              stepUpScopeIsCurrent(pending, active.current, authSessionGeneration()),
           );
         }}
       />

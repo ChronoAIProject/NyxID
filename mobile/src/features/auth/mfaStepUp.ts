@@ -15,17 +15,29 @@ export function mobileMfaEnabled(profile: AccountProfile): boolean {
   );
 }
 
-export async function shouldOfferStepUp(
+export type StepUpScope = { scope: string; generation: number };
+
+export function stepUpScopeIsCurrent(
+  origin: StepUpScope,
+  activeScope: string | null,
+  activeGeneration: number,
+): boolean {
+  return origin.scope === activeScope && origin.generation === activeGeneration;
+}
+
+export async function decideStepUp(
   error: unknown,
   loadProfile: () => Promise<AccountProfile>,
   isCurrent: () => boolean,
-): Promise<boolean> {
-  if (!isMfaStepUpRequired(error) || !isCurrent()) return false;
+): Promise<"prompt" | "message" | "discard" | "unhandled"> {
+  if (!isCurrent()) return "discard";
+  if (!isMfaStepUpRequired(error)) return "unhandled";
   try {
     const profile = await loadProfile();
-    return isCurrent() && mobileMfaEnabled(profile);
+    if (!isCurrent()) return "discard";
+    return mobileMfaEnabled(profile) ? "prompt" : "message";
   } catch {
-    return false;
+    return isCurrent() ? "message" : "discard";
   }
 }
 

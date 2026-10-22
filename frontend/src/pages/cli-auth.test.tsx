@@ -62,7 +62,7 @@ describe("CliAuthPage", () => {
     storeState.isAuthenticated = true;
     searchState.value = { port: "5555", state: "step-up" };
     mockPost.mockRejectedValueOnce(new ApiError(403, {error: "mfa_step_up_required", error_code: 2003,
-      message: "Verify with your authenticator to approve sign-ins on other devices"}));
+      message: "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."}));
     render(<CliAuthPage />);
     const user = userEvent.setup();
     expect(await screen.findByRole("region", {name: "Verify this session"})).toBeVisible();

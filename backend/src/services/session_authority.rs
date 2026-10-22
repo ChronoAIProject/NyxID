@@ -67,6 +67,7 @@ pub fn pending(filter: Document, legacy: bool) -> Document {
 
 /// Validate live user authority for MCP, accepting grandfathered devices while
 /// retaining exact-parent revocation and explicit-unverified rejection.
+#[cfg(test)]
 pub async fn mfa_assurance(
     db: &mongodb::Database,
     user_id: &str,
@@ -80,6 +81,56 @@ pub async fn mfa_assurance(
         .ok_or_else(|| AppError::Unauthorized("User account is inactive; sign in again".into()))
         .map(|user| (user.id, user.mfa_enabled))?;
     mfa_assurance_for_active_user(db, &user_id, mfa_enabled, session_id).await
+}
+
+/// Parent-less fallback predates assurance. Its sliding idle timeout must not
+/// extend the fixed grandfathering window for an MFA account.
+pub async fn mcp_fallback_assurance(
+    db: &mongodb::Database,
+    mcp_session_id: &str,
+    session: &crate::models::mcp_session::McpSessionAccess,
+) -> crate::errors::AppResult<bool> {
+    use crate::errors::AppError;
+    let user = db
+        .collection::<crate::models::user::User>(USERS)
+        .find_one(doc! {"_id": &session.user_id, "is_active": true})
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("User account is inactive; sign in again".into()))?;
+    if user.mfa_enabled
+        && session.parent_session_id.is_none()
+        && session.created_at + chrono::Duration::seconds(super::token_service::SESSION_TTL_SECS)
+            <= chrono::Utc::now()
+    {
+        let context = (db.clone(), user.id.clone(), mcp_session_id.to_owned());
+        super::transaction_service::run_db_only(db, &context, |tx, c| Box::pin(async move {
+            let (db, user, id) = c;
+            let removed = db.collection::<Document>(MCP_SESSION_COLLECTION)
+                .delete_one(doc! {"_id": id, "user_id": user, "parent_session_id": null,
+                    "session_fallback_allowed": true, "created_at": {"$lte": bson::DateTime::from_chrono(
+                        chrono::Utc::now() - chrono::Duration::seconds(super::token_service::SESSION_TTL_SECS))}})
+                .session(&mut *tx).await?;
+            if removed.deleted_count == 0 { return Ok(()); }
+            for collection in [MCP_SESSION_SLOT_COLLECTION, MCP_NOTIFICATIONS] {
+                db.collection::<Document>(collection).delete_many(doc! {"session_id": id})
+                    .session(&mut *tx).await?;
+            }
+            super::audit_service::log_actor_event_in_transaction(db, tx,
+                &super::audit_service::AuditActor {user_id: user.clone(), ip_address: None,
+                    user_agent: None, api_key_id: None, api_key_name: None},
+                "mfa_unassured_session_rejected",
+                serde_json::json!({"session_id": id, "source": "mcp_legacy_expired"})).await
+        })).await?;
+        return Err(AppError::Unauthorized(
+            "MFA verification required; sign in again".into(),
+        ));
+    }
+    mfa_assurance_for_active_user(
+        db,
+        &user.id,
+        user.mfa_enabled,
+        session.parent_session_id.as_deref(),
+    )
+    .await
 }
 
 /// Apply assurance to an active user already validated in this authentication
@@ -104,8 +155,8 @@ pub(crate) async fn mfa_assurance_for_active_user(
     } else {
         None
     };
-    // Sid-less authority can only come from old issuers. Its JWT/MCP expiry
-    // bounds access; first refresh binds it to a fixed-lifetime legacy session.
+    // Sid-less bearer authority is bounded by JWT expiry. Fallback separately
+    // enforces its fixed creation-time bound before reaching this predicate.
     if session_id.is_none() {
         return Ok(false);
     }

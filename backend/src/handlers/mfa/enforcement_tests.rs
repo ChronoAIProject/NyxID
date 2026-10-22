@@ -188,6 +188,15 @@ async fn mfa_social_enrollment_keeps_and_assures_current_session_and_revokes_oth
     )
     .await
     .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(SESSIONS)
+        .update_one(
+            doc! {"_id": &current.session_id},
+            doc! {"$set": {"mfa_exemption": "mobile_rollout"}},
+        )
+        .await
+        .unwrap();
     // A legacy row without session_id must be revoked alongside sid-bearing rows.
     let mut legacy = state
         .db
@@ -254,6 +263,7 @@ async fn mfa_social_enrollment_keeps_and_assures_current_session_and_revokes_oth
         .unwrap()
         .unwrap();
     assert!(!retained.revoked && retained.mfa_assured == Some(true));
+    assert_eq!(retained.mfa_exemption, None);
     assert_eq!(
         state
             .db
@@ -1365,26 +1375,26 @@ async fn old_device_deliveries_cannot_grandfather_an_unverified_approval() {
             }
             assert!(matches!(
                 device::poll_and_prepare(&state.db, &state.encryption_keys, state.auth_device_hmac_key.as_slice(), &request.device_code).await,
-                Err(AppError::MfaStepUpRequired)
+                Err(AppError::AuthDeviceCodeDenied)
             ));
             assert!(matches!(
                 device::poll_and_claim(&state.db, state.auth_device_hmac_key.as_slice(), &request.device_code).await,
-                Err(AppError::MfaStepUpRequired)
+                Err(AppError::AuthDeviceCodeDenied)
             ));
             if selected {
                 assert!(matches!(
                     device::poll_agent_key(&state.db, &state.encryption_keys, state.auth_device_hmac_key.as_slice(), &request.device_code).await,
-                    Err(AppError::MfaStepUpRequired)
+                    Err(AppError::AuthDeviceCodeDenied)
                 ));
                 assert!(matches!(
                     crate::services::login_code_service::browser_handoff(&state.db, state.auth_device_hmac_key.as_slice(), &request.device_code).await,
-                    Err(AppError::MfaStepUpRequired)
+                    Err(AppError::AuthDeviceCodeDenied)
                 ));
             } else {
                 assert!(matches!(
                     device::poll_for_browser(&state.db, &state.encryption_keys, state.auth_device_hmac_key.as_slice(),
                         &request.device_code, &hash_token(&crate::crypto::token::generate_random_token()), "127.0.0.1", None).await,
-                    Err(AppError::MfaStepUpRequired)
+                    Err(AppError::AuthDeviceCodeDenied)
                 ));
             }
             let pending = requests.find_one(filter.clone()).await.unwrap().unwrap();
@@ -1392,6 +1402,15 @@ async fn old_device_deliveries_cannot_grandfather_an_unverified_approval() {
             assert!(!pending.contains_key("mfa_assured"));
             // A genuinely verified record remains deliverable on both lanes.
             requests.update_one(filter, doc! {"$set": {"mfa_assured": true}}).await.unwrap();
+            if session_id.is_some() {
+                // Even a verified pending proof cannot make an unverified
+                // prepared parent authorize a browser handoff.
+                assert!(matches!(
+                    device::poll_for_browser(&state.db, &state.encryption_keys, state.auth_device_hmac_key.as_slice(),
+                        &request.device_code, &hash_token(&crate::crypto::token::generate_random_token()), "127.0.0.1", None).await,
+                    Err(AppError::AuthDeviceCodeDenied)
+                ));
+            }
             if let Some(sid) = session_id {
                 state.db.collection::<bson::Document>(SESSIONS)
                     .update_one(doc! {"_id": &sid}, doc! {"$set": {"mfa_assured": true}}).await.unwrap();
@@ -1576,5 +1595,63 @@ async fn step_up_requires_mfa_and_first_party_identified_human_authority() {
         step_up(State(state.clone()), auth, body()).await,
         Err(AppError::Forbidden(_))
     ));
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn inactive_user_cannot_reach_derived_mfa_guard_or_mint_tokens() {
+    let (state, id) = fixture("inactive_derived_mfa").await;
+    let tokens = token_service::create_session_and_issue_tokens(
+        &state.db,
+        &state.config,
+        &state.jwt_keys,
+        &id,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    state
+        .db
+        .collection::<User>(USERS)
+        .update_one(
+            doc! {"_id": &id},
+            doc! {"$set": {"mfa_enabled": true, "is_active": false}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<Session>(SESSIONS)
+        .update_one(
+            doc! {"_id": &tokens.session_id},
+            doc! {"$set": {"mfa_assured": true}},
+        )
+        .await
+        .unwrap();
+    let (base, server) = serve(state.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/cli-token"))
+        .bearer_auth(&tokens.access_token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        matches!(token_service::refresh_tokens(&state.db, &state.config, &state.jwt_keys,
+        &tokens.refresh_token, None, None).await,
+        Err(AppError::Unauthorized(message)) if message.contains("inactive"))
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<Session>(SESSIONS)
+            .count_documents(doc! {"user_id": &id})
+            .await
+            .unwrap(),
+        1
+    );
+    server.abort();
     state.db.drop().await.unwrap();
 }

@@ -6,8 +6,9 @@ import type { AccountProfile } from "../../lib/api/types";
 import {
   mobileMfaEnabled,
   isMfaStepUpRequired,
-  shouldOfferStepUp,
+  decideStepUp,
   completeStepUp,
+  stepUpScopeIsCurrent,
 } from "./mfaStepUp";
 
 test("MFA UI defaults off for old backends and follows per-person capabilities", () => {
@@ -40,11 +41,13 @@ test("step-up recognizes the typed 403 without mistaking session expiry or login
   );
   assert.equal(
     resolveAuthDeviceErrorMessage(error(403, 2003, "mfa_step_up_required")),
-    "Verification required",
+    "Open the NyxID website to verify with your authenticator, then approve the sign-in or create a login code there.",
   );
   for (const value of [
     error(401, 2003, "mfa_step_up_required"),
     error(403, 2002, "mfa_required"),
+    error(403, 2003, "other_error"),
+    null,
     new Error("step-up"),
   ])
     assert.equal(isMfaStepUpRequired(value), false);
@@ -68,11 +71,11 @@ test("a late step-up refusal cannot prompt under a replacement login", async () 
     } as AccountProfile;
   };
   generation += 1;
-  assert.equal(await shouldOfferStepUp(error, loadProfile, isCurrent), false);
+  assert.equal(await decideStepUp(error, loadProfile, isCurrent), "discard");
   assert.equal(profileReads, 0);
 });
 
-test("capability fetch discards a changed account and retains the server message when unavailable", async () => {
+test("capability fetch discards a changed account and selects website guidance when unavailable", async () => {
   const error = new ApiError({
     statusCode: 403,
     errorCode: 2003,
@@ -84,7 +87,7 @@ test("capability fetch discards a changed account and retains the server message
   } as AccountProfile;
   let current = true;
   let resolveProfile!: (profile: AccountProfile) => void;
-  const pending = shouldOfferStepUp(
+  const pending = decideStepUp(
     error,
     () =>
       new Promise<AccountProfile>((resolve) => {
@@ -94,24 +97,24 @@ test("capability fetch discards a changed account and retains the server message
   );
   current = false;
   resolveProfile(enabled);
-  assert.equal(await pending, false);
+  assert.equal(await pending, "discard");
   assert.equal(
-    await shouldOfferStepUp(error, async () => enabled, () => true),
-    true,
+    await decideStepUp(error, async () => enabled, () => true),
+    "prompt",
   );
   assert.equal(
-    await shouldOfferStepUp(error, async () => ({} as AccountProfile), () => true),
-    false,
+    await decideStepUp(error, async () => ({} as AccountProfile), () => true),
+    "message",
   );
   assert.equal(
-    await shouldOfferStepUp(
+    await decideStepUp(
       error,
       async () => {
         throw new Error("profile unavailable");
       },
       () => true,
     ),
-    false,
+    "message",
   );
 });
 for (const surface of [
@@ -157,3 +160,21 @@ for (const surface of [
     assert.deepEqual(calls, []);
   });
 }
+
+
+test("step-up decisions cover unrelated errors and stale scope/generation on every async exit", async () => {
+  const origin = { scope: "approval-1", generation: 1 };
+  assert.equal(stepUpScopeIsCurrent(origin, "approval-1", 1), true);
+  assert.equal(stepUpScopeIsCurrent(origin, "approval-2", 1), false);
+  assert.equal(stepUpScopeIsCurrent(origin, "approval-1", 2), false);
+  assert.equal(stepUpScopeIsCurrent(origin, null, 1), false);
+  assert.equal(await decideStepUp(new Error("unrelated"), async () => {
+    assert.fail("must not fetch capabilities");
+  }, () => true), "unhandled");
+  let current = true;
+  assert.equal(await decideStepUp(new ApiError({statusCode: 403, errorCode: 2003,
+    errorKey: "mfa_step_up_required", message: "step up"}), async () => {
+      current = false;
+      throw new Error("account changed while fetching");
+    }, () => current), "discard");
+});

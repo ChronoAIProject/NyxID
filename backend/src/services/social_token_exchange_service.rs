@@ -64,6 +64,7 @@ pub async fn exchange_social_token(
                     "subject_token_type": subject_token_type,
                     "client_id": client_id,
                     "result": "success",
+                    "session_id": resp.session_id,
                     "mfa": if resp.mobile_mfa_exempt {"skipped_mobile_rollout"} else {"not_required"},
                 })),
                 None,
@@ -113,6 +114,7 @@ struct SocialTokenExchangeInner {
     expires_in: i64,
     scope: String,
     user_id_for_audit: String,
+    session_id: String,
     mobile_mfa_exempt: bool,
 }
 
@@ -226,22 +228,6 @@ async fn complete_verified_exchange(
         None, // no auth context
     )?;
 
-    audit_service::log_async(
-        db.clone(),
-        Some(user.id.clone()),
-        "social_login".into(),
-        Some(
-            serde_json::json!({"provider": social_provider.as_str(), "session_id": tokens.session_id,
-            "mfa": if mobile_exempt {"skipped_mobile_rollout"} else {"not_required"}}),
-        ),
-        None,
-        None,
-        None,
-        None,
-    );
-    if mobile_exempt {
-        tracing::info!(target: "nyxid::auth", mfa = "skipped_mobile_rollout", method = social_provider.as_str(), "Mobile social MFA rollout exemption issued");
-    }
     Ok(SocialTokenExchangeInner {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
@@ -249,6 +235,7 @@ async fn complete_verified_exchange(
         expires_in: tokens.access_expires_in,
         scope: token_service::FIRST_PARTY_ACCESS_SCOPES.to_string(),
         user_id_for_audit: user.id,
+        session_id: tokens.session_id,
         mobile_mfa_exempt: mobile_exempt,
     })
 }
@@ -515,15 +502,6 @@ mod tests {
                     .unwrap(),
                 1
             );
-            let audit = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
-            let filter = doc! {"user_id": &id, "event_type": "social_login", "event_data.mfa": "skipped_mobile_rollout"};
-            for _ in 0..100 {
-                if audit.count_documents(filter.clone()).await.unwrap() == 1 {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            assert_eq!(audit.count_documents(filter).await.unwrap(), 1);
         }
         db.drop().await.unwrap();
     }

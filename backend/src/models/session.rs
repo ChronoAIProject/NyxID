@@ -100,6 +100,67 @@ mod tests {
     }
 
     #[test]
+    fn assurance_classification_and_derivation_cover_every_persisted_state() {
+        use crate::services::session_authority::{
+            DerivedMfaAuthority, classification, may_derive, require_derived_mfa, satisfies_mfa,
+        };
+        let base = bson::to_document(&make_session()).unwrap();
+        for (value, exemption, expected) in [
+            (
+                Some(bson::Bson::Boolean(true)),
+                None,
+                MfaAssurance::Verified,
+            ),
+            (
+                Some(bson::Bson::Boolean(false)),
+                None,
+                MfaAssurance::Unverified,
+            ),
+            (None, None, MfaAssurance::Legacy),
+            (Some(bson::Bson::Null), None, MfaAssurance::Legacy),
+            (
+                Some(bson::Bson::Boolean(false)),
+                Some("legacy_migration"),
+                MfaAssurance::Legacy,
+            ),
+            (
+                Some(bson::Bson::Boolean(false)),
+                Some("mobile_rollout"),
+                MfaAssurance::MobileExempt,
+            ),
+            (
+                Some(bson::Bson::Boolean(true)),
+                Some("mobile_rollout"),
+                MfaAssurance::Verified,
+            ),
+        ] {
+            let mut row = base.clone();
+            row.remove("mfa_assured");
+            if let Some(value) = value {
+                row.insert("mfa_assured", value);
+            }
+            if let Some(exemption) = exemption {
+                row.insert("mfa_exemption", exemption);
+            }
+            let session: Session = bson::from_document(row).unwrap();
+            assert_eq!(classification(&session), expected);
+            assert_eq!(
+                satisfies_mfa(&session),
+                expected != MfaAssurance::Unverified
+            );
+            for mfa in [false, true] {
+                let verified = expected == MfaAssurance::Verified;
+                let allowed = !mfa || verified;
+                assert_eq!(may_derive(mfa, verified), allowed);
+                assert_eq!(
+                    require_derived_mfa(DerivedMfaAuthority::new(mfa, verified)).is_ok(),
+                    allowed
+                );
+            }
+        }
+    }
+
+    #[test]
     fn bson_roundtrip() {
         let session = make_session();
         let doc = bson::to_document(&session).expect("serialize");

@@ -427,7 +427,7 @@ async fn refresh_refuses_expired_deleted_or_revoked_bound_session_before_rotatio
                 None
             )
             .await,
-            Err(AppError::MfaStepUpRequired)
+            Err(AppError::Unauthorized(message)) if message == "Session expired or revoked"
         ));
         assert_eq!(
             state
@@ -692,8 +692,8 @@ async fn mint_freezes_default_intent_and_old_shaped_pending_codes_remain_readabl
 
 #[tokio::test]
 async fn mfa_browser_handoff_inherits_device_assurance_and_rejects_unassured_delivery() {
+    let (state, actor) = fixture("mfa_handoff_assurance").await;
     for assured in [false, true] {
-        let (state, actor) = fixture("mfa_handoff_assurance").await;
         state
             .db
             .collection::<User>(USERS)
@@ -757,7 +757,7 @@ async fn mfa_browser_handoff_inherits_device_assurance_and_rejects_unassured_del
                 .unwrap();
             assert!(matches!(
                 browser_handoff(&state.db, KEY, &request.device_code).await,
-                Err(AppError::MfaStepUpRequired)
+                Err(AppError::AuthDeviceCodeDenied)
             ));
         }
         let row = state
@@ -783,6 +783,6 @@ async fn mfa_browser_handoff_inherits_device_assurance_and_rejects_unassured_del
                 .unwrap(),
             0
         );
-        state.db.drop().await.unwrap();
     }
+    state.db.drop().await.unwrap();
 }
