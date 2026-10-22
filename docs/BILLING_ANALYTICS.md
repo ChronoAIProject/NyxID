@@ -245,6 +245,9 @@ are reporting groups without an identity-filter action.
 Each panel exposes a **Group by** selector. For example, filter to Chrono LLM
 and choose **Model** to inspect its recorded model usage. New workspaces include
 a **Tokens by model** panel; saved workspaces keep their existing panels.
+Identical recorded model IDs combine across services (for example, Chrono LLM
+and direct DeepSeek usage); distinct aliases remain separate. Service, actor,
+billing-owner, and time filters apply before this grouping.
 Model grouping reuses the pricing-model / provider-reported-model projection
 described under [NyxBot model usage](#nyxbot-model-usage), without changing rates
 or Lago events. Missing model identities appear as **Unattributed**; history is

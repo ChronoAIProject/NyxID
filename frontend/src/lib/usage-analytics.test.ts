@@ -197,7 +197,9 @@ it("filters sample services, organizations, and users rather than relabeling unc
 });
 
 it("supports model breakdowns in persisted views and conserves their token totals", () => {
-  const panel = newPanel({ breakdown: "model", measure: "total_tokens" });
+  const panel = newView().panels.find((item) => item.title === "Tokens by model")!;
+  expect(panel.breakdown).toBe("model");
+  expect(panel.measure).toBe("total_tokens");
   expect(analyticsPanelSchema.parse(panel).breakdown).toBe("model");
   expect(analyticsPath(EMPTY_FILTERS, panel)).toContain("breakdown=model");
   const filters = {
