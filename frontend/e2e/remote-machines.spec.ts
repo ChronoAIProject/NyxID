@@ -48,14 +48,45 @@ async function machineApi(
   const writes: { body: unknown; key: string | undefined }[] = [];
   let created = !initiallyEmpty;
   let projection = { ...machine, ...configuration };
+  let currentOperation = remoteMachineOperationFixture;
+  await page.routeWebSocket("**/*", (socket) => {
+    if (new URL(socket.url()).pathname === "/")
+      socket.send(JSON.stringify({ type: "connected" }));
+    socket.onMessage(() => {});
+  });
   // No request reaches a real backend, including unspecified dashboard APIs.
   await page.route("**/*", (route) => {
-    const url = new URL(route.request().url());
-    if (url.hostname === "localhost" || url.hostname === "127.0.0.1")
+    const request = route.request();
+    const url = new URL(request.url());
+    if (
+      url.origin === "http://localhost:4627" &&
+      request.method() === "GET" &&
+      ["document", "script", "stylesheet", "image", "font", "other"].includes(
+        request.resourceType(),
+      ) &&
+      !/^\/(api|oauth|mcp|health|\.well-known)(\/|$)/.test(url.pathname)
+    )
       return route.continue();
     return route.abort();
   });
   await mockDashboard(page);
+  await page.route("**/api/v1/**", (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname.replace("/api/v1", "");
+    if (
+      request.method() === "GET" &&
+      ["/orgs", "/api-keys", "/nodes", "/runtime-config"].includes(path)
+    )
+      return route.fallback();
+    return route.fulfill({
+      status: 404,
+      json: {
+        error: "not_found",
+        error_code: 404,
+        message: "Unconfigured fixture API blocked locally",
+      },
+    });
+  });
   await page.route("**/api/v1/users/me", (route) =>
     route.fulfill({
       json: {
@@ -117,15 +148,18 @@ async function machineApi(
       });
       created = true;
       const configuration = route.request().postDataJSON();
+      currentOperation = { ...remoteMachineOperationFixture, action: "create" };
       projection = {
         ...machine,
         name: configuration.name,
         capabilities: configuration.capabilities,
         specialist_id: configuration.specialist_id,
+        resource_state: "provisioning",
+        active_operation_id: currentOperation.id,
       };
       body = {
         machine: projection,
-        operation: remoteMachineOperationFixture,
+        operation: currentOperation,
         replayed: false,
       };
     } else if (path === "/remote-machines")
@@ -147,7 +181,7 @@ async function machineApi(
     else if (
       path === `/remote-machine-operations/${remoteMachineOperationFixture.id}`
     )
-      body = { operation: remoteMachineOperationFixture };
+      body = { operation: currentOperation };
     else
       return route.fulfill({
         status: 404,
@@ -433,6 +467,25 @@ for (const width of [1440, 390]) {
         ),
       )
       .toBe(0);
+    await expect(page).toHaveURL(
+      new RegExp(
+        `/assistant/machines\\?machine=${machine.node_id}&operation=${remoteMachineOperationFixture.id}`,
+      ),
+    );
+    const operation = page.getByRole("dialog", {
+      name: "Current operation details",
+      exact: true,
+    });
+    await expect(operation).toBeVisible();
+    await expect(
+      operation.getByText(
+        /This read-only view does not change the current lifecycle operation/,
+      ),
+    ).toBeVisible();
+    await expect(
+      operation.getByRole("button", { name: "Retry deletion", exact: true }),
+    ).toHaveCount(0);
+    await operation.getByRole("button", { name: "Close", exact: true }).click();
     await expect(
       page.getByRole("heading", { name: "Remote machine details" }),
     ).toBeVisible();
@@ -783,6 +836,9 @@ for (const featureMode of ["absent", "off"] as const) {
     await expect(
       page.getByRole("button", { name: "Resume machine", exact: true }),
     ).toBeDisabled();
+    await page
+      .getByRole("tab", { name: "Settings and rules", exact: true })
+      .click();
     await expect(
       page.getByRole("button", { name: "Delete machine", exact: true }),
     ).toBeEnabled();

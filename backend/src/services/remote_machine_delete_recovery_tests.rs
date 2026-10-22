@@ -1756,8 +1756,12 @@ async fn unresolved_suspended_rekey_submission_remains_a_creation_responsibility
     rekey.operation_id = Uuid::new_v4().to_string();
     rekey.kind = EffectKind::RekeySandbox;
     rekey.desired_mode = "suspended".into();
-    rekey.state = EffectState::Claimed;
-    rekey.attempts = 1;
+    rekey.state = EffectState::Pending;
+    rekey.attempts = 0;
+    rekey.claim_id = None;
+    rekey.undispatched_claim_id = None;
+    rekey.claimed_until = None;
+    rekey.available_at = Some(Utc::now());
     rekey.submission = None;
     running.active_operation_id = Some(rekey.operation_id.clone());
     running.resource_state = ResourceState::Provisioning;
@@ -1772,6 +1776,12 @@ async fn unresolved_suspended_rekey_submission_remains_a_creation_responsibility
         .insert_one(&rekey)
         .await
         .unwrap();
+    let claimed = operations::claim_effect(&f.db, Utc::now(), std::time::Duration::from_secs(60))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, rekey.id);
+    rekey = claimed;
     let dispatch = operations::begin_submission(&f.db, &running, &rekey)
         .await
         .unwrap();
@@ -4066,13 +4076,24 @@ async fn reopen_original_submission(f: &RecoveryFixture) -> (ManagedMachine, Mac
             .unwrap()
             .unwrap();
     effect.submission = None;
+    // Recreate the first delivery before any dispatch. An Applied/null row
+    // would instead be an independent legacy unknown responsibility.
+    effect.state = crate::models::remote_machine_outbox::EffectState::Pending;
+    effect.attempts = 0;
+    effect.claim_id = None;
+    effect.undispatched_claim_id = None;
+    effect.claimed_until = None;
+    effect.available_at = Some(Utc::now());
     f.db.collection::<Document>(OUTBOX_COLLECTION)
-        .update_one(
-            doc! {"_id":&effect.id},
-            doc! {"$set":{"submission":bson::Bson::Null}},
-        )
+        .replace_one(doc! {"_id":&effect.id}, bson::to_document(&effect).unwrap())
         .await
         .unwrap();
+    let claimed = operations::claim_effect(&f.db, Utc::now(), std::time::Duration::from_secs(60))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, effect.id);
+    effect = claimed;
     // Construct the state immediately before the owner delete, keeping its
     // original request and tuple. The test accepts no network result here.
     f.db.collection::<Document>(MACHINE_COLLECTION).update_one(

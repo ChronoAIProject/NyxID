@@ -24,19 +24,19 @@ import {
   useRemoteMachineEvents,
   useRemoteMachineQuote,
   useRemoteMachineOperation,
-  useRetryRemoteMachineDelete,
+  useRemoteMachineRuntimeBilling,
+  useRemoteMachineEntitlement,
 } from "@/hooks/use-machines";
+import { useNode } from "@/hooks/use-nodes";
+import {
+  RemoteMachineOperationCard,
+  type MachineAccountingView,
+} from "./remote-machine-lifecycle";
+export { RemoteMachineOperationCard } from "./remote-machine-lifecycle";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { useAuthStore } from "@/stores/auth-store";
-import {
-  remoteMachineActionRequestSchema,
-  remoteMachineDeleteRetryRequestSchema,
-} from "@/schemas/machines";
-import type {
-  RemoteMachine,
-  RemoteMachineOperation,
-  RemoteMachinePolicy,
-} from "@/schemas/machines";
+import { remoteMachineActionRequestSchema } from "@/schemas/machines";
+import type { RemoteMachine, RemoteMachinePolicy } from "@/schemas/machines";
 import type { NodeInfo } from "@/types/nodes";
 import { ApiError } from "@/lib/api-client";
 import {
@@ -136,16 +136,7 @@ function statusVariant(
   return "secondary";
 }
 
-export function RemoteMachineDetail({
-  machineId,
-  initialMachine,
-  node,
-  policy,
-  onClose,
-  operationId: linkedOperationId,
-  confirmationId,
-  accessPanel,
-}: {
+type RemoteMachineDetailProps = {
   readonly machineId: string;
   readonly initialMachine?: RemoteMachine;
   readonly node?: NodeInfo;
@@ -154,29 +145,138 @@ export function RemoteMachineDetail({
   readonly operationId?: string;
   readonly confirmationId?: string;
   readonly accessPanel?: React.ReactNode;
-}) {
+};
+
+export function RemoteMachineDetail(props: RemoteMachineDetailProps) {
+  const owner = useAuthStore((state) => state.user?.id);
+  return (
+    <RemoteMachineDetailView key={`${owner}:${props.machineId}`} {...props} />
+  );
+}
+
+function RemoteMachineDetailView({
+  machineId,
+  initialMachine,
+  node: suppliedNode,
+  policy: suppliedPolicy,
+  onClose,
+  operationId: linkedOperationId,
+  confirmationId,
+  accessPanel,
+}: RemoteMachineDetailProps) {
   const userId = useAuthStore((state) => state.user?.id);
   const remoteAdmission = useRemoteMachineAdmission();
   const query = useRemoteMachine(machineId);
-  const machine = query.error ? undefined : (query.data ?? initialMachine);
-  const [reviewOwner, setReviewOwner] = useState(userId);
-  const [reviewAction, setReviewAction] = useState<OwnerAction | null>(null);
-  const [paidResumeOpen, setPaidResumeOpen] = useState(false);
-  if (
-    reviewOwner !== userId ||
-    (!remoteAdmission && (reviewAction === "resume" || paidResumeOpen))
-  ) {
-    setReviewOwner(userId);
-    setReviewAction(null);
-    setPaidResumeOpen(false);
-  }
+  const candidate = query.data ?? initialMachine;
+  const machine =
+    !query.error && candidate?.node_id === machineId ? candidate : undefined;
+  const node =
+    suppliedNode?.id === machineId &&
+    suppliedNode.owner.kind === "user" &&
+    suppliedNode.owner.id === userId
+      ? suppliedNode
+      : undefined;
+  const entitlement = useRemoteMachineEntitlement(
+    Boolean(machine && !suppliedPolicy),
+    machine?.profile.profile_version,
+  );
+  const policy =
+    suppliedPolicy ??
+    (!entitlement.error ? entitlement.data?.policy : undefined);
+  const operationQuery = useRemoteMachineOperation(
+    machine?.active_operation_id ?? undefined,
+  );
+  const activeOperation =
+    !operationQuery.error &&
+    operationQuery.data?.id === machine?.active_operation_id &&
+    operationQuery.data?.machine_id === machineId
+      ? operationQuery.data
+      : undefined;
   const [selectedOperationId, setSelectedOperationId] = useState<string | null>(
     linkedOperationId ?? null,
   );
-  const operationId =
-    selectedOperationId ?? machine?.active_operation_id ?? undefined;
-  const operation = useRemoteMachineOperation(operationId);
+  const selectedQuery = useRemoteMachineOperation(
+    selectedOperationId && selectedOperationId !== machine?.active_operation_id
+      ? selectedOperationId
+      : undefined,
+  );
+  const selectedOperation =
+    selectedOperationId === activeOperation?.id
+      ? activeOperation
+      : selectedQuery.data?.machine_id === machineId &&
+          selectedQuery.data.id === selectedOperationId
+        ? selectedQuery.data
+        : undefined;
   const [tab, setTab] = useState(confirmationId ? "confirmations" : "overview");
+  const [reviewAction, setReviewAction] = useState<OwnerAction | null>(null);
+  const [paidResumeOpen, setPaidResumeOpen] = useState(false);
+  const [acceptedAction, setAcceptedAction] = useState<OwnerAction | null>(
+    null,
+  );
+  if (!remoteAdmission && (reviewAction === "resume" || paidResumeOpen)) {
+    setReviewAction(null);
+    setPaidResumeOpen(false);
+  }
+  const freeSlot = machine?.free_slot ?? machine?.billing_state === "free";
+  const billing = useRemoteMachineRuntimeBilling(
+    machine && !freeSlot ? machine.node_id : undefined,
+    machine?.runtime_run_id ?? undefined,
+  );
+  const billingData =
+    !billing.error &&
+    billing.data?.node_id === machineId &&
+    (!machine?.runtime_run_id || billing.data.run_id === machine.runtime_run_id)
+      ? billing.data
+      : undefined;
+  const accounting: MachineAccountingView = freeSlot
+    ? {
+        label: "Free runtime · no paid contract",
+        detail: "Downstream services are charged independently.",
+        closed: true,
+      }
+    : billingData
+      ? {
+          label:
+            billingData.state === "closed"
+              ? "Runtime contract closed"
+              : `Runtime contract ${readable(billingData.state)}`,
+          detail:
+            billingData.state === "closed"
+              ? "The runtime billing read confirms accounting closure."
+              : "Accounting closure has not been confirmed.",
+          closed: billingData.state === "closed",
+        }
+      : {
+          label: "Accounting finality unknown",
+          detail: billing.isPending
+            ? "Reading the runtime billing contract…"
+            : "The runtime contract could not be confirmed. Open Billing to review or retry.",
+          closed: false,
+        };
+  const notifications = useRemoteMachineEvents(machine?.node_id);
+  const notice = !notifications.error
+    ? notifications.data?.events.find(
+        (event) =>
+          event.notification &&
+          (!activeOperation || event.operation_id === activeOperation.id) &&
+          !(
+            event.kind === "accepted" &&
+            activeOperation &&
+            ["succeeded", "failed"].includes(activeOperation.state)
+          ),
+      )
+    : undefined;
+
+  async function refreshProgress() {
+    const results = await Promise.allSettled([
+      query.refetch(),
+      operationQuery.refetch(),
+    ]);
+    return results.every(
+      (result) => result.status === "fulfilled" && !result.value?.error,
+    );
+  }
+
   if (query.isPending && !machine)
     return (
       <div
@@ -195,24 +295,19 @@ export function RemoteMachineDetail({
           message={query.error?.message ?? "Remote machine not found."}
           onRetry={() => void query.refetch()}
         />
+        {onClose && (
+          <Button variant="ghost" onClick={onClose}>
+            Back to machines
+          </Button>
+        )}
       </div>
     );
-  const transitioning = [
-    "provisioning",
-    "stopping",
-    "resuming",
-    "deleting",
-    "reconciling",
-  ].includes(machine.resource_state);
+
   const closed = machine.resource_state === "deleted";
-  const freeSlot = machine.free_slot ?? machine.billing_state === "free";
   const canResume = machine.resource_state === "paused";
   const canPause = ["ready", "degraded"].includes(machine.resource_state);
   const desktopNode =
-    node?.id === machine.node_id &&
-    node.owner.kind === "user" &&
-    node.owner.id === userId &&
-    (node.machine?.browser || node.machine?.computer)
+    node && (node.machine?.browser || node.machine?.computer)
       ? node
       : undefined;
   const desktopUnavailable = desktopNode
@@ -222,113 +317,95 @@ export function RemoteMachineDetail({
         ? "Desktop unavailable until this machine has an active runtime."
         : null
     : null;
+  const acceptancePending =
+    acceptedAction &&
+    activeOperation?.state !== "failed" &&
+    !(
+      (acceptedAction === "delete" && closed) ||
+      (acceptedAction === "pause" && machine.resource_state === "paused") ||
+      (acceptedAction === "resume" && machine.resource_state === "ready")
+    );
+  const title = closed
+    ? machine.cleanup_state === "pending"
+      ? "Background supplemental cleanup"
+      : "Machine deleted"
+    : machine.resource_state === "deleting"
+      ? machine.cleanup_state === "complete"
+        ? "Platform object cleanup confirmed"
+        : "Deletion remains pending"
+      : machine.resource_state === "paused"
+        ? !remoteAdmission
+          ? "Resume currently unavailable"
+          : "Machine paused"
+        : ["reconciling", "failed", "degraded"].includes(machine.resource_state)
+          ? "Resource state needs attention"
+          : ["provisioning", "resuming", "stopping"].includes(
+                machine.resource_state,
+              )
+            ? `${readable(machine.resource_state)} · awaiting confirmation`
+            : node && !node.is_connected
+              ? "Machine connection unavailable"
+              : null;
+  const attention = closed
+    ? machine.cleanup_state === "pending"
+      ? "Later scans are checking supplemental cleanup. The machine stays deleted and the original deletion remains successful; execution stays closed and no new deletion retry is available."
+      : "The platform confirmed Sandbox and related object cleanup, terminal creation responsibilities and accounting before final deletion. Physical disk release or erasure is not verified."
+    : machine.resource_state === "deleting"
+      ? machine.cleanup_state === "complete"
+        ? accounting.closed
+          ? "Platform objects are clear. Final deletion still requires the platform’s remaining finality checks."
+          : billingData
+            ? "Awaiting accounting closure. Platform object cleanup does not establish billing finality."
+            : "Runtime accounting is independently checked below; its finality is currently unknown."
+        : "Execution is closed. Platform object cleanup, creation responsibilities and runtime accounting must be confirmed independently."
+      : machine.resource_state === "paused"
+        ? !remoteAdmission
+          ? "Remote Machines are not enabled for this account. Resume is unavailable. Existing records and deletion remain available."
+          : "The workspace is retained. Resume starts a new runtime after review and does not restore old processes or jobs."
+        : ["reconciling", "failed", "degraded"].includes(machine.resource_state)
+          ? "The platform is checking resource and runtime evidence. A disconnected node does not prove the runtime has stopped."
+          : node && !node.is_connected
+            ? "Connection loss does not prove processes stopped or that charging ended. Resource and accounting observations remain separate."
+            : "An accepted request is awaiting a confirmed resource result.";
+
   return (
-    <div className="min-h-0 space-y-6 overflow-auto p-5">
+    <div className="min-h-0 min-w-0 space-y-6 p-4 sm:p-5 [&_h2]:break-words [&>div:first-child>div:last-child]:max-w-full max-sm:[&_div.flex.text-12]:flex-col max-sm:[&_div.flex.text-12]:items-start max-sm:[&_div.flex.text-12]:gap-1 max-sm:[&_div.flex.text-12>div]:max-w-full max-sm:[&_.text-right]:text-left">
       <PageHeader
         title={machine.name ?? node?.name ?? "Remote Nyx Machine"}
-        description="Owner controls for this hosted machine. Execution grants do not confer management access."
+        description={`${machine.profile.cpu_millis / 1000} vCPU · ${machine.profile.memory_mib / 1024} GiB RAM · ${machine.profile.workspace_gib} GiB workspace`}
         actions={
-          <Button
-            size="icon"
-            aria-label="Refresh machine"
-            onClick={() => void query.refetch()}
-            disabled={query.isFetching}
-          >
-            <RefreshCw className="size-3" />
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            {canPause && (
+              <Button onClick={() => setReviewAction("pause")}>
+                <Pause className="size-3" />
+                Pause machine
+              </Button>
+            )}
+            {canResume && (
+              <Button
+                onClick={() =>
+                  freeSlot ? setReviewAction("resume") : setPaidResumeOpen(true)
+                }
+                disabled={!remoteAdmission}
+              >
+                <Play className="size-3" />
+                {freeSlot ? "Resume machine" : "Review quote to resume"}
+              </Button>
+            )}
+            <Button
+              size="icon"
+              aria-label="Refresh machine"
+              onClick={() => void refreshProgress()}
+              disabled={query.isFetching}
+            >
+              <RefreshCw className="size-3" />
+            </Button>
+          </div>
         }
       />
-      <section
-        aria-label="Hosted machine configuration"
-        className="space-y-3 rounded-xl border border-border bg-card p-4 text-12"
-      >
-        <p className="font-medium">Enabled capabilities</p>
-        <p>
-          {machine.capabilities
-            ?.map((capability) => capabilityLabels[capability])
-            .join(" · ") ?? "Configuration is unavailable from this server."}
-        </p>
-        <p className="font-medium">
-          {machine.specialist_assignment_state
-            ? {
-                none: "No specialist assigned",
-                pending: "Specialist assignment is pending",
-                assigned: "Specialist assigned",
-                permissions_required:
-                  "Specialist permissions need configuration",
-                failed: "Specialist assignment could not be completed",
-              }[machine.specialist_assignment_state]
-            : "Specialist assignment status is unavailable"}
-        </p>
-        {machine.specialist_assignment_state === "pending" ? (
-          <p>
-            Assignment will be checked when this Machine is ready. Follow this
-            Machine’s progress; creating another Machine does not resolve the
-            pending assignment.
-          </p>
-        ) : null}
-        {machine.specialist_assignment_state === "permissions_required" ||
-        machine.specialist_assignment_state === "failed" ? (
-          <p>
-            Review the existing specialist assignment and its allowed
-            capabilities before use. This Machine has already been created.
-          </p>
-        ) : null}
-        <p>
-          Enabled capabilities and specialist assignment do not authorize every
-          caller. Agent permissions are configured separately. External OAuth
-          and Agent Key tools remain limited to authorized Commands and Files.
-        </p>
-        <div className="flex flex-wrap gap-2">
-          <Button onClick={() => setTab("access")}>Review agent access</Button>
-          {desktopNode ? (
-            desktopUnavailable ? (
-              <Button disabled>Watch / Take over desktop</Button>
-            ) : (
-              <Button asChild>
-                <Link
-                  to="/assistant/machines/$nodeId/desktop"
-                  params={{ nodeId: desktopNode.id }}
-                >
-                  Watch / Take over desktop
-                </Link>
-              </Button>
-            )
-          ) : null}
-          {machine.specialist_id ? (
-            <Button asChild>
-              <Link
-                to="/assistant/automations"
-                search={{ agent: machine.specialist_id }}
-              >
-                Open specialist settings
-              </Link>
-            </Button>
-          ) : null}
-        </div>
-        {desktopUnavailable ? (
-          <p role="status" className="text-muted-foreground">
-            {desktopUnavailable}
-          </p>
-        ) : desktopNode && !desktopNode.machine?.computer_ready ? (
-          <p role="status" className="text-muted-foreground">
-            Computer permissions or display unavailable
-          </p>
-        ) : null}
-      </section>
-      {query.error && (
-        <ErrorBanner
-          message={`The latest machine state could not be loaded. ${query.error.message}`}
-          onRetry={() => void query.refetch()}
-        />
-      )}
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Badge variant={statusVariant(machine.resource_state)}>
           {readable(machine.resource_state)}
-        </Badge>
-        <Badge variant="secondary">
-          {machine.profile.cpu_millis / 1000} vCPU ·{" "}
-          {machine.profile.memory_mib / 1024} GiB RAM
         </Badge>
         <div
           role="group"
@@ -345,168 +422,126 @@ export function RemoteMachineDetail({
             <Badge variant="secondary">Capabilities not reported</Badge>
           )}
         </div>
-        <Badge variant="warning">Shared environment</Badge>
-      </div>
-      {(machine.resource_state === "reconciling" ||
-        machine.resource_state === "failed" ||
-        machine.resource_state === "degraded") && (
-        <div
-          role="status"
-          className="rounded-xl border border-warning/30 bg-warning/10 p-4 text-12 text-muted-foreground"
-        >
-          The platform is checking resource and runtime evidence. A disconnected
-          node does not prove the runtime has stopped. Review the operation
-          below; retained workspace data is not deleted automatically.
-        </div>
-      )}
-      <div className="flex flex-wrap gap-2">
-        <Button
-          onClick={() => setReviewAction("pause")}
-          disabled={!canPause || transitioning || Boolean(query.error)}
-        >
-          <Pause className="size-3" />
-          Pause machine
-        </Button>
-        <Button
-          onClick={() =>
-            freeSlot ? setReviewAction("resume") : setPaidResumeOpen(true)
-          }
-          disabled={
-            !remoteAdmission ||
-            !canResume ||
-            transitioning ||
-            Boolean(query.error)
-          }
-        >
-          <Play className="size-3" />
-          {freeSlot ? "Resume machine" : "Review quote to resume"}
-        </Button>
+        <Badge variant="secondary">Shared environment</Badge>
         {onClose && (
           <Button variant="ghost" onClick={onClose}>
             Back to machines
           </Button>
         )}
       </div>
-      {!remoteAdmission && machine.resource_state === "paused" && (
-        <p role="status" className="text-12 text-muted-foreground">
-          Remote Machines are not enabled for this account. Resume is
-          unavailable.
-        </p>
-      )}
-      {machine.resource_state === "paused" && !freeSlot && (
-        <p role="status" className="text-12 text-muted-foreground">
-          Paid resume requires explicit acceptance of a new quote and a finite
-          funding reservation. Adding funds never resumes a machine
-          automatically. Any earlier pending liability must be resolved
-          separately.
-        </p>
+      {(title ||
+        notice ||
+        activeOperation ||
+        operationQuery.error ||
+        acceptancePending) && (
+        <section
+          aria-label="Current attention"
+          className="space-y-4 rounded-xl border border-border bg-card p-4"
+        >
+          {title && (
+            <div className="space-y-1">
+              <h3 className="text-13 font-semibold">{title}</h3>
+              <p className="text-12 text-muted-foreground">{attention}</p>
+            </div>
+          )}
+          {notice && (
+            <div className="space-y-1 text-12">
+              <p>{notice.message}</p>
+              <a
+                className="break-all text-primary-text underline"
+                href={`/assistant/machines?machine=${encodeURIComponent(machineId)}&operation=${encodeURIComponent(notice.operation_id)}`}
+              >
+                View operation {notice.operation_id}
+              </a>
+            </div>
+          )}
+          {acceptancePending && acceptedAction && (
+            <p role="status" className="text-12">
+              {readable(acceptedAction)} request accepted. Waiting for the
+              resource and runtime result.
+            </p>
+          )}
+          {activeOperation && (
+            <RemoteMachineOperationCard
+              key={activeOperation.id}
+              operation={activeOperation}
+              machine={machine}
+              accounting={accounting}
+              onRetryAccepted={() => void refreshProgress()}
+              onReview={refreshProgress}
+            />
+          )}
+          {operationQuery.error && (
+            <ErrorBanner
+              message={`Operation status unavailable. ${operationQuery.error.message}`}
+              onRetry={() => void operationQuery.refetch()}
+            />
+          )}
+        </section>
       )}
       <RemoteMachinePaidStart
-        open={paidResumeOpen && remoteAdmission && reviewOwner === userId}
+        open={paidResumeOpen && remoteAdmission}
         onOpenChange={setPaidResumeOpen}
         machine={machine}
-        onAccepted={(_machineId, nextOperationId) => {
-          setSelectedOperationId(nextOperationId);
+        onAccepted={() => {
+          setAcceptedAction("resume");
+          setTab("overview");
           void query.refetch();
         }}
       />
-      <RemoteMachineNotifications machineId={machineId} />
-      {operation.data && (
-        <RemoteMachineOperationCard
-          operation={operation.data}
-          machine={query.error ? undefined : machine}
-          onRetryAccepted={() => void query.refetch()}
-        />
-      )}
-      {operation.error && (
-        <ErrorBanner
-          message={`Operation status unavailable. ${operation.error.message}`}
-          onRetry={() => void operation.refetch()}
-        />
-      )}
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="justify-start">
+      <Tabs value={tab} onValueChange={setTab} className="min-w-0">
+        <TabsList
+          className="w-full justify-start"
+          aria-label="Machine detail sections"
+        >
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="access">Access</TabsTrigger>
           <TabsTrigger value="jobs">Jobs</TabsTrigger>
           <TabsTrigger value="confirmations">Confirmations</TabsTrigger>
           <TabsTrigger value="billing">Billing</TabsTrigger>
-          <TabsTrigger value="timeline">Timeline</TabsTrigger>
-          <TabsTrigger value="policy">Policy and setup</TabsTrigger>
+          <TabsTrigger value="timeline">Events</TabsTrigger>
+          <TabsTrigger value="policy">Settings and rules</TabsTrigger>
         </TabsList>
-        <TabsContent value="overview" className="mt-6 space-y-8">
-          <DetailSection title="Current state">
-            <DetailRow
-              label="Stop reason"
-              value={
-                machine.stop_reason?.replaceAll("_", " ") ?? "Not reported"
-              }
-            />
-            <DetailRow
-              label="Resource state"
-              value={readable(machine.resource_state)}
-              badge
-              badgeVariant={statusVariant(machine.resource_state)}
-            />
-            <DetailRow
-              label="Billing state"
-              value={readable(machine.billing_state)}
-              badge
-              badgeVariant={statusVariant(machine.billing_state)}
-            />
-            <DetailRow
-              label="Authorization state"
-              value={readable(machine.authorization_state)}
-              badge
-              badgeVariant={statusVariant(machine.authorization_state)}
-            />
-            <DetailRow
-              label="Node connection"
-              value={
-                node
+        <TabsContent value="overview" className="mt-6 space-y-6">
+          <section
+            aria-label="Independent machine status"
+            className="grid min-w-0 gap-4 sm:grid-cols-3"
+          >
+            <div className="min-w-0 space-y-1">
+              <p className="text-11 text-muted-foreground">Execution</p>
+              <p className="text-13 font-semibold">
+                {machine.authorization_state === "active" && canPause
+                  ? "Runtime authorized"
+                  : "Execution unavailable"}
+              </p>
+              <p className="text-11 text-muted-foreground">
+                Agent and external grants are checked separately.
+              </p>
+            </div>
+            <div className="min-w-0 space-y-1">
+              <p className="text-11 text-muted-foreground">Runtime billing</p>
+              <p className="text-13 font-semibold">{accounting.label}</p>
+              <p className="text-11 text-muted-foreground">
+                {accounting.detail}
+              </p>
+              <Button variant="link" onClick={() => setTab("billing")}>
+                Review billing
+              </Button>
+            </div>
+            <div className="min-w-0 space-y-1">
+              <p className="text-11 text-muted-foreground">Node connection</p>
+              <p className="text-13 font-semibold">
+                {node
                   ? node.is_connected
                     ? "WSS connected"
                     : "WSS disconnected"
-                  : "WSS status unknown"
-              }
-            />
-            <DetailRow
-              label="Last heartbeat"
-              value={time(machine.last_heartbeat_at)}
-            />
-            <DetailRow
-              label="Runtime generation"
-              value={String(machine.runtime_generation)}
-            />
-            <DetailRow
-              label="Credential epoch"
-              value={String(machine.credential_epoch)}
-            />
-            <DetailRow
-              label="Resource revision"
-              value={String(machine.revision)}
-            />
-            <DetailRow label="Updated" value={time(machine.updated_at)} />
-            {machine.runtime_run_id && (
-              <DetailRow
-                label="Runtime billing run"
-                value={machine.runtime_run_id}
-                mono
-                copyable
-              />
-            )}
-            {machine.funded_until && (
-              <DetailRow
-                label="Current funded deadline"
-                value={time(machine.funded_until)}
-              />
-            )}
-            <p className="px-4 py-3 text-12 text-muted-foreground">
-              Resource readiness, billing eligibility, and current execution
-              authorization are independent. A ready resource alone does not
-              allow any client to execute.
-            </p>
-          </DetailSection>
+                  : "WSS status unknown"}
+              </p>
+              <p className="text-11 text-muted-foreground">
+                Last heartbeat: {time(machine.last_heartbeat_at)}
+              </p>
+            </div>
+          </section>
           <DetailSection title="Workspace and temporary storage">
             <DetailRow
               label="Workspace allocation"
@@ -516,122 +551,82 @@ export function RemoteMachineDetail({
               label="Temporary capacity policy"
               value="No fixed capacity declared"
             />
-            <p className="px-4 py-3 text-12 text-muted-foreground">
-              Temporary storage is managed by the deployment environment. No
-              fixed capacity is promised. Temporary data may be lost after pause
-              or Pod recreation.
-            </p>
             <RemoteMachineUsage machineId={machineId} />
-            <p className="px-4 py-3 text-12 text-muted-foreground">
-              If a disk fills, writes and jobs may fail. Disk pressure can evict
-              the Pod. Use an authorized file or shell client to remove unneeded
-              files when the runtime is available, then retry the failed work.
-              This fixed profile cannot be expanded. If recovery tools cannot
-              run, review the operation and contact the platform operator before
-              choosing irreversible deletion.
-            </p>
+            <details className="text-12">
+              <summary className="cursor-pointer px-4 py-3 font-medium">
+                Storage and recovery rules
+              </summary>
+              <div className="space-y-3 px-4 py-3 text-muted-foreground">
+                <p>
+                  Temporary storage is managed by the deployment environment.
+                  Temporary data may be lost after pause or Pod recreation.
+                </p>
+                <p>
+                  If a disk fills, writes and jobs may fail. Disk pressure can
+                  evict the Pod. Use an authorized file or shell client to
+                  remove unneeded files when available. This fixed profile
+                  cannot be expanded; review recovery with the platform operator
+                  before irreversible deletion.
+                </p>
+              </div>
+            </details>
           </DetailSection>
-          <DetailSection title="Resource binding">
-            <DetailRow
-              label="Machine / Node ID"
-              value={machine.node_id}
-              mono
-              copyable
-            />
-            <DetailRow
-              label="Sandbox"
-              value={`${machine.sandbox_namespace}/${machine.sandbox_name}`}
-              mono
-            />
-            <DetailRow
-              label="Sandbox UID"
-              value={machine.sandbox_uid ?? "Not observed"}
-              mono
-            />
-            <DetailRow
-              label="Pod UID"
-              value={machine.pod_uid ?? "Not observed"}
-              mono
-            />
-            <DetailRow
-              label="Workspace claim"
-              value={machine.pvc_name ?? "Not observed"}
-              mono
-            />
-            <DetailRow
-              label="Workspace claim UID"
-              value={machine.pvc_uid ?? "Not observed"}
-              mono
-            />
-            <DetailRow
-              label="Profile"
-              value={machine.profile.profile_version}
-              mono
-            />
-            <p className="px-4 py-3 text-12 text-muted-foreground">
-              These identifiers describe the observed resource binding. They are
-              not credentials or proof of physical runtime stop, writer fencing,
-              or storage erasure.
-            </p>
-          </DetailSection>
-          <DetailSection title="Access and client identity">
+          <DetailSection title="Using this machine">
             <div className="space-y-3 px-4 py-3 text-12 text-muted-foreground">
-              <p>
-                NyxBot and specialists use their existing Agent assignments.
-                External clients use the signed-in person plus an OAuth client,
-                or the person plus a parent Agent Key. Children of one parent
-                Key share that parent’s Machine grant.
+              <p className="font-medium text-foreground">
+                {machine.specialist_assignment_state
+                  ? {
+                      none: "No specialist assigned",
+                      pending: "Specialist assignment is pending",
+                      assigned: "Specialist assigned",
+                      permissions_required:
+                        "Specialist permissions need configuration",
+                      failed: "Specialist assignment could not be completed",
+                    }[machine.specialist_assignment_state]
+                  : "Specialist assignment status is unavailable"}
               </p>
               <p>
-                Review capabilities, file roots, service ceilings, expiry and
-                grant revisions in the existing Agent, Key detail, or
-                granted-app controls. Revoking Machine access affects that
-                grant; revoking an OAuth consent or parent Key affects its
-                authority more broadly. Logging out one child credential is
-                limited to that child.
+                Agent permissions are configured separately. External OAuth and
+                Agent Key tools remain limited to authorized Commands and Files.
+                All granted clients share the OS user and workspace; file roots
+                do not isolate shell commands.
               </p>
               <div className="flex flex-wrap gap-2">
-                <Button asChild>
-                  <Link to="/keys" search={{ tab: "api-keys" }}>
-                    Agent Keys
-                  </Link>
+                <Button onClick={() => setTab("access")}>
+                  Review agent access
                 </Button>
-                <Button asChild>
-                  <Link to="/settings/consents">Granted apps</Link>
-                </Button>
+                {desktopNode &&
+                  (desktopUnavailable ? (
+                    <Button disabled>Watch / Take over desktop</Button>
+                  ) : (
+                    <Button asChild>
+                      <Link
+                        to="/assistant/machines/$nodeId/desktop"
+                        params={{ nodeId: desktopNode.id }}
+                      >
+                        Watch / Take over desktop
+                      </Link>
+                    </Button>
+                  ))}
+                {machine.specialist_id && (
+                  <Button asChild>
+                    <Link
+                      to="/assistant/automations"
+                      search={{ agent: machine.specialist_id }}
+                    >
+                      Open specialist settings
+                    </Link>
+                  </Button>
+                )}
               </div>
+              {desktopUnavailable ? (
+                <p role="status">{desktopUnavailable}</p>
+              ) : desktopNode && !desktopNode.machine?.computer_ready ? (
+                <p role="status">Computer permissions or display unavailable</p>
+              ) : null}
             </div>
           </DetailSection>
-          <DetailSection title="Cleanup and retention">
-            <DetailRow
-              label="Cleanup state"
-              value={readable(machine.cleanup_state)}
-              badge
-              badgeVariant={statusVariant(machine.cleanup_state)}
-            />
-            <div className="space-y-2 px-4 py-3 text-12 text-muted-foreground">
-              <p>
-                Paused workspaces remain until you explicitly delete the
-                machine. Pausing has no storage fee.
-              </p>
-              <p>
-                Deletion queues removal of the workspace and temporary runtime
-                data. Cleanup remains pending until the applicable control-plane
-                stop/absence, Sandbox object-cascade checks, creation
-                obligations and accounting are verified. Underlying storage
-                follows its reclaim policy; physical storage release is not
-                verified. The 24-hour cleanup target is not guaranteed erasure.
-                The durable tombstone and required evidence remain; a free slot
-                is released only after finalization.
-              </p>
-            </div>
-          </DetailSection>
-          <p className="text-12 text-muted-foreground">
-            All clients granted this machine share its OS user and workspace.
-            File roots constrain file tools and working directories; roots do
-            not isolate shell commands. Do not treat them as protection between
-            clients.
-          </p>
+          <RemoteMachineTechnicalDetails machine={machine} />
         </TabsContent>
         <TabsContent value="access" className="mt-6 space-y-6">
           {accessPanel ?? (
@@ -648,7 +643,7 @@ export function RemoteMachineDetail({
             confirmationId={confirmationId}
           />
         </TabsContent>
-        <TabsContent value="billing" className="mt-6">
+        <TabsContent value="billing" className="mt-6 space-y-6">
           <RemoteMachineBilling
             machineId={machineId}
             billingState={machine.billing_state}
@@ -664,204 +659,175 @@ export function RemoteMachineDetail({
         <TabsContent value="policy" className="mt-6 space-y-8">
           <RemoteMachinePolicyPanel machine={machine} policy={policy} />
           <RemoteMachineClientSetup />
+          {!closed && (
+            <Card className="border-destructive/40">
+              <CardHeader>
+                <CardTitle className="text-destructive">
+                  Delete machine
+                </CardTitle>
+                <CardDescription>
+                  Permanent workspace deletion. Review pending work and
+                  accounting before continuing.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex justify-end">
+                <Button
+                  variant="destructive"
+                  onClick={() => setReviewAction("delete")}
+                  disabled={machine.resource_state === "deleting"}
+                >
+                  <Trash2 className="size-3" />
+                  Delete machine
+                </Button>
+              </CardContent>
+            </Card>
+          )}
         </TabsContent>
       </Tabs>
-      {!closed && (
-        <Card className="border-destructive/40">
-          <CardHeader>
-            <CardTitle className="text-destructive">Delete machine</CardTitle>
-            <CardDescription>
-              Permanent workspace deletion. Review pending work and accounting
-              before continuing.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex justify-end">
-            <Button
-              variant="destructive"
-              onClick={() => setReviewAction("delete")}
-              disabled={
-                machine.resource_state === "deleting" || Boolean(query.error)
-              }
-            >
-              <Trash2 className="size-3" />
-              Delete machine
-            </Button>
-          </CardContent>
-        </Card>
+      {selectedOperationId && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setSelectedOperationId(null);
+          }}
+        >
+          <DialogContent className="max-h-[85dvh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>
+                {selectedOperationId === machine.active_operation_id
+                  ? "Current operation details"
+                  : "Historical operation"}
+              </DialogTitle>
+              <DialogDescription>
+                This read-only view does not change the current lifecycle
+                operation.
+              </DialogDescription>
+            </DialogHeader>
+            {selectedQuery.error ? (
+              <ErrorBanner
+                message={selectedQuery.error.message}
+                onRetry={() => void selectedQuery.refetch()}
+              />
+            ) : selectedOperation ? (
+              <RemoteMachineOperationCard
+                key={selectedOperation.id}
+                operation={selectedOperation}
+              />
+            ) : (
+              <p role="status">Loading operation…</p>
+            )}
+          </DialogContent>
+        </Dialog>
       )}
-      {reviewAction &&
-        reviewOwner === userId &&
-        (reviewAction !== "resume" || remoteAdmission) && (
-          <LifecycleActionDialog
-            key={`${machineId}:${reviewAction}`}
-            action={reviewAction}
-            machine={machine}
-            policy={policy}
-            onClose={() => setReviewAction(null)}
-            onAccepted={(id) => {
-              setSelectedOperationId(id);
-              setReviewAction(null);
-              void query.refetch();
-            }}
-            onReload={() => void query.refetch()}
-          />
-        )}
+      {reviewAction && (reviewAction !== "resume" || remoteAdmission) && (
+        <LifecycleActionDialog
+          key={`${machineId}:${reviewAction}`}
+          action={reviewAction}
+          machine={machine}
+          policy={policy}
+          onClose={() => setReviewAction(null)}
+          onAccepted={() => {
+            setAcceptedAction(reviewAction);
+            setReviewAction(null);
+            setTab("overview");
+            void query.refetch();
+          }}
+          onReload={() => void query.refetch()}
+        />
+      )}
     </div>
   );
 }
 
-export function RemoteMachineOperationCard({
-  operation,
+function RemoteMachineTechnicalDetails({
   machine,
-  onRetryAccepted,
-}: {
-  readonly operation: RemoteMachineOperation;
-  readonly machine?: RemoteMachine;
-  readonly onRetryAccepted?: () => void;
-}) {
-  return (
-    <DetailSection
-      title={`${readable(operation.action)} operation`}
-      action={
-        <Badge variant={statusVariant(operation.state)}>
-          {readable(operation.state)}
-        </Badge>
-      }
-    >
-      <DetailRow label="Operation ID" value={operation.id} mono copyable />
-      <DetailRow label="Cleanup" value={readable(operation.cleanup_state)} />
-      <DetailRow
-        label={
-          operation.action === "delete"
-            ? "Total deletion attempts"
-            : "Attempts after retry"
-        }
-        value={String(operation.retry_count)}
-      />
-      {operation.action === "delete" &&
-        operation.delete_retry_attempts != null && (
-          <DetailRow
-            label="Attempts this round"
-            value={`${operation.delete_retry_attempts} / ${operation.delete_retry_limit}`}
-          />
-        )}
-      {operation.delete_retry_stopped && (
-        <div className="space-y-3 px-4 py-3 text-12">
-          <p role="status">
-            Automatic deletion attempts stopped. Cleanup is still pending. Retry
-            deletion manually to start another round of up to{" "}
-            {operation.delete_retry_limit} attempts, one minute apart.
-          </p>
-          {machine?.resource_state === "deleting" &&
-            machine.active_operation_id === operation.id &&
-            operation.machine_id === machine.node_id &&
-            operation.action === "delete" &&
-            !operation.terminal_at && (
-              <RemoteMachineDeleteRetry
-                key={`${operation.id}:${operation.retry_count}`}
-                machine={machine}
-                operation={operation}
-                onAccepted={onRetryAccepted}
-              />
-            )}
-        </div>
-      )}
-      <DetailRow label="Created" value={time(operation.created_at)} />
-      <DetailRow label="Updated" value={time(operation.updated_at)} />
-      {operation.next_attempt_at && (
-        <DetailRow
-          label="Next platform attempt"
-          value={time(operation.next_attempt_at)}
-        />
-      )}
-      {operation.deadline_at && (
-        <DetailRow
-          label="Investigation target"
-          value={time(operation.deadline_at)}
-        />
-      )}
-      {operation.terminal_at && (
-        <DetailRow
-          label="Terminal result recorded"
-          value={time(operation.terminal_at)}
-        />
-      )}
-      {operation.error_code && (
-        <DetailRow label="Recovery code" value={operation.error_code} mono />
-      )}
-      {operation.error_message && (
-        <p role="alert" className="px-4 py-3 text-12 text-destructive">
-          {operation.error_message}
-        </p>
-      )}
-      {operation.evidence_digest && (
-        <DetailRow
-          label="Evidence reference"
-          value={operation.evidence_digest}
-          mono
-        />
-      )}
-      <p className="px-4 py-3 text-12 text-muted-foreground">
-        Operation status refreshes automatically. The operation ID is a
-        reference only; owner authentication is required to view it.
-      </p>
-    </DetailSection>
-  );
-}
-
-function RemoteMachineDeleteRetry({
-  machine,
-  operation,
-  onAccepted,
 }: {
   readonly machine: RemoteMachine;
-  readonly operation: RemoteMachineOperation;
-  readonly onAccepted?: () => void;
 }) {
-  const owner = useAuthStore((state) => state.user?.id ?? "");
-  const mutation = useRetryRemoteMachineDelete();
-  const [error, setError] = useState<string | null>(null);
-  const scope = `${operation.id}:retry-delete:${operation.retry_count}`;
-  async function retry() {
-    if (mutation.isPending) return;
-    setError(null);
-    try {
-      const intent = getRemoteMachineIntent(owner, scope, {
-        expected_revision: machine.revision,
-        expected_retry_count: operation.retry_count,
-      });
-      await mutation.mutateAsync({
-        machineId: machine.node_id,
-        operationId: operation.id,
-        body: remoteMachineDeleteRetryRequestSchema.parse(intent.body),
-        idempotencyKey: intent.idempotencyKey,
-      });
-      if (useAuthStore.getState().user?.id !== owner) return;
-      clearRemoteMachineIntent(owner, scope, intent.idempotencyKey);
-      onAccepted?.();
-    } catch (cause) {
-      if (useAuthStore.getState().user?.id !== owner) return;
-      if (cause instanceof ApiError && cause.status === 409)
-        clearRemoteMachineIntent(owner, scope);
-      setError(
-        cause instanceof Error
-          ? cause.message
-          : "Deletion retry could not be accepted.",
-      );
-    }
-  }
   return (
-    <div className="space-y-2">
-      <Button onClick={() => void retry()} disabled={mutation.isPending}>
-        <RefreshCw className="size-3" />
-        {mutation.isPending ? "Retrying deletion…" : "Retry deletion"}
-      </Button>
-      {error && (
-        <p role="alert" className="text-destructive">
-          {error}
-        </p>
+    <details className="rounded-xl border border-border/50 bg-card text-12">
+      <summary className="cursor-pointer px-4 py-3 font-medium">
+        Technical information and resource binding
+      </summary>
+      <DetailRow
+        label="Machine / Node ID"
+        value={machine.node_id}
+        mono
+        copyable
+      />
+      <DetailRow
+        label="Resource state"
+        value={readable(machine.resource_state)}
+      />
+      <DetailRow
+        label="Billing state"
+        value={readable(machine.billing_state)}
+      />
+      <DetailRow
+        label="Authorization state"
+        value={readable(machine.authorization_state)}
+      />
+      <DetailRow
+        label="Stop reason"
+        value={
+          machine.stop_reason ? readable(machine.stop_reason) : "Not reported"
+        }
+      />
+      <DetailRow
+        label="Runtime generation"
+        value={String(machine.runtime_generation)}
+      />
+      <DetailRow
+        label="Credential epoch"
+        value={String(machine.credential_epoch)}
+      />
+      <DetailRow label="Resource revision" value={String(machine.revision)} />
+      <DetailRow label="Updated" value={time(machine.updated_at)} />
+      {machine.runtime_run_id && (
+        <DetailRow
+          label="Runtime billing run"
+          value={machine.runtime_run_id}
+          mono
+          copyable
+        />
       )}
-    </div>
+      {machine.funded_until && (
+        <DetailRow
+          label="Current funded deadline"
+          value={time(machine.funded_until)}
+        />
+      )}
+      <DetailRow
+        label="Sandbox"
+        value={`${machine.sandbox_namespace}/${machine.sandbox_name}`}
+        mono
+      />
+      <DetailRow
+        label="Sandbox UID"
+        value={machine.sandbox_uid ?? "Not observed"}
+        mono
+      />
+      <DetailRow
+        label="Pod UID"
+        value={machine.pod_uid ?? "Not observed"}
+        mono
+      />
+      <DetailRow
+        label="Workspace claim"
+        value={machine.pvc_name ?? "Not observed"}
+        mono
+      />
+      <DetailRow
+        label="Workspace claim UID"
+        value={machine.pvc_uid ?? "Not observed"}
+        mono
+      />
+      <DetailRow label="Profile" value={machine.profile.profile_version} mono />
+      <p className="px-4 py-3 text-muted-foreground">
+        These observed identifiers do not prove physical runtime stop or storage
+        erasure.
+      </p>
+    </details>
   );
 }
 
@@ -991,18 +957,28 @@ function LifecycleActionDialog({
                     policy. Accounting progress is tracked separately.
                   </p>
                   <p>
-                    The cleanup target is 24 hours, not a guaranteed erasure
-                    deadline. Submitting deletion does not mean all data has
-                    been physically erased. A durable tombstone and necessary
-                    evidence remain. A free slot is not released until
-                    finalization.
+                    The cleanup target is{" "}
+                    {policy
+                      ? `${policy.cleanup_target_hours} hours`
+                      : "not reported"}
+                    , not a guaranteed erasure deadline. Submitting deletion
+                    does not mean all data has been physically erased. A durable
+                    tombstone and necessary evidence remain. A free slot is not
+                    released until finalization.
                   </p>
                   <p>
                     Deletion immediately denies further output reads. Output is
                     never archived and may disappear before its one-hour maximum
-                    after completion. Terminal job metadata remains for 30 days,
-                    and terminal operation history for 90 days. Required audit
-                    and financial evidence is retained separately.
+                    after completion. Terminal job metadata remains for{" "}
+                    {policy
+                      ? `${policy.job_history_days} days`
+                      : "the published retention period"}
+                    , and terminal operation history for{" "}
+                    {policy
+                      ? `${policy.operation_history_days} days`
+                      : "the published retention period"}
+                    . Required audit and financial evidence is retained
+                    separately.
                   </p>
                 </>
               ) : action === "pause" ? (
@@ -1173,54 +1149,6 @@ function FreeResumePreflight({ machine }: { readonly machine: RemoteMachine }) {
   );
 }
 
-function RemoteMachineNotifications({
-  machineId,
-}: {
-  readonly machineId: string;
-}) {
-  const query = useRemoteMachineEvents(machineId);
-  const notices = (query.data?.events ?? [])
-    .filter(
-      (event, index, events) =>
-        event.notification &&
-        events.findIndex((other) => other.id === event.id) === index,
-    )
-    .slice(0, 5);
-  if (query.error)
-    return (
-      <p role="status" className="text-12 text-muted-foreground">
-        Machine notifications could not be refreshed. Open the timeline to
-        retry.
-      </p>
-    );
-  if (!notices.length) return null;
-  return (
-    <section
-      aria-label="Machine notifications"
-      className="space-y-3 rounded-xl border border-border/50 bg-card p-4"
-    >
-      <h3 className="text-13 font-semibold">Machine notifications</h3>
-      {notices.map((event) => (
-        <article
-          key={event.id}
-          className="space-y-1 border-t border-border/30 pt-2"
-        >
-          <p className="text-12 text-muted-foreground">{event.message}</p>
-          <p className="text-11 text-text-tertiary">
-            {time(event.created_at)} · Responsibility: {event.responsibility}
-          </p>
-          <a
-            className="break-all text-11 text-primary-text underline"
-            href={`/assistant/machines?machine=${encodeURIComponent(machineId)}&operation=${encodeURIComponent(event.operation_id)}`}
-          >
-            View operation {event.operation_id}
-          </a>
-        </article>
-      ))}
-    </section>
-  );
-}
-
 function RemoteMachineTimeline({
   machineId,
   onOperation,
@@ -1228,6 +1156,7 @@ function RemoteMachineTimeline({
   readonly machineId: string;
   readonly onOperation: (id: string) => void;
 }) {
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [pages, setPages] = useState<{
     machineId: string;
     cursors: (string | undefined)[];
@@ -1237,9 +1166,12 @@ function RemoteMachineTimeline({
   const cursor =
     pages.machineId === machineId ? pages.cursors.at(-1) : undefined;
   const query = useRemoteMachineEvents(machineId, cursor);
-  const events = query.data?.events ?? [];
+  const events = query.error ? [] : (query.data?.events ?? []);
   const uniqueEvents = events.filter(
     (event, index) => events.findIndex((row) => row.id === event.id) === index,
+  );
+  const selectedEvent = uniqueEvents.find(
+    (event) => event.id === selectedEventId,
   );
   return (
     <div className="space-y-4">
@@ -1289,23 +1221,20 @@ function RemoteMachineTimeline({
               </span>
               <Button
                 variant="ghost"
-                onClick={() => onOperation(event.operation_id)}
+                onClick={() => setSelectedEventId(event.id)}
               >
-                View operation
+                Event details
               </Button>
             </div>
-            <a
-              className="break-all text-11 text-primary-text underline"
-              href={`/assistant/machines?machine=${encodeURIComponent(machineId)}&operation=${encodeURIComponent(event.operation_id)}`}
-            >
-              Operation {event.operation_id}
-            </a>
           </li>
         ))}
       </ol>
       <div className="space-y-2 text-12 text-muted-foreground">
         <p>
-          Showing up to 100 events on this page.
+          Loaded {uniqueEvents.length}{" "}
+          {uniqueEvents.length === 1 ? "event" : "events"} on this page
+        </p>
+        <p>
           {query.data?.next_cursor === undefined
             ? " Older-history availability is unknown on this server."
             : " The server cursor preserves events with matching timestamps."}
@@ -1341,6 +1270,46 @@ function RemoteMachineTimeline({
           </Button>
         </div>
       </div>
+      {selectedEvent && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setSelectedEventId(null);
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Event details</DialogTitle>
+              <DialogDescription>{selectedEvent.message}</DialogDescription>
+            </DialogHeader>
+            <DetailRow label="Event type" value={selectedEvent.kind} />
+            <DetailRow
+              label="Event time"
+              value={time(selectedEvent.created_at)}
+            />
+            <DetailRow
+              label="Responsibility"
+              value={selectedEvent.responsibility}
+            />
+            <DetailRow
+              label="Operation ID"
+              value={selectedEvent.operation_id}
+              mono
+              copyable
+            />
+            <DialogFooter>
+              <Button
+                onClick={() => {
+                  setSelectedEventId(null);
+                  onOperation(selectedEvent.operation_id);
+                }}
+              >
+                View operation
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }
@@ -1352,8 +1321,45 @@ function RemoteMachinePolicyPanel({
   readonly machine: RemoteMachine;
   readonly policy?: RemoteMachinePolicy;
 }) {
+  const owner = useAuthStore((state) => state.user?.id);
+  const nodeQuery = useNode(machine.node_id);
+  const node =
+    !nodeQuery.error &&
+    nodeQuery.data?.id === machine.node_id &&
+    nodeQuery.data.owner.kind === "user" &&
+    nodeQuery.data.owner.id === owner
+      ? nodeQuery.data
+      : undefined;
   return (
     <div className="space-y-8">
+      <DetailSection title="Confirmation policy">
+        {nodeQuery.error ? (
+          <ErrorBanner
+            message={`Confirmation policy unavailable. ${nodeQuery.error.message}`}
+            onRetry={() => void nodeQuery.refetch()}
+          />
+        ) : (
+          <DetailRow
+            label="Node confirmation policy"
+            value={
+              node?.machine_confirm
+                ? {
+                    none: "No machine confirmation",
+                    changes: "Confirm changes",
+                    all: "Confirm every operation",
+                  }[node.machine_confirm]
+                : nodeQuery.isPending
+                  ? "Loading confirmation policy…"
+                  : "Not reported"
+            }
+          />
+        )}
+        <p className="px-4 py-3 text-12 text-muted-foreground">
+          Read-only settings from the Node detail. Agent access mode and source
+          policies may require additional confirmation; a single setting does
+          not authorize execution.
+        </p>
+      </DetailSection>
       <DetailSection title="Fixed profile and limits">
         <DetailRow
           label="CPU"
@@ -1373,22 +1379,30 @@ function RemoteMachinePolicyPanel({
         />
         <DetailRow
           label="Concurrent commands"
-          value={String(policy?.concurrent_jobs ?? 2)}
+          value={policy ? String(policy.concurrent_jobs) : "Not reported"}
         />
         <DetailRow
           label="Command timeout"
-          value={`${policy?.default_command_timeout_seconds ?? 120}s default · ${policy?.maximum_command_timeout_seconds ?? 3600}s maximum`}
+          value={
+            policy
+              ? `${policy.default_command_timeout_seconds}s default · ${policy.maximum_command_timeout_seconds}s maximum`
+              : "Not reported"
+          }
         />
         <DetailRow
           label="Output limits"
-          value="1 MiB per job (512 KiB each stream) · 32 MiB machine cache"
+          value={
+            policy
+              ? `${policy.job_output_bytes.toLocaleString()} bytes per job · ${policy.machine_output_cache_bytes.toLocaleString()} bytes machine cache`
+              : "Not reported"
+          }
         />
         <DetailRow
           label="Command input"
           value="32 KiB command · 64 KiB stdin"
         />
         <p className="px-4 py-3 text-12 text-muted-foreground">
-          All subjects and child credentials share two command slots. There is
+          All subjects and child credentials share the command slots. There is
           no persistent queue; capacity rejection does not mean work is queued.
           File reads are paged at up to 4 KiB. Exact edits handle at most 16 MiB
           for both the original and result; this is not a universal file-size or
@@ -1445,12 +1459,21 @@ function RemoteMachinePolicyPanel({
         />
         <div className="space-y-3 px-4 py-3 text-12 text-muted-foreground">
           <p>
-            Job metadata remains for {policy?.job_history_days ?? 30} days;
-            terminal operation projections remain for{" "}
-            {policy?.operation_history_days ?? 90} days. Output is read only
-            from the currently authorized live node, retained at most one hour
-            after a job finishes, and can disappear earlier after cache eviction
-            or runtime loss.
+            Job metadata retention:{" "}
+            {policy ? `${policy.job_history_days} days` : "not reported"};
+            terminal operation retention:{" "}
+            {policy ? `${policy.operation_history_days} days` : "not reported"}.
+            Output is read only from the currently authorized live node,
+            retained at most one hour after a job finishes, and can disappear
+            earlier after cache eviction or runtime loss.
+          </p>
+          <p>
+            Deletion confirms Sandbox and related namespace object cleanup,
+            terminal creation responsibilities and accounting. Underlying
+            storage follows its reclaim policy; physical storage release or
+            erasure is not verified. Cleanup target:{" "}
+            {policy ? `${policy.cleanup_target_hours} hours` : "not reported"}.
+            A target is not a completion guarantee.
           </p>
           <p>
             Paused workspaces have no automatic expiry and no storage fee. A

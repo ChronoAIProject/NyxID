@@ -105,7 +105,7 @@ async fn supersede_operation(
     Ok(())
 }
 
-fn owner_ineligibility(user: Option<&Document>) -> Option<&'static str> {
+pub(crate) fn owner_ineligibility(user: Option<&Document>) -> Option<&'static str> {
     let Some(user) = user else {
         return Some("owner_not_found");
     };
@@ -1793,6 +1793,42 @@ pub async fn entitlement(db: &Database, owner_id: &str) -> AppResult<MachineEnti
     })
 }
 
+/// Immutable account-safety provenance is shared by the producer and the
+/// first-claim cancellation validator. Progress may replace the error code.
+pub(crate) struct AccountSafetyIdentity {
+    pub idempotency_key_hash: String,
+    pub request_digest: String,
+    pub effect_digest: String,
+}
+
+pub(crate) fn account_safety_identity(
+    machine: &ManagedMachine,
+    action: LifecycleAction,
+    retained_recovery_operation: Option<&str>,
+) -> AccountSafetyIdentity {
+    let key = if let Some(operation) = retained_recovery_operation {
+        format!(
+            "account-safety:retained-recovery:{}:{operation}",
+            machine.runtime_generation
+        )
+    } else {
+        format!(
+            "account-safety:{}:{}",
+            action.as_str(),
+            machine.runtime_generation
+        )
+    };
+    AccountSafetyIdentity {
+        idempotency_key_hash: format!("system:{}", idempotency_key_hash(&key)),
+        request_digest: request_digest(
+            &json!({"source":"account_safety","generation":machine.runtime_generation}),
+        ),
+        effect_digest: request_digest(
+            &json!({"machine_id":machine.node_id,"safety_generation":machine.runtime_generation}),
+        ),
+    }
+}
+
 /// Bounded, fair account-safety sweep. A lost account qualification closes
 /// authority and queues a physical pause. Only a durable, policy-bound owner
 /// deletion basis permits irreversible cleanup, including already paused disks.
@@ -1901,12 +1937,13 @@ async fn suspend_ineligible_filtered(
                     if touched.matched_count!=1{return Err(AppError::Conflict("owner_safety_state_changed".into()));}
                 }
                 let action=if deletion {LifecycleAction::Delete} else {LifecycleAction::Pause};
+                let identity=account_safety_identity(&current,action,unauthorized_replay.then(||current.active_operation_id.as_deref().unwrap_or("unbound")));
                 let now = Utc::now();
                 let operation = MachineOperation {
                     id: operation_id.clone(), owner_id: current.owner_id.clone(), machine_id: Some(current.node_id.clone()),
                     action,
-                    idempotency_key_hash: format!("system:{}", idempotency_key_hash(&if unauthorized_replay {format!("account-safety:retained-recovery:{}:{}",current.runtime_generation,current.active_operation_id.as_deref().unwrap_or("unbound"))} else {format!("account-safety:{}:{}",action.as_str(),current.runtime_generation)})),
-                    request_digest: request_digest(&json!({"source":"account_safety","generation":current.runtime_generation})),
+                    idempotency_key_hash: identity.idempotency_key_hash,
+                    request_digest: identity.request_digest,
                     expected_revision: Some(current.revision), desired_runtime_generation: Some(current.runtime_generation),
                     state: OperationState::Accepted, cleanup_state: CleanupState::Pending, effect_id: Some(effect_id.clone()),
                     error_code: Some(reason.into()), error_message: None, evidence_digest: None, retry_count: 0, delete_retry: None,
@@ -1914,7 +1951,7 @@ async fn suspend_ineligible_filtered(
                 };
                 let outbox = MachineEffectOutbox {
                     id: effect_id.clone(), operation_id: operation_id.clone(), machine_id: current.node_id.clone(), owner_id: current.owner_id.clone(),
-                    kind: EffectKind::for_action(action), effect_digest: request_digest(&json!({"machine_id":current.node_id,"safety_generation":current.runtime_generation})),
+                    kind: EffectKind::for_action(action), effect_digest: identity.effect_digest,
                     namespace: current.sandbox_namespace.clone(), sandbox_name: current.sandbox_name.clone(), desired_mode: "suspended".into(),
                     state: EffectState::Pending, attempts: 0, claim_id: None, undispatched_claim_id: None, claimed_until: None, last_error: None, available_at: Some(now),
                     submission: None, created_at: now, updated_at: now,
