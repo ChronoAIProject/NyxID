@@ -191,8 +191,8 @@ async fn source_session(
     user_id: &str,
     session_id: &str,
 ) -> AppResult<()> {
-    let _: Session = reads
-        .required(
+    let row: Option<Session> = reads
+        .read(
             crate::models::session::COLLECTION_NAME,
             super::session_authority::authenticated(
                 doc! {"_id":session_id,"user_id":user_id,"revoked":false,
@@ -200,6 +200,11 @@ async fn source_session(
             ),
         )
         .await?;
+    if row.is_none() {
+        return Err(
+            super::session_authority::session_end_error(reads.db, session_id, user_id).await,
+        );
+    }
     Ok(())
 }
 
