@@ -30,3 +30,10 @@ threads-required = "num-cpus"
 [[profile.ci.overrides]]
 filter = "test(=routes::remote_machine_flag_tests::flag_absent_and_explicit_off_block_all_mounted_admission_before_effects_for_users_and_admins)"
 threads-required = "num-cpus"
+
+# This fixture fills every uncertainty slot through the real 250ms dispatch
+# admission budget. Keep unrelated MongoDB churn out of its positive admissions;
+# preserve the production deadline, retained-proof assertions and no-retry policy.
+[[profile.ci.overrides]]
+filter = "test(=services::analytics_dispatch_service::tests::retained_uncertainty_is_bounded_without_expiring_proof_and_accepted_rows_are_removed)"
+threads-required = "num-cpus"
