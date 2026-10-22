@@ -1491,11 +1491,15 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/authorize", get(handlers::oauth::authorize))
         .route(
             "/authorize/decision",
-            post(handlers::oauth::authorize_decision),
+            post(handlers::oauth::authorize_decision).layer(middleware::map_response(
+                handlers::oauth_consent_response::complete_form_post,
+            )),
         )
         .route(
             "/authorize/incremental/decision",
-            post(handlers::oauth::authorize_incremental_decision),
+            post(handlers::oauth::authorize_incremental_decision).layer(middleware::map_response(
+                handlers::oauth_consent_response::complete_form_post,
+            )),
         )
         .route("/par", post(handlers::oauth::pushed_authorization_request))
         .route("/token", post(handlers::oauth::token))

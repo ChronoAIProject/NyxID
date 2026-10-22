@@ -292,7 +292,7 @@ async fn legacy_refresh_predating_regrant_or_incremental_replacement_cannot_upgr
     )
     .await
     .unwrap();
-    assert_ne!(regrant.revision, incremental.revision);
+    assert_eq!(regrant.revision, incremental.revision);
     assert!(increment_row.created_at > regrant.granted_at + Duration::seconds(60));
     assert!(increment_row.created_at < incremental.granted_at);
     assert!(matches!(

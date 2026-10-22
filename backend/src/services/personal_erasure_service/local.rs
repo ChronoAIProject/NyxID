@@ -3,6 +3,7 @@
 //! from creator/updater attribution. Durable admission tombstones survive the
 //! final source deletion and remain the writer barrier.
 use super::*;
+use crate::services::consent_service::REVOCATION_FENCES;
 use futures::TryStreamExt;
 
 const PAGE: i64 = 32;
@@ -285,6 +286,7 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ),
         (m::oauth_state::COLLECTION_NAME, doc! {"user_id":owner}),
         (m::consent::COLLECTION_NAME, doc! {"user_id":owner}),
+        (REVOCATION_FENCES, doc! {"user_id":owner}),
         (
             m::mcp_session::MCP_SESSION_COLLECTION,
             doc! {"user_id":owner},

@@ -1083,8 +1083,9 @@ async fn authenticate_mcp_or_public(
         match jwt::verify_token(&state.jwt_keys, &state.config, token) {
             Ok(claims) if claims.token_type == "access" => {
                 let authority_user =
-                    crate::services::oauth_token_authority_service::validate_claims_with_user(
+                    crate::services::oauth_token_authority_service::validate_claims_with_user_for_route(
                         &state.db, &claims,
+                        "mcp",
                     )
                     .await
                     .map_err(|error| match error {

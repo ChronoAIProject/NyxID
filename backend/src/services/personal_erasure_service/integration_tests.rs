@@ -144,6 +144,14 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
             doc! {"_id":"event-joined","conversation_id":"personal-chat"},
         ),
         ("mcp_sessions", doc! {"_id":"mcp","user_id":&owner}),
+        (
+            "consents",
+            doc! {"_id":"personal-consent","user_id":&owner,"client_id":"connected-app","scopes":"openid","granted_at":bson::DateTime::now()},
+        ),
+        (
+            "consent_revocation_fences",
+            doc! {"_id":format!("{owner}:revoked-app"),"user_id":&owner,"client_id":"revoked-app","revoked_at":bson::DateTime::now(),"version":uuid::Uuid::new_v4().to_string()},
+        ),
         ("triggers", doc! {"_id":"trigger","user_id":&owner}),
         (
             "trigger_work",
@@ -186,6 +194,10 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
         .unwrap();
     db.collection::<Document>("durable_operation_executions").insert_one(doc! {"_id":"never-dispatched","user_id":&owner,"grant_id":"durable-grant","status":"reserved","request_digest":"personal-request"}).await.unwrap();
     let retained = [
+        (
+            "consent_revocation_fences",
+            doc! {"_id":format!("{other}:revoked-app"),"user_id":&other,"client_id":"revoked-app","revoked_at":bson::DateTime::now(),"version":uuid::Uuid::new_v4().to_string()},
+        ),
         (
             "assistant_learning_publication_targets",
             doc! {"_id":"landed-shared-target","owner_id":&owner,"agent_id":"agent-personal","state":"landed","operation_id":"settled-publication"},

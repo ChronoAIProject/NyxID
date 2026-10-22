@@ -2509,7 +2509,10 @@ async fn source_outbox_actual_incremental_consent_edit_and_revoke_use_original_g
         consent_service::replace_incremental_consent(&f.db, &consent, &consent.scopes, vec![])
             .await
             .unwrap();
-    assert_ne!(changed.revision, consent.revision);
+    // The incremental edit adds no authority, so it is a true no-op and must
+    // preserve the live revision. The later Machine re-approval is the
+    // authority change that rotates the external grant.
+    assert_eq!(changed.revision, consent.revision);
     let (_, replacement, new_source) = approve_oauth(&f, &client).await;
     let new_work = admitted_work(&f, &new_source).await;
     let outbox = source_outbox_rows(&f.db).await;

@@ -602,9 +602,10 @@ pub async fn refresh_tokens(
             .is_some();
         if !client_active {
             tracing::warn!(
-                jti = %claims.jti,
                 client_id = %stored.client_id,
-                "Refresh attempt against deactivated OAuth client; revoking"
+                reason = "client_inactive",
+                route_class = "refresh",
+                "Protected OAuth authority rejected"
             );
             // Revoke the token in place so subsequent retries follow
             // the existing reuse-detection path instead of leaking the
@@ -643,6 +644,7 @@ pub async fn refresh_tokens(
                 .await?
                 .ok_or_else(super::consent_service::grant_changed)?;
         if stored.created_at <= consent.granted_at + Duration::seconds(60) {
+            tracing::warn!(client_id = %stored.client_id, route_class = "refresh", reason = "legacy_unbound", "Protected OAuth authority rejected");
             return Err(super::consent_service::grant_changed());
         }
         let scope = stored
@@ -806,7 +808,7 @@ pub async fn refresh_tokens(
     if active_token.protected_consent != original_protected_consent {
         return Err(super::consent_service::grant_changed());
     }
-    super::consent_service::validate_protected_reference(
+    super::consent_service::validate_protected_reference_for_route(
         db,
         &active_token.user_id,
         &active_token.client_id,
@@ -815,6 +817,7 @@ pub async fn refresh_tokens(
             .as_deref()
             .unwrap_or(FIRST_PARTY_ACCESS_SCOPES),
         active_token.protected_consent.as_ref(),
+        "refresh",
     )
     .await?;
     if active_token.client_id == Uuid::nil().to_string() {
@@ -890,12 +893,13 @@ pub async fn refresh_tokens(
     };
 
     if reuse_existing_refresh_token {
-        super::consent_service::fence_protected_reference(
+        super::consent_service::fence_protected_reference_for_route(
             db,
             &active_token.user_id,
             &active_token.client_id,
             scope,
             active_token.protected_consent.as_ref(),
+            "refresh",
         )
         .await?;
         touch_session_last_active(db, session_id.as_deref(), now).await?;
@@ -960,12 +964,13 @@ pub async fn refresh_tokens(
             if recovered.protected_consent != active_token.protected_consent {
                 return Err(super::consent_service::grant_changed());
             }
-            super::consent_service::fence_protected_reference(
+            super::consent_service::fence_protected_reference_for_route(
                 db,
                 &active_token.user_id,
                 &active_token.client_id,
                 scope,
                 active_token.protected_consent.as_ref(),
+                "refresh",
             )
             .await?;
             touch_session_last_active(db, session_id.as_deref(), now).await?;
@@ -1007,12 +1012,13 @@ pub async fn refresh_tokens(
         .insert_one(&new_refresh)
         .await?;
 
-    if let Err(error) = super::consent_service::fence_protected_reference(
+    if let Err(error) = super::consent_service::fence_protected_reference_for_route(
         db,
         &active_token.user_id,
         &active_token.client_id,
         scope,
         active_token.protected_consent.as_ref(),
+        "refresh",
     )
     .await
     {

@@ -1005,6 +1005,7 @@ function StandardConsentPage({
         />
         <input type="hidden" name="nonce" value={nonce} />
         <input type="hidden" name="consent_request" value={preparedMachineRequest ?? consentRequest} />
+        <input type="hidden" name="browser_form" value="true" />
         {prompt && <input type="hidden" name="prompt" value={prompt} />}
         {externalSubjectPlatform && (
           <input

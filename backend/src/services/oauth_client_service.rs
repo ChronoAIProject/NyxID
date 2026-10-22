@@ -3,7 +3,6 @@ use futures::TryStreamExt;
 use mongodb::bson::{self, Binary, Bson, Document, doc, spec::BinarySubtype};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use url::Url;
 use uuid::Uuid;
 
 use crate::crypto::token::{generate_random_token, hash_token};
@@ -197,13 +196,14 @@ pub fn validate_allowed_scopes_list(scopes: &[String]) -> AppResult<String> {
     validate_allowed_scopes(&scopes.join(" "))
 }
 
-/// Validate, trim, and deduplicate registered OAuth redirect URIs.
+/// Trim, validate and deduplicate registered OAuth redirect URIs. Preserve the
+/// trimmed spelling for exact execution-time OAuth redirect matching.
 ///
 /// Allows HTTPS, localhost HTTP, loopback/custom app schemes, and other
 /// schemes historically accepted by NyxID developer apps, but rejects obvious
-/// browser execution/local-file schemes and fragments. Returns the exact
-/// trimmed URI strings rather than `url`-serialized strings because OAuth
-/// redirect URI matching is exact.
+/// browser execution/local-file schemes and fragments. Returns the trimmed
+/// URI strings rather than `url`-serialized strings because OAuth redirect
+/// URI matching is exact.
 pub fn validate_redirect_uris(redirect_uris: &[String]) -> AppResult<Vec<String>> {
     if redirect_uris.is_empty() {
         return Err(AppError::ValidationError(
@@ -222,25 +222,11 @@ pub fn validate_redirect_uris(redirect_uris: &[String]) -> AppResult<Vec<String>
             ));
         }
 
-        let parsed = Url::parse(uri).map_err(|_| {
-            AppError::ValidationError(format!("Invalid redirect_uri format: {uri}"))
-        })?;
+        crate::services::oauth_service::validate_redirect_uri_scheme(uri)
+            .map_err(|_| AppError::ValidationError("Unsupported redirect_uri".to_string()))?;
 
-        if matches!(parsed.scheme(), "javascript" | "data" | "file") {
-            return Err(AppError::ValidationError(format!(
-                "Unsupported redirect_uri scheme: {uri}"
-            )));
-        }
-
-        if parsed.fragment().is_some() {
-            return Err(AppError::ValidationError(format!(
-                "redirect_uri must not contain fragment: {uri}"
-            )));
-        }
-
-        let trimmed = uri.to_string();
-        if unique.insert(trimmed.clone()) {
-            validated.push(trimmed);
+        if unique.insert(uri.to_string()) {
+            validated.push(uri.to_string());
         }
     }
 
@@ -2515,6 +2501,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_redirect_uris_rejects_non_exact_browser_normalization() {
+        for redirect_uri in [
+            "https://app.example\t/callback",
+            "https://app.example\n/callback",
+            "https://app.example\r\n/callback",
+            "custom:payload",
+        ] {
+            assert!(
+                validate_redirect_uris(&[redirect_uri.to_string()]).is_err(),
+                "redirect URI should be rejected: {redirect_uri:?}"
+            );
+        }
+    }
+
+    #[test]
     fn validate_redirect_uris_preserves_exact_trimmed_strings() {
         let uris = validate_redirect_uris(&[
             " https://app.example ".to_string(),
@@ -3178,6 +3179,7 @@ mod tests {
             db.collection::<Consent>(CONSENTS)
                 .insert_one(&Consent {
                     revision: None,
+                    write_version: None,
                     issuance_fence: None,
                     id: format!("consent-{client_id}"),
                     user_id: "user-with-consent".to_string(),

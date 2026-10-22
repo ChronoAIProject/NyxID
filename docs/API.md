@@ -9135,3 +9135,42 @@ requires the 24-hour dispatch window to have elapsed and `dispatch_drained: true
 absence alone never proves no creation. A stale revision/observation returns
 conflict; an invalid action returns validation failure. Authority/storage
 unavailability is retryable. No action deletes a replacement version.
+
+### OAuth consent decisions
+
+Browser consent forms submit a `browser_form=true` marker. Successful, denied,
+and callback-error decisions return a script-free 200 interstitial that performs
+a meta-refresh to the already validated callback; API and non-browser callers
+retain the normal 302/JSON contract. An unauthenticated form is also completed
+through the interstitial before its same-origin `/login?return_to=...` navigation.
+OAuth redirect URIs are checked at both
+registration and execution time. HTTP(S), loopback HTTP, and RFC 8252 private-use
+native schemes (including reverse-DNS schemes with a path) are accepted;
+browser execution, content, local-file, and opaque schemes are rejected with
+the normal invalid-redirect error.
+Registration trims surrounding whitespace and stores the trimmed exact string;
+embedded tab/CR/LF are rejected. Execution requires the exact registered string
+and rejects browser-normalized whitespace/control variants.
+
+An ordinary approval preserves the live consent's existing scopes, service
+allowlist, and expiry and unions the newly approved request. The standard screen does not
+provide a complete editable view of the grant, so it cannot silently narrow
+previous authority; use Authorized Applications to revoke or narrow access.
+Reordered or duplicate selections are equal authority and are a no-op: the
+consent id, revision, issuance fence, and Machine external grant remain stable.
+Incremental approval with no additions has the same no-op behavior. Pure broadening
+preserves the existing authority revision and does not invalidate tokens bound to it;
+each token remains limited to its own scope, service, and resource claims. Narrowing,
+expiry shortening, revoke, regrant, and authority-removing Machine or binding changes
+create a new revision and invalidate tokens bound to the previous revision.
+
+The new code carries only the approved request's validated scope, its service
+selection and required resource services; it does not inherit the older stored
+union or its allow-all flag. CAS uses an independent optional `write_version`,
+compatible with old rows/readers. Signed decisions bind the revocation generation, so a request issued before
+revocation fails with a conflict and requires fresh authorization; a new request
+can authorize immediately. Old signed requests use a conservative timestamp
+compatibility fence, including same-second revocation. Double submit before
+revocation is harmless. URI
+spelling is preserved exactly: tab/CR/LF anywhere and leading/trailing C0/space
+are rejected rather than normalized into a match.

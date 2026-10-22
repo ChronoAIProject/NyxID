@@ -5285,6 +5285,7 @@ mod tests {
 
         let consent = crate::models::consent::Consent {
             revision: None,
+            write_version: None,
             issuance_fence: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: actor_id.clone(),
