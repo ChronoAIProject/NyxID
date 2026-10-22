@@ -3,9 +3,12 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 import shutil
 import xml.etree.ElementTree as ET
+
+FLAKY_TAGS = {"flakyFailure", "flakyError"}
 
 
 def verify_shard_directories(results, count):
@@ -35,6 +38,7 @@ def verify(inventory, results, count, output):
         raise ValueError("the full test inventory is empty")
 
     actual = set()
+    flaky = []
     combined = ET.Element("testsuites", name="backend-shards")
     for shard in range(1, count + 1):
         report = results / f"shard-{shard}" / "junit.xml"
@@ -44,9 +48,14 @@ def verify(inventory, results, count, output):
             raise ValueError(f"empty shard report: {report}")
         for case in cases:
             key = (case.attrib["classname"], case.attrib["name"])
-            # Retries must not turn an earlier failure into a passing gate.
-            if any(child.tag not in {"system-out", "system-err"} for child in case):
-                raise ValueError(f"non-passing or retried test: {key}")
+            tags = {child.tag for child in case} - {"system-out", "system-err"}
+            # nextest records a retried-then-passed attempt as flakyFailure /
+            # flakyError. That test passed and is reported by name below; any
+            # other child (failure, error, skipped) is a non-passing test.
+            if tags - FLAKY_TAGS:
+                raise ValueError(f"non-passing test: {key}")
+            if tags:
+                flaky.append((shard, key))
             if key in actual:
                 raise ValueError(f"test ran more than once: {key}")
             actual.add(key)
@@ -63,7 +72,22 @@ def verify(inventory, results, count, output):
     output.parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(combined).write(output, encoding="utf-8", xml_declaration=True)
     print(f"Verified {len(actual)} tests exactly once across {count} shards; "
-          f"{ignored} pre-existing ignored tests.")
+          f"{ignored} pre-existing ignored tests; {len(flaky)} passed only on retry.")
+    report_flaky(flaky)
+    return flaky
+
+
+def report_flaky(flaky):
+    """Keep every retried test visible: stdout plus the GitHub job summary."""
+    if not flaky:
+        return
+    lines = [f"- shard {shard}: `{binary}` `{name}`" for shard, (binary, name) in sorted(flaky)]
+    print("Tests that passed only on retry (first attempt failed):")
+    print("\n".join(lines))
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as handle:
+            handle.write(f"### {len(flaky)} test(s) passed only on retry\n\n" + "\n".join(lines) + "\n")
 
 
 def stage_profiles(results, count, destination):

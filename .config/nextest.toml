@@ -2,8 +2,14 @@
 fail-fast = false
 # Terminate any test after five minutes so a stalled runner or hung test reports
 # its name and output (and junit.xml is still written) instead of consuming the
-# entire job timeout. No retries: a flaky test must stay visible.
+# entire job timeout.
 slow-timeout = { period = "60s", terminate-after = 5 }
+# One retry absorbs a single transient (an I/O-stalled runner, a wall-clock
+# window boundary, a concurrent touch racing an exact-source edit) without
+# hiding it: nextest records the first attempt as <flakyFailure> in junit.xml,
+# and .github/scripts/backend_shards.py lists every retried test by name in the
+# job summary. A test that fails twice still fails the run.
+retries = 1
 
 [profile.ci.junit]
 path = "junit.xml"

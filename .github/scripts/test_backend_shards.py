@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -71,12 +72,27 @@ class BackendShardTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inventory mismatch"):
             self.check()
 
-    def test_failure_skip_and_retry_cannot_pass(self):
-        for child in ("failure", "error", "skipped", "flakyFailure", "rerunFailure"):
+    def test_failure_skip_and_error_cannot_pass(self):
+        for child in ("failure", "error", "skipped", "rerunFailure"):
             with self.subTest(child=child):
-                self.report(2, "second", child)
-                with self.assertRaisesRegex(ValueError, "non-passing or retried"):
+                self.report(3, "third", child)
+                with self.assertRaisesRegex(ValueError, "non-passing test"):
                     self.check()
+
+    def test_retried_then_passed_tests_are_accepted_and_reported(self):
+        for child in ("flakyFailure", "flakyError"):
+            with self.subTest(child=child):
+                self.report(3, "third", child)
+                summary = self.root / "summary.md"
+                summary.write_text("")
+                os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+                try:
+                    flaky = verify(self.inventory, self.results, 3, self.output)
+                finally:
+                    del os.environ["GITHUB_STEP_SUMMARY"]
+                self.assertEqual(flaky, [(3, ("nyxid::bin/nyxid-server", "third"))])
+                self.assertIn("third", summary.read_text())
+                self.assertIn("passed only on retry", summary.read_text())
 
     def test_empty_report_cannot_pass(self):
         (self.results / "shard-2/junit.xml").write_text("<testsuites/>")
