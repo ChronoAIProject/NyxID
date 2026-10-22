@@ -1,8 +1,43 @@
 use std::process::Command;
 
+fn git_output(args: &[&str]) -> Option<String> {
+    Command::new("git")
+        .args(args)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|output| output.trim().to_string())
+}
+
+fn watch_git_metadata() {
+    println!("cargo:rerun-if-changed=build.rs");
+    if let Some(head) = git_output(&["rev-parse", "--git-path", "HEAD"])
+        && std::path::Path::new(&head).exists()
+    {
+        println!("cargo:rerun-if-changed={head}");
+    }
+    if let Some(reference) = git_output(&["symbolic-ref", "--quiet", "HEAD"])
+        && let Some(path) = git_output(&["rev-parse", "--git-path", &reference])
+    {
+        let mut path = std::path::PathBuf::from(path);
+        if !path.exists() {
+            if let Some(packed) = git_output(&["rev-parse", "--git-path", "packed-refs"])
+                && std::path::Path::new(&packed).exists()
+            {
+                println!("cargo:rerun-if-changed={packed}");
+            }
+            // A commit creates a loose reference when the branch is packed.
+            while !path.exists() && path.pop() {}
+        }
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+}
+
 fn main() {
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs");
+    watch_git_metadata();
     println!("cargo:rerun-if-env-changed=NYXID_GIT_HASH");
 
     // macOS integration tests link the real node runtime's ScreenCaptureKit
@@ -22,14 +57,8 @@ fn main() {
 }
 
 fn resolve_from_git() -> String {
-    let hash = Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let hash =
+        git_output(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
 
     let dirty = Command::new("git")
         .args(["status", "--porcelain"])
