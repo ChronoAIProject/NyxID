@@ -84,7 +84,7 @@ fn readiness_binds_executing_generation_roster_and_observation() {
 }
 
 #[tokio::test]
-async fn effective_flag_rechecks_existing_override_and_clear_without_legacy_fallback() {
+async fn effective_flag_reads_preserve_existing_override_and_clear_when_unready() {
     let db = crate::test_utils::connect_test_database("readiness_effective")
         .await
         .expect("configured Mongo required");
@@ -97,6 +97,7 @@ async fn effective_flag_rechecks_existing_override_and_clear_without_legacy_fall
         .await
         .unwrap();
     let flag = flags::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY;
+    ready_test_replica(&db).await;
     flags::set_platform_override(&db, flag, &flags::FlagTarget::Global, true, &user)
         .await
         .unwrap();
@@ -114,20 +115,25 @@ async fn effective_flag_rechecks_existing_override_and_clear_without_legacy_fall
             .await
             .unwrap()
     );
+    db.collection::<SecurityReplica>(COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
     flags::clear_platform_override(&db, flag, &flags::FlagTarget::User(user.clone()))
         .await
         .unwrap();
-    assert!(matches!(
-        flags::personal_flag_enabled(&db, &user, flag).await,
-        Err(AppError::SecurityReadinessUnavailable)
-    ));
+    assert!(
+        flags::personal_flag_enabled(&db, &user, flag)
+            .await
+            .unwrap()
+    );
     ready_test_replica(&db).await;
     assert!(
         flags::personal_flag_enabled(&db, &user, flag)
             .await
             .unwrap()
     );
-    // A fresh singleton with a different roster cannot replace this process.
+    // A foreign roster is still unready, but cannot break an active flag read.
     db.collection::<SecurityReplica>(COLLECTION_NAME)
         .delete_many(doc! {})
         .await
@@ -136,14 +142,15 @@ async fn effective_flag_rechecks_existing_override_and_clear_without_legacy_fall
     observe(&db, &foreign.identity, &foreign.config, false)
         .await
         .unwrap();
-    assert!(matches!(
-        flags::personal_flag_enabled(&db, &user, flag).await,
-        Err(AppError::SecurityReadinessUnavailable)
-    ));
+    assert!(
+        flags::personal_flag_enabled(&db, &user, flag)
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
-async fn membership_enablement_requires_ready_execution_without_an_enable_write() {
+async fn membership_enablement_preserves_configured_flags_when_readiness_becomes_unready() {
     use crate::models::{
         org_membership::{MemberScopeSource, OrgMembership, OrgRole},
         user::UserType,
@@ -160,6 +167,7 @@ async fn membership_enablement_requires_ready_execution_without_an_enable_write(
             .unwrap();
     }
     let flag = "assistant:org-agents";
+    ready_test_replica(&db).await;
     flags::set_platform_org_override(&db, &org, flag, true, &user)
         .await
         .unwrap();
@@ -182,8 +190,11 @@ async fn membership_enablement_requires_ready_execution_without_an_enable_write(
         .insert_one(&membership)
         .await
         .unwrap();
-    // The ordinary effective resolver reports configuration. The real creation
-    // gate must refuse until this executing process's full roster is ready.
+    // Losing readiness after activation does not break newly matching members.
+    db.collection::<SecurityReplica>(COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
     assert!(
         flags::resolve_personal_features(&db, &user)
             .await
@@ -191,11 +202,7 @@ async fn membership_enablement_requires_ready_execution_without_an_enable_write(
             .iter()
             .any(|key| key == flag)
     );
-    assert!(matches!(
-        super::super::org_agent_service::require_creation_enabled(&db, &user).await,
-        Err(AppError::SecurityReadinessUnavailable)
-    ));
-    ready_test_replica(&db).await;
+
     super::super::org_agent_service::require_creation_enabled(&db, &user)
         .await
         .unwrap();

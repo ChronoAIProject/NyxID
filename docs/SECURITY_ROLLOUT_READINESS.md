@@ -43,7 +43,8 @@ witnessed audit integrity.
 
 ## Feature configuration and execution
 
-The following effective feature gates require deployment readiness:
+Admin activation (`enabled=true`, global/user/org override) of the following
+feature flags requires deployment readiness:
 
 | Capability | Existing boundary retained |
 | --- | --- |
@@ -53,13 +54,15 @@ The following effective feature gates require deployment readiness:
 | `assistant:machine-contexts` | Separated-context configuration; backend observations do not certify the node's OS implementation. |
 | `assistant:live-turn-gate` | Conditional execution/route gate; channel and platform turn fences and conversation-key management denial retain their stronger unconditional checks. |
 
-The ordinary feature resolver still reports configured precedence. Actual
-callers use `personal_flag_enabled`, which rechecks readiness whenever the
-effective value is true. This includes existing overrides, clearing a false
-user/org override, membership changes, and defaults at restart. Unready effective
-activation returns HTTP 503 (`security_readiness_unavailable`, code 12900),
-without converting it to false and executing a legacy path. An effective false
-value keeps the existing flag-off behavior; it does not erase stored policy.
+Admin enable writes return HTTP 503 (`security_readiness_unavailable`, code
+12900) while readiness is red; disabling remains allowed. Request-path reads
+return the resolved boolean, preserving existing overrides, membership changes,
+override clearing and defaults even if readiness later becomes unavailable.
+Enabled gated reads emit a 1% sampled warning and audit event
+`security_readiness_flag_in_effect_unready`, limited to one pair per flag/user
+per one-minute shared window. Readiness report errors are debug-logged and
+do not fail requests. An effective false value retains existing flag-off
+behavior and does not erase stored policy.
 
 The `approval:required-web-v1` capability is **diagnostic**, not an enforced
 activation switch. Required approval is implemented by every upgraded process
