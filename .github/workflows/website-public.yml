@@ -122,3 +122,46 @@ jobs:
             frontend/dist/public-browser-results.json
             frontend/dist/solution-fixture.json
             frontend/test-results/
+  wizard-regeneration:
+    name: Rebuild committed CLI wizard
+    needs: solution-on-fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Generate the actual embedded wizard and source metadata
+        run: npm run build:wizard
+      - name: Package generated wizard for review and commit
+        run: tar -czf wizard-regenerated.tar.gz -C .. cli/src/wizard/assets cli/src/wizard/bundle-meta
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wizard-regenerated-${{ github.sha }}
+          path: frontend/wizard-regenerated.tar.gz
+      - name: Require the committed source-closure hash to match the real rebuild
+        run: |
+          git show HEAD:cli/src/wizard/bundle-meta/index.hash > /tmp/wizard-committed.hash
+          cmp /tmp/wizard-committed.hash ../cli/src/wizard/bundle-meta/index.hash
+  wizard-committed-freshness:
+    name: Verify committed CLI wizard freshness
+    needs: wizard-regeneration
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust test dependencies
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wizard-freshness
+      - name: Run the authoritative committed-bundle Rust test
+        run: cargo test -p nyxid-cli --test wizard_bundle_freshness
