@@ -11280,8 +11280,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 14 meta-tools (6 core + 2 SSH + 6 oracle)
-        assert_eq!(tools.len(), 14);
+        // Should only have the 8 meta-tools (6 core + 2 SSH)
+        assert_eq!(tools.len(), 8);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -11306,8 +11306,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 14 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 15);
+        // 8 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 9);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -11331,8 +11331,8 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 14 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 16);
+        // 8 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 10);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
     }
