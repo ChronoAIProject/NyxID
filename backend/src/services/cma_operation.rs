@@ -119,8 +119,7 @@ pub fn response_metadata(text: &str) -> Option<Value> {
         .filter_map(|line| line.strip_prefix("data:"))
         .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
         .filter_map(|event| event.get("response").cloned())
-        .filter(|v| v["id"].is_string())
-        .next_back()
+        .rfind(|v| v["id"].is_string())
 }
 
 pub fn observed(cma: &mut CmaOperation, value: &Value) {
