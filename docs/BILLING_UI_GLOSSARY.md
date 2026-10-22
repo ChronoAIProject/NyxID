@@ -400,8 +400,9 @@ the person has no chargeable wallet.
 read-only operators, and any user holding `nyxid:admin:usage:read` through a
 direct or group role (the seeded **Usage Viewer** role carries it). Usage-only
 role holders see just the Usage page in the admin navigation and command
-palette; Admins and Operators keep their existing admin navigation. Saving a
-workspace stays admin-only.
+palette, including its Dashboard, List and NyxBot tabs (NyxBot activity, model
+usage and feedback with comments); Admins and Operators keep their existing
+admin navigation. Saving a workspace stays admin-only.
 
 Usage-only readers never see identities beyond the usage data:
 

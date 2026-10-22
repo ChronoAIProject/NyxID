@@ -7153,8 +7153,11 @@ admin-only. `GET /api/v1/users/me` reports the result as
 #### GET /api/v1/admin/assistant/model-usage
 
 Returns attributed NyxBot and specialist model costs, requests, and provider
-token counts, with daily UTC series and top billing accounts. Requires Admin
-or Operator; the Usage Viewer permission alone does not grant access.
+token counts, with daily UTC series and top billing accounts. Same read access
+as Admin Usage: Admin, Operator, or the `nyxid:admin:usage:read` permission
+(Usage Viewer). `GET /api/v1/admin/assistant/analytics` and
+`GET /api/v1/admin/assistant/feedback`, which back the rest of the Usage ->
+NyxBot tab, use the same check.
 
 Use `from` and `to` RFC 3339 timestamps for a positive window of at most 31 days.
 An optional `model` selects an exact, case-sensitive billing model (trimmed,
@@ -7172,8 +7175,9 @@ orchestration, ordinary tools, unclassified assistant activity, and historical
 platform records without provable attribution. See the full
 [reporting contract](BILLING_ANALYTICS.md#nyxbot-model-usage).
 
-**Errors:** `400` invalid window or model filter; `403` without Admin/Operator
-access; `503` (`12200`) when the bounded report times out.
+**Errors:** `400` invalid window or model filter; `403` without Admin, Operator,
+or `nyxid:admin:usage:read` access; `503` (`12200`) when the bounded report
+times out.
 
 #### GET /api/v1/admin/usage/identities
 

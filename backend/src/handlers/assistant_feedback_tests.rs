@@ -2074,7 +2074,7 @@ async fn assistant_analytics_counts_real_activity_deduplicates_voice_and_separat
             expected
         );
     }
-    // Operator can inspect metadata and feedback; a usage-only reader cannot.
+    // Operators and usage-only readers can inspect metadata, feedback and model usage.
     let roles = crate::services::role_service::get_platform_role_ids(&f.state.db)
         .await
         .unwrap();
@@ -2110,10 +2110,34 @@ async fn assistant_analytics_counts_real_activity_deduplicates_voice_and_separat
         )
         .await
         .unwrap();
-    assert_eq!(
-        request(&f.state, "GET", &path, &f.human_token, None)
-            .await
-            .0,
-        StatusCode::FORBIDDEN
+    let window = format!(
+        "from={}&to={}",
+        from.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     );
+    for path in [
+        path,
+        format!("/api/v1/admin/assistant/feedback?{window}"),
+        format!("/api/v1/admin/assistant/model-usage?{window}"),
+    ] {
+        let (status, body) = request(&f.state, "GET", &path, &f.human_token, None).await;
+        assert!(status.is_success(), "{path}: {status} {body}");
+    }
+    // Removing the role removes access again.
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(doc! {"_id": &f.owner}, doc! {"$set": {"role_ids": []}})
+        .await
+        .unwrap();
+    for path in ["analytics", "feedback", "model-usage"] {
+        let path = format!("/api/v1/admin/assistant/{path}?{window}");
+        assert_eq!(
+            request(&f.state, "GET", &path, &f.human_token, None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
 }
