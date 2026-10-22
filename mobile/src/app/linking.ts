@@ -168,102 +168,10 @@ function classifyLinkType(url: string): LinkType {
   return "other";
 }
 
-// Cold-start deep-link + push-open events fire from `getInitialURL()` before
-// `AuthSessionContext` calls `initTelemetry()`. Without buffering, those
-// captures land while the mobile client is still uninitialized and are
-// silently dropped -- losing exactly the cold-start launches we want to
-// measure. The buffer sits in one of three states so the same module can
-// handle (a) initial cold start with pending consent hydration, (b) opted-in
-// steady state, and (c) in-session consent toggles without leaking pre-consent
-// events on re-enable.
-//
-//   "pending"   — consent not yet known or consent-on but init not finished.
-//                 Buffer new events up to a hard cap.
-//   "active"    — init complete. Pass new events straight to capture().
-//   "discarded" — consent explicitly off. Drop new events immediately
-//                 without buffering. No state accumulates.
-//
-// Transitions:
-//   pending -> active:    flushPendingDeepLinks() drains + marks active.
-//   * -> discarded:       discardPendingDeepLinks() clears + marks discarded.
-//   discarded -> pending: armDeepLinkBuffer() (called when consent flips
-//                          back on, BEFORE initTelemetry runs) so the brief
-//                          window between consent=on and init-complete is
-//                          captured instead of dropped.
-//
-// Hard cap keeps unbounded growth impossible even in pathological cases.
-type DeepLinkBufferState = "pending" | "active" | "discarded";
-let deepLinkBufferState: DeepLinkBufferState = "pending";
-const MAX_PENDING_DEEP_LINKS = 16;
-const pendingDeepLinkTypes: Array<{ link_type: LinkType }> = [];
-
+// No telemetry buffer: pre-consent/pre-login events cannot acquire later
+// permission or become associated with a newly selected account.
 function reportDeepLinkOpened(url: string): void {
-  const props = { link_type: classifyLinkType(url) };
-  switch (deepLinkBufferState) {
-    case "active":
-      try {
-        capture({ name: "mobile.deep_link_opened", props });
-      } catch {
-        // telemetry must never break the linking pipeline
-      }
-      return;
-    case "pending":
-      if (pendingDeepLinkTypes.length < MAX_PENDING_DEEP_LINKS) {
-        pendingDeepLinkTypes.push(props);
-      }
-      return;
-    case "discarded":
-      // Consent is off; drop silently.
-      return;
-  }
-}
-
-/**
- * Called once per init cycle, immediately after `initTelemetry()` resolves,
- * to drain deep-link events captured while the client was warming up.
- * Idempotent: if state is already "active" this is a no-op. Callers MUST
- * NOT invoke this unless the user has consented to telemetry;
- * `initTelemetry()` itself short-circuits on !consent, so tying the flush
- * to init resolution satisfies the consent boundary.
- */
-export function flushPendingDeepLinks(): void {
-  if (deepLinkBufferState === "active") return;
-  deepLinkBufferState = "active";
-  for (const props of pendingDeepLinkTypes) {
-    try {
-      capture({ name: "mobile.deep_link_opened", props });
-    } catch {
-      // telemetry must never break the linking pipeline
-    }
-  }
-  pendingDeepLinkTypes.length = 0;
-}
-
-/**
- * Called when telemetry is explicitly off (consent=false / revoked / no
- * DSN configured). Clears the buffer and moves to the "discarded" state
- * so subsequent events are dropped silently instead of accumulating.
- * Prevents unbounded queue growth on installs that never opt in and
- * keeps pre-consent events from leaking if the user later re-enables.
- */
-export function discardPendingDeepLinks(): void {
-  deepLinkBufferState = "discarded";
-  pendingDeepLinkTypes.length = 0;
-}
-
-/**
- * Called by the consent-on branch of `AuthSessionContext` BEFORE
- * `initTelemetry()` runs, to re-arm buffering if we had previously
- * discarded. Brings the state back to "pending" so deep links that
- * arrive during the init promise are captured instead of dropped.
- * No-op when state is already "pending" or "active" -- this is the only
- * transition from "discarded" back to "pending", so it can't leak
- * pre-consent events.
- */
-export function armDeepLinkBuffer(): void {
-  if (deepLinkBufferState === "discarded") {
-    deepLinkBufferState = "pending";
-  }
+  void capture({ name: "mobile.deep_link_opened", props: { link_type: classifyLinkType(url) } });
 }
 
 /**

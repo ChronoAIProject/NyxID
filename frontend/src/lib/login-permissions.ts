@@ -450,7 +450,8 @@ export function draftSummary(
     allowed_nodes: inventory.options.nodes.filter((s) =>
       data.allowed_node_ids?.includes(s.id),
     ),
-    expires_at: loginKeyExpiry(data.expires_at),
+    expires_at: data.never_expires ? null
+      : loginKeyExpiry(data.expires_at) ?? new Date(Date.now() + 90 * 86400000).toISOString(),
     rate_limit_per_second: data.rate_limit_per_second ?? null,
     rate_limit_burst: data.rate_limit_burst ?? null,
     platform: data.platform ?? null,

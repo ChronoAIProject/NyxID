@@ -227,7 +227,8 @@ pub async fn forward_event(
                     event_type: envelope.event_type.clone(),
                     deduplicated: true,
                 },
-            );
+            )
+            .await;
             audit(
                 db,
                 auth_user,
@@ -336,7 +337,8 @@ pub async fn forward_event(
                     event_type: envelope.event_type.clone(),
                     deduplicated: false,
                 },
-            );
+            )
+            .await;
             audit(
                 db,
                 auth_user,
@@ -470,6 +472,7 @@ pub async fn forward_trigger_event(
     let user_id =
         uuid::Uuid::parse_str(owner_user_id).map_err(|_| AppError::TriggerDeliveryUnsupported)?;
     let auth_user = AuthUser {
+        mfa_assured: false,
         org_agent_access: None,
         assistant_group_id: None,
         assistant_agent_owner_id: None,
@@ -482,6 +485,7 @@ pub async fn forward_trigger_event(
         acting_client_id: None,
         oauth_client_id: None,
         token_jti: None,
+        oauth_lineage: None,
         approval_owner_user_id: None,
         auth_method: AuthMethod::ApiKey,
         allow_all_services: false,
@@ -781,6 +785,7 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(Utc::now()),
             last_used_at: None,

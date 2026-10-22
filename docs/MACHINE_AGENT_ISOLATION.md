@@ -1,4 +1,4 @@
-# M1 draft: agent-scoped machine workspaces, authority, and visibility
+# M1.3 review status: agent-scoped machine workspaces, authority, and visibility
 
 Status: design approved on 2026-10-03; revised M1.3 backend/runtime slice ready for review. Owner rollout is incomplete; see §8.7. Started incrementally at `/tmp/m1-design.md`, moved here with owner authorization after #1747 merged.
 Date: 2026-10-03.
@@ -67,8 +67,122 @@ OpenDots is ahead in per-agent lifecycle/UX and continuously rechecked capabilit
 
 The owner-approved mode is `separated`; the UI label is **Separate workspace and
 browser for this agent**. It combines the former workspace and browser phases.
-`shared_legacy` remains the default. **Full isolation requires a separate machine
-container or VM per agent.** Never label this mode “isolated”.
+Existing assignments retain `shared_legacy`. New assignments follow the W9.4
+selection contract below. **Use a separate machine container or VM per agent
+for stronger separation; containers still share their host kernel.** Never label
+`separated` mode “isolated” or a VM boundary.
+
+#### W9.4 new-assignment selection
+
+Node setup records the owner's `automatic`, `require_separated`, or
+`shared_legacy` intent. New server assignments use current v4 capability evidence;
+the older support boolean, v1/v2/v3 reports, missing evidence and unknown evidence
+versions cannot establish support. Automatic and required intent select
+`separated` only when the supported mechanisms are positively observed and
+context creation is enabled.
+Otherwise the assignment is denied with an actionable `selection_required` state.
+An omitted choice never selects legacy. An explicit legacy choice is available on
+unsupported and older hosts after the owner reviews the complete warning in
+[NYXID_NODE.md](NYXID_NODE.md#machine-access-for-nyxbot-and-specialists).
+
+Existing assignments keep their stored mode, capabilities and login restrictions.
+Changing the node's intent, upgrading it, or changing a feature flag does not
+reinterpret them. The first capable server atomically writes the immutable
+`machine-separation-defaults-v1` marker and a compatibility snapshot of enabled
+machines, their capability ceilings, and existing organization-admin reachability.
+Flag-off NyxBot discovery may materialize only that pre-marker reachability when
+the node has no recorded choice, while rechecking live ACLs. Later node enablement,
+organization promotion, and capability expansion cannot extend this snapshot.
+Existing assignment restrictions and removal tombstones win.
+
+Machine settings links each eligible agent to its separation controls. Missing
+selection appears in the API, settings, setup progress, and NyxBot tool/watch
+results, with an owner action and no execution retry loop. The human action card
+contains the full legacy warning before approving a new legacy assignment or a
+separated-to-shared change; an assistant cannot choose legacy on the owner's
+behalf. New external OAuth/API-key Machine grants support explicit legacy consent
+only, with affirmative warning acknowledgement; automatic/required contexts are
+refused. Revalidation of an existing external grant retains its existing policy
+and live source, ACL, and capability checks.
+
+Upgrade and drain every server replica before relying on W9.4 for new grants;
+older replicas do not enforce the new recorded-intent contract. Publish the
+matching frontend and CLI/container versions together. An old node that reports
+neither intent nor evidence remains usable through an existing legacy assignment;
+new access requires the owner action. Missing UI fields from an older server are
+accepted for existing assignments, while new grant submissions without explicit
+external legacy consent are rejected by the upgraded server with an explanation.
+
+#### Capability evidence and owner-visible support
+
+The v4 report confirms Linux, Landlock ABI 6+, a root supervisor with three
+distinct non-root users, the command seccomp filter, actual Landlock enforcement,
+the secure browser's effective managed policy, and the configured managed
+Chromium's sandbox under both browser identities. It additionally requires
+`credential_custody: true` from actual dropped-identity access checks against
+the supervisor's protected credential files and configured key service. Container
+preflight uses disposable public sentinels, without generating node credentials;
+registered native probes check the actual node and sibling-profile custody.
+Missing or failed custody gives `node_custody_unverified`: repair protected
+storage and rerun the probe before requesting new separated access.
+Every mechanism needs a positive observation; absent fields, unknown versions
+and v1/v2/v3 reports are insufficient for new automatic/required assignments. The
+browser probe executes the real managed binary with a fresh private profile,
+the runtime UID/GID and no-new-privileges. A pidfd holds the launched browser's
+identity; its executable must resolve to the recognized package layout. Candidate
+processes must have a kernel-reported PPid chain reaching that exact browser.
+Process names and renderer-like command-line arguments never establish ancestry.
+For a live sandboxed descendant, all four UID/GID values must match the browser
+identity, NNP must be 1, Seccomp must be 2, and the filter count must exceed the
+browser parent's. Its NSpid list must be deeper, both uid_map and gid_map must
+differ from the parent's, and the namespace-specific `/proc/PID/net/dev` inode
+must differ. The generic `/proc/PID/net` directory inode is per-process and is
+not network-namespace evidence. Parent links, start times, process liveness and
+the sandbox observations are rechecked before accepting a result.
+
+These are observations, not attestation: ancestry ties the sample to a trusted
+browser launch, but does not attest each descendant executable or protect against
+a compromised browser, supervisor or kernel. The probe does not read protected
+renderer executable, namespace, memory or descriptor links. It adds no tracing
+capability to the supervisor or a helper. If a container hides any required
+observation, `managed_browser_sandbox` is explicitly false and the report gives
+`separated_browser_sandbox_unobservable_in_container`. Separated contexts are
+unavailable in that container; use supported native Linux or a separate machine
+container/VM per agent. Do not add capabilities or disable the browser sandbox
+to make the test pass. The probe uses no DevTools
+transport and does not infer browser permission from `/bin/true` or a successful
+`unshare` before exec. On Ubuntu,
+AppArmor's unprivileged-user-namespace sysctl is diagnostic only: the executable's
+profile attachment decides its user-namespace permission. Keep that restriction
+enabled. macOS has no supported per-agent separation backend in this runtime.
+
+Setup resolves the configured executable and verifies its package metadata
+before selecting a policy layout: packaged Debian Chromium uses
+`/etc/chromium/policies/managed`, the actual Ubuntu Snap Chromium binary uses
+`/etc/chromium-browser/policies/managed`, and packaged Google Chrome uses
+`/etc/opt/chrome/policies/managed`. Unknown layouts fail closed; setup does not
+create a compatibility alias. The secure identity must explicitly refuse
+`--remote-debugging-port=0`, remain alive, and open no DevTools port or TCP
+listener owned by the secure UID in its network namespace's TCP/TCP6 tables.
+Unknown or unreadable tables fail closed. Missing or ineffective policy gives
+`separated_browser_policy_not_effective`; a timed-out observation retains
+`separated_probe_timeout`. Disabling the secure policy is not a probe workaround.
+
+Settings distinguish confirmed support, failed prerequisites and unknown evidence.
+`separated_probe_timeout` has its own retry guidance: a cold Chromium start can
+exceed the five-second probe bound. Timeout does not establish support or prove
+that a host can never support separation. All probe process groups are swept on
+success, error and timeout. Reports are observations, not an attestation or a
+promise that support will remain available; execution still checks current fences.
+
+The machine-level badge says **Sharing set per agent**. The assignment label is
+**Shared legacy**, **Separate workspace and browser**, or **Owner selection
+required**. Capability support and command-versus-node-secret separation are
+different facts: neither `commands_isolated` nor successful v4 probes change an
+existing assignment. An unknown host remains usable under an existing legacy
+assignment, subject to its live ACLs and restrictions. Browserless node-only
+containers need explicit legacy consent; a separate container per agent is the
+recommended deployment until browserless contexts are supported.
 
 #### What separated does and does not guarantee
 
@@ -79,6 +193,11 @@ ancestors prevent a context from widening access to siblings by chmod or rename.
 Legacy roots become supervisor-owned with only the legacy group able to traverse
 them; world-writable files below them remain unreachable to context UIDs. This
 change happens only as part of the owner's explicit opt-in, not on upgrade.
+Legacy browser homes instead receive an exact UID ACL behind a supervisor-owned
+gate: context browsers share a policy-reading group, which must not grant access
+to those homes. The legacy browser can still write its home but cannot chmod the
+gate. Reinstalling managed resources preserves existing developer-deny ACLs on
+the policy, native-host manifest, launcher and copied executable.
 
 Linux Landlock ABI **6 or later**, verified by a real execution probe, provides
 additional read/write/execute restrictions and signal/abstract-socket scoping.
@@ -430,15 +549,15 @@ activity has an explicit “Unknown (older node)” filter.
 M1.2 adds an explicit boxed `machine_access` sibling policy (version, monotonic
 editor revision, per-machine execution revisions and assignments). For acting people
 with `assistant:machine-capabilities` enabled, new selections start with all
-capabilities off and the editor is available. With the flag off, existing workflows
-keep working: NyxBot snapshots missing assignments at discovery or first use after
-live ACL checks, and the specialist Grants picker snapshots selected machines.
-Both use `legacy:true` and the node's current legacy capability profile. The
-one-time cutover likewise snapshots pre-existing reachability as `shared_legacy`.
-Turning the flag on preserves these snapshots until edited. Turning it off never
-widens an explicitly configured assignment.
-Migration and grant writes serialize on the agent row. Removal and re-addition
-retain the global revision fence rather than growing an unbounded tombstone map.
+capabilities off and the editor is available. W9.4 narrows the original flag-off
+compatibility path: existing assignments remain usable; missing NyxBot assignments
+inherit only the frozen pre-marker reachability described above. New Grants and
+specialist creation use recorded setup intent and current capability evidence, or
+remain denied pending owner selection. Turning either flag on or off never widens
+an explicitly configured assignment.
+Migration and grant writes serialize on the agent row. Removal retains the mode
+and an all-off assignment so later discovery or re-addition cannot resurrect a
+revoked compatibility grant.
 Legacy rosters above the 500-machine discovery page remain explicit and usable;
 migration streams all pre-cutover rows in batches of 100. The editor limits new
 assignments to 64 without truncating or revoking larger legacy rosters.
@@ -480,11 +599,28 @@ and are never affected by this cap. Renewal streams bounded batches with 64
 concurrent requests every ten seconds, independently of the one-second revocation
 sweep and compatibility migration. A brief socket loss preserves the running job;
 reconnect can renew it while the last 45-second signed lease is still live.
-Push revocation remains immediate, with the offline deadline as its backstop. Lease messages are never retried past an
-expired local deadline. The compatibility snapshot uses bounded driver batches, without applying
-new-assignment limits to existing access. Node fence storage is private, capped at 2 MiB and
-persisted before activation. Context metadata remains separate from process or
-filesystem isolation.
+Push revocation cancels promptly after delivery, with the local monotonic deadline
+as its offline backstop. The clock-safe timing revision consumes a bounded
+five-second clock uncertainty from the signed lease, rather than extending the
+45-second local cancellation bound. Chat, external and owner-job access use the
+same signed timing semantics. Renewal transactions fence current assignment and
+runtime; the status projection additionally allows two seconds for older
+in-flight renewal writers. A fresh call acquires live runtime-bound authority;
+capability reads do not refresh it. A restart never revives an old lease.
+
+Execution expiry is separate from durable delivery and required profile
+quarantine. Expiry may settle execution pending only for nodes advertising
+`authority_timing_v1`; it never discards undelivered fences, claims ACK, or clears
+cleanup. Legacy outbox rows start one durable first-observation window, while
+malformed deadlines fail closed. Details and supported recovery are in
+[MACHINE_NODES.md](MACHINE_NODES.md#per-agent-capabilities-m12) and
+[NYXID_NODE.md](NYXID_NODE.md#recovering-machine-authority).
+
+Lease messages are never retried past an expired local deadline. The compatibility
+snapshot uses bounded driver batches, without applying new-assignment limits to
+existing access. Node fence storage is private, capped at 2 MiB and persisted
+before activation. If persistence outlasts activation, retain the fence and deny
+work. Context metadata remains separate from process or filesystem isolation.
 
 ### 8.5 M1.3 feasibility gate (2026-10-04)
 
@@ -671,24 +807,66 @@ Agent labels are batch-resolved from the listed contexts' agent IDs, including
 organization agents. Shared Linux secure/dev display control remains independent;
 a developer-display takeover does not select the secure browser.
 
-Native validation remains a release gate. Run the existing machine context
-harness on a Linux VM provisioned with `--separate-users` (for example, the
-`cli/tests/machine_context_spike` fixture plus `cli/tests/machine_context_e2e.mjs`)
-and repeat the two-context browser/profile/display/D-Bus/native-host denial,
-restart, saved-login binding and generation-quarantine cases. This worktree has
-no Linux VM provider available (`limactl`, `multipass`, QEMU and Tart are absent),
-so no native VM result is claimed here. Unsupported hosts return an explicit
-separated-unavailable reason; they never silently become `shared_legacy`.
+Run native acceptance only as root in an expendable Linux VM/runner with the
+documented browser/display prerequisites, `node-ws`, `libnss3-tools`, Python
+venv/pip, git, npm, C/C++/make and Rust installed. Use a supported packaged
+Chromium or Google Chrome and the pinned cua driver for the runner architecture.
+Keep the host's real AppArmor/user-namespace restrictions; the actual executable
+must have the permission its normal launch needs. Do not add `--no-sandbox` or
+relax secure managed policies to make acceptance pass.
 
-A feasible next validation environment is a disposable arm64 Lima VM using
-Apple's Virtualization.framework (or a Colima-managed VM accessed through SSH),
-with host-directory sharing disabled. Run the daemon natively inside the guest
-with `--separate-users`, not inside Docker. Ubuntu 24.04 needs an HWE kernel
-providing Landlock ABI 6 or newer: its original 6.8 kernel is insufficient.
-Debian 13 with kernel 6.12 is another candidate. Live-probe Landlock and retain
-the guest's AppArmor policy. Adapt the container harness's fixed paths and
-entrypoint checks to the native setup, then exercise two concurrent contexts,
-browser relaunch/restart, cross-context denials, fill binding and quarantine.
-The earlier QEMU/TCG spike proved an independent Linux kernel can run locally,
-but did not validate native browser lifecycle. No VM tooling was installed for
-this follow-up; the flag remains off pending that release gate.
+Build the committed CLI and the standalone fixture with their checked-in locks,
+then invoke the checked-in entrypoint:
+
+```sh
+cargo build --locked -p nyxid-cli --bin nyxid
+cargo build --locked --manifest-path cli/tests/machine_context_spike/Cargo.toml
+sudo env NYXID_TEST_CLI=/absolute/path/to/nyxid \
+  NYXID_TEST_CUA_DRIVER=/absolute/path/to/pinned/cua-driver \
+  NYXID_TEST_CONTEXT_SPIKE=/absolute/path/to/nyxid-machine-context-spike \
+  bash cli/tests/machine_native_acceptance.sh --disposable
+```
+
+The entrypoint creates a fresh native profile, synthetic loopback registration
+and HTTPS sign-in fixtures, and distinct browser/command identities. It verifies
+complete v4 evidence including credential custody, removes the secure policy as
+a negative control and restores the exact inode, then exercises two contexts, reconnects, restart,
+private roots, secure/dev browsers, delayed cold starts and lost native probes,
+login binding, D-Bus/accessibility, cross-context file/native-host/display
+denials, four desktop streams, owner takeover and quarantine. After another
+restart, each active secure UID must have a real renderer with the expected
+executable, all UID/GID fields, NNP, additional seccomp filters and separate
+user/PID/network namespaces. It also verifies no context account needs
+subordinate UID/GID allocations.
+
+The full existing adversarial suite runs with its negative controls and offline
+tool workloads. A private mount namespace gives it a fresh fixture root, `/tmp`
+and `/dev/shm` without deleting earlier test data; no production mount permission
+is inferred from this supervisor-only fixture operation. System metadata mutation, shared-memory
+names/capacity and public pathname Unix sockets retain their documented residuals.
+The script changes global managed resources and creates test accounts, homes and
+sentinels, so never run it on an owner node. Stop competing validation workloads
+before taking calibration measurements.
+
+The same entrypoint collects 100 samples from the shipped probe, each with a
+fresh process/profile, and prints fixed-label durations, median, observed p99,
+maximum and twice-p99 headroom for each browser probe. OS file caches can warm
+between samples; preserve the first observation too. For hosted image timing,
+run this helper inside the actual full machine image with its normal init,
+seccomp and shared-memory settings and no token environment or identity/workspace
+mounts:
+
+```sh
+python3 cli/tests/machine_probe_acceptance.py --disposable \
+  --binary /usr/local/bin/nyxid --container --samples 100
+```
+
+Hosted amd64 Docker timing and lifecycle checks remain a separate release gate
+from native aarch64 acceptance. The browser observation bound remains five
+seconds until actual hosted measurements justify changing it; extending the
+old DOM timeout could not fix its conflict with the secure DevTools policy.
+Unsupported or unobserved hosts must never silently become `shared_legacy`;
+existing stored assignments retain their mode. Keep the feature gated until
+the native, hosted and rollout acceptance gates have passed. Actual batch
+counts, source commits and guest mutations are recorded in
+`docs/SECURITY_W9_MACHINE_LOG.md`.

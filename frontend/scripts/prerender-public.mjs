@@ -128,6 +128,15 @@ for (const slug of ["privacy", "terms"]) {
   await fs.writeFile(path.join(dist, file), enhanced);
   results.push({ ...meta, file, markdown, revision });
 }
+// Metadata enhancement is the last legal HTML write; hash those exact bytes.
+const legalEtags = [];
+for (const slug of ["privacy", "terms"]) {
+  const digest = hash(await fs.readFile(path.join(dist, `${slug}.html`)));
+  for (const uri of [`/${slug}`, `/${slug}.html`])
+    legalEtags.push(`    ${uri} ${JSON.stringify(`W/"${digest}"`)};`);
+}
+await fs.writeFile(path.join(dist, "legal-cache.conf"),
+  `map $uri $nyxid_legal_etag {\n    default "";\n${legalEtags.join("\n")}\n}\n`);
 for (const locale of ["en", "zh"]) {
   const entries = results.filter((p) => p.locale === locale);
   await fs.writeFile(

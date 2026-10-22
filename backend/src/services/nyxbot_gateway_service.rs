@@ -6,15 +6,32 @@
 
 use crate::{
     AppState,
+    crypto::jwt::{
+        Claims, DelegationOrigin, NYXBOT_GATEWAY_CREATOR_ACTOR as CREATOR_ACTOR,
+        NYXBOT_GATEWAY_CREATOR_TOKEN_TTL_SECS as CREATOR_TOKEN_TTL_SECS,
+    },
     errors::{AppError, AppResult},
+    models::oauth_client::OauthClient,
 };
 use mongodb::bson::{self, Document, doc};
 use serde_json::Value;
-use std::time::Duration;
+use std::{sync::LazyLock, time::Duration};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 const GATEWAY_SLUG: &str = "cmaeg";
 const GATEWAY_TIMEOUT_SECS: u64 = 20;
+const MAX_GATEWAY_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+pub(crate) static GATEWAY_HTTP_CLIENT: LazyLock<reqwest::Client> =
+    LazyLock::new(gateway_http_client);
+
+fn gateway_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .expect("gateway HTTP client")
+}
 fn urlencode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
@@ -33,28 +50,98 @@ pub(crate) async fn gateway_base(state: &AppState) -> AppResult<String> {
     Ok(base)
 }
 
-/// Acting service recorded on creator tokens (`act.sub`).
-const CREATOR_CLIENT_ID: &str = "nyxbot";
-/// A creator token covers one channel-management sequence.
-const CREATOR_TOKEN_TTL_SECS: i64 = 120;
+const CREATOR_GATEWAY_PERMISSIONS: &[&str] = &[
+    "cma-eg:channels:read",
+    "cma-eg:channels:create",
+    "cma-eg:channels:update",
+    "cma-eg:channels:delete",
+];
 
-/// The owner's bearer for gateway channel management. The gateway resolves
-/// the creator with `GET /api/v1/users/me`, which refuses API keys, and requires
-/// `profile.metadata.owner.subject` to match. NyxID therefore mints a
-/// short-lived delegated token carrying only `account:read`, the narrowest
-/// credential that endpoint accepts. It is sent only to the gateway and is
-/// never logged or stored.
+/// Match only the unrestricted, short-lived server-side creator mint.
+pub(crate) fn is_creator_claims(claims: &Claims) -> bool {
+    let Claims {
+        // JWT verification and live authority/RBAC resolution own these identity
+        // fields; they do not distinguish the creator mint.
+        sub: _,
+        iss: _,
+        aud: _,
+        jti: _,
+        exp,
+        iat,
+        scope,
+        token_type,
+        delegated: Some(true),
+        delegation_origin: Some(DelegationOrigin::Service),
+        act: Some(actor),
+        client_id: None,
+        oauth_lineage: None,
+        protected_consent: None,
+        sid: None,
+        sgen: None,
+        cnf: None,
+        assistant_forward: None,
+        sa: None,
+        relay: None,
+        relay_api_key_id: None,
+        relay_api_key_name: None,
+        relay_allowed_service_ids: None,
+        relay_allowed_node_ids: None,
+        relay_allow_all_services: None,
+        relay_allow_all_nodes: None,
+        resources: None,
+        allowed_service_ids: None,
+        allow_all_services: None,
+        allowed_node_ids: None,
+        allow_all_nodes: None,
+        roles: None,
+        groups: None,
+        permissions: None,
+    } = claims
+    else {
+        return false;
+    };
+    token_type == "access"
+        && actor.sub == CREATOR_ACTOR
+        && scope == crate::mw::auth::ACCOUNT_READ_SCOPE
+        && exp
+            .checked_sub(*iat)
+            .is_some_and(|ttl| ttl > 0 && ttl <= CREATOR_TOKEN_TTL_SECS)
+        && *exp > chrono::Utc::now().timestamp()
+}
+
+pub(crate) async fn creator_gateway_permissions(
+    db: &mongodb::Database,
+    claims: &Claims,
+    client: &OauthClient,
+) -> AppResult<&'static [&'static str]> {
+    if !is_creator_claims(claims) || !client.is_active || client.client_type != "confidential" {
+        return Ok(&[]);
+    }
+    let gateway = super::assistant_service::resolve_admin_service_by_slug(db, GATEWAY_SLUG)
+        .await
+        .map_err(|_| AppError::OAuthAuthorityUnavailable)?;
+    if !gateway
+        .introspection_client_ids
+        .as_ref()
+        .is_some_and(|ids| ids.contains(&client.id))
+    {
+        return Ok(&[]);
+    }
+    Ok(CREATOR_GATEWAY_PERMISSIONS)
+}
+
+/// The owner's server-only bearer for gateway channel management. Legacy
+/// gateways validate it through `/api/v1/users/me`; RFC 7662 gateways require
+/// per-method `cma-eg:channels:*` permissions. Introspection grants those only
+/// for this actor-scoped mint and the catalog's registered confidential caller.
+/// The 120-second bearer is never logged or stored; the provider key is separate.
 pub(crate) fn creator_bearer(state: &AppState, owner: &str) -> AppResult<Zeroizing<String>> {
     let user_id =
         Uuid::parse_str(owner).map_err(|_| AppError::Internal("Invalid channel owner".into()))?;
-    crate::crypto::jwt::generate_delegated_access_token(
+    crate::crypto::jwt::generate_nyxbot_gateway_creator_token(
         &state.jwt_keys,
         &state.config,
         &user_id,
-        crate::mw::auth::ACCOUNT_READ_SCOPE,
-        CREATOR_CLIENT_ID,
-        CREATOR_TOKEN_TTL_SECS,
-        None,
     )
     .map(Zeroizing::new)
 }
@@ -73,8 +160,8 @@ pub(crate) async fn gateway_call(
     idempotency_key: Option<&str>,
 ) -> AppResult<GatewayResponse> {
     let base = gateway_base(state).await?;
-    let mut request = state
-        .http_client
+    let requires_json = method != reqwest::Method::DELETE && method != reqwest::Method::HEAD;
+    let mut request = GATEWAY_HTTP_CLIENT
         .request(method, format!("{base}{path}"))
         .bearer_auth(bearer)
         .timeout(Duration::from_secs(GATEWAY_TIMEOUT_SECS));
@@ -89,10 +176,48 @@ pub(crate) async fn gateway_call(
         .await
         .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
     let status = response.status().as_u16();
-    let bytes = response.bytes().await.unwrap_or_default();
-    let body =
-        serde_json::from_slice(&bytes[..bytes.len().min(2 * 1024 * 1024)]).unwrap_or(Value::Null);
+    let body = gateway_body(response, requires_json).await;
+    // HTTP refusals remain classified by status even if their diagnostic body
+    // cannot be read. Never parse a partial body or turn a broken 2xx into success.
+    let body = match body {
+        Err(_) if !(200..300).contains(&status) => Value::Null,
+        result => result?,
+    };
     Ok(GatewayResponse { status, body })
+}
+
+async fn gateway_body(mut response: reqwest::Response, requires_json: bool) -> AppResult<Value> {
+    if response
+        .content_length()
+        .is_some_and(|n| n > MAX_GATEWAY_RESPONSE_BYTES as u64)
+    {
+        return Err(AppError::ValidationError("gateway_unavailable".into()));
+    }
+    let status = response.status();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_GATEWAY_RESPONSE_BYTES {
+            return Err(AppError::ValidationError("gateway_unavailable".into()));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    // DELETE/HEAD and 204 replies need only status. Other successful calls
+    // require JSON; callers validate their operation's identity/version fields.
+    match serde_json::from_slice(&bytes) {
+        Ok(body) => Ok(body),
+        Err(_)
+            if !requires_json
+                || !status.is_success()
+                || status == reqwest::StatusCode::NO_CONTENT =>
+        {
+            Ok(Value::Null)
+        }
+        Err(_) => Err(AppError::ValidationError("gateway_invalid_response".into())),
+    }
 }
 
 pub(crate) async fn cleanup_platform_gateway(
@@ -567,3 +692,11 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "nyxbot_gateway_creator_tests.rs"]
+mod creator_tests;
+
+#[cfg(test)]
+#[path = "nyxbot_gateway_http_tests.rs"]
+mod http_tests;

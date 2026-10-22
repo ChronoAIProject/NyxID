@@ -12,6 +12,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "dist");
 const css = await fs.readFile(path.join(root, "scripts", "legal-page.css"), "utf8");
 const etags = {};
+const themeScript = `try{const mode=JSON.parse(localStorage.getItem("nyxid.theme")||"null")?.state?.mode;if(mode==="light"||(mode!=="dark"&&matchMedia("(prefers-color-scheme: light)").matches))document.documentElement.classList.add("theme-light")}catch{}`;
+const themePath = `/assets/legal-theme-${createHash("sha256").update(themeScript).digest("hex").slice(0, 16)}.js`;
+await fs.writeFile(path.join(dist, themePath.slice(1)), themeScript);
 
 function escapeHtml(value) {
   return value.replace(/[&<>"']/g, (char) => ({
@@ -46,7 +49,7 @@ for (const slug of ["privacy", "terms"]) {
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Mona+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
     <title>${escapeHtml(displayTitle)} | NyxID</title>
-    <script>try{const mode=JSON.parse(localStorage.getItem("nyxid.theme")||"null")?.state?.mode;if(mode==="light"||(mode!=="dark"&&matchMedia("(prefers-color-scheme: light)").matches))document.documentElement.classList.add("theme-light")}catch{}</script>
+    <script src="${themePath}"></script>
     <style>${css}</style>
   </head>
   <body class="legal-page legal-page--${slug}">

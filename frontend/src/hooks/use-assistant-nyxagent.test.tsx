@@ -704,7 +704,7 @@ it("never opens for failures already in the transcript or in older pages", async
     expect(result.current.session.messages.at(-1)?.status).toBe("error"),
   );
   expect(result.current.session.messages.at(-1)?.error).toBe(
-    "There aren't enough credits to run this turn.",
+    "There aren't enough credits to run this turn. Add credits in Billing & Usage, then try again.",
   );
   page.messages = [failedReply("older", "insufficient_credits", 1)];
   page.before_seq = null;

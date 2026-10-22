@@ -42,15 +42,13 @@ use crate::{
     },
 };
 
-/// Channel turns are bounded per owner, separately from browser turns.
-pub const CHANNEL_TURNS_PER_OWNER: u32 = 2;
-
 /// The owner identity NyxID uses for turns it starts itself (specialist
 /// work, wake-ups, channel messages): the same person a browser turn acts for.
 pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
     let user_id =
         Uuid::parse_str(owner).map_err(|_| AppError::NotFound("Conversation not found".into()))?;
     Ok(AuthUser {
+        mfa_assured: false,
         org_agent_access: None,
         assistant_group_id: None,
         assistant_agent_owner_id: None,
@@ -63,6 +61,7 @@ pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
         acting_client_id: None,
         oauth_client_id: None,
         token_jti: None,
+        oauth_lineage: None,
         approval_owner_user_id: None,
         auth_method: AuthMethod::Session,
         allow_all_services: true,
@@ -111,7 +110,7 @@ async fn acquire(state: &AppState, pool: Pool<'_>) -> AppResult<Option<DirectCha
         Pool::Channel { owner } => {
             state
                 .direct_chat_limiter
-                .try_acquire_pool("assistant_channel", owner, CHANNEL_TURNS_PER_OWNER)
+                .try_acquire_pool("assistant_channel", owner, team::CHANNEL_TURNS_PER_OWNER)
                 .await
         }
     }
@@ -164,6 +163,9 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        media_event_ids: Vec::new(),
+        channel_uploads: Vec::new(),
+        invocation_id: None,
         acknowledgement_id: None,
         retry_of: None,
         channel_event_id: None,
@@ -207,13 +209,11 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
             }
             Err(error) => return Err(error),
         };
-        if row
-            .pending_events
-            .iter()
-            .any(|e| e.reply_to.iter().any(|o| o.thread.is_some()))
-            && crate::services::channel_thread_follow_service::prune_queue(&state.db, owner, id)
-                .await?
-                == 0
+        if Box::pin(crate::services::channel_thread_follow_service::prune_queue(
+            &state.db, owner, id,
+        ))
+        .await?
+            == 0
         {
             return Ok(());
         }
@@ -337,6 +337,7 @@ pub(crate) async fn owner_denial_decided(
         || row.status != "denied"
         || row.trigger_run_id.is_some()
         || row.voice_request_id.is_some()
+        || row.invocation_id.is_some()
     {
         return;
     }
@@ -357,6 +358,66 @@ pub(crate) async fn owner_denial_decided(
 
 /// Type-erased settlement hook. `run_turn` awaits this so the detached turn's
 /// future type never depends on the turns it may start.
+pub(crate) fn owner_turn_settled_hook(
+    state: AppState,
+) -> std::sync::Arc<dyn crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook> {
+    std::sync::Arc::new(OwnerTurnSettled { state })
+}
+
+struct OwnerTurnSettled {
+    state: AppState,
+}
+
+#[async_trait::async_trait]
+impl crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook for OwnerTurnSettled {
+    async fn settled(
+        &self,
+        row: AssistantConversation,
+        reply: crate::services::platform_manager_contract::ReplyRef,
+    ) {
+        if row.id != reply.turn.conversation_id
+            || row
+                .active_turn
+                .as_ref()
+                .is_none_or(|turn| turn.turn_id != reply.turn.turn_id)
+        {
+            return;
+        }
+        let saved = self
+            .state
+            .db
+            .collection::<crate::models::assistant_message::AssistantMessage>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! {
+                "_id": &reply.reply_id, "conversation_id": &row.id, "user_id": &row.user_id,
+                "turn_id": &reply.turn.turn_id, "role": "assistant",
+            })
+            .await;
+        match saved {
+            Ok(Some(message)) => {
+                if let Err(error) =
+                    crate::services::platform_manager_delivery::saved_personal_reply(
+                        &self.state,
+                        &row,
+                        &reply,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        error_code = error.error_code(),
+                        "Saved personal reply delivery deferred or refused"
+                    );
+                }
+                let error = message.error_code.as_deref().map(TurnError::new);
+                after_turn_boxed(self.state.clone(), row, message.text, error).await;
+            }
+            Ok(None) => {}
+            Err(_) => tracing::warn!("Personal after-turn reply read failed"),
+        }
+    }
+}
+
 pub(crate) fn after_turn_boxed(
     state: AppState,
     row: AssistantConversation,
@@ -381,6 +442,11 @@ pub(crate) async fn after_turn(
     if let Some(event_id) = turn.channel_event_id.as_deref() {
         super::nyxbot::late_delivery::settled(state, event_id).await;
     }
+    for source in turn.events.iter().flat_map(|e| &e.source_event_ids) {
+        if Some(source.as_str()) != turn.channel_event_id.as_deref() {
+            super::nyxbot::late_delivery::process(state, source).await;
+        }
+    }
     let owner = row.user_id.as_str();
     if let Some(run_id) = turn.trigger_run_id.as_deref()
         && !crate::services::async_service_operation::pending_run(&state.db, run_id)
@@ -397,9 +463,15 @@ pub(crate) async fn after_turn(
     }
     if row.is_subagent()
         && !row.guest_turn
-        && let Some(target) = settled_report_target(state, row, turn).await
-        && let Ok(agent) = team::agent_for_conversation(&state.db, row).await
+        && let Some(target) = match settled_report_target(state, row, turn).await {
+            Ok(target) => target,
+            Err(_) => return,
+        }
     {
+        let agent = match team::agent_for_conversation(&state.db, row).await {
+            Ok(agent) => agent,
+            Err(_) => return,
+        };
         let status = match error.map(|error| error.code) {
             None => "replied".to_owned(),
             Some("cancelled") => "was stopped".to_owned(),
@@ -411,13 +483,20 @@ pub(crate) async fn after_turn(
             excerpt(text, 1200).replace('"', "'"),
             agent.id
         );
-        notify(
-            state,
+        let queued = engine::push_events(
+            &state.db,
             owner,
             &target,
-            vec![team::event("subagent_settled", note, Some(&agent.id))],
+            vec![
+                team::event("subagent_settled", note, Some(&agent.id))
+                    .for_invocation(turn.invocation_id.as_deref()),
+            ],
         )
         .await;
+        if queued.is_err() {
+            return;
+        }
+        Box::pin(wake(state, owner, &target)).await;
     }
     // Wake whoever has queued work now that a slot is free.
     wake(state, owner, &row.id).await;
@@ -443,6 +522,7 @@ pub(crate) async fn after_turn(
             )
             .await;
         }
+        let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
         return;
     }
     let plan = super::nyxbot::images::ImageSendPlan {
@@ -471,6 +551,7 @@ pub(crate) async fn after_turn(
     for origin in &also {
         super::nyxbot::deliver_to(state, row, origin, text, Some(&plan)).await;
     }
+    let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
 }
 
 /// Falls back to the turn when no reply row exists (a lost turn swept
@@ -479,7 +560,7 @@ async fn settled_report_target(
     state: &AppState,
     row: &AssistantConversation,
     turn: &crate::models::assistant_conversation::ActiveTurn,
-) -> Option<String> {
+) -> AppResult<Option<String>> {
     let settled = state
         .db
         .collection::<crate::models::assistant_message::AssistantMessage>(
@@ -489,13 +570,11 @@ async fn settled_report_target(
             "conversation_id": &row.id, "user_id": &row.user_id,
             "turn_id": &turn.turn_id, "role": "assistant",
         })
-        .await
-        .ok()
-        .flatten();
-    match settled {
+        .await?;
+    Ok(match settled {
         Some(message) => message.report_to,
         None => turn.report_to.clone(),
-    }
+    })
 }
 
 /// A specialist asked for permission its grants do not cover: queue an event
@@ -546,7 +625,8 @@ pub(crate) async fn permission_requested(
             .unwrap_or_else(|| "(no text)".into()),
     );
     // A notice on a NyxBot thread is a root event: unbound.
-    let event = team::event("permission_requested", note, Some(&chat.agent_id));
+    let event = team::event("permission_requested", note, Some(&chat.agent_id))
+        .for_invocation(chat.invocation_id.as_deref());
     match Box::pin(acks::notify_nyxbot_request(&state.db, chat, request, event)).await {
         Ok(Some(target)) => Box::pin(wake(state, &chat.user_id, &target)).await,
         Ok(None) => {}
@@ -600,17 +680,19 @@ pub(crate) async fn permission_decided(
     );
     note.push(' ');
     note.push_str(acks::DECISION_NARRATION);
-    if request.trigger_run_id.is_none() {
+    if request.trigger_run_id.is_none() && request.invocation_id.is_none() {
         let event = crate::models::assistant_acknowledgement::bind_continuation(
             request.routing.as_ref(),
             team::event("permission_decided", note, None),
         );
-        notify(state, owner, &request.conversation_id, vec![event]).await;
+        Box::pin(notify(state, owner, &request.conversation_id, vec![event])).await;
     }
     if allowed
         && request.kind == "skills"
         && request.decided_by.as_deref() != Some("orchestrator")
-        && deliver_skill_notification(state, request).await.is_err()
+        && Box::pin(deliver_skill_notification(state, request))
+            .await
+            .is_err()
     {
         tracing::debug!("Skill attachment notification deferred");
     }
@@ -681,6 +763,7 @@ async fn deliver_skill_notification(
             Some(&agent.id),
         );
         event.id = request.id.clone();
+        event.invocation_id = request.invocation_id.clone();
         if let Some(target) =
             acks::skill_notifications::enqueue(&state.db, request, &target, &attempt, event).await?
         {
@@ -766,129 +849,6 @@ fn skill_request_allowed_note(
     )
 }
 
-/// What the agent's other threads are working on right now, so it neither
-/// redoes that work nor starts it twice. Lookup failures only omit it.
-async fn in_progress_note(
-    state: &AppState,
-    row: &AssistantConversation,
-    agent: &AssistantAgent,
-) -> String {
-    let Ok(others) = team::in_progress(&state.db, &row.user_id, &agent.id, &row.id).await else {
-        return String::new();
-    };
-    if others.is_empty() {
-        return String::new();
-    }
-    let this = row
-        .active_turn
-        .as_ref()
-        .and_then(|turn| turn.question_key.as_deref());
-    let mut note = String::from(
-        "\n\nYour other threads are working on these right now; do not start the same work \
-        again (if you are asked the same thing, say it is in progress there):",
-    );
-    for (title, question, key) in others {
-        note.push_str(&format!(
-            "\n- \"{}\": \"{}\"{}",
-            excerpt(&title, 60).replace('"', "'"),
-            excerpt(question.as_deref().unwrap_or("(working)"), 200).replace('"', "'"),
-            if this.is_some() && key.as_deref() == this {
-                " (the same question as this one)"
-            } else {
-                ""
-            }
-        ));
-    }
-    note
-}
-
-/// Turn-scoped input context: drained events, a channel sender's context,
-/// and for NyxBot its roster, direct
-/// user chats with specialists and pending permission requests. NyxID-authored
-/// and bounded; lookup failures only omit a note.
-pub(crate) async fn turn_notes(
-    state: &AppState,
-    row: &AssistantConversation,
-    agent: Option<&AssistantAgent>,
-    previous_user_message: Option<DateTime<Utc>>,
-) -> String {
-    let mut notes = engine::channel_note(row);
-    if let Some(turn) = row.active_turn.as_ref() {
-        if !row.guest_turn && turn.origin != TurnOrigin::Event && !turn.events.is_empty() {
-            notes.push_str(
-                "\n\nNyxID events since your previous turn (authored by NyxID; only a quoted \
-                owner message is a request from the user):",
-            );
-            for event in &turn.events {
-                notes.push_str("\n- ");
-                notes.push_str(&excerpt(&event.text, engine::event_text_limit(event)));
-            }
-        }
-        if let Some(note) = turn.note.as_deref() {
-            notes.push_str("\n\n");
-            notes.push_str(note);
-        }
-    }
-    // Someone other than the owner is talking: nothing private to the owner
-    // (memory, other chats, the team, pending requests) goes into this turn.
-    if row.guest_turn {
-        return notes;
-    }
-    if let Some(agent) = agent {
-        // Only the agent's own threads hear about its other chats.
-        if row.channel.is_none() && row.group_request_id.is_none() {
-            notes.push_str(&in_progress_note(state, row, agent).await);
-        }
-        if row.group_request_id.is_none()
-            && let Some(note) = super::assistant_group::group_note(state, row, agent).await
-        {
-            notes.push_str("\n\n");
-            notes.push_str(&note);
-        }
-    }
-    if row.is_subagent() {
-        return notes;
-    }
-    let owner = row.user_id.as_str();
-    notes.push_str(
-        &team::roster_note(&state.db, owner)
-            .await
-            .unwrap_or_default(),
-    );
-    if let Some(since) = previous_user_message {
-        notes.push_str(
-            &team::direct_chats_note(&state.db, owner, since)
-                .await
-                .unwrap_or_default(),
-        );
-        notes.push_str(
-            &crate::services::assistant_voice::published_result_notes(
-                &state.db, owner, &row.id, since,
-            )
-            .await
-            .unwrap_or_default(),
-        );
-    }
-    if let Ok(requests) = team::pending_requests(&state.db, owner).await
-        && let Ok(summaries) = team::request_summaries(&state.db, owner, &requests).await
-        && !summaries.is_empty()
-    {
-        notes.push_str(
-            "\n\nPending specialist permission requests (decide with nyxid__decide_permission):",
-        );
-        for request in summaries.iter().take(10) {
-            notes.push_str(&format!(
-                "\n- request_id {} from {}: {} {}",
-                request.request_id,
-                identifier(&request.agent),
-                identifier(&request.kind),
-                identifier(request.service_slug.as_deref().unwrap_or("account"))
-            ));
-        }
-    }
-    notes
-}
-
 fn refusal(error: &str, instructions: &str) -> (Value, bool) {
     (json!({"error": error, "instructions": instructions}), true)
 }
@@ -928,6 +888,7 @@ pub(crate) async fn assign(
     agent: &AssistantAgent,
     text: &str,
     report_to: Option<&str>,
+    invocation_id: Option<&str>,
 ) -> AppResult<Started> {
     if agent.user_id != owner {
         crate::services::org_agent_service::require_creation_enabled(&state.db, owner).await?;
@@ -943,10 +904,14 @@ pub(crate) async fn assign(
     ))
     .await?;
     let limit = team_pool_limit(state, owner).await;
+    let note = engine::reporting_channel_length_note(&state.db, owner, report_to).await?;
     start_server_turn(
         state,
         owner,
         TurnStart {
+            media_event_ids: Vec::new(),
+            channel_uploads: Vec::new(),
+            invocation_id: invocation_id.map(str::to_owned),
             acknowledgement_id: None,
             retry_of: None,
             channel_event_id: None,
@@ -961,7 +926,7 @@ pub(crate) async fn assign(
             origin: TurnOrigin::Orchestrator,
             channel: None,
             title: None,
-            note: None,
+            note,
             new_id: None,
             agent_id: None,
             report_to: report_to.map(str::to_owned),
@@ -1100,6 +1065,25 @@ pub(crate) async fn execute_tool(
             "Only NyxBot manages agents and channel bots. Report what you need in your reply.",
         );
     }
+    execute_authorized_tool(state, chat, tool_name, args).await
+}
+
+fn execute_authorized_tool<'a>(
+    state: &'a AppState,
+    chat: &'a ChatAuthority,
+    tool_name: &'a str,
+    args: &'a Value,
+) -> futures::future::BoxFuture<'a, (Value, bool)> {
+    Box::pin(execute_authorized_tool_impl(state, chat, tool_name, args))
+}
+
+async fn execute_authorized_tool_impl(
+    state: &AppState,
+    chat: &ChatAuthority,
+    tool_name: &str,
+    args: &Value,
+) -> (Value, bool) {
+    let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
     let result = async {
         assistant_team_tools::validate(name, args)?;
         let (caller_agent, access) = Box::pin(
@@ -1285,7 +1269,8 @@ fn dispatch<'a>(
             Box::pin(dispatch_groups(state, chat, name, args))
         }
         "update_settings" | "settings_link" => Box::pin(dispatch_settings(state, chat, name, args)),
-        "channel_bot_setup_link"
+        "channel_setup_guide"
+        | "channel_bot_setup_link"
         | "connect_channel_bot"
         | "link_channel_bot"
         | "list_channel_agents"
@@ -1386,7 +1371,15 @@ async fn dispatch_specialists(
                 Ok((agent, _)) => {
                     let task = match args["task"].as_str() {
                         Some(task) => started_json(
-                            Box::pin(assign(state, owner, &agent, task, Some(caller))).await?,
+                            Box::pin(assign(
+                                state,
+                                owner,
+                                &agent,
+                                task,
+                                Some(caller),
+                                chat.invocation_id.as_deref(),
+                            ))
+                            .await?,
                         ),
                         None => json!({"status": "idle",
                             "note": "Give it work with nyxid__message_subagent."}),
@@ -1410,6 +1403,7 @@ async fn dispatch_specialists(
                         &agent,
                         text_arg(args, "text"),
                         Some(caller),
+                        chat.invocation_id.as_deref(),
                     ))
                     .await?,
                 ),
@@ -2095,6 +2089,11 @@ async fn dispatch_groups(
     name: &str,
     args: &Value,
 ) -> AppResult<(Value, bool)> {
+    if name == "post_to_group" && chat.invocation_id.is_some() {
+        return Err(AppError::ValidationError(
+            "Group execution is unavailable for owner invocations; assign an owned specialist directly or post from the owner group interface".into(),
+        ));
+    }
     let db = &state.db;
     let owner = chat.user_id.as_str();
     let caller = chat.conversation_id.as_str();
@@ -2420,6 +2419,10 @@ async fn dispatch_channels(
     let owner = chat.user_id.as_str();
     let caller = chat.conversation_id.as_str();
     Ok(match name {
+        "channel_setup_guide" => (
+            json!({"contract_version": 1, "source_verified_at": "2026-10-19", "live_provider_verified": false, "guide": include_str!("../../../docs/assistant/CHANNEL_SETUP_GUIDE.md")}),
+            false,
+        ),
         "channel_bot_setup_link" => {
             let agent = target_agent(state, owner, args["agent"].as_str()).await?;
             super::nyxbot::setup_link_tool(
@@ -2459,7 +2462,10 @@ async fn dispatch_channels(
                 args["channel_agent_id"].as_str(),
             ))
             .await?;
-            (json!({"chats": chats}), false)
+            (
+                json!({"chats": chats.iter().map(|chat| chat.posting_context()).collect::<Vec<_>>()}),
+                false,
+            )
         }
         "list_channel_threads" => (
             super::nyxbot::thread_controls::list_tool(state, owner, args).await?,
@@ -3278,11 +3284,35 @@ pub fn spawn_sweeps(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if crate::services::lark_base_writes::sweep(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Lark Base write maintenance deferred");
+            }
+            if crate::services::assistant_channel_media::queue::sweep(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Channel media finalization deferred");
+            }
+            if crate::services::channel_media_events::sweep(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Channel media sweep deferred");
+            }
             if crate::services::channel_thread_follow_service::sweep(&state.db)
                 .await
                 .is_err()
             {
                 tracing::debug!("Channel thread sweep deferred");
+            }
+            if crate::services::assistant_invocation_service::reconcile_cancellations(&state)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Invocation cancellation sweep deferred");
             }
             if super::assistant_voice::sweep(&state).await.is_err() {
                 tracing::warn!("Voice queue sweep deferred");
@@ -3411,3 +3441,35 @@ pub(crate) async fn operation_owner_card(
 #[cfg(test)]
 #[path = "assistant_team_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod future_size_tests {
+    use super::*;
+
+    type ToolArgs = (
+        &'static AppState,
+        &'static ChatAuthority,
+        &'static str,
+        &'static Value,
+    );
+
+    fn future_size<F: Future>(_: impl FnOnce(ToolArgs) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn tool_authority_refusals_keep_caller_futures_small() {
+        let outer = future_size(|(state, chat, tool, args)| execute_tool(state, chat, tool, args));
+        let authorized = future_size(|(state, chat, tool, args)| {
+            execute_authorized_tool(state, chat, tool, args)
+        });
+        assert!(
+            outer < 16 * 1024,
+            "tool authority guard future grew to {outer} bytes"
+        );
+        assert!(
+            authorized < 1024,
+            "authorized tool caller future grew to {authorized} bytes"
+        );
+    }
+}

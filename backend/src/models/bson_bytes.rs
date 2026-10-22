@@ -16,17 +16,15 @@ fn bytes_from_bson<E: serde::de::Error>(bson: Bson) -> Result<Vec<u8>, E> {
             .into_iter()
             .map(|v| match v {
                 Bson::Int32(n) => u8::try_from(n)
-                    .map_err(|_| E::custom(format!("array element {n} out of u8 range"))),
+                    .map_err(|_| E::custom("byte array element is outside the supported range")),
                 Bson::Int64(n) => u8::try_from(n)
-                    .map_err(|_| E::custom(format!("array element {n} out of u8 range"))),
-                other => Err(E::custom(format!(
-                    "expected integer in byte array, got {other:?}"
-                ))),
+                    .map_err(|_| E::custom("byte array element is outside the supported range")),
+                _ => Err(E::custom("byte array element must be an integer")),
             })
             .collect(),
-        other => Err(E::custom(format!(
-            "expected Binary or Array for bytes, got {other:?}"
-        ))),
+        _ => Err(E::custom(
+            "encrypted bytes must use Binary or an integer array",
+        )),
     }
 }
 
@@ -87,6 +85,30 @@ mod tests {
     struct TestOptional {
         #[serde(default, with = "super::optional")]
         pub data: Option<Vec<u8>>,
+    }
+
+    #[test]
+    fn malformed_secret_scalars_and_arrays_never_enter_display_errors() {
+        let secret = "distinctive-malformed-encrypted-field-884f";
+        for value in [
+            bson::Bson::String(secret.into()),
+            bson::Bson::Array(vec![bson::Bson::String(secret.into())]),
+            bson::Bson::Int64(8844884488448844),
+            bson::Bson::Array(vec![bson::Bson::Int64(8844884488448844)]),
+        ] {
+            for required in [true, false] {
+                let error = if required {
+                    bson::from_document::<TestRequired>(bson::doc! {"data":value.clone()})
+                        .unwrap_err()
+                } else {
+                    bson::from_document::<TestOptional>(bson::doc! {"data":value.clone()})
+                        .unwrap_err()
+                };
+                let display = error.to_string();
+                assert!(!display.contains(secret));
+                assert!(!display.contains("8844884488448844"));
+            }
+        }
     }
 
     #[test]

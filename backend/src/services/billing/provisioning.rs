@@ -139,6 +139,11 @@ pub async fn ensure_owner_wallet(
             .await;
         match result {
             Ok(()) => {
+                // Provisioning remains retryable even if the read-only cache is unavailable.
+                // Wallet-funded admission retries once and then fails closed.
+                if let Err(error) = super::taxes::refresh(db, lago, &wallet).await {
+                    tracing::warn!(%owner_id, %error, "Initial Lago tax profile refresh failed");
+                }
                 return Ok(ProvisionedWallet {
                     wallet,
                     created: true,
@@ -823,6 +828,14 @@ mod tests {
 
     #[async_trait]
     impl super::LagoApi for FakeLago {
+        async fn tax_config(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig>
+        {
+            Ok(crate::services::billing::taxes::zero_config())
+        }
         async fn ensure_customer(
             &self,
             owner: &OwnerProvisionInput,

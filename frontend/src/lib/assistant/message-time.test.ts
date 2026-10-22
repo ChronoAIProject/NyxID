@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { messageTime } from "@/lib/assistant/message-time";
+
+afterEach(() => vi.unstubAllGlobals());
 
 /** ICU separates some parts with narrow no-break spaces. */
 function label(value: Parameters<typeof messageTime>[0], timeZone: string, locale = "en-US") {
@@ -18,6 +20,25 @@ describe("messageTime", () => {
 
   it("follows the reader's locale", () => {
     expect(label("2026-10-12T07:40:43Z", "UTC", "en-GB")).toBe("12 Oct 2026, 07:40 UTC");
+  });
+
+  it("prefers the browser's first requested language", () => {
+    vi.stubGlobal("navigator", { languages: ["en-GB"], language: "en-US" });
+    expect(messageTime("2026-10-12T07:40:43Z", { timeZone: "UTC" })?.label)
+      .toBe("12 Oct 2026, 07:40 UTC");
+  });
+
+  it.each([undefined, []])("uses the browser's language when its language list is %s", (languages) => {
+    vi.stubGlobal("navigator", { languages, language: "en-GB" });
+    expect(messageTime("2026-10-12T07:40:43Z", { timeZone: "UTC" })?.label)
+      .toBe("12 Oct 2026, 07:40 UTC");
+  });
+
+  it.each([undefined, {}])("formats timestamps when browser locale preferences are unavailable: %s", (browser) => {
+    vi.stubGlobal("navigator", browser);
+    const labels = messageTime("2026-10-12T07:40:43Z", { timeZone: "UTC" });
+    expect(labels?.iso).toBe("2026-10-12T07:40:43.000Z");
+    expect(labels?.label).toBeTruthy();
   });
 
   it("places instants on the reader's local calendar day", () => {

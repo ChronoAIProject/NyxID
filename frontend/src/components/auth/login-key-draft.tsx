@@ -20,6 +20,7 @@ import {
 } from "@/components/dashboard/api-key-form-fields";
 import {
   createApiKeySchema,
+  newApiKeyDefaults,
   type CreateApiKeyFormData,
 } from "@/schemas/api-keys";
 import type { RequestedPermissions } from "@/schemas/login-request";
@@ -126,6 +127,8 @@ export function LoginKeyDraft({
                         form.setValue("allow_all_services", false);
                         form.setValue("allow_auto_connected_services", false);
                         form.setValue("allow_all_nodes", false);
+                        form.setValue("never_expires", false);
+                        form.setValue("expires_at", newApiKeyDefaults().expires_at);
                       }}
                     >
                       <SelectTrigger aria-label="Owner">

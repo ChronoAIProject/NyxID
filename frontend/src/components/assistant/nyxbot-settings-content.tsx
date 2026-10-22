@@ -1,4 +1,8 @@
+import { useAuthStore } from "@/stores/auth-store";
+import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
+import { ChannelAdapterBindings } from "./channel-adapter-bindings";
 import { AutomationPreferences } from "./automation-preferences";
+import { PlatformPersonalBindings } from "./platform-personal-bindings";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AlertTriangle } from "lucide-react";
@@ -44,6 +48,7 @@ function errorMessage(error: unknown, fallback: string): string {
 
 export function NyxBotSettingsContent() {
   const settings = useNyxBotSettings();
+  const adaptersEnabled = useAuthStore(s=>userHasFeature(s.user,FEATURE_FLAG.NYXBOT_ADAPTERS));
   return (
     <section aria-label="NyxBot settings" className="space-y-8">
       <DetailSection title="General">
@@ -72,6 +77,8 @@ export function NyxBotSettingsContent() {
           <ChannelBotsSection />
         </div>
       </DetailSection>
+      {adaptersEnabled && <DetailSection title="Phone and speech connections"><div className="p-5"><ChannelAdapterBindings /></div></DetailSection>}
+      <DetailSection title="Personal chat links"><div className="p-5"><PlatformPersonalBindings /></div></DetailSection>
     </section>
   );
 }

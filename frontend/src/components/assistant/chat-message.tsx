@@ -1,3 +1,8 @@
+import { useRouter, useRouterState } from "@tanstack/react-router";
+import { useAccountPanel } from "@/hooks/use-account-panel";
+import { isAssistantShellRoute } from "@/lib/assistant/account-panel-search";
+import { CAPACITY_ACKNOWLEDGEMENT, formatCapacityWait } from "@/lib/assistant/capacity-wait";
+import { billingError } from "@/lib/assistant/billing-error";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   memo,
@@ -34,6 +39,7 @@ import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
 import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
 import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
 import { MachineToolCard } from "./machine-tool-card";
+import { MessageCopyAction } from "./message-copy-action";
 import { MessageTime } from "./message-time";
 import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
 import { capture } from "@/lib/telemetry";
@@ -124,15 +130,34 @@ function formatElapsed(seconds: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-function ToolElapsed({ startedAt }: { readonly startedAt: string }) {
+function useElapsedNow(ticking = true) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-  const seconds = Math.max(0, Math.floor((now - Date.parse(startedAt)) / 1000));
+    if (!ticking) return;
+    const update = () => setNow(Date.now());
+    const timer = setInterval(update, 1000);
+    window.addEventListener("focus", update);
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", update);
+      document.removeEventListener("visibilitychange", update);
+    };
+  }, [ticking]);
+  return now;
+}
+
+function ToolElapsed({ startedAt, finishedAt, total = false }: {
+  readonly startedAt: string;
+  readonly finishedAt?: number;
+  readonly total?: boolean;
+}) {
+  const now = useElapsedNow(finishedAt === undefined);
+  const from = Date.parse(startedAt);
+  if (!Number.isFinite(from)) return null;
+  const seconds = Math.max(0, Math.floor(((finishedAt ?? now) - from) / 1000));
   if (seconds < 3) return null;
-  return <span aria-hidden> · {formatElapsed(seconds)}</span>;
+  return <span aria-hidden title={total ? "Time since this turn started" : "Time spent on this tool call"}> · {formatElapsed(seconds)}{total ? " total" : ""}</span>;
 }
 
 function StatusLabel({ label, interrupted }: {
@@ -165,7 +190,7 @@ function activitySummary(message: ChatMessage): string {
     case "streaming":
       return message.turnStatus?.label ?? "Working…";
     case "error":
-      return "Turn failed";
+      return billingError(message.errorCode)?.title ?? "Turn failed";
     case "stopped":
       return "Stopped";
     default:
@@ -249,22 +274,28 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
             <details key={tool.id} className="text-11 text-muted-foreground">
               <summary
                 data-tool-status={tool.status}
-                className="flex cursor-pointer list-none items-center gap-2 py-0.5"
+                className="flex cursor-pointer list-none flex-col gap-1 py-0.5"
               >
-                <ToolStatusIcon status={tool.status} />
-                <span
-                  className={cn(
-                    "min-w-0 flex-1 truncate",
-                    tool.status === "error" && "text-destructive",
-                  )}
-                >
-                  {describeToolActivity(tool.name || tool.id, tool.status)}
-                </span>
-                <span className="max-w-[45%] shrink-0 truncate font-mono text-10 text-text-tertiary">
-                  {tool.name || tool.id}
+                <span className="flex w-full min-w-0 items-center gap-2">
+                  <ToolStatusIcon status={tool.status} />
+                  <span
+                    className={cn(
+                      "min-w-0 flex-1 truncate",
+                      tool.status === "error" && "text-destructive",
+                    )}
+                  >
+                    {describeToolActivity(tool.name || tool.id, tool.status)}
+                  </span>
+                  <span className="flex max-w-[45%] min-w-0 shrink-0 items-center font-mono text-10 text-text-tertiary">
+                    <span className="truncate">{tool.name || tool.id}</span>
+                    {Number.isFinite(tool.startedAt) ? <span className="shrink-0"><ToolElapsed
+                      startedAt={new Date(tool.startedAt).toISOString()}
+                      finishedAt={tool.status === "running" ? undefined : tool.finishedAt ?? tool.startedAt}
+                    /></span> : null}
+                  </span>
                 </span>
                 {tool.status === "error" ? (
-                  <span className="text-text-tertiary">
+                  <span className="break-words pl-5 text-text-tertiary">
                     {toolFailureCopy(tool.failure)} The assistant can continue
                     after a failed step.
                   </span>
@@ -285,10 +316,31 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
 
 type ErrorDetail = NonNullable<ChatMessage["errorDetail"]>;
 
+function BillingRemedy() {
+  const router = useRouter({ warn: false });
+  return router ? <BillingRemedyWithRouter /> : null;
+}
+
+function BillingRemedyWithRouter() {
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const panel = useAccountPanel();
+  if (!isAssistantShellRoute(pathname)) return null;
+  return <button type="button" className="mt-2 block text-11 underline"
+    onClick={() => void panel.open("billing", { panelTab: "overview" })}>Open Billing &amp; Usage</button>;
+}
+
+function CapacityDetails({ attempts, capacityWaitMs }: { readonly attempts?: number | null; readonly capacityWaitMs?: number | null }) {
+  return <>{attempts != null ? <><dt>attempts</dt><dd>{attempts}</dd></> : null}
+    {capacityWaitMs != null && capacityWaitMs > 0 ? <><dt>capacity</dt><dd>waited {formatCapacityWait(capacityWaitMs)} for capacity</dd></> : null}</>;
+}
+
 /** Metadata-only diagnostics of a failed turn, with a copyable ID. */
 function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
   const diagnosticId = [
     `turn ${detail.turnId}`,
+    detail.attempts != null ? `attempts ${detail.attempts}` : null,
+    detail.capacityWaitMs != null ? `capacity_wait_ms ${detail.capacityWaitMs}` : null,
+    detail.upstreamCode ? `upstream ${detail.upstreamCode}` : null,
     detail.responseId ? `response ${detail.responseId}` : null,
     detail.upstreamRequestId ? `request ${detail.upstreamRequestId}` : null,
   ]
@@ -298,6 +350,7 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
     <details className="mt-2 text-11 text-text-tertiary">
       <summary className="cursor-pointer">Details</summary>
       <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
+        <CapacityDetails attempts={detail.attempts} capacityWaitMs={detail.capacityWaitMs} />
         <dt>stage</dt>
         <dd>{detail.stage}</dd>
         {detail.httpStatus != null ? (
@@ -306,6 +359,7 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
             <dd>{detail.httpStatus}</dd>
           </>
         ) : null}
+        {detail.upstreamCode ? <><dt>upstream</dt><dd>{detail.upstreamCode}</dd></> : null}
         <dt>turn</dt>
         <dd>{detail.turnId}</dd>
         {detail.responseId ? (
@@ -347,23 +401,38 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
  * model can think for many seconds before its first word, which must not read
  * as a frozen page. Ticks only itself, never the transcript.
  */
-function WaitingStatus({ label, interrupted }: {
+function WaitingStatus({ label, interrupted, startedAt, capacity, queued, capacityStartedAt, capacityDeadline }: {
   readonly label?: string;
   readonly interrupted?: boolean;
+  readonly startedAt?: string;
+  readonly capacity?: boolean;
+  readonly queued?: boolean;
+  readonly capacityStartedAt?: string | null;
+  readonly capacityDeadline?: string | null;
 }) {
-  const [seconds, setSeconds] = useState(0);
-  useEffect(() => {
-    const started = Date.now();
-    const timer = setInterval(
-      () => setSeconds(Math.floor((Date.now() - started) / 1000)),
-      1000,
+  const [started] = useState(Date.now);
+  const now = useElapsedNow();
+  const fromTurn = Date.parse(startedAt ?? "");
+  const seconds = Math.max(0, Math.floor((now - (Number.isFinite(fromTurn) ? fromTurn : started)) / 1000));
+  if (capacity) {
+    const from = Date.parse(capacityStartedAt ?? "");
+    const to = Date.parse(capacityDeadline ?? "");
+    const clock = (value: number) => `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
+    const bound = Math.max(0, Math.ceil((to - from) / 1000));
+    const waited = Math.min(bound, Math.max(0, Math.floor((now - from) / 1000)));
+    return (
+      <span data-waiting-status>
+        <StatusLabel label={queued ? "Queued until another reply finishes" : "Waiting for the assistant"} interrupted={interrupted} />
+        {Number.isFinite(from) && Number.isFinite(to)
+          ? <span aria-hidden> · {clock(waited)} of up to {clock(bound)}</span>
+          : seconds >= 3 ? <span aria-hidden> · {formatElapsed(seconds)}</span> : null}
+      </span>
     );
-    return () => clearInterval(timer);
-  }, []);
+  }
   return (
     <span data-waiting-status={!label && seconds >= 3 ? true : undefined}>
       <StatusLabel label={label ?? "Thinking"} interrupted={interrupted} />
-      {seconds >= 3 ? <span aria-hidden> · {formatElapsed(seconds)}</span> : null}
+      {seconds >= 3 ? <span aria-hidden title={startedAt ? "Time since this turn started" : undefined}> · {formatElapsed(seconds)}{startedAt ? " total" : ""}</span> : null}
     </span>
   );
 }
@@ -384,6 +453,7 @@ export function ChatMessageBubble({
   readonly feedbackEnabled?: boolean;
 }) {
   const streaming = message.status === "streaming";
+  const capacityNote = streaming && message.systemNote === "capacity_wait";
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string>();
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -463,7 +533,10 @@ export function ChatMessageBubble({
             </p>
           ) : null}
         </div>
-        <MessageTime value={message.timestamp} reveal />
+        <div className="flex max-w-full flex-wrap items-center justify-end gap-x-2 gap-y-1 opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 [@media(hover:none)]:opacity-100">
+          <MessageTime value={message.timestamp} />
+          <MessageCopyAction text={content} />
+        </div>
       </div>
     );
   }
@@ -481,7 +554,7 @@ export function ChatMessageBubble({
     (image) => !message.toolCalls?.some((tool) => tool.machine?.screenshot_id === image.id),
   );
   const runningTool = streaming
-    ? message.toolCalls?.filter((tool) => tool.status === "running").at(-1)
+    ? message.toolCalls?.find((tool) => tool.status === "running")
     : undefined;
   const lastTool = streaming ? message.toolCalls?.at(-1) : undefined;
   let statusLabel: string | undefined;
@@ -497,17 +570,21 @@ export function ChatMessageBubble({
   const toolStartedAt = message.turnStatus?.phase === "tool"
     ? message.turnStatus.toolStartedAt
     : undefined;
+  const billing = message.status === "error" ? billingError(message.errorCode) : undefined;
+  const errorMessage = billing?.message ?? message.error;
   const showFeedback = Boolean(
     feedbackEnabled &&
     conversationId &&
     message.status === "complete" &&
     !message.errorCode &&
+    !message.systemNote &&
     message.id,
   );
   return (
     <article
       role={thinking ? "status" : undefined}
-      aria-label={thinking ? "Assistant is thinking" : undefined}
+      aria-label={capacityNote ? "Assistant is waiting for capacity" : thinking ? "Assistant is thinking" : undefined}
+      data-system-note={capacityNote ? "capacity_wait" : undefined}
       className="group/message flex items-start gap-2.5"
     >
       <span
@@ -537,7 +614,29 @@ export function ChatMessageBubble({
             ))}
           </div>
         ) : null}
-        {content ? <TextBlock text={content} streaming={streaming} /> : null}
+        {capacityNote ? (
+          <p role="note" className="text-12 leading-relaxed text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
+        ) : content ? <TextBlock text={content} streaming={streaming} /> : null}
+        {message.status === "error" && errorMessage ? (
+          <div role={billing ? "alert" : undefined} className="mt-2 flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/[0.05] px-3 py-2 text-11 text-destructive">
+            <CircleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <div>
+              {billing ? <p className="font-medium">{billing.title}</p> : null}
+              <p>{errorMessage}</p>
+            </div>
+          </div>
+        ) : null}
+        {billing?.openBilling ? (
+          <BillingRemedy />
+        ) : null}
+        {message.status === "complete" && message.turnMetadata && ((message.turnMetadata.capacityWaitMs ?? 0) > 0 || (message.turnMetadata.attempts ?? 0) > 1) ? (
+          <details className="mt-2 text-11 text-text-tertiary"><summary className="cursor-pointer">Details</summary>
+            <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
+              <CapacityDetails {...message.turnMetadata} />
+            </dl>
+          </details>
+        ) : null}
+        {message.role === "assistant" && message.channelDelivery ? <p className="mt-2 text-11 text-text-tertiary" role="note">{message.channelDelivery.status === "interrupted_prefix" && message.channelDelivery.heard_prefix_matches_sent ? `Caller interrupted after a verified prefix of ${message.channelDelivery.heard_prefix_chars ?? 0} characters. The remaining answer is unconfirmed.` : message.channelDelivery.status === "delivered" ? "Provider confirmed message delivery." : message.channelDelivery.status === "failed" ? "Provider reported delivery failure." : "Generated reply; caller hearing or message delivery is unconfirmed."}</p> : null}
         {message.status === "error" && message.errorDetail ? (
           <ErrorDetails detail={message.errorDetail} />
         ) : null}
@@ -639,16 +738,24 @@ export function ChatMessageBubble({
               {...(!content && runningTool ? { "data-running-tool": runningTool.name } : {})}
               {...(!runningTool && lastTool ? { "data-last-tool": true } : {})}
             >
-              {toolStartedAt ? (
+              {toolStartedAt && !(capacityNote || message.waitingForCapacity) ? (
                 <>
                   <StatusLabel
                     label={statusLabel ?? "Thinking"}
                     interrupted={message.turnStatus?.interrupted}
                   />
-                  <ToolElapsed startedAt={toolStartedAt} />
+                  <ToolElapsed startedAt={message.turnStatus?.startedAt ?? toolStartedAt} total={Boolean(message.turnStatus?.startedAt)} />
                 </>
               ) : (
-                <WaitingStatus label={statusLabel} interrupted={message.turnStatus?.interrupted} />
+                <WaitingStatus
+                  label={statusLabel}
+                  interrupted={message.turnStatus?.interrupted}
+                  startedAt={message.turnStatus?.startedAt}
+                  capacity={capacityNote || message.waitingForCapacity}
+                  queued={message.queued}
+                  capacityStartedAt={message.capacityWaitStartedAt}
+                  capacityDeadline={message.capacityWaitDeadline}
+                />
               )}
             </span>
           </div>
@@ -663,16 +770,11 @@ export function ChatMessageBubble({
             Stopped
           </p>
         ) : null}
-        {message.status === "error" && message.error ? (
-          <div className="mt-2 flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/[0.05] px-3 py-2 text-11 text-destructive">
-            <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span>{message.error}</span>
-          </div>
-        ) : null}
         {/* The time joins the feedback line once the reply settles; a
             streaming reply has no settled instant yet. */}
         {streaming ? null : (
           <div className="mt-2 flex flex-wrap items-center gap-1 empty:hidden">
+            <MessageCopyAction text={content} />
             {showFeedback ? (
               <div
                 role="group"

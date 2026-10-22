@@ -23,6 +23,9 @@ use crate::test_utils::{connect_test_database, test_user};
 
 fn schedule_input() -> schedules::CreateScheduleInput {
     schedules::CreateScheduleInput {
+        amount: None,
+        service_limits: Vec::new(),
+        request_id: None,
         amount_credits: 25,
         recurrence: ScheduleRecurrence::Monthly,
         expiry: CreditExpiryPolicy::EndOfPeriod,
@@ -303,6 +306,7 @@ async fn elapsed_incomplete_period_is_abandoned_without_dead_credit_backfill() {
     let old_id = schedules::period_id(&schedule.id, old_period.start);
     db.collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
         .insert_one(CreditSchedulePeriod {
+            service_limits: Vec::new(),
             id: old_id.clone(),
             schedule_id: schedule.id.clone(),
             period_start: old_period.start,
@@ -327,6 +331,9 @@ async fn elapsed_incomplete_period_is_abandoned_without_dead_credit_backfill() {
         .expect("insert incomplete elapsed period");
     db.collection::<CreditGrant>(CREDIT_GRANTS)
         .insert_one(CreditGrant {
+            service_limits: Vec::new(),
+            revoke_requested_at: None,
+            revoke_requested_by: None,
             id: "crash-inserted-scheduled-grant".to_string(),
             batch_id: old_id.clone(),
             schedule_origin: Some(CreditGrantScheduleOrigin {

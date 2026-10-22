@@ -119,6 +119,38 @@ fn directory_entries(directory: &File) -> Result<Vec<(std::ffi::OsString, libc::
 }
 
 impl Roots {
+    /// Compute the actual filesystem intersection before opening a descriptor.
+    /// Grant roots never replace the local allowlist or protected exclusions.
+    pub fn restricted(&self, granted: &[String]) -> Result<Self> {
+        let mut roots = Vec::new();
+        for value in granted {
+            let granted = std::fs::canonicalize(value)?;
+            for local in &self.roots {
+                let candidate = if granted.starts_with(local) {
+                    &granted
+                } else if local.starts_with(&granted) {
+                    local
+                } else {
+                    continue;
+                };
+                if !self
+                    .excluded
+                    .iter()
+                    .any(|denied| candidate.starts_with(denied))
+                    && !roots.contains(candidate)
+                {
+                    roots.push(candidate.clone());
+                }
+            }
+        }
+        if roots.is_empty() {
+            return Err(super::MachineError::PathOutsideRoots.into());
+        }
+        Self::new(&roots, &self.excluded)
+    }
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.roots
+    }
     pub fn new(roots: &[PathBuf], excluded: &[PathBuf]) -> Result<Self> {
         let roots = roots
             .iter()

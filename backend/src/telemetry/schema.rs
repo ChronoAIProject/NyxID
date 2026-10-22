@@ -17,6 +17,11 @@ use super::scrub;
 /// `docs/TELEMETRY.md` §5.1.
 #[derive(Debug, Clone)]
 pub enum TelemetryEvent {
+    /// Explicit client event admitted under a revision captured before enqueue.
+    ClientOriginated {
+        event: super::client_event::ClientEvent,
+        revision: String,
+    },
     // --- handlers/auth.rs -----------------------------------------------
     UserSignedUp {
         /// `email` | `google` | `github` | `apple` — the auth method.
@@ -372,6 +377,7 @@ impl TelemetryEvent {
     /// Canonical event name. Dot-namespaced, lowercase, past-tense verb.
     pub fn name(&self) -> &'static str {
         match self {
+            Self::ClientOriginated { event, .. } => event.name.name(),
             Self::UserSignedUp { .. } => "user.signed_up",
             Self::UserEmailVerified => "user.email_verified",
             Self::AuthLoggedIn { .. } => "auth.logged_in",
@@ -466,6 +472,9 @@ impl TelemetryEvent {
     /// `properties()` can centralize the scrubber call.
     fn raw_properties(&self) -> Value {
         match self {
+            Self::ClientOriginated { event, .. } => {
+                event.properties().unwrap_or_else(|_| json!({}))
+            }
             Self::UserSignedUp {
                 method,
                 source,

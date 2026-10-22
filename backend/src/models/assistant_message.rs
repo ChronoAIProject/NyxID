@@ -12,6 +12,22 @@ pub enum MessageAuthor {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_queue_notice_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_pending: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_bound: Option<super::assistant_channel_media::MediaBound>,
+    /// Metadata-only handoff to manager delivery, including fresh event replies.
+    #[serde(default)]
+    pub platform_delivery_recovery_queued: bool,
+    #[serde(default)]
+    pub platform_reply: Option<super::assistant_conversation::PlatformReplyRouting>,
+    /// Retained after settlement for exact transport delivery and recovery.
+    #[serde(default)]
+    pub platform_origin: Option<super::assistant_conversation::PlatformTurnOrigin>,
     #[serde(default)]
     pub author: Option<MessageAuthor>,
     /// Guidance delivered to an existing response, never a new instruction turn.
@@ -38,6 +54,8 @@ pub struct AssistantMessage {
     /// Metadata-only failure diagnostics; never contains prompt or credential data.
     #[serde(default)]
     pub error_detail: Option<AssistantErrorDetail>,
+    #[serde(default)]
+    pub turn_metadata: Option<TurnMetadata>,
     /// Specialist identity for bounded access-denial notices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub specialist_id: Option<String>,
@@ -78,6 +96,10 @@ pub struct AssistantMessage {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantErrorDetail {
+    #[serde(default)]
+    pub attempts: Option<u32>,
+    #[serde(default)]
+    pub capacity_wait_ms: Option<u64>,
     pub stage: String,
     pub http_status: Option<u16>,
     pub upstream_request_id: Option<String>,
@@ -99,7 +121,16 @@ impl std::fmt::Debug for AssistantMessage {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct VoiceFragment {
+    pub text: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceTranscript {
+    #[serde(default)]
+    pub fragments: Vec<VoiceFragment>,
     pub session_id: String,
     pub segment_id: String,
     pub start_ms: i64,
@@ -125,4 +156,19 @@ pub struct Steering {
     pub outcome: String,
     pub code: Option<String>,
     pub http_status: u16,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TurnMetadata {
+    #[serde(default)]
+    pub channel_delivery: Option<ChannelDelivery>,
+    pub attempts: Option<u32>,
+    pub capacity_wait_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelDelivery {
+    pub status: String,
+    pub heard_prefix_chars: Option<i64>,
+    pub heard_prefix_matches_sent: bool,
 }

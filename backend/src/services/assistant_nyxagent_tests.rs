@@ -2,6 +2,7 @@ use super::*;
 use crate::models::assistant_attachment::COLLECTION_NAME as ATTACHMENTS;
 use crate::models::user::{COLLECTION_NAME as USERS, UserType};
 use crate::services::assistant_agent_credential_service as credentials;
+use crate::services::assistant_engine_policy as engine_policy;
 use crate::test_utils::{connect_transaction_test_database, test_app_state, test_user};
 
 fn request(id: Option<&str>, text: &str) -> TurnRequest {
@@ -193,12 +194,19 @@ fn recovery_is_bounded_and_never_retries_uncertain_effects() {
         recovery.decide(403, "agent_key_required", false),
         RecoveryAction::Fail
     );
-    for code in ["session_busy", "capacity_exceeded"] {
+    for (status, code) in [
+        (409, "session_busy"),
+        (503, "capacity_exceeded"),
+        (503, "draining"),
+    ] {
         let mut retry = Recovery::default();
-        for _ in 0..4 {
-            assert_eq!(retry.decide(409, code, true), RecoveryAction::Backoff);
+        for _ in 0..100 {
+            assert_eq!(retry.decide(status, code, true), RecoveryAction::Backoff);
         }
-        assert_eq!(retry.decide(409, code, true), RecoveryAction::Fail);
+        assert_eq!(
+            Recovery::default().decide(500, code, true),
+            RecoveryAction::Fail
+        );
     }
     for code in [
         "outcome_unknown",
@@ -261,9 +269,97 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 }
 
 #[test]
+fn billing_failures_keep_their_cause_through_streaming_and_recovery() {
+    for code in ["billing_not_configured", "billing_provider_unavailable"] {
+        for status in [401, 402, 403, 409, 503] {
+            assert_eq!(
+                Recovery::default().decide(status, code, true),
+                RecoveryAction::Fail
+            );
+        }
+        let mut stream = ResponseStream::default();
+        let mut failed = terminal("response.failed", 1, "partial");
+        failed["response"]["error"] = json!({"code": code, "message": "SECRET body"});
+        stream.push(&frame(failed)).unwrap();
+        let result = stream.terminal.unwrap();
+        let error = result.error.unwrap();
+        assert_eq!(error.code, code);
+        assert_eq!(result.text, "partial");
+        assert!(error.message.contains("billing"));
+        assert!(!error.message.contains("SECRET"));
+    }
+}
+
+#[test]
+fn billing_attribution_recovers_wrapped_causes_only_with_current_evidence() {
+    use crate::models::assistant_conversation::ModelRefusal;
+    use crate::services::assistant_model_observer::{attribute, refusal_code};
+    let now = Utc::now();
+    let mut row = stale_test_row(now);
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.model_attempt_id = Some("attempt".into());
+    for (error, code) in [
+        (AppError::InsufficientCredits, "insufficient_credits"),
+        (AppError::WalletSuspended, "wallet_suspended"),
+        (
+            AppError::PlanEntitlementRequired("service".into()),
+            "plan_entitlement_required",
+        ),
+        (
+            AppError::BillingNotConfigured("SECRET".into()),
+            "billing_not_configured",
+        ),
+        (
+            AppError::BillingProviderUnavailable("SECRET".into()),
+            "billing_provider_unavailable",
+        ),
+    ] {
+        assert_eq!(refusal_code(&error), Some(code));
+        turn.model_refusal = Some(ModelRefusal {
+            code: code.into(),
+            attempt_id: "attempt".into(),
+            at: now,
+        });
+        for upstream in ["turn_failed", "nyxid_error", "invalid_stream"] {
+            let wrapped = TurnError::new(upstream);
+            let mapped = attribute(&wrapped, turn, now);
+            assert_eq!(mapped.code, code);
+            assert_eq!(mapped.upstream_code, wrapped.upstream_code);
+            assert!(!mapped.message.contains("SECRET"));
+        }
+        for code in ["cancelled", "capacity_exceeded", "credential_invalid"] {
+            assert_eq!(attribute(&TurnError::new(code), turn, now).code, code);
+        }
+        let wrapped = TurnError::new("nyxid_error");
+        turn.model_attribution_uncertain = true;
+        assert_eq!(attribute(&wrapped, turn, now).code, "nyxid_error");
+        turn.model_attribution_uncertain = false;
+        turn.model_attempt_id = Some("newer-attempt".into());
+        assert_eq!(attribute(&wrapped, turn, now).code, "nyxid_error");
+        turn.model_attempt_id = Some("attempt".into());
+        assert_eq!(
+            attribute(&wrapped, turn, now + chrono::Duration::seconds(121)).code,
+            "nyxid_error"
+        );
+    }
+    turn.model_refusal = None;
+    assert_eq!(
+        attribute(&TurnError::new("nyxid_error"), turn, now).code,
+        "nyxid_error"
+    );
+}
+
+#[test]
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
+            platform_delivery_recovery_queued: false,
+            platform_reply: None,
+            platform_origin: None,
             author: None,
             activity_total: 0,
             report_to: None,
@@ -285,6 +381,7 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
             status: "completed".into(),
             error_code: None,
             upstream_error_code: None,
+            turn_metadata: None,
             error_detail: None,
             created_at: Utc::now(),
             activities: Vec::new(),
@@ -374,6 +471,27 @@ fn web_research_guidance_reaches_both_roles_without_lifting_guest_limits() {
 }
 
 #[test]
+fn cli_guidance_reaches_both_roles_and_confines_cli_to_cma_sandboxes() {
+    let mut row = stale_test_row(Utc::now());
+    for role in [AgentRole::Orchestrator, AgentRole::Subagent] {
+        row.role = role;
+        for guest_turn in [false, true] {
+            row.guest_turn = guest_turn;
+            let prompt = base_prompt(&row, None);
+            for guidance in [
+                "Avoid CLI commands",
+                "If a CLI is absolutely necessary",
+                "CMA (slug cma) sandbox command tool",
+                "only when the owner names that machine",
+                "Guests retain their existing tool limits",
+            ] {
+                assert!(prompt.contains(guidance), "missing {guidance} for {role:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
     assert_eq!(
         TurnError::new("first_byte_timeout").code,
@@ -392,6 +510,13 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
+            platform_delivery_recovery_queued: false,
+            platform_reply: None,
+            platform_origin: None,
             author: None,
             activity_total: 0,
             report_to: None,
@@ -413,6 +538,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             status: "completed".into(),
             error_code: None,
             upstream_error_code: None,
+            turn_metadata: None,
             error_detail: None,
             created_at: Utc::now(),
             activities: Vec::new(),
@@ -421,6 +547,13 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
         AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
+            platform_delivery_recovery_queued: false,
+            platform_reply: None,
+            platform_origin: None,
             author: None,
             activity_total: 0,
             report_to: None,
@@ -442,6 +575,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             status: "completed".into(),
             error_code: None,
             upstream_error_code: None,
+            turn_metadata: None,
             error_detail: None,
             created_at: Utc::now(),
             activities: Vec::new(),
@@ -461,6 +595,13 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         author: None,
         activity_total: 0,
         report_to: None,
@@ -482,6 +623,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
         status: "completed".into(),
         error_code: None,
         upstream_error_code: None,
+        turn_metadata: None,
         error_detail: None,
         created_at: Utc::now(),
         activities: (0..40)
@@ -531,6 +673,13 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         author: None,
         activity_total: 0,
         report_to: None,
@@ -552,6 +701,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
         status: "failed".into(),
         error_code: Some("turn_lost".into()),
         upstream_error_code: Some("upstream_x".into()),
+        turn_metadata: None,
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
@@ -567,6 +717,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
             chat_delivery: None,
             image_input: None,
+            image_inspection: None,
             origin: "tool".into(),
             pages: None,
             id: "att".into(),
@@ -587,6 +738,13 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         author: None,
         activity_total: 0,
         report_to: None,
@@ -608,6 +766,7 @@ fn guest_recap_omits_owner_tool_metadata() {
         status: "completed".into(),
         error_code: Some("turn_lost".into()),
         upstream_error_code: None,
+        turn_metadata: None,
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
@@ -623,6 +782,7 @@ fn guest_recap_omits_owner_tool_metadata() {
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
             chat_delivery: None,
             image_input: None,
+            image_inspection: None,
             origin: "tool".into(),
             pages: None,
             id: "owner-attachment".into(),
@@ -643,6 +803,13 @@ fn guest_recap_omits_owner_tool_metadata() {
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         author: None,
         activity_total: 0,
         report_to: None,
@@ -664,6 +831,7 @@ fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
         status: "failed".into(),
         error_code: Some("turn_lost".into()),
         upstream_error_code: None,
+        turn_metadata: None,
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
@@ -822,6 +990,61 @@ async fn persistence_fences_concurrent_turns_scopes_owners_paginates_and_deletes
 }
 
 #[tokio::test]
+async fn new_threads_inherit_agent_profile_explicit_selection_wins_existing_threads_keep_model() {
+    let f =
+        crate::services::assistant_authority_tests::direct_fixture("nyxa_default_profile").await;
+    let agent_id = f.row.agent_id.clone().unwrap();
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&agent_id},
+            doc! {"$set":{"model":"nyxagent/channel"}},
+        )
+        .await
+        .unwrap();
+    let mut req = request(None, "FAQ question");
+    req.agent_id = Some(agent_id.clone());
+    let row = begin_turn(&f.state.db, &f.owner, &req, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    assert_eq!(row.model, "nyxagent/channel");
+    req.model = Some("nyxagent/research".into());
+    let explicit = begin_turn(&f.state.db, &f.owner, &req, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    assert_eq!(explicit.model, "nyxagent/research");
+    // Changing the agent default never rewrites an existing thread's selection.
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&agent_id},
+            doc! {"$set":{"model":"nyxagent/channel"}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&explicit.id},
+            doc! {"$set":{"active_turn":bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    let continued = begin_turn(
+        &f.state.db,
+        &f.owner,
+        &request(Some(&explicit.id), "Continue"),
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert_eq!(continued.model, "nyxagent/research");
+}
+
+#[tokio::test]
 async fn every_failed_turn_clears_binding_and_retains_partial_reply() {
     let db = connect_transaction_test_database("nyxa_failures").await;
     ensure_indexes(&db).await.unwrap();
@@ -897,6 +1120,9 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        invocation_controlled: false,
+        credential_invocation_id: None,
+        platform_thread: None,
         machine_previews: false,
         platform_cleanup_pending: false,
         platform_cleanup_id: None,
@@ -915,7 +1141,31 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            channel_adapter_origin: None,
+            invocation_id: None,
+            resource_refs: Vec::new(),
+            reply: None,
+            platform_reply: None,
+            execution_started: false,
+            machine_scopes: Vec::new(),
+            platform_origin: None,
             activity_total: 0,
+            worker_instance: None,
+            model_attempt_id: None,
+            model_requests_active: 0,
+            model_attribution_uncertain: false,
+            model_refusal: None,
+            model_stream_fault: None,
+            model_stream_cancellation: None,
+            waiting_for_capacity: false,
+            capacity_wait_note_origin: None,
+            engine_request_started_at: None,
+            engine_attempts: 0,
+            capacity_wait_started_at: None,
+            capacity_wait_ms: 0,
+            capacity_wait_deadline: None,
+            capacity_accepted_at: None,
+            capacity_notice_claimed: false,
             retry_digests: Vec::new(),
             retry_of: None,
             activity_count: None,
@@ -927,10 +1177,13 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             continuations: 0,
             tool_progress: Default::default(),
             lease_expires_at: None,
+            queued_at: None,
+            queue_deadline: None,
             heartbeat_at: None,
             trigger_run_id: None,
             report_to: None,
             with_nyxbot: false,
+            trigger_continuation: false,
             activities: Vec::new(),
             attachments: Vec::new(),
             turn_id: Uuid::new_v4().to_string(),
@@ -964,6 +1217,398 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     }
 }
 
+fn platform_test_origin(
+    row: &AssistantConversation,
+) -> crate::models::assistant_conversation::PlatformTurnOrigin {
+    use crate::models::assistant_conversation::{
+        PlatformOriginSource, PlatformThread, PlatformTurnOrigin,
+    };
+    PlatformTurnOrigin {
+        thread: PlatformThread {
+            platform: "telegram".into(),
+            profile_id: "manager-profile".into(),
+            manager_bot_id: "123".into(),
+            entry: crate::models::platform_entry_projection::StoredEntryIdentity::TelegramV1 {
+                telegram_bot_id: 123,
+            },
+            binding_id: "personal-binding".into(),
+            binding_generation: 7,
+            user_id: row.user_id.clone(),
+            nyxbot_agent_id: row.agent_id.clone().unwrap_or_else(|| "agent".into()),
+        },
+        manager_authority_epoch: 3,
+        personal_control_revision: 11,
+        sender: crate::models::platform_entry_projection::StoredSenderIdentity::TelegramV1 {
+            telegram_sender_id: 456,
+            telegram_chat_id: 456,
+        },
+        source: PlatformOriginSource::Ingress {
+            receipt_id: "receipt".into(),
+            claim_id: "claim".into(),
+        },
+    }
+}
+
+async fn seed_platform_execution(
+    db: &Database,
+    row: &AssistantConversation,
+    proof: &crate::models::assistant_conversation::PlatformTurnOrigin,
+) {
+    use crate::models::assistant_conversation::PlatformOriginSource;
+    let turn = row.active_turn.as_ref().unwrap();
+    let PlatformOriginSource::Ingress {
+        receipt_id,
+        claim_id,
+    } = &proof.source
+    else {
+        panic!("ingress fixture");
+    };
+    db.collection::<bson::Document>(crate::models::platform_personal_binding::COLLECTION_NAME).insert_one(doc! {
+        "_id":&proof.thread.binding_id, "user_id":&row.user_id, "generation":proof.thread.binding_generation,
+        "state":"revoked", "conversation_id":&row.id, "nyxbot_agent_id":&proof.thread.nyxbot_agent_id,
+        "active_turn":{"conversation_id":&row.id,"turn_id":&turn.turn_id},
+    }).await.unwrap();
+    db.collection::<bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME).insert_one(doc! {
+        "_id":receipt_id, "claim_id":claim_id, "phase":"executing", "reply_id":bson::Bson::Null,"decision":bson::Bson::Null,
+        "profile_id":&proof.thread.profile_id,"manager_bot_id":&proof.thread.manager_bot_id,
+        "telegram_bot_id":crate::services::platform_entry_scope::legacy_bot_id(&proof.thread.entry),"manager_authority_epoch":proof.manager_authority_epoch,
+        "sender_id":crate::services::platform_entry_scope::legacy_sender_id(&proof.sender),"chat_id":crate::services::platform_entry_scope::legacy_chat_id(&proof.sender),
+        "audience":{"kind":"personal","user_id":&row.user_id,"binding_id":&proof.thread.binding_id,
+            "binding_generation":proof.thread.binding_generation,"personal_control_revision":proof.personal_control_revision},
+        "execution":{"conversation_id":&row.id,"turn_id":&turn.turn_id,"payer_user_id":&row.user_id},
+    }).await.unwrap();
+}
+
+async fn assert_platform_settled(
+    db: &Database,
+    proof: &crate::models::assistant_conversation::PlatformTurnOrigin,
+    reply_id: &str,
+) {
+    let binding = db
+        .collection::<bson::Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+        .find_one(doc! {"_id":&proof.thread.binding_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.get("active_turn"), Some(&bson::Bson::Null));
+    let receipt = db
+        .collection::<bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME)
+        .find_one(doc! {"audience.binding_id":&proof.thread.binding_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.get_str("phase").unwrap(), "settled");
+    assert_eq!(receipt.get_str("reply_id").unwrap(), reply_id);
+}
+
+#[test]
+fn platform_provenance_round_trips_and_legacy_rows_remain_origin_free() {
+    let mut row = stale_test_row(Utc::now());
+    let mut legacy = bson::to_document(&row).unwrap();
+    legacy.remove("platform_thread");
+    legacy
+        .get_document_mut("active_turn")
+        .unwrap()
+        .remove("platform_origin");
+    let restored: AssistantConversation = bson::from_document(legacy).unwrap();
+    assert!(restored.platform_thread.is_none());
+    assert!(restored.active_turn.unwrap().platform_origin.is_none());
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    let restored: AssistantConversation =
+        bson::from_document(bson::to_document(&row).unwrap()).unwrap();
+    assert_eq!(restored.platform_thread.as_ref(), Some(&proof.thread));
+    assert_eq!(
+        restored.active_turn.unwrap().platform_origin,
+        Some(proof.clone())
+    );
+    let debug = format!("{proof:?}");
+    for internal in ["receipt", "claim", "456", "789", "personal-binding"] {
+        assert!(!debug.contains(internal));
+    }
+}
+
+#[tokio::test]
+async fn platform_thread_is_excluded_from_home_validation_fallback_repair_and_web_adoption() {
+    let db = connect_transaction_test_database("nyxa_platform_home").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let ordinary = begin_turn(
+        &db,
+        &owner,
+        &request(None, "ordinary"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let result = TurnResult {
+        text: "reply".into(),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    finish_turn(
+        &db,
+        &ordinary,
+        &ordinary.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &result,
+    )
+    .await
+    .unwrap();
+    let platform = begin_turn(
+        &db,
+        &owner,
+        &request(None, "personal"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    finish_turn(
+        &db,
+        &platform,
+        &platform.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &result,
+    )
+    .await
+    .unwrap();
+    let proof = platform_test_origin(&platform);
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &platform.id},
+            doc! {"$set": {"platform_thread": bson::to_bson(&proof.thread).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let agents = db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    let agent_id = platform.agent_id.as_deref().unwrap();
+    agents
+        .update_one(
+            doc! {"_id": agent_id},
+            doc! {"$set": {"home_conversation_id": &platform.id}},
+        )
+        .await
+        .unwrap();
+    let team = crate::services::assistant_team_service::agent(&db, &owner, agent_id)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread_for(
+        &db,
+        &state.encryption_keys,
+        &owner,
+        &team,
+    )
+    .await
+    .unwrap();
+    assert_eq!(home.id, ordinary.id);
+    agents
+        .update_one(
+            doc! {"_id": agent_id},
+            doc! {"$set": {"home_conversation_id": &platform.id}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(repair_channel_homes(&db).await.unwrap(), 1);
+    let web = begin_turn(
+        &db,
+        &owner,
+        &request(Some(&platform.id), "web after unlink"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert!(web.platform_thread.is_some());
+    assert!(web.active_turn.as_ref().unwrap().platform_origin.is_none());
+    let team = crate::services::assistant_team_service::agent(&db, &owner, agent_id)
+        .await
+        .unwrap();
+    assert!(team.home_conversation_id.is_none());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_owner_admission_commits_proof_input_and_key_together_without_home_adoption() {
+    let db = connect_transaction_test_database("nyxa_platform_admission").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let agent = crate::services::assistant_team_service::ensure_nyxbot(&db, &owner)
+        .await
+        .unwrap();
+    let mut template = stale_test_row(Utc::now());
+    template.user_id = owner.clone();
+    template.agent_id = Some(agent.id.clone());
+    let proof = platform_test_origin(&template);
+    let ids = OwnerTurnIds {
+        conversation_id: template.id,
+        turn_id: Uuid::new_v4().to_string(),
+        message_id: Uuid::new_v4().to_string(),
+    };
+    let start = TurnStart::from(&request(None, "personal input"));
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let aborted = begin_owner_turn_in_session(
+        &db,
+        &mut session,
+        &state.encryption_keys,
+        &owner,
+        &start,
+        &ids,
+        &agent,
+        Some(99),
+        Some(&proof),
+        None,
+    )
+    .await
+    .unwrap()
+    .into_started()
+    .unwrap();
+    session.abort_transaction().await.unwrap();
+    assert!(get(&db, &owner, &ids.conversation_id).await.is_err());
+    assert!(
+        db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .find_one(doc! {"_id": &aborted.credential.api_key_id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db.collection::<AssistantMessage>(MESSAGES)
+            .count_documents(doc! {"conversation_id": &ids.conversation_id})
+            .await
+            .unwrap(),
+        0
+    );
+    session.start_transaction().await.unwrap();
+    let committed = begin_owner_turn_in_session(
+        &db,
+        &mut session,
+        &state.encryption_keys,
+        &owner,
+        &start,
+        &ids,
+        &agent,
+        Some(99),
+        Some(&proof),
+        None,
+    )
+    .await
+    .unwrap()
+    .into_started()
+    .unwrap();
+    session.commit_transaction().await.unwrap();
+    let saved = get(&db, &owner, &ids.conversation_id).await.unwrap();
+    assert_eq!(saved.credential_api_key_id, committed.credential.api_key_id);
+    assert!(saved.learning_epoch.is_none());
+    assert_eq!(saved.platform_thread.as_ref(), Some(&proof.thread));
+    assert_eq!(
+        saved.active_turn.as_ref().unwrap().platform_origin.as_ref(),
+        Some(&proof)
+    );
+    let input = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {"_id": &ids.message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(input.platform_origin.as_ref(), Some(&proof));
+    assert_eq!(input.turn_id, ids.turn_id);
+    assert!(
+        crate::services::assistant_team_service::agent(&db, &owner, &agent.id)
+            .await
+            .unwrap()
+            .home_conversation_id
+            .is_none()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn settlement_retains_platform_origin_after_active_turn_is_cleared() {
+    let db = connect_transaction_test_database("nyxa_platform_settlement").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let mut row = begin_turn(
+        &db,
+        &owner,
+        &request(None, "personal"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    let destination = crate::models::assistant_conversation::PlatformReplyRouting::Captured {
+        origin: Box::new(proof.clone()),
+        turn_id: row.active_turn.as_ref().unwrap().turn_id.clone(),
+        expires_at: bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(30))
+            .to_chrono(),
+    };
+    row.active_turn.as_mut().unwrap().platform_reply = Some(destination.clone());
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .replace_one(doc! {"_id": &row.id}, &row)
+        .await
+        .unwrap();
+    seed_platform_execution(&db, &row, &proof).await;
+    let message_id = Uuid::new_v4().to_string();
+    finish_turn(
+        &db,
+        &row,
+        &row.credential_api_key_id,
+        &message_id,
+        &TurnResult {
+            text: "personal reply".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        get(&db, &owner, &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_none()
+    );
+    let reply = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {"_id": &message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_platform_settled(&db, &proof, &reply.id).await;
+    assert_eq!(reply.platform_origin, Some(proof));
+    assert_eq!(reply.platform_reply, Some(destination));
+    let mut legacy = bson::to_document(&reply).unwrap();
+    legacy.remove("platform_origin");
+    assert!(
+        bson::from_document::<AssistantMessage>(legacy)
+            .unwrap()
+            .platform_origin
+            .is_none()
+    );
+    db.drop().await.unwrap();
+}
+
 async fn expire_turn(db: &Database, row: &AssistantConversation) {
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
@@ -992,14 +1637,42 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     )
     .await
     .unwrap();
+    let proof = platform_test_origin(&old);
+    let destination = crate::models::assistant_conversation::PlatformReplyRouting::Captured {
+        origin: Box::new(proof.clone()),
+        turn_id: old.active_turn.as_ref().unwrap().turn_id.clone(),
+        expires_at: bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(30))
+            .to_chrono(),
+    };
+    seed_platform_execution(&db, &old, &proof).await;
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &old.id},
+            doc! {"$set": {
+                "platform_thread": bson::to_bson(&proof.thread).unwrap(),
+                "active_turn.platform_origin": bson::to_bson(&proof).unwrap(),
+                "active_turn.platform_reply": bson::to_bson(&destination).unwrap(),
+            }},
+        )
+        .await
+        .unwrap();
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &old.id},
-            doc! {"$set": {"active_turn.activities": [{"id": "act-1", "label": "nyxid__check", "status": "running", "started_at": bson::DateTime::now(), "ended_at": bson::Bson::Null}], "active_turn.attachments": [{"id": "att-1", "content_type": "text/plain", "size": 4i64, "label": "result.txt", "origin": "tool"}]}},
+            doc! {"$set": {"active_turn.waiting_for_capacity": true, "active_turn.activities": [{"id": "act-1", "label": "nyxid__check", "status": "running", "started_at": bson::DateTime::now(), "ended_at": bson::Bson::Null}], "active_turn.attachments": [{"id": "att-1", "content_type": "text/plain", "size": 4i64, "label": "result.txt", "origin": "tool"}]}},
         )
         .await
         .unwrap();
     expire_turn(&db, &old).await;
+    db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
+        .insert_one(doc! {"_id": "reclaimed-run", "user_id": "owner",
+            "turn_id": &old.active_turn.as_ref().unwrap().turn_id, "attempts": null, "capacity_wait_ms": null})
+        .await.unwrap();
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(doc! {"_id": &old.id}, doc! {"$set": {
+            "active_turn.trigger_run_id": "reclaimed-run", "active_turn.engine_attempts": 2,
+            "active_turn.capacity_wait_started_at": bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(20)),
+        }}).await.unwrap();
     let next = begin_turn(
         &db,
         "owner",
@@ -1017,6 +1690,10 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     let transcript = messages(&db, "owner", &old.id, 100, None).await.unwrap();
     assert_eq!(transcript.len(), 3);
     let lost = &transcript[1];
+    assert_eq!(lost.platform_origin.as_ref(), Some(&proof));
+    assert_eq!(lost.platform_reply.as_ref(), Some(&destination));
+    assert_platform_settled(&db, &proof, &lost.id).await;
+    assert!(next.active_turn.as_ref().unwrap().platform_origin.is_none());
     assert_eq!(lost.turn_id, old.active_turn.as_ref().unwrap().turn_id);
     assert_eq!(lost.role, "assistant");
     assert_eq!(lost.status, "failed");
@@ -1027,6 +1704,14 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
     let detail = lost.error_detail.as_ref().expect("reclaim diagnostics");
     assert_eq!(detail.stage, "lease_expiry");
     assert_eq!(lost.upstream_error_code, None);
+    let run = db
+        .collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
+        .find_one(doc! {"_id": "reclaimed-run"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.get_i64("attempts").unwrap(), 2);
+    assert!(run.get_i64("capacity_wait_ms").unwrap() >= 20_000);
     assert_eq!(
         lost.created_at.timestamp_millis(),
         next.context_reset_at.unwrap().timestamp_millis()
@@ -1231,6 +1916,7 @@ async fn dead_worker_stop_is_forced_within_grace_and_late_settlement_is_fenced()
 
 #[tokio::test]
 async fn orphan_sweep_reclaims_stale_heartbeat_but_keeps_fresh_and_legacy_turns() {
+    use tracing::instrument::WithSubscriber;
     let db = connect_transaction_test_database("nyxa_heartbeat_sweep").await;
     let state = test_app_state(db.clone());
     let stale = begin_turn(
@@ -1241,6 +1927,10 @@ async fn orphan_sweep_reclaims_stale_heartbeat_but_keeps_fresh_and_legacy_turns(
     )
     .await
     .unwrap();
+    assert_eq!(
+        stale.active_turn.as_ref().unwrap().worker_instance.as_ref(),
+        Some(crate::services::assistant_engine_worker::instance())
+    );
     let fresh = begin_turn(
         &db,
         "owner",
@@ -1263,7 +1953,9 @@ async fn orphan_sweep_reclaims_stale_heartbeat_but_keeps_fresh_and_legacy_turns(
     db.collection::<bson::Document>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &stale.id},
-            doc! {"$set": {"active_turn.heartbeat_at": old}},
+            doc! {"$set": {"active_turn.heartbeat_at": old,
+            "active_turn.reply": {"message_id":"partial", "block_id":"partial-text", "cursor":4_i64, "text":"Saved before the worker stopped 界"},
+            "active_turn.worker_instance": {"id": "old-process-id", "hostname": "nyxid-old-pod"}}},
         )
         .await
         .unwrap();
@@ -1274,7 +1966,44 @@ async fn orphan_sweep_reclaims_stale_heartbeat_but_keeps_fresh_and_legacy_turns(
         )
         .await
         .unwrap();
-    assert_eq!(sweep_orphaned_turns(&db).await.unwrap(), 1);
+    let capture = tempfile::NamedTempFile::new().unwrap();
+    let writer = capture.reopen().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.try_clone().unwrap())
+        .finish();
+    assert_eq!(
+        sweep_orphaned_turns(&db)
+            .with_subscriber(subscriber)
+            .await
+            .unwrap(),
+        1
+    );
+    let logs = std::fs::read_to_string(capture.path()).unwrap();
+    assert!(logs.contains("nyxid::assistant_engine"), "{logs}");
+    assert!(logs.contains("old-process-id"), "{logs}");
+    assert!(logs.contains("nyxid-old-pod"), "{logs}");
+    assert!(logs.contains("heartbeat_age_ms="), "{logs}");
+    let audits = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    let filter = doc! {"event_type": "assistant_turn_failed", "event_data.turn_id": &stale.active_turn.as_ref().unwrap().turn_id};
+    let audit = audits.find_one(filter.clone()).await.unwrap().unwrap();
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("code").unwrap(), "turn_lost");
+    assert_eq!(data.get_str("stage").unwrap(), "sweep");
+    let worker = data.get_document("worker_instance").unwrap();
+    assert_eq!(worker.get_str("id").unwrap(), "old-process-id");
+    assert_eq!(worker.get_str("hostname").unwrap(), "nyxid-old-pod");
+    assert_eq!(
+        data.get_document("settled_by_worker_instance")
+            .unwrap()
+            .get_str("id")
+            .unwrap(),
+        crate::services::assistant_engine_worker::instance().id
+    );
+    assert!(data.get_i64("heartbeat_age_ms").unwrap() >= ACTIVE_TURN_HEARTBEAT_STALE_SECS * 1_000);
+    assert_eq!(sweep_orphaned_turns(&db).await.unwrap(), 0);
+    assert_eq!(audits.count_documents(filter).await.unwrap(), 1);
     assert!(
         get(&db, "owner", &stale.id)
             .await
@@ -1288,6 +2017,7 @@ async fn orphan_sweep_reclaims_stale_heartbeat_but_keeps_fresh_and_legacy_turns(
         .pop()
         .unwrap();
     assert_eq!(reclaimed.error_code.as_deref(), Some("turn_lost"));
+    assert_eq!(reclaimed.text, "Saved before the worker stopped 界");
     assert_eq!(
         reclaimed.upstream_error_code, None,
         "a NyxID class, not an upstream code"
@@ -1311,6 +2041,67 @@ async fn orphan_sweep_reclaims_stale_heartbeat_but_keeps_fresh_and_legacy_turns(
             .unwrap()
             .active_turn
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn stopped_orphan_sweep_retains_heartbeat_diagnostics_for_legacy_worker() {
+    let db = connect_transaction_test_database("nyxa_stopped_orphan").await;
+    let state = test_app_state(db.clone());
+    let row = begin_turn(
+        &db,
+        "owner",
+        &request(None, "private stopped turn"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let turn_id = &row.active_turn.as_ref().unwrap().turn_id;
+    let old = bson::DateTime::from_chrono(
+        Utc::now() - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS + 1),
+    );
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {
+                "$set": {"active_turn.stop_requested": true, "active_turn.heartbeat_at": old},
+                "$unset": {"active_turn.worker_instance": ""},
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        get(&db, "owner", &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .worker_instance
+            .is_none()
+    );
+    assert_eq!(sweep_orphaned_turns(&db).await.unwrap(), 1);
+    let audit = db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {"event_type": "assistant_turn_failed", "event_data.turn_id": turn_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let data = audit.get_document("event_data").unwrap();
+    assert_eq!(data.get_str("code").unwrap(), "cancelled");
+    assert_eq!(data.get_str("stage").unwrap(), "stop");
+    assert_eq!(data.get("worker_instance"), Some(&bson::Bson::Null));
+    assert!(data.get_i64("heartbeat_age_ms").unwrap() >= ACTIVE_TURN_HEARTBEAT_STALE_SECS * 1_000);
+    assert!(
+        !serde_json::to_string(&audit)
+            .unwrap()
+            .contains("private stopped turn")
+    );
+    assert!(
+        get(&db, "owner", &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_none()
     );
 }
 
@@ -2603,6 +3394,13 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 #[test]
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         author: None,
         activity_total: 0,
         report_to: None,
@@ -2624,6 +3422,7 @@ fn recap_reserves_the_goal_before_long_recent_rows() {
         status: "completed".into(),
         error_code: None,
         upstream_error_code: None,
+        turn_metadata: None,
         error_detail: None,
         created_at: Utc::now(),
         activities: Vec::new(),
@@ -3622,6 +4421,14 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 #[test]
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
+        turn_metadata: None,
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         retry_claimed_by: None,
         activity_count: None,
         report_to: None,
@@ -3675,6 +4482,14 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 #[test]
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
+        turn_metadata: None,
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
         retry_claimed_by: None,
         activity_count: None,
         report_to: None,
@@ -3749,6 +4564,7 @@ async fn reset_recap_queries_owner_rules_and_expired_manifest_outside_tail() {
                     pages: Some(1),
                     origin: "user_upload".into(),
                     image_input: None,
+                    image_inspection: None,
                 });
             db.collection::<bson::Document>(crate::models::assistant_upload_retention::TOMBSTONES)
                 .insert_one(doc! {"_id":upload_id,"user_id":"owner","conversation_id":&row.id})
@@ -4065,6 +4881,7 @@ fn answer_routing_matches_image_and_settlement_destinations_in_768_rows() {
             partition: partition.into(),
             thread: bound.then(|| {
                 Box::new(ThreadTurnBinding {
+                    sender_kind: None,
                     child_id: partition.into(),
                     source_message_id: "source".into(),
                     sender_id: "sender".into(),
@@ -4223,6 +5040,165 @@ fn channel_note_follows_the_turn_destination_and_keeps_image_ordering_explicit()
     }
 }
 
+#[test]
+fn reply_length_guidance_follows_all_channel_destinations_but_never_app_only() {
+    use crate::models::assistant_conversation::PlatformReplyRouting;
+    let mut row = stale_test_row(Utc::now());
+    let telegram = ChannelOrigin {
+        nyxbot_channel_id: "telegram-channel".into(),
+        platform: "telegram".into(),
+        partition: "chat".into(),
+        thread: None,
+    };
+    row.channel = Some(telegram.clone());
+    row.reply_channel = Some(telegram.clone());
+    for origin in [TurnOrigin::User, TurnOrigin::Orchestrator] {
+        row.active_turn.as_mut().unwrap().origin = origin;
+        assert!(!channel_note(&row).contains("One message holds"));
+    }
+    // Both direct and gateway channel turns carry this same admitted origin.
+    for origin in [TurnOrigin::Channel, TurnOrigin::Event] {
+        let turn = row.active_turn.as_mut().unwrap();
+        turn.origin = origin;
+        turn.asked_from = Some(telegram.clone());
+        let note = channel_note(&row);
+        assert!(note.contains("Destination: Telegram."));
+        assert!(note.contains("4,096 characters"));
+    }
+    // A drained followed-thread event supplies its destination explicitly.
+    row.channel = None;
+    row.reply_channel = None;
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.asked_from = None;
+    let mut event = crate::services::assistant_team_service::event("message", "wake".into(), None);
+    event.source_event_ids = vec!["source".into()];
+    event.reply_to = vec![telegram.clone()];
+    turn.events = vec![event];
+    assert!(channel_note(&row).contains("4,096 characters"));
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.events.clear();
+    turn.origin = TurnOrigin::User;
+    // App-origin work can explicitly owe several chat destinations.
+    let mut discord = telegram.clone();
+    discord.platform = "discord".into();
+    turn.also_deliver = vec![telegram.clone(), telegram, discord];
+    let note = channel_note(&row);
+    assert_eq!(note.matches("Destination: Telegram.").count(), 1);
+    assert!(note.contains("Destination: Discord. One message holds 2,000 characters"));
+    row.active_turn.as_mut().unwrap().also_deliver.clear();
+    let platform_origin = platform_test_origin(&row);
+    row.active_turn.as_mut().unwrap().platform_reply = Some(PlatformReplyRouting::Captured {
+        origin: Box::new(platform_origin),
+        turn_id: "manager-turn".into(),
+        expires_at: Utc::now() + chrono::Duration::minutes(30),
+    });
+    assert!(channel_note(&row).contains("4,096 characters"));
+    row.active_turn.as_mut().unwrap().platform_reply = Some(PlatformReplyRouting::WebOnly);
+    assert!(!channel_note(&row).contains("One message holds"));
+    row.active_turn = None;
+    assert!(channel_note(&row).is_empty());
+}
+
+#[tokio::test]
+async fn automation_and_specialist_turn_context_resolves_only_owned_chat_destinations() {
+    use crate::models::nyxbot_channel::{
+        COLLECTION_NAME as CHANNELS, THREADS_COLLECTION_NAME as THREADS,
+    };
+    use crate::models::trigger_run::COLLECTION_NAME as RUNS;
+    let db = connect_transaction_test_database("channel_length_notes").await;
+    let state = test_app_state(db.clone());
+    let date = bson::DateTime::now();
+    db.collection::<bson::Document>(CHANNELS).insert_one(doc! {
+        "_id":"channel", "user_id":"owner", "channel_bot_id":"bot", "platform":"telegram-new", "bot_label":"bot",
+        "transport":"gateway", "status":"active", "route_api_key_id":"key", "created_at":date, "updated_at":date,
+    }).await.unwrap();
+    db.collection::<bson::Document>(THREADS).insert_one(doc! {
+        "_id":"chat", "channel_id":"channel", "user_id":"owner", "partition":"chat", "platform_chat_id":"123",
+        "created_at":date, "updated_at":date,
+    }).await.unwrap();
+    db.collection::<bson::Document>(RUNS).insert_one(doc! {
+        "_id":"run", "trigger_id":"trigger", "user_id":"owner", "scheduled_at":date, "deadline":date,
+        "outcome":"started", "fence":"fence", "lease_until":date, "expires_at":date,
+        "deliver_to":{"type":"chat", "chat_id":"chat"},
+    }).await.unwrap();
+    let mut parent = stale_test_row(Utc::now());
+    parent.active_turn.as_mut().unwrap().trigger_run_id = Some("run".into());
+    parent.active_turn.as_mut().unwrap().origin = TurnOrigin::Trigger;
+    let note =
+        crate::services::assistant_nyxagent_runtime::turn_notes(&state, &parent, None, None).await;
+    assert!(note.contains("Destination: Telegram. One message holds 4,096 characters"));
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_one(&parent)
+        .await
+        .unwrap();
+    let mut specialist = stale_test_row(Utc::now());
+    specialist.role = AgentRole::Subagent;
+    specialist.active_turn.as_mut().unwrap().origin = TurnOrigin::Orchestrator;
+    specialist.active_turn.as_mut().unwrap().report_to = Some(parent.id.clone());
+    specialist.active_turn.as_mut().unwrap().note =
+        reporting_channel_length_note(&db, "owner", Some(&parent.id))
+            .await
+            .unwrap();
+    specialist.report_to = Some(parent.id.clone());
+    let note =
+        crate::services::assistant_nyxagent_runtime::turn_notes(&state, &specialist, None, None)
+            .await;
+    assert!(note.contains("Your report is intended for the requesting turn's chat destination"));
+    assert!(note.contains("4,096 characters"));
+    // Follow the immutable run destination on a confirmation continuation too.
+    parent.active_turn.as_mut().unwrap().origin = TurnOrigin::Event;
+    assert!(
+        additional_channel_length_note(&db, &parent)
+            .await
+            .unwrap()
+            .contains("4,096 characters")
+    );
+    db.collection::<bson::Document>(RUNS)
+        .update_one(
+            doc! {"_id":"run"},
+            doc! {"$set":{"deliver_to":{"type":"thread"}}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        !additional_channel_length_note(&db, &parent)
+            .await
+            .unwrap()
+            .contains("One message holds")
+    );
+    // Assigned work retains its admitted formatting context even if the
+    // requesting turn settles or its next turn is app-only.
+    let note =
+        crate::services::assistant_nyxagent_runtime::turn_notes(&state, &specialist, None, None)
+            .await;
+    assert!(note.contains("4,096 characters"));
+    assert!(
+        reporting_channel_length_note(&db, "owner", Some(&parent.id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Neither another owner's automation nor another owner's reporting thread
+    // can supply destination context to this turn.
+    parent.user_id = "other-owner".into();
+    assert!(
+        additional_channel_length_note(&db, &parent)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        reporting_channel_length_note(&db, "other-owner", Some(&parent.id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let app = stale_test_row(Utc::now());
+    let note =
+        crate::services::assistant_nyxagent_runtime::turn_notes(&state, &app, None, None).await;
+    assert!(!note.contains("One message holds"));
+}
+
 #[tokio::test]
 async fn tool_image_chat_resolves_x_public_dm_and_trigger_destinations() {
     use crate::models::nyxbot_channel::{
@@ -4358,6 +5334,416 @@ fn channel_tool_image_filter_honors_explicit_policy_and_narrow_legacy_shim() {
     attachment.origin = "tool".into();
     attachment.content_type = "application/pdf".into();
     assert!(!chat_tool_image(&attachment));
+}
+
+#[tokio::test]
+async fn platform_stop_capture_is_exact_transactional_and_keeps_independent_work() {
+    use crate::models::machine_job::{COLLECTION_NAME as JOBS, MachineJob};
+    use crate::services::{
+        platform_manager_contract as contract, platform_personal_turn_service as personal,
+    };
+    let db = connect_transaction_test_database("nyxa_exact_platform_stop").await;
+    let mut row = stale_test_row(Utc::now());
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    row.active_turn.as_mut().unwrap().stop_requested = false;
+    row.active_turn.as_mut().unwrap().machine_scopes.push(
+        crate::models::assistant_conversation::MachineTurnScope {
+            node_id: "node".into(),
+            runtime_id: "issue-time-runtime".into(),
+        },
+    );
+    let origin = personal::contract_origin(&proof).unwrap();
+    assert_eq!(personal::model_origin(&origin), proof);
+    let turn = contract::TurnRef {
+        conversation_id: row.id.clone(),
+        turn_id: row.active_turn.as_ref().unwrap().turn_id.clone(),
+    };
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    let job = |id: &str, issuing_turn: Option<String>| MachineJob {
+        id: id.into(),
+        user_id: row.user_id.clone(),
+        conversation_id: row.id.clone(),
+        issuing_turn_id: issuing_turn,
+        binding: None,
+        node_id: "node".into(),
+        runtime_id: "runtime".into(),
+        runtime_generation: None,
+        api_key_id: row.credential_api_key_id.clone(),
+        agent_id: proof.thread.nyxbot_agent_id.clone(),
+        state: "running".into(),
+        exit_code: None,
+        stop_reason: None,
+        duration_ms: None,
+        cancellation_requested_by: None,
+        cancellation_requested_at: None,
+        services: Vec::new(),
+        report_to: None,
+        report_provenance: 0,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::hours(1),
+        finished_at: None,
+        retain_until: None,
+    };
+    db.collection::<MachineJob>(JOBS)
+        .insert_many([
+            job("exact-job", Some(turn.turn_id.clone())),
+            job("old-job", Some("older-turn".into())),
+            job("legacy-job", None),
+        ])
+        .await
+        .unwrap();
+    // Independent watches deliberately remain unchanged, including idle turns.
+    db.collection::<bson::Document>(crate::models::async_service_operation::COLLECTION_NAME)
+        .insert_one(
+            doc! {"_id":"watch","user_id":&row.user_id,"conversation_id":&row.id,"state":"waiting"},
+        )
+        .await
+        .unwrap();
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let mut wrong = origin.clone();
+    wrong.authority.binding_generation += 1;
+    assert!(matches!(
+        personal::capture_exact_stop_in_session(&db, &mut session, &wrong, &turn)
+            .await
+            .unwrap(),
+        contract::ExactStopOutcome::NoMatchingActiveTurn
+    ));
+    let captured = personal::capture_exact_stop_in_session(&db, &mut session, &origin, &turn)
+        .await
+        .unwrap();
+    let contract::ExactStopOutcome::Captured(captured) = captured else {
+        panic!("matching turn must be captured")
+    };
+    assert_eq!(captured.machine_scopes.len(), 1);
+    assert_eq!(captured.machine_scopes[0].runtime_id, "issue-time-runtime");
+    assert_eq!(captured.machine_jobs.len(), 1);
+    assert_eq!(captured.machine_jobs[0].job_id, "exact-job");
+    session.abort_transaction().await.unwrap();
+    assert!(
+        !get(&db, &row.user_id, &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .stop_requested
+    );
+    session.start_transaction().await.unwrap();
+    personal::capture_exact_stop_in_session(&db, &mut session, &origin, &turn)
+        .await
+        .unwrap();
+    session.commit_transaction().await.unwrap();
+    assert!(
+        get(&db, &row.user_id, &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .stop_requested
+    );
+    assert_eq!(
+        db.collection::<MachineJob>(JOBS)
+            .count_documents(doc! {"state":"running"})
+            .await
+            .unwrap(),
+        3
+    );
+    assert!(
+        db.collection::<bson::Document>(crate::models::async_service_operation::COLLECTION_NAME)
+            .find_one(doc! {"_id":"watch","state":"waiting"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn platform_thread_requires_live_turn_with_ordinary_rollout_disabled() {
+    use crate::services::assistant_acknowledgement_service::{
+        AssistantTurnFence, enforce_turn_gate,
+    };
+    let db = connect_transaction_test_database("nyxa_platform_gate_off").await;
+    let owner = Uuid::new_v4().to_string();
+    let mut fence = AssistantTurnFence {
+        channel_adapter_origin: None,
+        invocation_id: None,
+        invocation_controlled: false,
+        conversation_id: Uuid::new_v4().to_string(),
+        turn_id: None,
+        turn_live: false,
+        turn_stopped: true,
+        platform_thread: false,
+        platform_origin: None,
+    };
+    // No rollout row: ordinary compatibility remains permissive.
+    enforce_turn_gate(&db, &fence, &owner, Some("key"), None, None, None, "test")
+        .await
+        .unwrap();
+    fence.platform_thread = true;
+    assert!(matches!(
+        enforce_turn_gate(&db, &fence, &owner, Some("key"), None, None, None, "test").await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    fence.turn_id = Some("turn".into());
+    fence.turn_live = true;
+    fence.turn_stopped = false;
+    // A fresh owner web turn carries no revoked transport authority.
+    enforce_turn_gate(&db, &fence, &owner, Some("key"), None, None, None, "test")
+        .await
+        .unwrap();
+    fence.turn_stopped = true;
+    assert!(matches!(
+        enforce_turn_gate(&db, &fence, &owner, Some("key"), None, None, None, "test").await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separate() {
+    use crate::models::async_service_operation::{AsyncServiceOperation, DeliveryBinding};
+    let mut row = stale_test_row(Utc::now());
+    let original = platform_test_origin(&row);
+    let mut fresh = original.clone();
+    fresh.source = crate::models::assistant_conversation::PlatformOriginSource::ThreadEvent {
+        admission_id: "fresh-event".into(),
+    };
+    row.platform_thread = Some(fresh.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(fresh.clone());
+    let delivery = DeliveryBinding {
+        invocation_id: None,
+        platform_reply: Some(
+            crate::models::assistant_conversation::PlatformReplyRouting::Captured {
+                origin: Box::new(original.clone()),
+                turn_id: "original-turn".into(),
+                expires_at: bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(30))
+                    .to_chrono(),
+            },
+        ),
+        platform_origin: Some(original.clone()),
+        origin: TurnOrigin::User,
+        channel: None,
+        reply_channel: None,
+        group_id: None,
+        group_request_id: None,
+        voice_request_id: None,
+        trigger_run_id: None,
+        report_to: Some("nyxa-original-report".into()),
+        report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
+    };
+    let watch = AsyncServiceOperation {
+        secret_context_versions: Default::default(),
+        id: "watch".into(),
+        user_id: row.user_id.clone(),
+        conversation_id: row.id.clone(),
+        agent_id: "agent".into(),
+        turn_id: "original-turn".into(),
+        api_key_id: "key".into(),
+        service_id: "service".into(),
+        submit_endpoint_id: "submit".into(),
+        contract: crate::models::async_service_operation::AsyncOperationContract {
+            status_operation: "status".into(),
+            result_operation: "result".into(),
+            cancel_operation: None,
+            id_field: "id".into(),
+            id_parameter: "id".into(),
+            status_field: "status".into(),
+            success_states: vec!["done".into()],
+            failure_states: vec!["failed".into()],
+            error_field: None,
+        },
+        delivery,
+        operation_id: Some("operation".into()),
+        execution_binding: None,
+        authority_version: 0,
+        contract_binding: None,
+        state: "queued".into(),
+        reason: None,
+        attempts: 0,
+        lease_id: None,
+        lease_until: None,
+        created_at: Utc::now(),
+        deadline: Utc::now(),
+        poll_at: Utc::now(),
+        expires_at: Utc::now(),
+        result_encrypted: None,
+    };
+    crate::services::async_service_operation::apply_delivery(&mut row, &watch);
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().platform_origin,
+        Some(fresh.clone())
+    );
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().platform_reply,
+        watch.delivery.platform_reply
+    );
+    assert!(channel_note(&row).contains("private Telegram"));
+    let mut web_watch = watch.clone();
+    web_watch.delivery.platform_reply = None;
+    crate::services::async_service_operation::apply_delivery(&mut row, &web_watch);
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().platform_origin,
+        Some(fresh)
+    );
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().platform_reply,
+        Some(crate::models::assistant_conversation::PlatformReplyRouting::WebOnly)
+    );
+    assert!(!channel_note(&row).contains("private Telegram"));
+    assert_eq!(watch.delivery.platform_origin, Some(original));
+    assert_eq!(
+        crate::models::assistant_conversation::carried_report_to(
+            watch.delivery.report_to.as_deref(),
+            watch.delivery.report_provenance,
+        )
+        .as_deref(),
+        Some("nyxa-original-report"),
+    );
+    let mut legacy = bson::to_document(&watch.delivery).unwrap();
+    legacy.remove("platform_origin");
+    assert!(
+        bson::from_document::<DeliveryBinding>(legacy)
+            .unwrap()
+            .platform_origin
+            .is_none()
+    );
+    let mut legacy_report = bson::to_document(&watch.delivery).unwrap();
+    legacy_report.remove("report_provenance");
+    let legacy_report = bson::from_document::<DeliveryBinding>(legacy_report).unwrap();
+    assert_eq!(
+        legacy_report.platform_origin,
+        watch.delivery.platform_origin
+    );
+    assert!(
+        crate::models::assistant_conversation::carried_report_to(
+            legacy_report.report_to.as_deref(),
+            legacy_report.report_provenance,
+        )
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn personal_settlement_receipt_mismatch_rolls_back_reply_and_pointer_clear() {
+    let db = connect_transaction_test_database("nyxa_personal_settle_abort").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let mut row = begin_turn(
+        &db,
+        "owner",
+        &request(None, "hello"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    seed_platform_execution(&db, &row, &proof).await;
+    let receipts =
+        db.collection::<bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME);
+    receipts
+        .update_one(doc! {}, doc! {"$set":{"claim_id":"different-claim"}})
+        .await
+        .unwrap();
+    let reply_id = Uuid::new_v4().to_string();
+    assert!(
+        finish_turn(
+            &db,
+            &row,
+            &row.credential_api_key_id,
+            &reply_id,
+            &TurnResult {
+                text: "uncommitted".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        get(&db, "owner", &row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_some()
+    );
+    assert!(
+        db.collection::<AssistantMessage>(MESSAGES)
+            .find_one(doc! {"_id":reply_id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let binding = db
+        .collection::<bson::Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+        .find_one(doc! {"_id":&proof.thread.binding_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(binding.get_document("active_turn").is_ok());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn deleting_personal_thread_interrupts_only_its_exact_claim_and_clears_reference() {
+    let db = connect_transaction_test_database("nyxa_personal_delete").await;
+    ensure_indexes(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let mut row = begin_turn(
+        &db,
+        "owner",
+        &request(None, "hello"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let proof = platform_test_origin(&row);
+    row.platform_thread = Some(proof.thread.clone());
+    row.active_turn.as_mut().unwrap().platform_origin = Some(proof.clone());
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    seed_platform_execution(&db, &row, &proof).await;
+    delete(&db, "owner", &row.id).await.unwrap();
+    let binding = db
+        .collection::<bson::Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+        .find_one(doc! {"_id":&proof.thread.binding_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.get("conversation_id"), Some(&bson::Bson::Null));
+    assert_eq!(binding.get("active_turn"), Some(&bson::Bson::Null));
+    let receipt = db
+        .collection::<bson::Document>(crate::models::platform_manager_ingress::COLLECTION_NAME)
+        .find_one(doc! {})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.get_str("phase").unwrap(), "interrupted");
+    assert_eq!(
+        receipt.get_str("interrupted_reason").unwrap(),
+        "conversation_deleted"
+    );
+    assert_eq!(receipt.get("reply_id"), Some(&bson::Bson::Null));
+    assert!(matches!(
+        get(&db, "owner", &row.id).await,
+        Err(AppError::NotFound(_))
+    ));
+    db.drop().await.unwrap();
 }
 
 /// Plan v7 §2.2: the reducer never creates NyxBot involvement from
@@ -4976,4 +6362,692 @@ async fn ineligible_skill_events_are_drained_transactionally_without_a_turn() {
         Some(nyxbot.id.as_str())
     );
     settle(&db, keys, &owner, &row, "done", None).await;
+}
+
+#[tokio::test]
+async fn model_facts_are_attempt_and_turn_fenced_and_preserve_upstream_diagnostics() {
+    use crate::services::assistant_model_observer::{ModelRequest, attribute};
+    let db = connect_transaction_test_database("model_facts").await;
+    let now = Utc::now();
+    let mut row = stale_test_row(now);
+    row.active_turn.as_mut().unwrap().started_at = now;
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    let generic = TurnError::new("turn_failed");
+    for (error, code) in [
+        (AppError::InsufficientCredits, "insufficient_credits"),
+        (AppError::WalletSuspended, "wallet_suspended"),
+        (
+            AppError::PlanEntitlementRequired("service".into()),
+            "plan_entitlement_required",
+        ),
+        (
+            AppError::BillingNotConfigured("SECRET".into()),
+            "billing_not_configured",
+        ),
+        (
+            AppError::BillingProviderUnavailable("SECRET".into()),
+            "billing_provider_unavailable",
+        ),
+    ] {
+        let attempt = ModelRequest::capture(
+            &db,
+            &row.id,
+            "key",
+            &row.active_turn.as_ref().unwrap().turn_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        attempt.refusal(&error).await.unwrap();
+        attempt.fault("transport_error", true).await.unwrap();
+        let saved = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let turn = saved.active_turn.as_ref().unwrap();
+        let classified = attribute(&generic, turn, Utc::now());
+        assert_eq!(classified.code, code);
+        assert_eq!(classified.upstream_code.as_deref(), Some("turn_failed"));
+        assert_eq!(
+            attribute(&TurnError::new("capacity_exceeded"), turn, Utc::now()).code,
+            "capacity_exceeded"
+        );
+        assert_eq!(
+            attribute(
+                &generic,
+                turn,
+                turn.model_refusal.as_ref().unwrap().at
+                    + chrono::Duration::from_std(
+                        engine_policy::MODEL_ATTRIBUTION_WINDOW + Duration::from_secs(1)
+                    )
+                    .unwrap()
+            )
+            .code,
+            "assistant_unavailable"
+        );
+        attempt.complete().await.unwrap();
+        let success = ModelRequest::capture(
+            &db,
+            &row.id,
+            "key",
+            &row.active_turn.as_ref().unwrap().turn_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        success.accepted().await.unwrap();
+        // Older writes arrive after a newer accepted request, even on another replica.
+        attempt.refusal(&error).await.unwrap();
+        attempt.fault("transport_error", true).await.unwrap();
+        let saved = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.active_turn.as_ref().unwrap().model_refusal.is_none());
+        assert_eq!(
+            attribute(&generic, saved.active_turn.as_ref().unwrap(), Utc::now()).code,
+            "assistant_unavailable"
+        );
+        success.fault("consumer_cancelled", false).await.unwrap();
+        let saved = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            attribute(&generic, saved.active_turn.as_ref().unwrap(), Utc::now()).code,
+            "assistant_unavailable"
+        );
+        success.fault("provider_error", true).await.unwrap();
+        success.fault("consumer_cancelled", false).await.unwrap();
+        let saved = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            attribute(&generic, saved.active_turn.as_ref().unwrap(), Utc::now()).code,
+            "model_interrupted"
+        );
+        assert_eq!(
+            saved
+                .active_turn
+                .as_ref()
+                .unwrap()
+                .model_stream_cancellation
+                .as_ref()
+                .unwrap()
+                .kind,
+            "consumer_cancelled"
+        );
+
+        success.complete().await.unwrap();
+        row.active_turn.as_mut().unwrap().turn_id = Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id": &row.id}, doc! {"$set": {"active_turn.turn_id": &row.active_turn.as_ref().unwrap().turn_id}, "$unset": {"active_turn.model_refusal": "", "active_turn.model_stream_fault": ""}}).await.unwrap();
+        success.refusal(&error).await.unwrap();
+        success.fault("transport_error", true).await.unwrap();
+        let saved = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.active_turn.as_ref().unwrap().model_refusal.is_none());
+        assert!(
+            saved
+                .active_turn
+                .as_ref()
+                .unwrap()
+                .model_stream_fault
+                .is_none()
+        );
+    }
+    assert!(
+        ModelRequest::capture(
+            &db,
+            &row.id,
+            "wrong-key",
+            &row.active_turn.as_ref().unwrap().turn_id
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn model_stream_protocols_require_terminals_but_never_usage() {
+    use crate::services::assistant_model_observer::{Protocol, StreamObserver};
+    for (protocol, terminal) in [
+        (Protocol::Responses, r#"{"type":"response.completed"}"#),
+        (Protocol::ChatCompletions, "[DONE]"),
+        (Protocol::Anthropic, r#"{"type":"message_stop"}"#),
+    ] {
+        let mut stream = StreamObserver::new(protocol);
+        assert_eq!(stream.eof(), Some("missing_terminal"));
+        stream.event(Some("message"), terminal);
+        assert_eq!(stream.eof(), None);
+    }
+    let mut unknown = StreamObserver::new(Protocol::Unknown);
+    unknown.event(None, r#"{"error":{"code":"bad"}}"#);
+    assert!(!unknown.provider_failed());
+    assert_eq!(unknown.eof(), Some("unknown"));
+    let mut failed = StreamObserver::new(Protocol::Responses);
+    failed.event(None, r#"{"type":"response.failed"}"#);
+    failed.invalidate();
+    assert_eq!(failed.eof(), Some("unknown"));
+}
+
+#[test]
+fn capacity_retry_after_and_full_jitter_are_bounded() {
+    for value in [
+        "",
+        "0",
+        "-1",
+        "1.2",
+        " 1",
+        "Wed, 21 Oct 2015 07:28:00 GMT",
+        "9999999999999999999999",
+    ] {
+        assert_eq!(retry_after(value), None);
+    }
+    assert_eq!(
+        retry_after(&(engine_policy::RETRY_AFTER_MAX.as_secs() + 1).to_string()),
+        None
+    );
+    assert_eq!(
+        retry_after(&(engine_policy::RETRY_AFTER_MIN.as_secs() - 1).to_string()),
+        None
+    );
+    for value in [
+        engine_policy::RETRY_AFTER_MIN.as_secs(),
+        engine_policy::CAPACITY_BACKOFF_CAP.as_secs(),
+        engine_policy::RETRY_AFTER_MAX.as_secs(),
+    ] {
+        assert_eq!(
+            retry_after(&value.to_string()),
+            Some(Duration::from_secs(value))
+        );
+    }
+    for retry in 1..100 {
+        assert_eq!(capacity_delay(retry, None, 0), Duration::ZERO);
+        assert!(capacity_delay(retry, None, u64::MAX) <= engine_policy::CAPACITY_BACKOFF_CAP);
+        assert_eq!(
+            capacity_delay(retry, Some(engine_policy::RETRY_AFTER_MAX), 0),
+            engine_policy::RETRY_AFTER_MAX
+        );
+    }
+}
+
+#[test]
+fn capacity_deadline_covers_request_age_and_expired_grace() {
+    let now = Utc::now();
+    assert_eq!(
+        capacity_budget(now, None, now),
+        engine_policy::INTERACTIVE_CAPACITY_BUDGET
+    );
+    assert_eq!(
+        capacity_budget(now - chrono::Duration::seconds(32), None, now),
+        engine_policy::INTERACTIVE_CAPACITY_BUDGET - Duration::from_secs(32)
+    );
+    assert_eq!(
+        capacity_budget(now, Some(now - chrono::Duration::seconds(1)), now),
+        Duration::ZERO
+    );
+    assert_eq!(
+        capacity_budget(now, Some(now + chrono::Duration::seconds(900)), now),
+        engine_policy::AUTOMATION_CAPACITY_CAP
+    );
+    assert_eq!(
+        capacity_budget(
+            now - chrono::Duration::from_std(
+                engine_policy::AUTOMATION_CAPACITY_CAP - Duration::from_secs(1)
+            )
+            .unwrap(),
+            Some(now + chrono::Duration::seconds(900)),
+            now
+        ),
+        Duration::from_secs(1)
+    );
+}
+
+#[tokio::test]
+async fn overlapping_model_requests_keep_facts_diagnostic_only() {
+    use crate::services::assistant_model_observer::{ModelRequest, attribute};
+    let db = connect_transaction_test_database("model_overlap").await;
+    let mut row = stale_test_row(Utc::now());
+    row.active_turn.as_mut().unwrap().started_at = Utc::now();
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    let turn = &row.active_turn.as_ref().unwrap().turn_id;
+    let first = ModelRequest::capture(&db, &row.id, "key", turn)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = ModelRequest::capture(&db, &row.id, "key", turn)
+        .await
+        .unwrap()
+        .unwrap();
+    second
+        .refusal(&AppError::InsufficientCredits)
+        .await
+        .unwrap();
+    second.fault("provider_error", true).await.unwrap();
+    first.complete().await.unwrap();
+    // Even after overlapping requests finish, causality for this turn is uncertain.
+    let saved = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id": &row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let turn = saved.active_turn.as_ref().unwrap();
+    assert_eq!(turn.model_requests_active, 0);
+    assert!(turn.model_attribution_uncertain);
+    assert!(turn.model_refusal.is_some());
+    assert!(turn.model_stream_fault.is_some());
+    assert_eq!(
+        attribute(&TurnError::new("turn_failed"), turn, Utc::now()).code,
+        "assistant_unavailable"
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn capacity_wait_metadata_survives_reload_notice_claims_and_audits_are_deduplicated() {
+    use crate::services::assistant_turn_observability as observed;
+    let db = connect_transaction_test_database("capacity_observability").await;
+    let state = test_app_state(db.clone());
+    for (wait, fail) in [(false, false), (true, false), (true, true)] {
+        let row = begin_turn(
+            &db,
+            "owner",
+            &request(None, "private prompt"),
+            &state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        assert!(!observed::claim_notice(&db, &row, Utc::now()).await.unwrap());
+        assert!(
+            row.active_turn
+                .as_ref()
+                .unwrap()
+                .capacity_wait_note_origin
+                .is_none()
+        );
+        let first_attempt = observed::attempt(&db, &row).await.unwrap();
+        assert_eq!(first_attempt, 1);
+        let run_id = Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
+            .insert_one(doc! {"_id": &run_id, "user_id": "owner",
+            "turn_id": &row.active_turn.as_ref().unwrap().turn_id,
+            "attempts": 3_i64, "capacity_wait_ms": 1_000_i64})
+            .await
+            .unwrap();
+        let began = Utc::now() - chrono::Duration::from_std(engine_policy::ACK_DELAY * 2).unwrap();
+        let deadline =
+            began + chrono::Duration::from_std(engine_policy::INTERACTIVE_CAPACITY_BUDGET).unwrap();
+        observed::request_started(&db, &row, began, deadline)
+            .await
+            .unwrap();
+        if wait {
+            waiting_for_capacity(&db, &row, began, deadline)
+                .await
+                .unwrap();
+            waiting_for_capacity(
+                &db,
+                &row,
+                Utc::now(),
+                deadline + chrono::Duration::seconds(30),
+            )
+            .await
+            .unwrap();
+            assert!(
+                observed::acknowledge(
+                    &db,
+                    &row,
+                    began + chrono::Duration::from_std(engine_policy::ACK_DELAY).unwrap()
+                        - chrono::Duration::milliseconds(1)
+                )
+                .await
+                .unwrap()
+                .is_none()
+            );
+            observed::acknowledge(&db, &row, Utc::now())
+                .await
+                .unwrap()
+                .unwrap();
+            let reloaded = get(&db, "owner", &row.id).await.unwrap();
+            let turn = reloaded.active_turn.as_ref().unwrap();
+            assert_eq!(
+                turn.capacity_wait_note_origin.as_deref(),
+                Some("nyxid_system")
+            );
+            let input = messages(&db, "owner", &row.id, 20, None).await.unwrap();
+            assert_eq!(input.len(), 1);
+            assert!(!bounded_recap(&input).contains(observed::CAPACITY_ACKNOWLEDGEMENT));
+            assert!(checkpoint(&db, "owner", &row.id).await.unwrap().is_none());
+            assert_eq!(
+                turn.capacity_wait_started_at.unwrap().timestamp_millis(),
+                began.timestamp_millis()
+            );
+            assert_eq!(
+                turn.capacity_wait_deadline.unwrap().timestamp_millis(),
+                deadline.timestamp_millis()
+            );
+            assert!(
+                !observed::claim_notice(
+                    &db,
+                    &row,
+                    began + chrono::Duration::from_std(engine_policy::ACK_DELAY).unwrap()
+                        - chrono::Duration::milliseconds(1)
+                )
+                .await
+                .unwrap()
+            );
+            let (a, b) = tokio::join!(
+                observed::claim_notice(&db, &row, Utc::now()),
+                observed::claim_notice(&db, &row, Utc::now())
+            );
+            assert_eq!(usize::from(a.unwrap()) + usize::from(b.unwrap()), 1);
+            assert_eq!(observed::attempt(&db, &row).await.unwrap(), 2);
+            if !fail {
+                observed::accepted(&db, &row).await.unwrap();
+                observed::accepted(&db, &row).await.unwrap();
+                assert!(!observed::claim_notice(&db, &row, Utc::now()).await.unwrap());
+                assert!(
+                    !get(&db, "owner", &row.id)
+                        .await
+                        .unwrap()
+                        .active_turn
+                        .unwrap()
+                        .waiting_for_capacity
+                );
+            }
+        }
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$set": {"active_turn.trigger_run_id": &run_id}},
+            )
+            .await
+            .unwrap();
+        let message_id = Uuid::new_v4().to_string();
+        let result = TurnResult {
+            text: if fail { "" } else { "private reply" }.into(),
+            session_id: None,
+            response_id: None,
+            error: fail.then(|| TurnError::internal("capacity_exceeded", "upstream_response")),
+        };
+        for _ in 0..2 {
+            let error = finish_turn(&db, &row, "key", &message_id, &result)
+                .await
+                .unwrap();
+            if fail {
+                let error = error.unwrap();
+                assert_eq!(error.attempts(), Some(2));
+                assert!(
+                    error.capacity_wait_ms().unwrap()
+                        >= (engine_policy::ACK_DELAY * 2).as_millis() as u64
+                );
+                assert!(error.message.contains("waited"));
+            }
+        }
+        let saved = db
+            .collection::<AssistantMessage>(MESSAGES)
+            .find_one(doc! {"_id": &message_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let metadata = saved.turn_metadata.unwrap();
+        assert_eq!(metadata.attempts, Some(if wait { 2 } else { 1 }));
+        assert!(metadata.capacity_wait_ms.is_some());
+        if !wait {
+            assert_eq!(metadata.capacity_wait_ms, Some(0));
+        }
+        let run = db
+            .collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
+            .find_one(doc! {"_id": &run_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            run.get_i64("attempts").unwrap(),
+            3 + i64::from(metadata.attempts.unwrap())
+        );
+        assert_eq!(
+            run.get_i64("capacity_wait_ms").unwrap(),
+            1_000 + metadata.capacity_wait_ms.unwrap() as i64
+        );
+        if let Some(detail) = saved.error_detail {
+            assert_eq!(detail.attempts, Some(2));
+            assert_eq!(detail.capacity_wait_ms, metadata.capacity_wait_ms);
+        }
+        for (event, expected) in [
+            ("assistant_turn_failed", u64::from(fail)),
+            ("assistant_turn_capacity_wait", u64::from(wait && !fail)),
+        ] {
+            let filter = doc! {"event_type": event, "event_data.conversation_id": &row.id};
+            assert_eq!(
+                db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                    .count_documents(filter.clone())
+                    .await
+                    .unwrap(),
+                expected
+            );
+            if expected != 0 {
+                let audit = db
+                    .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                    .find_one(filter)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let json = serde_json::to_string(&audit).unwrap();
+                assert!(!json.contains("private prompt") && !json.contains("private reply"));
+                assert_eq!(
+                    audit
+                        .get_document("event_data")
+                        .unwrap()
+                        .get_str("origin")
+                        .unwrap(),
+                    "chat"
+                );
+            }
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn capacity_exhaustion_copy_uses_actual_wait_for_interactive_and_short_trigger_budgets() {
+    use crate::services::assistant_turn_observability::capacity_message;
+    assert_eq!(
+        capacity_message(Some(120_000)),
+        "NyxBot is at capacity right now (waited 2 minutes). Try again shortly."
+    );
+    assert!(capacity_message(Some(2_000)).contains("waited 2 seconds"));
+    assert!(capacity_message(Some(119_999)).contains("waited 2 minutes"));
+    assert!(capacity_message(Some(120_001)).contains("waited 2 minutes 1 second"));
+    assert!(capacity_message(Some(600_000)).contains("waited 10 minutes"));
+    assert!(!capacity_message(None).contains("waited"));
+}
+
+#[tokio::test]
+async fn admission_acknowledgement_covers_slow_connect_but_never_accepted_stopped_or_automation_turns()
+ {
+    use crate::services::assistant_turn_observability as observed;
+    let db = connect_transaction_test_database("admission_acknowledgement").await;
+    let now = Utc::now();
+    let began = now
+        - chrono::Duration::from_std(engine_policy::ACK_DELAY).unwrap()
+        - chrono::Duration::seconds(1);
+    let deadline =
+        began + chrono::Duration::from_std(engine_policy::INTERACTIVE_CAPACITY_BUDGET).unwrap();
+    for mode in [
+        "owner",
+        "guest",
+        "accepted",
+        "stopped",
+        "trigger",
+        "trigger_delivery",
+    ] {
+        let mut row = stale_test_row(now);
+        row.guest_turn = mode == "guest";
+        let turn = row.active_turn.as_mut().unwrap();
+        turn.started_at = began;
+        turn.stop_requested = mode == "stopped";
+        if mode == "trigger" {
+            turn.origin = TurnOrigin::Trigger;
+        }
+        if mode == "trigger_delivery" {
+            turn.trigger_run_id = Some(Uuid::new_v4().to_string());
+        }
+        db.collection::<AssistantConversation>(CONVERSATIONS)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        observed::request_started(&db, &row, began, deadline)
+            .await
+            .unwrap();
+        if mode == "accepted" {
+            observed::accepted(&db, &row).await.unwrap();
+        }
+        let note = observed::acknowledge(&db, &row, now).await.unwrap();
+        assert_eq!(note.is_some(), matches!(mode, "owner" | "guest"), "{mode}");
+        if let Some(turn) = note {
+            assert!(!turn.waiting_for_capacity);
+            assert_eq!(
+                turn.capacity_wait_note_origin.as_deref(),
+                Some("nyxid_system")
+            );
+            assert_eq!(observed::metadata(&turn, now).capacity_wait_ms, Some(0));
+            assert!(
+                messages(&db, &row.user_id, &row.id, 20, None)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                checkpoint(&db, &row.user_id, &row.id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let (a, b) = tokio::join!(
+                observed::claim_notice(&db, &row, now),
+                observed::claim_notice(&db, &row, now)
+            );
+            assert_eq!(usize::from(a.unwrap()) + usize::from(b.unwrap()), 1);
+            observed::accepted(&db, &row).await.unwrap();
+            assert!(
+                observed::acknowledge(&db, &row, now)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                get(&db, &row.user_id, &row.id)
+                    .await
+                    .unwrap()
+                    .active_turn
+                    .unwrap()
+                    .capacity_wait_note_origin
+                    .is_none()
+            );
+        }
+        assert!(!observed::claim_notice(&db, &row, now).await.unwrap());
+    }
+    assert_eq!(
+        db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {"event_type": "assistant_turn_capacity_wait"})
+            .await
+            .unwrap(),
+        0
+    );
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn capacity_wait_durations_are_grammatical_and_empty_waits_are_omitted() {
+    use crate::services::assistant_turn_observability::{capacity_message, wait_duration};
+    for (ms, expected) in [
+        (0, "0 seconds"),
+        (1, "1 second"),
+        (1_000, "1 second"),
+        (45_000, "45 seconds"),
+        (60_000, "1 minute"),
+        (65_000, "1 minute 5 seconds"),
+        (120_000, "2 minutes"),
+        (120_001, "2 minutes 1 second"),
+    ] {
+        assert_eq!(wait_duration(ms), expected);
+        assert_eq!(capacity_message(Some(ms)).contains("waited"), ms > 0);
+    }
+    assert!(!capacity_message(None).contains("waited"));
+}
+
+#[tokio::test]
+async fn capacity_waits_accumulate_without_execution_time_and_acceptance_is_idempotent() {
+    use crate::services::assistant_turn_observability as observed;
+    let db = connect_transaction_test_database("capacity_request_waits").await;
+    let state = test_app_state(db.clone());
+    let row = begin_turn(
+        &db,
+        "owner",
+        &request(None, "hello"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    // An additive wait flag without a timestamp cannot prove any elapsed wait.
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"active_turn.waiting_for_capacity": true}},
+        )
+        .await
+        .unwrap();
+    observed::accepted(&db, &row).await.unwrap(); // Common, non-transactional path.
+    let now = Utc::now();
+    let deadline =
+        now + chrono::Duration::from_std(engine_policy::INTERACTIVE_CAPACITY_BUDGET).unwrap();
+    for seconds in [2, 3] {
+        waiting_for_capacity(
+            &db,
+            &row,
+            Utc::now() - chrono::Duration::seconds(seconds),
+            deadline,
+        )
+        .await
+        .unwrap();
+        observed::accepted(&db, &row).await.unwrap();
+        observed::accepted(&db, &row).await.unwrap();
+    }
+    let saved = get(&db, "owner", &row.id).await.unwrap();
+    let turn = saved.active_turn.as_ref().unwrap();
+    let data = observed::metadata(turn, Utc::now() + chrono::Duration::hours(1));
+    assert!((5_000..6_000).contains(&data.capacity_wait_ms.unwrap()));
+    assert!(!turn.waiting_for_capacity);
+    assert!(
+        observed::acknowledge(&db, &row, Utc::now())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .count_documents(doc! {"event_type":"assistant_turn_capacity_wait", "event_data.conversation_id": &row.id})
+        .await.unwrap(), 2);
+    db.drop().await.unwrap();
 }

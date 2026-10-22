@@ -343,6 +343,17 @@ pub async fn run_with_shutdown(
     credential_sender: Arc<SharedCredentialsSender>,
     backend: Arc<SecretBackend>,
 ) {
+    if let Some(binding) = &config.managed_runtime
+        && (super::managed_runtime::validate_existing_config(&config, binding).is_err()
+            || signing_secret
+                .as_ref()
+                .is_none_or(|secret| secret.is_empty()))
+    {
+        tracing::error!(
+            "Managed node startup refused invalid profile, endpoint, or signing material"
+        );
+        return;
+    }
     let in_flight = Arc::new(AtomicUsize::new(0));
     let in_flight_shutdown = in_flight.clone();
     let signing_secret = signing_secret.map(|secret| Arc::new(Zeroizing::new(secret)));
@@ -352,6 +363,8 @@ pub async fn run_with_shutdown(
         .unwrap_or(std::path::Path::new("."))
         .to_path_buf();
     let storage_backend = config.storage_backend.clone();
+    let managed_binding = config.managed_runtime.clone();
+    let managed_directory = config_dir.clone();
     let pending_poll_shutdown_rx = shutdown_rx.clone();
     let connection_shutdown_rx = shutdown_rx;
     let pending_poll_server_url = config.server.url.clone();
@@ -401,7 +414,12 @@ pub async fn run_with_shutdown(
                 tracing::error!(%error, "Pending credential poll loop terminated unexpectedly");
             }
         }
-        _ = shutdown_signal() => {
+        _ = async {
+            tokio::select! {
+                _ = shutdown_signal() => {},
+                _ = super::managed_runtime::wait_for_runtime_end(&managed_directory, managed_binding.as_ref()) => {},
+            }
+        } => {
             tracing::info!("Shutdown signal received, draining in-flight requests and SSH tunnels...");
             let _ = shutdown_tx.send(true);
             let deadline = tokio::time::Instant::now()
@@ -817,10 +835,11 @@ async fn run_connection_loop(
     // runtime's receipt ledger then returns its original outcome without
     // executing the operation twice.
     let replay_guard = Arc::new(tokio::sync::Mutex::new(ReplayGuard::new()));
-    let machine = if config.machine.shell
-        || config.machine.files
-        || config.machine.computer
-        || config.machine.browser_enabled()
+    let mut machine = if config.managed_runtime.is_none()
+        && (config.machine.shell
+            || config.machine.files
+            || config.machine.computer
+            || config.machine.browser_enabled())
     {
         match super::machine::Runtime::new(&config.machine, &config.node.id, config_dir) {
             Ok(runtime) => Some(runtime),
@@ -851,7 +870,7 @@ async fn run_connection_loop(
             credential_sender,
             in_flight.clone(),
             shutdown.clone(),
-            machine.clone(),
+            &mut machine,
             proxy_uploads.clone(),
             replay_guard.clone(),
         )
@@ -896,7 +915,7 @@ async fn connect_and_serve(
     credential_sender: &Arc<SharedCredentialsSender>,
     in_flight: Arc<AtomicUsize>,
     mut shutdown: watch::Receiver<bool>,
-    machine: Option<Arc<super::machine::Runtime>>,
+    machine_state: &mut Option<Arc<super::machine::Runtime>>,
     proxy_uploads: Arc<super::proxy_upload::Uploads>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
 ) -> Result<Option<Duration>> {
@@ -906,7 +925,7 @@ async fn connect_and_serve(
     let connect = tokio_tungstenite::connect_async_tls_with_config(
         &config.server.url,
         Some(ws_config),
-        machine.is_some(),
+        machine_state.is_some() || config.managed_runtime.is_some(),
         Some(tokio_tungstenite::Connector::Rustls(
             crate::tls::shared_config()?,
         )),
@@ -922,11 +941,17 @@ async fn connect_and_serve(
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
     // 2. Authenticate
-    let auth_msg = serde_json::json!({
+    let mut auth_msg = serde_json::json!({
         "type": "auth",
         "node_id": config.node.id,
         "token": auth_token,
     });
+    if let Some(binding) = &config.managed_runtime {
+        binding
+            .validate()
+            .map_err(|reason| Error::Config(reason.into()))?;
+        auth_msg["managed_runtime"] = serde_json::to_value(binding)?;
+    }
     tokio::select! {
         result = ws_sink.send(Message::Text(auth_msg.to_string().into())) => {
             result.map_err(|e| Error::WebSocket(format!("Failed to send auth: {e}")))?;
@@ -966,6 +991,16 @@ async fn connect_and_serve(
     };
     let (use_binary_proxy_chunks, server_heartbeat_interval_secs) = match parsed["type"].as_str() {
         Some("auth_ok") => {
+            if let Some(binding) = &config.managed_runtime {
+                let accepted = parsed.get("managed_runtime").cloned().and_then(|value| {
+                    serde_json::from_value::<nyxid_machine::managed::Binding>(value).ok()
+                });
+                if accepted.as_ref() != Some(binding) {
+                    return Err(Error::AuthFailed(
+                        "Managed runtime fence was not acknowledged".into(),
+                    ));
+                }
+            }
             let enabled = parsed["capabilities"]["proxy_binary_chunks"]
                 .as_bool()
                 .unwrap_or(false);
@@ -997,7 +1032,65 @@ async fn connect_and_serve(
         }
     };
 
+    // Managed runtimes may touch the workspace while initializing. Wait for
+    // the backend's exact live generation/epoch acknowledgement before even
+    // constructing them, including a restart with a persisted config. Keep
+    // the admitted runtime across reconnects so existing bounded jobs retain
+    // the ordinary signed-lease behavior.
+    let managed_window = if let Some(binding) = &config.managed_runtime {
+        let window: nyxid_machine::managed::SignedRuntimeWindow = serde_json::from_value(
+            parsed
+                .get("managed_runtime_window")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )
+        .map_err(|_| Error::AuthFailed("Managed runtime deadline missing".into()))?;
+        let secret = signing_secret
+            .as_ref()
+            .ok_or_else(|| Error::AuthFailed("Managed runtime signing key missing".into()))?;
+        let bytes = zeroize::Zeroizing::new(
+            hex::decode(secret.as_str())
+                .map_err(|_| Error::AuthFailed("Managed runtime signing key invalid".into()))?,
+        );
+        window
+            .verify(binding, &bytes, chrono::Utc::now().timestamp_millis())
+            .map_err(|_| Error::AuthFailed("Managed runtime deadline invalid".into()))?;
+        super::managed_deadline::install_deadline_marker(config_dir, &window.window)
+            .map_err(|_| Error::AuthFailed("Managed runtime deadline is terminal".into()))?;
+        Some(window)
+    } else {
+        None
+    };
+    if config.managed_runtime.is_some() && machine_state.is_none() {
+        super::managed_runtime::admit_workspace()
+            .map_err(|_| Error::Config("Managed workspace admission setup refused".into()))?;
+        *machine_state = Some(
+            super::machine::Runtime::new(&config.machine, &config.node.id, config_dir)
+                .map_err(|_| Error::Config("Managed machine runtime refused startup".into()))?,
+        );
+    }
+    let machine = machine_state.clone();
     if let Some(machine) = &machine {
+        if let Some(binding) = &config.managed_runtime {
+            machine
+                .bind_managed_runtime(binding)
+                .map_err(|_| Error::Config("Managed runtime fence mismatch".into()))?;
+            let bytes = zeroize::Zeroizing::new(
+                hex::decode(
+                    signing_secret
+                        .as_ref()
+                        .expect("managed key checked")
+                        .as_str(),
+                )
+                .map_err(|_| Error::AuthFailed("Managed runtime signing key invalid".into()))?,
+            );
+            machine
+                .apply_managed_window(
+                    managed_window.as_ref().expect("managed window checked"),
+                    &bytes,
+                )
+                .map_err(|_| Error::AuthFailed("Managed runtime deadline fenced".into()))?;
+        }
         machine.report_connected();
     }
 
@@ -1078,6 +1171,35 @@ async fn connect_and_serve(
         "capabilities": capabilities,
     });
     let _ = send_ws_message(&tx, caps_msg.to_string()).await;
+
+    let usage_task = machine
+        .as_ref()
+        .filter(|_| config.managed_runtime.is_some())
+        .map(|machine| {
+            let machine = machine.clone();
+            let sender = tx.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    let machine = machine.clone();
+                    let sample = tokio::task::spawn_blocking(move || machine.managed_usage()).await;
+                    if let Ok(Ok(sample)) = sample
+                        && let Ok(mut value) = serde_json::to_value(sample)
+                    {
+                        value["type"] = serde_json::json!("managed_machine_usage");
+                        if sender
+                            .try_send(NodeWsMessage::Text(value.to_string()))
+                            .is_err()
+                            && sender.is_closed()
+                        {
+                            break;
+                        }
+                    }
+                }
+            })
+        });
 
     // Shared state for the reader loop
     let metrics = Arc::new(NodeMetrics::new());
@@ -1180,6 +1302,24 @@ async fn connect_and_serve(
                     break false;
                 }
             }
+            Some("managed_runtime_window") => {
+                if let (Some(machine), Some(secret)) = (&machine, &signing_secret) {
+                    let accepted = serde_json::from_value::<
+                        nyxid_machine::managed::SignedRuntimeWindow,
+                    >(parsed["window"].clone())
+                    .ok()
+                    .is_some_and(|window| {
+                        let bytes = zeroize::Zeroizing::new(
+                            hex::decode(secret.as_str()).unwrap_or_default(),
+                        );
+                        machine.apply_managed_window(&window, &bytes).is_ok()
+                    });
+                    if !accepted {
+                        machine.shutdown().await;
+                        break false;
+                    }
+                }
+            }
             Some("machine_service_response") => {
                 if let Some(machine) = &machine {
                     machine
@@ -1197,7 +1337,7 @@ async fn connect_and_serve(
                         .await;
                 }
             }
-            Some("machine_request" | "machine_request_v2") => {
+            Some("machine_request" | "machine_request_v2" | "machine_request_v3") => {
                 if let (Some(machine), Some(secret)) = (machine.clone(), signing_secret.clone())
                     && let Ok(request) =
                         serde_json::from_value::<nyxid_machine::Request>(parsed.clone())
@@ -1209,6 +1349,9 @@ async fn connect_and_serve(
                         let mut parameters = request.parameters.clone();
                         parameters["_signed_authority"] = serde_json::to_value(&request.authority)
                             .unwrap_or(serde_json::Value::Null);
+                        parameters["_signed_external_authority"] =
+                            serde_json::to_value(&request.external_authority)
+                                .unwrap_or(serde_json::Value::Null);
                         let revision = machine.control_revision(operation, &parameters).await;
                         let signing_bytes = zeroize::Zeroizing::new(
                             hex::decode(secret.as_str()).unwrap_or_default(),
@@ -1554,6 +1697,9 @@ async fn connect_and_serve(
     proxy_uploads.disconnect().await;
     if let Some(machine) = &machine {
         machine.disconnect().await;
+    }
+    if let Some(task) = usage_task {
+        task.abort();
     }
     writer_task.abort();
     Ok(Some(served_for))
@@ -3961,7 +4107,9 @@ async fn handle_ws_proxy_open(
         .await;
         return;
     }
-    let raw_credential = cred.raw_credential().map(str::to_string);
+    let raw_credential = cred
+        .raw_credential()
+        .map(|raw| zeroize::Zeroizing::new(raw.to_owned()));
 
     // Resolve effective base URL.
     let effective_base_url = if base_url.is_empty() {
@@ -4025,40 +4173,28 @@ async fn handle_ws_proxy_open(
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut ws_request = match url.into_client_request() {
         Ok(r) => r,
-        Err(e) => {
-            let _ = send_ws_proxy_error(
-                &tx,
-                &session_id,
-                &format!("Failed to build WS request: {e}"),
-            )
-            .await;
+        Err(_) => {
+            let _ = send_ws_proxy_error(&tx, &session_id, "Downstream WS request invalid").await;
             return;
         }
     };
 
-    // Forward headers from the proxy message.
-    if let Some(headers) = parsed["headers"].as_object() {
-        for (name, value) in headers {
-            // Values are already wire-safe (percent-encoded) per identity_service::sanitize_header_value.
-            if let Some(v) = value.as_str()
-                && let (Ok(hn), Ok(hv)) = (
-                    reqwest::header::HeaderName::from_bytes(name.as_bytes()),
-                    reqwest::header::HeaderValue::from_str(v),
-                )
-            {
-                ws_request.headers_mut().insert(hn, hv);
-            }
-        }
-    }
-
-    // Inject header credential.
-    if let Some((hdr_name, hdr_value)) = cred.header()
-        && let (Ok(hn), Ok(hv)) = (
-            reqwest::header::HeaderName::from_bytes(hdr_name.as_bytes()),
-            reqwest::header::HeaderValue::from_str(hdr_value),
-        )
+    // A configured authentication/default header may never disappear while
+    // connecting. Return one sanitized protocol error before opening a socket.
+    if install_ws_proxy_headers(
+        ws_request.headers_mut(),
+        parsed.get("headers"),
+        cred.header(),
+    )
+    .is_err()
     {
-        ws_request.headers_mut().insert(hn, hv);
+        let _ = send_ws_proxy_error(
+            &tx,
+            &session_id,
+            "Invalid downstream WS header configuration",
+        )
+        .await;
+        return;
     }
 
     // Connect to downstream WS with timeout and message size limits
@@ -4098,13 +4234,8 @@ async fn handle_ws_proxy_open(
                 .map(str::to_string);
             (ws, selected_protocol)
         }
-        Ok(Err(e)) => {
-            let _ = send_ws_proxy_error(
-                &tx,
-                &session_id,
-                &format!("Downstream WS connection failed: {e}"),
-            )
-            .await;
+        Ok(Err(_)) => {
+            let _ = send_ws_proxy_error(&tx, &session_id, "Downstream WS connection failed").await;
             return;
         }
         Err(_) => {
@@ -4175,7 +4306,7 @@ async fn run_ws_proxy_session(
     tx: mpsc::Sender<NodeWsMessage>,
     active_ws_proxies: ActiveWsProxyMap,
     ws_frame_injections: Vec<WsFrameInjection>,
-    raw_credential: Option<String>,
+    raw_credential: Option<zeroize::Zeroizing<String>>,
 ) {
     run_ws_proxy_session_with_limits(
         session_id,
@@ -4255,7 +4386,7 @@ async fn run_ws_proxy_session_with_limits<S>(
     tx: mpsc::Sender<NodeWsMessage>,
     active_ws_proxies: ActiveWsProxyMap,
     ws_frame_injections: Vec<WsFrameInjection>,
-    raw_credential: Option<String>,
+    raw_credential: Option<zeroize::Zeroizing<String>>,
     max_duration_limit: Duration,
     idle_timeout_limit: Duration,
 ) where
@@ -4400,16 +4531,16 @@ async fn run_ws_proxy_session_with_limits<S>(
                         // Handled at protocol level by tungstenite
                     }
                     Some(Ok(Message::Frame(_))) => {}
-                    Some(Err(e)) => {
+                    Some(Err(_)) => {
                         tracing::debug!(
                             session_id = %session_id,
-                            error = %e,
+                            code = "downstream_ws_failed",
                             "Downstream WS error in node proxy"
                         );
                         let json = serde_json::json!({
                             "type": "ws_proxy_closed",
                             "session_id": session_id,
-                            "reason": format!("downstream error: {e}"),
+                            "reason": "Downstream WS connection failed",
                         });
                         let _ = send_ws_message(&tx, json.to_string()).await;
                         break;
@@ -4615,6 +4746,30 @@ async fn drain_active_ws_proxies(active_ws_proxies: &ActiveWsProxyMap) {
     }
 }
 
+/// Build the exact WS transport headers without dropping a malformed configured
+/// value. Partial construction cannot escape: the caller stops before connect.
+fn install_ws_proxy_headers(
+    target: &mut reqwest::header::HeaderMap,
+    forwarded: Option<&serde_json::Value>,
+    credential: Option<(&str, &str)>,
+) -> std::result::Result<(), ()> {
+    if let Some(forwarded) = forwarded {
+        let forwarded = forwarded.as_object().ok_or(())?;
+        for (name, value) in forwarded {
+            let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| ())?;
+            let value = proxy_executor::sensitive_header_value(value.as_str().ok_or(())?)
+                .map_err(|_| ())?;
+            target.insert(name, value);
+        }
+    }
+    if let Some((name, value)) = credential {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| ())?;
+        let value = proxy_executor::sensitive_header_value(value).map_err(|_| ())?;
+        target.insert(name, value);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4705,6 +4860,82 @@ mod tests {
 
     fn rci_test_config(server_url: String) -> NodeConfig {
         NodeConfig::new(server_url, "node-1".to_string(), "file".to_string())
+    }
+
+    #[tokio::test]
+    async fn managed_handshake_refuses_missing_or_stale_fence_before_runtime_start() {
+        for stale in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let binding = nyxid_machine::managed::Binding {
+                node_id: uuid::Uuid::new_v4().to_string(),
+                sandbox_uid: uuid::Uuid::new_v4().to_string(),
+                pod_uid: uuid::Uuid::new_v4().to_string(),
+                runtime_generation: 1,
+                credential_epoch: 1,
+                writer_fence: uuid::Uuid::new_v4().to_string(),
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                delivery_id: uuid::Uuid::new_v4().to_string(),
+            };
+            let mut config = NodeConfig::new(
+                format!("ws://{}/api/v1/nodes/ws", listener.local_addr().unwrap()),
+                binding.node_id.clone(),
+                "file".into(),
+            );
+            config.managed_runtime = Some(binding.clone());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let auth = socket.next().await.unwrap().unwrap();
+                let auth: serde_json::Value =
+                    serde_json::from_str(auth.to_text().unwrap()).unwrap();
+                assert_eq!(
+                    auth["managed_runtime"],
+                    serde_json::to_value(&binding).unwrap()
+                );
+                let mut response = serde_json::json!({"type":"auth_ok"});
+                if stale {
+                    let mut old = binding;
+                    old.credential_epoch += 1;
+                    response["managed_runtime"] = serde_json::to_value(old).unwrap();
+                }
+                socket
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .unwrap();
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+            let (sender, credentials) =
+                SharedCredentials::new(CredentialStore::from_config(&config, &encryption).unwrap());
+            let (_shutdown, receiver) = watch::channel(false);
+            let mut machine = None;
+            let result = tokio::time::timeout(
+                Duration::from_secs(3),
+                connect_and_serve(
+                    &config,
+                    &dir.path().join("config.toml"),
+                    dir.path(),
+                    "file",
+                    "fixture-auth",
+                    Some(shared_signing_secret(&"a".repeat(64))),
+                    &credentials,
+                    &Arc::new(sender),
+                    Arc::new(AtomicUsize::new(0)),
+                    receiver,
+                    &mut machine,
+                    Arc::new(super::super::proxy_upload::Uploads::default()),
+                    replay_guard(),
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(result, Err(Error::AuthFailed(_))));
+            assert!(
+                machine.is_none(),
+                "unacknowledged binding must not construct a runtime"
+            );
+            server.await.unwrap();
+        }
     }
 
     fn rci_metadata(pending_id: &str) -> rci_crypto::PendingCredentialCryptoMetadata {
@@ -4827,6 +5058,62 @@ mod tests {
         assert!(active_ws_proxies.lock().await.is_empty());
     }
 
+    #[tokio::test]
+    async fn malformed_ws_auth_and_defaults_never_open_downstream_socket() {
+        for (credential_name, credential_value, forwarded) in [
+            ("x-auth", "credential\r\nsecret", serde_json::json!({})),
+            ("x-bad\rname", "credential-secret", serde_json::json!({})),
+            (
+                "x-auth",
+                "credential-secret",
+                serde_json::json!({"x-custom":"default\r\nsecret"}),
+            ),
+            (
+                "x-auth",
+                "credential-secret",
+                serde_json::json!({"x-bad\n":"default-secret"}),
+            ),
+            (
+                "x-auth",
+                "credential-secret",
+                serde_json::json!({"x-custom":123}),
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+            let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".to_owned());
+            config.credentials.insert(
+                "custom".to_owned(),
+                CredentialConfig::new_header(
+                    credential_name.to_owned(),
+                    Some(encryption.encrypt(credential_value).unwrap()),
+                    Some(format!("ws://{addr}")),
+                ),
+            );
+            let credentials = CredentialStore::from_config(&config, &encryption).unwrap();
+            let active: ActiveWsProxyMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+            let (tx, mut rx) = mpsc::channel(4);
+            handle_ws_proxy_open(&serde_json::json!({"session_id":"invalid-headers", "service_slug":"custom", "base_url":format!("ws://{addr}"),"path":"/socket","headers":forwarded}), &credentials, tx, active.clone(), None, replay_guard()).await;
+            let NodeWsMessage::Text(message) = rx.recv().await.unwrap() else {
+                panic!("expected bounded protocol error");
+            };
+            let response: serde_json::Value = serde_json::from_str(&message).unwrap();
+            assert_eq!(response["type"], "ws_proxy_error");
+            assert_eq!(
+                response["error"],
+                "Invalid downstream WS header configuration"
+            );
+            assert!(!message.contains("secret"));
+            assert!(active.lock().await.is_empty());
+            assert_eq!(
+                listener.into_std().unwrap().accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+    }
+
     async fn duplex_websocket_pair() -> (
         WebSocketStream<tokio::io::DuplexStream>,
         WebSocketStream<tokio::io::DuplexStream>,
@@ -4839,7 +5126,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::result_large_err)]
-    async fn node_websocket_injects_elevenlabs_api_key_on_upgrade() {
+    async fn node_websocket_valid_headers_reach_handshake_and_establish_session() {
         use tokio_tungstenite::tungstenite::handshake::server::{
             Request as WsRequest, Response as WsResponse,
         };
@@ -4849,22 +5136,30 @@ mod tests {
             .expect("bind downstream WebSocket");
         let addr = listener.local_addr().expect("downstream address");
         let (header_tx, header_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let server_task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept downstream");
             let socket = tokio_tungstenite::accept_hdr_async(
                 stream,
                 move |request: &WsRequest, response: WsResponse| {
-                    let api_key = request
-                        .headers()
-                        .get("xi-api-key")
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_string);
-                    header_tx.send(api_key).expect("send captured API key");
+                    assert_eq!(
+                        request.uri().path(),
+                        "/v1/text-to-speech/voice-1/stream-input"
+                    );
+                    let values =
+                        ["xi-api-key", "x-forwarded-context", "x-unfamiliar-default"].map(|name| {
+                            request
+                                .headers()
+                                .get(name)
+                                .map(|value| value.as_bytes().to_vec())
+                        });
+                    header_tx.send(values).expect("send captured headers");
                     Ok(response)
                 },
             )
             .await
             .expect("complete downstream handshake");
+            release_rx.await.expect("release downstream socket");
             drop(socket);
         });
 
@@ -4894,7 +5189,11 @@ mod tests {
                 "service_slug": "api-elevenlabs",
                 "base_url": format!("ws://{addr}"),
                 "path": "/v1/text-to-speech/voice-1/stream-input",
-                "headers": {},
+                "headers": {
+                    "x-forwarded-context": "forwarded-wire-value",
+                    "x-unfamiliar-default": "default-wire-secret",
+                    "xi-api-key": "forwarded-auth-must-be-overridden"
+                },
             }),
             &credentials,
             tx.clone(),
@@ -4904,9 +5203,17 @@ mod tests {
         )
         .await;
 
+        let captured = tokio::time::timeout(Duration::from_secs(5), header_rx)
+            .await
+            .expect("handshake completed")
+            .expect("captured headers");
         assert_eq!(
-            header_rx.await.expect("captured API key"),
-            Some("elevenlabs-node-test-key".to_string())
+            captured,
+            [
+                Some(b"elevenlabs-node-test-key".to_vec()),
+                Some(b"forwarded-wire-value".to_vec()),
+                Some(b"default-wire-secret".to_vec()),
+            ]
         );
         let opened: serde_json::Value = serde_json::from_str(&unwrap_text(
             rx.recv().await.expect("ws_proxy_opened acknowledgement"),
@@ -4914,6 +5221,13 @@ mod tests {
         .expect("valid acknowledgement");
         assert_eq!(opened["type"], "ws_proxy_opened");
         assert_eq!(opened["session_id"], "elevenlabs-session");
+
+        assert!(
+            active_ws_proxies
+                .lock()
+                .await
+                .contains_key("elevenlabs-session")
+        );
 
         handle_ws_proxy_close(
             &serde_json::json!({
@@ -4925,7 +5239,13 @@ mod tests {
             &active_ws_proxies,
         )
         .await;
-        server_task.await.expect("downstream server task");
+        release_tx.send(()).expect("release established session");
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .expect("downstream task terminates")
+            .expect("downstream server task");
+        drain_active_ws_proxies(&active_ws_proxies).await;
+        assert!(active_ws_proxies.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -5072,6 +5392,7 @@ mod tests {
             let mut opening = Request {
                 version: 1,
                 authority: None,
+                external_authority: None,
                 request_id: id.to_string(),
                 node_id: config.node.id.clone(),
                 operation: Operation::ProxyUpload,
@@ -6265,5 +6586,22 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+}
+
+#[cfg(test)]
+mod ws_proxy_header_tests {
+    #[test]
+    fn valid_ws_headers_preserve_exact_wire_bytes_and_sensitive_metadata() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        super::install_ws_proxy_headers(
+            &mut headers,
+            Some(&serde_json::json!({"x-custom":"exact-default"})),
+            Some(("x-auth", "exact-credential")),
+        )
+        .unwrap();
+        assert_eq!(headers["x-custom"].as_bytes(), b"exact-default");
+        assert_eq!(headers["x-auth"].as_bytes(), b"exact-credential");
+        assert!(headers.values().all(|value| value.is_sensitive()));
     }
 }

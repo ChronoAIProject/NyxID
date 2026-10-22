@@ -36,10 +36,12 @@ impl Fixture {
         let (mut row, key) = channel(&state, "gateway").await;
         row.platform = "lark".into();
         row.owner_sender_ids = vec!["human".into()];
-        row.route_id = Some(Uuid::new_v4().to_string());
         row.gateway_channel_id = Some("cmaeg1.ch.test".into());
         row.gateway_bot_id = Some("ou_bot".into());
         row.gateway_version = Some(1);
+        row.gateway_bot_mentions.supported = true;
+        row.gateway_bot_mentions.enabled = true;
+        row.gateway_bot_mentions.checked_at = Some(Utc::now());
         row.gateway_threads.supported = true;
         row.gateway_threads.version = Some(1);
         row.gateway_threads.enabled = true;
@@ -79,7 +81,12 @@ impl Fixture {
             )
             .await
             .unwrap();
-        state.db.collection::<bson::Document>("channel_conversations").insert_one(doc! {"_id":&row.route_id,"user_id":OWNER,"channel_bot_id":&row.channel_bot_id,"platform":"lark","platform_conversation_id":"*","platform_conversation_type":"group","agent_api_key_id":&row.route_api_key_id,"default_agent":true,"is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+        // Reuse channel()'s real route so native validation sees one active
+        // default whose identity matches the source, rather than two defaults.
+        assert_eq!(state.db.collection::<bson::Document>("channel_conversations").replace_one(
+            doc! {"_id": &row.route_id},
+            doc! {"_id":&row.route_id,"user_id":OWNER,"channel_bot_id":&row.channel_bot_id,"platform":"lark","platform_conversation_id":"*","platform_conversation_type":"group","agent_api_key_id":&row.route_api_key_id,"default_agent":true,"is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}
+        ).await.unwrap().matched_count, 1);
         state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {"_id":"follow-flag","org_user_id":bson::Bson::Null,"flag_key":crate::services::feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,"target_kind":"user","target_key":OWNER,"enabled":true,"updated_by":"admin","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
         let gateway = MockServer::start().await;
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
@@ -160,6 +167,8 @@ impl Fixture {
             ..Default::default()
         };
         let inbound = InboundMessage {
+            embedded_attachments: Vec::new(),
+            embedded_attachments_omitted: 0,
             platform_message_id: native,
             conversation_id: "oc_chat".into(),
             conversation_type: "group".into(),
@@ -561,7 +570,7 @@ async fn gateway_negotiation_requires_advertisement_and_echo_and_backs_off_legac
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
             doc! {"_id":&f.row.id},
-            doc! {"$unset":{"gateway_threads":""}},
+            doc! {"$unset":{"gateway_threads":""}, "$set":{"gateway_bot_mentions.supported":false,"gateway_bot_mentions.enabled":false,"gateway_bot_mentions.checked_at":bson::DateTime::now()}},
         )
         .await
         .unwrap();
@@ -575,17 +584,30 @@ async fn gateway_negotiation_requires_advertisement_and_echo_and_backs_off_legac
         .unwrap();
     let legacy = load_channel(&f.state, OWNER, &f.row.id).await.unwrap();
     assert!(!threads::gateway::negotiated(&legacy));
+    assert!(legacy.gateway_no_progress);
     chats::sync_gateway_groups(&f.state, &legacy, true)
         .await
         .unwrap();
-    assert_eq!(f.gateway.received_requests().await.unwrap().len(), 1);
+    let requests = f.gateway.received_requests().await.unwrap();
+    // Unsupported thread capability is probed once and backs off, while an
+    // independent, echoed policy update reconciles quiet delivery exactly once.
+    assert_eq!(requests.iter().filter(|r| r.method == "GET").count(), 1);
+    let updates = requests
+        .iter()
+        .filter(|r| r.method == "PUT")
+        .collect::<Vec<_>>();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(
+        updates[0].body_json::<Value>().unwrap()["reply"]["ack_after_ms"],
+        0
+    );
     f.gateway.reset().await;
     f.state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
             doc! {"_id":&f.row.id},
-            doc! {"$unset":{"gateway_threads.checked_at":""}},
+            doc! {"$unset":{"gateway_threads.checked_at":""}, "$set":{"gateway_no_progress":false}},
         )
         .await
         .unwrap();
@@ -606,9 +628,9 @@ async fn gateway_negotiation_requires_advertisement_and_echo_and_backs_off_legac
             .unwrap(),
         Some("gateway_thread_contract_unavailable")
     );
-    assert!(!threads::gateway::negotiated(
-        &load_channel(&f.state, OWNER, &f.row.id).await.unwrap()
-    ));
+    let unconfirmed = load_channel(&f.state, OWNER, &f.row.id).await.unwrap();
+    assert!(!threads::gateway::negotiated(&unconfirmed));
+    assert!(!unconfirmed.gateway_no_progress);
     f.gateway.reset().await;
     Mock::given(method("PUT"))
         .respond_with(|r: &wiremock::Request| {
@@ -623,9 +645,9 @@ async fn gateway_negotiation_requires_advertisement_and_echo_and_backs_off_legac
             .unwrap()
             .is_none()
     );
-    assert!(threads::gateway::negotiated(
-        &load_channel(&f.state, OWNER, &f.row.id).await.unwrap()
-    ));
+    let confirmed = load_channel(&f.state, OWNER, &f.row.id).await.unwrap();
+    assert!(threads::gateway::negotiated(&confirmed));
+    assert!(confirmed.gateway_no_progress);
 }
 
 #[tokio::test]
@@ -659,6 +681,7 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
         let mut attachments = Vec::new();
         for _ in 0..2 {
             let attachment = AssistantAttachment {
+                secret_context_versions: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 origin: "tool".into(),
                 user_id: OWNER.into(),
@@ -686,6 +709,7 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
                 pages: None,
                 chat_delivery: None,
                 image_input: None,
+                image_inspection: None,
             });
         }
         Mock::given(path("/open-apis/im/v1/images"))
@@ -770,5 +794,484 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
                 .all(|i| i.state == crate::models::nyxbot_image_delivery::ImageDeliveryState::Sent)
         );
         f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn gateway_complete_thread_reply_uses_one_token_and_reconstructs_every_part() {
+    use crate::handlers::channel_relay::{
+        AsyncReplyBody, AsyncReplyRequest, async_reply_with_test_adapter,
+    };
+    let f = Box::pin(Fixture::new("nyx_gw_complete_reply")).await;
+    let (body, id) = f.input("start", ThreadAddress::Mention, false, true).await;
+    assert!(f.send(&body, &id).await.contains("Here is your answer"));
+    let counter = std::sync::atomic::AtomicUsize::new(1);
+    Mock::given(method("POST"))
+        .and(path("/open-apis/im/v1/messages/om_root/reply"))
+        .and(body_partial_json(json!({"reply_in_thread":true})))
+        .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200).set_body_json(json!({
+            "code":0,"data":{"message_id":format!("om_part_{}", counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst))}
+        }))).mount(&f.platform).await;
+    let token = crate::crypto::jwt::generate_relay_reply_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &f.row.route_api_key_id,
+        f.row.route_id.as_deref().unwrap(),
+        &id,
+        "lark",
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let adapter = thread_follow::TEST_ADAPTERS
+        .lock()
+        .unwrap()
+        .get(&f.row.channel_bot_id)
+        .cloned()
+        .unwrap();
+    let text = format!(
+        "{}\n\nhttps://example.com/complete-link",
+        "界🦉\\*\n\n".repeat(8000)
+    );
+    let request = || AsyncReplyRequest {
+        message_id: id.clone(),
+        thread_reply: true,
+        reply: AsyncReplyBody {
+            text: Some(text.clone()),
+            metadata: None,
+            attachments: vec![],
+        },
+    };
+    let result = Box::pin(async_reply_with_test_adapter(
+        &f.state,
+        &headers,
+        request(),
+        adapter.as_ref(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        result
+            .0
+            .platform_message_id
+            .unwrap()
+            .starts_with("om_part_")
+    );
+    let requests: Vec<_> = f
+        .platform
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path() == "/open-apis/im/v1/messages/om_root/reply")
+        .collect();
+    assert!(requests.len() > 1);
+    let mut reconstructed = String::new();
+    for request in &requests {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["reply_in_thread"], true);
+        let content = body["content"].as_str().unwrap();
+        assert!(content.len() <= 30 * 1024);
+        let content: Value = serde_json::from_str(content).unwrap();
+        reconstructed.push_str(content["text"].as_str().unwrap());
+    }
+    assert_eq!(reconstructed, text);
+    assert!(
+        Box::pin(async_reply_with_test_adapter(
+            &f.state,
+            &headers,
+            request(),
+            adapter.as_ref()
+        ))
+        .await
+        .is_err()
+    );
+    let record = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::channel_reply_delivery::COLLECTION_NAME)
+        .find_one(doc! {"inbound_message_id": &id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(record.get_bool("complete").unwrap());
+    assert_eq!(record.get_array("parts").unwrap().len(), requests.len());
+}
+
+#[tokio::test]
+async fn external_bot_mention_in_followed_thread_is_a_guest_and_spends_the_parent_budget() {
+    let f = Box::pin(Fixture::new("external_bot_follow")).await;
+    let (human, id) = f.input("start", ThreadAddress::Mention, false, true).await;
+    assert!(f.send(&human, &id).await.contains("Here is your answer"));
+    let child = f.children().await.remove(0);
+    settle(&f.state, child.conversation_id.as_deref().unwrap()).await;
+    // A delivered app actor, not a sender who has linked an OAuth account.
+    let (mut body, id) = f
+        .input("exact mention", ThreadAddress::Mention, false, true)
+        .await;
+    let activity = &mut body["event_context"]["activity"];
+    activity["actor"]["kind"] = json!("bot");
+    activity["actor"]["id"] = json!("ou_foreign_bot");
+    activity["thread"]["sender_kind"] = json!("bot");
+    f.state.db.collection::<ChannelMessage>(MESSAGES).update_one(doc! {"_id": &id},
+        doc! {"$set":{"sender_platform_id":"ou_foreign_bot","thread_context":bson::to_bson(&activity["thread"]).unwrap()}}).await.unwrap();
+    let text = f.send(&body, &id).await;
+    assert!(text.contains("Here is your answer"), "{text}");
+    assert!(text.contains("\"thread_reply\":true"), "{text}");
+    let children = f.children().await;
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].id, child.id);
+    assert_eq!(
+        children[0].follow.follow_expires_at, child.follow.follow_expires_at,
+        "a bot cannot renew follow"
+    );
+    let conversation = crate::services::assistant_nyxagent::get(
+        &f.state.db,
+        OWNER,
+        children[0].conversation_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(conversation.guest_turn);
+    assert!(
+        conversation
+            .channel
+            .as_ref()
+            .unwrap()
+            .thread
+            .as_ref()
+            .unwrap()
+            .guest
+    );
+    assert_eq!(f.calls.lock().await.len(), 2);
+}
+
+#[tokio::test]
+async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_authority() {
+    use crate::{
+        models::channel_message::StoredAttachment,
+        services::channel_media_authority::{self as authority, MediaRequest},
+    };
+    // Construct large fixture and handler futures outside the test's polling
+    // frame; inline Box::pin still reserves construction temporaries on its stack.
+    fn fixture() -> futures::future::BoxFuture<'static, Fixture> {
+        Box::pin(Fixture::new("media_follow_barrier"))
+    }
+    fn gateway_response<'a>(
+        f: &'a Fixture,
+        body: &'a Value,
+        id: &'a str,
+    ) -> futures::future::BoxFuture<'a, Response> {
+        Box::pin(respond(&f.state, &f.key, body, id))
+    }
+    fn direct_response(
+        f: &Fixture,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> futures::future::BoxFuture<'static, Response> {
+        Box::pin(relay_callback(
+            State(f.state.clone()),
+            Path(f.row.id.clone()),
+            headers,
+            body,
+        ))
+    }
+    for gateway in [false, true] {
+        let mut f = fixture().await;
+        f.state
+            .db
+            .collection::<bson::Document>("feature_flag_overrides")
+            .insert_one(doc! {
+                "_id":Uuid::new_v4().to_string(),"org_user_id":bson::Bson::Null,
+                "flag_key":crate::services::feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+                "target_kind":"user","target_key":OWNER,"enabled":true,"updated_by":"test",
+                "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+            })
+            .await
+            .unwrap();
+        if !gateway {
+            f.row.transport = "direct".into();
+            f.state
+                .db
+                .collection::<NyxbotChannel>(CHANNELS)
+                .replace_one(doc! {"_id":&f.row.id}, &f.row)
+                .await
+                .unwrap();
+        }
+        Mock::given(path("/open-apis/im/v1/messages/om_root/reply"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":0,"data":{"message_id":"om_reply"}})),
+            )
+            .mount(&f.platform)
+            .await;
+        let (mut a, id_a) = f
+            .input("receipt with caption", ThreadAddress::Mention, false, true)
+            .await;
+        let (mut b, id_b) = f
+            .input("receipt with caption", ThreadAddress::Mention, false, true)
+            .await;
+        let provider = super::media_tests::ingestion_provider(
+            &f.state,
+            &f.row,
+            super::media_tests::native_png(),
+        )
+        .await;
+        for (body, id) in [(&mut a, &id_a), (&mut b, &id_b)] {
+            body["event_context"]["activity"]["kind"]["attachments"] =
+                json!([{"kind":"image","source":{"type":"nyxid_relay","index":0}}]);
+            body["event_context"]["activity"]["thread"]["message_id"] = json!("om_native_receipt");
+            let item = StoredAttachment {
+                content_type: "image".into(),
+                provider_ref: format!(
+                    "{}/open-apis/im/v1/messages/om_native_receipt/resources/img_receipt?type=image",
+                    provider.uri()
+                ),
+                platform_message_id: Some("om_native_receipt".into()),
+                image_key: Some("img_receipt".into()),
+                file_key: None,
+                filename: None,
+                mime_type: None,
+                size_bytes: Some(42),
+            };
+            let facts: ChannelThreadFacts =
+                serde_json::from_value(body["event_context"]["activity"]["thread"].clone())
+                    .unwrap();
+            f.state.db.collection::<ChannelMessage>(MESSAGES).update_one(doc!{"_id":id},doc!{"$set":{
+                "platform_message_id":"om_native_receipt","content_type":"image","attachments":[bson::to_bson(&item).unwrap()],"thread_context":bson::to_bson(&facts).unwrap()
+            }}).await.unwrap();
+        }
+        if gateway {
+            let (a, b) = tokio::join!(
+                gateway_response(&f, &a, &id_a),
+                gateway_response(&f, &b, &id_b)
+            );
+            assert_eq!(a.status(), StatusCode::OK);
+            assert_eq!(b.status(), StatusCode::OK);
+            let _ = tokio::join!(body_text(a), body_text(b));
+        } else {
+            let signed = |id: &str| {
+                let payload = json!({"message_id":id,"correlation_id":format!("jti-{id}"),"platform":"lark",
+                    "conversation":{"platform_id":"oc_chat","type":"group"},"thread_id":"omt_thread",
+                    "sender":{"platform_id":"human"},"content":{"type":"image","text":"receipt with caption"},
+                    "raw_platform_data":{"event":{"sender":{"sender_type":"user","sender_id":{"open_id":"human"}}}}});
+                let bytes = serde_json::to_vec(&payload).unwrap();
+                let token = crate::crypto::jwt::generate_relay_callback_token(
+                    &f.state.jwt_keys,
+                    &f.state.config,
+                    &format!("jti-{id}"),
+                    &f.row.route_api_key_id,
+                    id,
+                    "lark",
+                    &sha256_hex(&bytes),
+                )
+                .unwrap();
+                let mut headers = HeaderMap::new();
+                headers.insert("x-nyxid-callback-token", token.parse().unwrap());
+                (headers, Bytes::from(bytes))
+            };
+            let (ha, ba) = signed(&id_a);
+            let (hb, bb) = signed(&id_b);
+            let (a, b) = tokio::join!(direct_response(&f, ha, ba), direct_response(&f, hb, bb));
+            assert_eq!(a.status(), StatusCode::ACCEPTED);
+            assert_eq!(b.status(), StatusCode::ACCEPTED);
+            wait_for_calls(&f.calls, 1).await;
+        }
+        assert_eq!(f.calls.lock().await.len(), 1, "gateway={gateway}");
+        assert!(f.calls.lock().await[0].to_string().contains("input_image"));
+        let events: Vec<NyxbotEvent> = f
+            .state
+            .db
+            .collection(EVENTS)
+            .find(doc! {"channel_id":&f.row.id})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(event.media.is_some());
+        assert!(event.turn_id.is_some());
+        let loser = if event.event_id == id_a { &id_b } else { &id_a };
+        assert_eq!(
+            f.state
+                .db
+                .collection::<ChannelMessage>(MESSAGES)
+                .find_one(doc! {"_id":loser})
+                .await
+                .unwrap()
+                .unwrap()
+                .duplicate_of_media_key
+                .as_deref(),
+            Some(event.media.as_ref().unwrap().key.as_str())
+        );
+        let conversation = engine::get(
+            &f.state.db,
+            OWNER,
+            event.conversation_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        let origin = conversation.channel.unwrap();
+        let request = MediaRequest {
+            channel: load_channel(&f.state, OWNER, &f.row.id).await.unwrap(),
+            source_message_id: event.event_id.clone(),
+            chat_id: "oc_chat".into(),
+            sender_id: "human".into(),
+            native_thread_id: Some("omt_thread".into()),
+            agent_id: Some(origin.thread.as_ref().unwrap().agent_id.clone()),
+            origin: Some(origin.clone()),
+            conversation_id: Some(conversation.id),
+        };
+        authority::resolve(&f.state.db, &request).await.unwrap();
+        for case in ["generation", "agent", "sender", "channel_generation"] {
+            let mut bad = request.clone();
+            let binding = bad.origin.as_mut().unwrap().thread.as_mut().unwrap();
+            match case {
+                "generation" => binding.generation += 1,
+                "agent" => binding.agent_id = "changed".into(),
+                "sender" => binding.sender_id = "stranger".into(),
+                "channel_generation" => binding.channel_generation += 1,
+                _ => unreachable!(),
+            }
+            assert!(
+                authority::resolve(&f.state.db, &bad).await.is_err(),
+                "{case}: authority refusal"
+            );
+            let result = async {
+                let allowed = authority::resolve(&f.state.db, &bad).await?;
+                let adapter =
+                    crate::services::channel_adapters::lark::LarkFamilyAdapter::media_test_adapter(
+                        &f.platform.uri(),
+                        "lark",
+                    );
+                crate::services::channel_media_fetch::fetch(
+                    &f.state.db,
+                    &f.state.encryption_keys,
+                    &f.state.http_client,
+                    &allowed.bot,
+                    &allowed.source.attachments[0],
+                    &adapter,
+                    1024,
+                )
+                .await
+                .map(|_| ())
+            }
+            .await;
+            assert!(result.is_err(), "{case}");
+            assert!(
+                !f.platform
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.url.path().contains("/resources/")),
+                "{case}: zero downloads"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn channel_media_gateway_follow_post_text_flags_guest_and_unaddressed_first_photo() {
+    use crate::models::channel_message::StoredAttachment;
+    for media_on in [false, true] {
+        let f = Box::pin(Fixture::new("media_gateway_follow_posts")).await;
+        if media_on {
+            super::media_tests::enable_media(&f.state).await;
+        }
+        let provider = super::media_tests::ingestion_provider(
+            &f.state,
+            &f.row,
+            super::media_tests::native_png(),
+        )
+        .await;
+        for (n, text, addressed, guest) in [
+            (0, "", false, false),
+            (1, "Receipt\nDinner", true, false),
+            (2, "", false, true),
+        ] {
+            let (mut body, id) = f
+                .input(
+                    text,
+                    if addressed {
+                        ThreadAddress::Mention
+                    } else {
+                        ThreadAddress::NotAddressed
+                    },
+                    false,
+                    true,
+                )
+                .await;
+            let native = body["event_context"]["activity"]["thread"]["message_id"]
+                .as_str()
+                .unwrap();
+            let item = StoredAttachment {
+                content_type: "image".into(),
+                provider_ref: format!(
+                    "{}/open-apis/im/v1/messages/{native}/resources/img_receipt?type=image",
+                    provider.uri()
+                ),
+                platform_message_id: Some(native.into()),
+                image_key: Some("img_receipt".into()),
+                file_key: None,
+                filename: None,
+                mime_type: None,
+                size_bytes: None,
+            };
+            let sender = if guest { "guest" } else { "human" };
+            body["event_context"]["activity"]["actor"]["id"] = json!(sender);
+            body["event_context"]["activity"]["kind"]["attachments"] =
+                json!([{"kind":"image","variant":"embedded"}]);
+            // CMA's authenticated post flattener has removed the own-bot mention.
+            body["input"][0]["content"][0]["text"] = json!(if n == 1 {
+                "legacy post @Thread helper"
+            } else {
+                ""
+            });
+            f.state.db.collection::<ChannelMessage>(MESSAGES).update_one(doc! {"_id":&id}, doc! {"$set":{
+                "content_type":"unknown", "sender_platform_id":sender,"embedded_attachments":[bson::to_bson(&item).unwrap()]
+            }}).await.unwrap();
+            let before = provider
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.method == "GET")
+                .count();
+            let answer = f.send(&body, &id).await;
+            let calls = f.calls.lock().await;
+            if n == 0 || (guest && !media_on) {
+                assert!(!answer.contains("Here is your answer"));
+                assert_eq!(calls.len(), if n == 0 { 0 } else { 1 });
+            } else {
+                assert!(answer.contains("Here is your answer"), "{answer}");
+                let call = calls.last().unwrap();
+                let text = call["input"]
+                    .as_str()
+                    .unwrap_or_else(|| call["input"][0]["content"][0]["text"].as_str().unwrap());
+                if guest {
+                    assert!(text.contains(crate::services::assistant_channel_media::GUEST_NOTE));
+                    assert_eq!(
+                        provider
+                            .received_requests()
+                            .await
+                            .unwrap()
+                            .iter()
+                            .filter(|r| r.method == "GET")
+                            .count(),
+                        before
+                    );
+                } else if media_on {
+                    assert!(text.contains("Receipt\nDinner"));
+                    assert!(!text.contains("@Thread helper"));
+                    assert!(call.to_string().contains("input_image"));
+                } else {
+                    assert!(text.contains("legacy post @Thread helper"));
+                }
+            }
+            drop(calls);
+        }
     }
 }

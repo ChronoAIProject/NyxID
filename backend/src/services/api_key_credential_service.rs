@@ -3,6 +3,7 @@ use futures::TryStreamExt;
 use mongodb::{
     ClientSession, Database,
     bson::{self, doc},
+    options::ReturnDocument,
 };
 use rand::{RngCore, rngs::OsRng};
 use zeroize::Zeroizing;
@@ -13,26 +14,48 @@ use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::api_key_credential::{
     ApiKeyCredential, ApiKeyCredentialKind, COLLECTION_NAME, CredentialRevokedReason,
 };
-use crate::services::{audit_service, org_service};
+use crate::services::{
+    api_key_mutation_service as transactions, audit_service,
+    machine_external_source_service::{self as machine_sources, SourceInvalidation},
+    org_service,
+};
 
-pub fn credential_expiry(
+/// Resolve only a NEW child. Omission always gets a finite default, bounded
+/// by the selected parent's existing policy; it never changes that parent.
+pub fn resolve_new_credential_expiry(
     parent: Option<DateTime<Utc>>,
     requested: Option<DateTime<Utc>>,
-) -> AppResult<Option<DateTime<Utc>>> {
-    let expires = requested.or(parent);
-    if expires.is_some_and(|expiry| expiry <= Utc::now()) {
+    created_at: DateTime<Utc>,
+) -> AppResult<DateTime<Utc>> {
+    let default = created_at
+        + chrono::Duration::days(super::api_key_validation::DEFAULT_NEW_KEY_LIFETIME_DAYS);
+    let expires = requested.unwrap_or_else(|| parent.map_or(default, |value| value.min(default)));
+    validate_stored_credential_expiry(parent, Some(expires), created_at)?;
+    let expires = bson::DateTime::from_chrono(expires).to_chrono();
+    validate_stored_credential_expiry(parent, Some(expires), created_at)?;
+    Ok(expires)
+}
+
+/// Validation of stored policy has no issuance defaults. In particular a
+/// legacy None stays None during delivery/authentication.
+pub fn validate_stored_credential_expiry(
+    parent: Option<DateTime<Utc>>,
+    child: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    if child.is_some_and(|expiry| expiry <= now) {
         return Err(AppError::ValidationError(
             "credential_expires_at must be in the future".into(),
         ));
     }
-    if let (Some(parent), Some(child)) = (parent, expires)
+    if let (Some(parent), Some(child)) = (parent, child)
         && child > parent
     {
         return Err(AppError::ValidationError(
             "credential_expires_at cannot exceed the key expiry".into(),
         ));
     }
-    Ok(expires)
+    Ok(())
 }
 
 pub fn generate_secret() -> Zeroizing<String> {
@@ -51,13 +74,14 @@ pub async fn issue(
     id: &str,
     login_request_id: &str,
     label: &str,
-    expires_at: Option<DateTime<Utc>>,
+    expires_at: DateTime<Utc>,
     secret: &str,
     session: &mut ClientSession,
 ) -> AppResult<()> {
+    super::key_service::require_ordinary_purpose(parent.purpose)?;
     let secret_prefix = agent_key_display_prefix(secret)
         .ok_or_else(|| AppError::ValidationError("Invalid Agent Key credential prefix".into()))?;
-    let expires_at = credential_expiry(parent.expires_at, expires_at)?;
+    validate_stored_credential_expiry(parent.expires_at, Some(expires_at), Utc::now())?;
     let row = ApiKeyCredential {
         id: id.into(),
         api_key_id: parent.id.clone(),
@@ -70,7 +94,7 @@ pub async fn issue(
         is_active: false,
         revoked_at: None,
         revoked_reason: None,
-        expires_at,
+        expires_at: Some(expires_at),
         last_used_at: None,
         created_at: Utc::now(),
     };
@@ -82,17 +106,58 @@ pub async fn issue(
 }
 
 pub async fn revoke(db: &Database, id: &str, reason: CredentialRevokedReason) -> AppResult<()> {
+    let transaction_db = db.clone();
+    let id = id.to_owned();
+    let mut session = db.client().start_session().await?;
+    let row = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            transactions::transaction_result(
+                revoke_in_session(&transaction_db, &id, reason, session).await,
+            )
+        })
+        .await
+        .map_err(transactions::map_transaction_error)?;
+    if let Some(row) = row {
+        audit_revocations(db, &[row.credential], reason);
+    }
+    Ok(())
+}
+
+/// The source-row fence and exact child cancellation are already enqueued in
+/// the caller's transaction when this receipt is returned. Callers must commit
+/// both together. A child revocation never edits its parent or the parent grant.
+pub struct RevokedCredential {
+    pub credential: ApiKeyCredential,
+    // Retain the transaction receipt alongside the revoked credential.
+    pub _source_invalidation: SourceInvalidation,
+}
+
+pub async fn revoke_in_session(
+    db: &Database,
+    id: &str,
+    reason: CredentialRevokedReason,
+    session: &mut ClientSession,
+) -> AppResult<Option<RevokedCredential>> {
     let row = db
-        .collection::<ApiKeyCredential>(COLLECTION_NAME)
+        .collection::<bson::Document>(COLLECTION_NAME)
         .find_one_and_update(
             doc! { "_id": id, "revoked_at": bson::Bson::Null },
             revocation_update(reason)?,
         )
+        .return_document(ReturnDocument::After)
+        .session(&mut *session)
         .await?;
-    if let Some(row) = row {
-        audit_revocations(db, &[row], reason);
-    }
-    Ok(())
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let source_invalidation = machine_sources::child_revoked_in_session(db, &row, session).await?;
+    let credential = bson::from_document(row)
+        .map_err(|_| AppError::Internal("Invalid Agent Key credential source".into()))?;
+    Ok(Some(RevokedCredential {
+        credential,
+        _source_invalidation: source_invalidation,
+    }))
 }
 
 pub fn audit_revocations(
@@ -121,7 +186,7 @@ pub fn revocation_update(reason: CredentialRevokedReason) -> AppResult<bson::Doc
         "is_active": false,
         "revoked_at": bson::DateTime::from_chrono(Utc::now()),
         "revoked_reason": bson::to_bson(&reason).map_err(|e| AppError::Internal(e.to_string()))?,
-    } })
+    }, "$inc": {"machine_external_fence": 1_i64} })
 }
 
 pub async fn revoke_children(
@@ -130,25 +195,40 @@ pub async fn revoke_children(
     reason: CredentialRevokedReason,
     session: Option<&mut ClientSession>,
 ) -> AppResult<Vec<ApiKeyCredential>> {
+    if let Some(session) = session {
+        return revoke_children_in_session(db, key_id, reason, session).await;
+    }
+    let db = db.clone();
+    let key_id = key_id.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            transactions::transaction_result(
+                revoke_children_in_session(&db, &key_id, reason, session).await,
+            )
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+async fn revoke_children_in_session(
+    db: &Database,
+    key_id: &str,
+    reason: CredentialRevokedReason,
+    session: &mut ClientSession,
+) -> AppResult<Vec<ApiKeyCredential>> {
     let collection = db.collection::<ApiKeyCredential>(COLLECTION_NAME);
     let filter = doc! {"api_key_id": key_id, "revoked_at": bson::Bson::Null};
-    let mut session = session;
-    let rows = if let Some(session) = session.as_deref_mut() {
-        let mut cursor = collection
-            .find(filter.clone())
-            .session(&mut *session)
-            .await?;
-        cursor.stream(&mut *session).try_collect().await?
-    } else {
-        collection.find(filter.clone()).await?.try_collect().await?
-    };
-    let operation = collection.update_many(filter, revocation_update(reason)?);
-    if let Some(session) = session {
-        operation.session(session).await?;
-    } else {
-        operation.await?;
+    let mut cursor = collection.find(filter).session(&mut *session).await?;
+    let rows: Vec<ApiKeyCredential> = cursor.stream(&mut *session).try_collect().await?;
+    let mut revoked = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(result) = revoke_in_session(db, &row.id, reason, &mut *session).await? {
+            revoked.push(result.credential);
+        }
     }
-    Ok(rows)
+    Ok(revoked)
 }
 
 pub async fn managed_key(
@@ -159,7 +239,7 @@ pub async fn managed_key(
 ) -> AppResult<ApiKey> {
     let key = db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! {"_id": key_id})
+        .find_one(doc! {"_id": key_id, "purpose": {"$ne": "public_nyxbot"}})
         .await?
         .ok_or(AppError::AgentKeyCredentialNotFound)?;
     let access = org_service::resolve_owner_access(db, actor, &key.user_id).await?;

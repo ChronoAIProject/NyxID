@@ -15,6 +15,7 @@ pub(crate) const OPENID_CONFIGURATION_SCOPES_SUPPORTED: &[&str] = &[
     "roles",
     "groups",
     "offline_access",
+    "machine",
 ];
 pub(crate) const OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED: &[&str] = &[
     "openid",
@@ -23,6 +24,7 @@ pub(crate) const OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED: &[&str] = &[
     "roles",
     "groups",
     "offline_access",
+    "machine",
     "proxy",
 ];
 
@@ -126,7 +128,7 @@ pub async fn oauth_protected_resource(State(state): State<AppState>) -> Json<ser
         "authorization_servers": [base],
         // Aligned with DEFAULT_MCP_ALLOWED_SCOPES (NyxID#1222/#1226): clients
         // use this list to decide which scopes to request.
-        "scopes_supported": ["openid", "profile", "email", "roles", "groups", "proxy", "offline_access"],
+        "scopes_supported": ["openid", "profile", "email", "roles", "groups", "proxy", "machine", "offline_access"],
         "bearer_methods_supported": ["header"],
     }))
 }
@@ -137,7 +139,7 @@ pub async fn oauth_protected_resource(State(state): State<AppState>) -> Json<ser
 /// so relying parties can verify token signatures.
 pub async fn jwks(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "keys": [state.jwk_json]
+        "keys": state.jwt_keys.public_keys(&state.jwk_json)
     }))
 }
 
@@ -165,6 +167,68 @@ mod tests {
     };
     use crate::services::oauth_broker_service::{BROKER_BINDING_SCOPE, BROKER_SUBJECT_TOKEN_TYPE};
     use axum::extract::State;
+
+    #[tokio::test]
+    async fn jwks_http_handler_publishes_active_and_retained_spki_keys_then_retires() {
+        use tower::ServiceExt;
+        let (old, current) = crate::crypto::jwt::test_rotation_keys();
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.jwt_keys = current;
+        // A stale legacy snapshot must not replace the validated active JWK.
+        state.jwk_json = serde_json::json!({"kid":"stale-legacy-snapshot"});
+        async fn fetch(state: crate::AppState) -> serde_json::Value {
+            let response = axum::Router::new()
+                .route("/.well-known/jwks.json", axum::routing::get(super::jwks))
+                .with_state(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/.well-known/jwks.json")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 16_384)
+                .await
+                .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+        let overlap = fetch(state.clone()).await;
+        let keys = overlap["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 2);
+        for signer in [&old, &state.jwt_keys] {
+            let jwk = keys.iter().find(|key| key["kid"] == signer.kid).unwrap();
+            assert_eq!(jwk["kty"], "RSA");
+            assert_eq!(jwk["alg"], "RS256");
+            assert!(jwk.get("d").is_none());
+            assert!(jwk["n"].as_str().unwrap().len() >= 512);
+            let token = crate::crypto::jwt::generate_access_token(
+                signer,
+                &state.config,
+                &uuid::Uuid::new_v4(),
+                "openid",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let decoding =
+                jsonwebtoken::DecodingKey::from_jwk(&serde_json::from_value(jwk.clone()).unwrap())
+                    .unwrap();
+            let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+            validation.set_issuer(&[&state.config.jwt_issuer]);
+            validation.set_audience(&[&state.config.base_url]);
+            jsonwebtoken::decode::<crate::crypto::jwt::Claims>(&token, &decoding, &validation)
+                .unwrap();
+        }
+        state.jwt_keys.retained.clear();
+        let retired = fetch(state.clone()).await;
+        assert_eq!(retired["keys"].as_array().unwrap().len(), 1);
+        assert_eq!(retired["keys"][0]["kid"], state.jwt_keys.kid);
+    }
 
     #[test]
     fn public_discovery_scopes_do_not_include_broker_binding_scope() {
@@ -364,6 +428,7 @@ mod tests {
                 "roles",
                 "groups",
                 "proxy",
+                "machine",
                 "offline_access"
             ])
         );

@@ -1,3 +1,6 @@
+mod billing;
+pub use billing::*;
+
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -18,6 +21,11 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Control NyxBot with the owner's first-party session (API keys are rejected)
+    Nyxbot {
+        #[command(subcommand)]
+        command: crate::commands::nyxbot::NyxbotCommands,
+    },
     /// Log in to NyxID (opens browser by default)
     Login(LoginArgs),
     /// Log out and clear stored token
@@ -199,6 +207,9 @@ pub enum Commands {
     },
     /// Manage telemetry consent on this machine (see `docs/TELEMETRY.md` §3)
     Telemetry {
+        /// Saved login profile whose account/device settings to manage
+        #[arg(long, env = "NYXID_PROFILE", global = true)]
+        profile: Option<String>,
         #[command(subcommand)]
         command: TelemetryCommands,
     },
@@ -320,6 +331,18 @@ pub struct RepoArgs {
 
 #[derive(Subcommand)]
 pub enum AdminCommands {
+    /// Configure billing, exact rates and ledger integrity
+    Billing {
+        #[command(subcommand)]
+        command: AdminBillingCommands,
+    },
+    /// Inspect platform usage in a bounded time window
+    Usage(AdminUsageArgs),
+    /// Manage credit benefits
+    Credits {
+        #[command(subcommand)]
+        command: AdminCreditsCommands,
+    },
     /// Manage NyxID-owned messaging platform credentials
     PlatformCredentials {
         #[command(subcommand)]
@@ -441,7 +464,7 @@ pub struct ManifestArgs {
     #[arg(long)]
     pub file: std::path::PathBuf,
     /// Value for a manifest `${name}` variable, as name=value (repeatable)
-    #[arg(long = "set", value_name = "NAME=VALUE")]
+    #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
     pub vars: Vec<String>,
 }
 
@@ -459,14 +482,17 @@ pub enum AdminCatalogCommands {
     },
     /// Interactive wizard: create a provider and service, set the OAuth client, then validate
     Add {
+        /// Print the proposed changes without writing or reading credentials
+        #[arg(long)]
+        dry_run: bool,
         /// Start from a manifest instead of answering every question
         #[arg(long, conflicts_with = "template")]
         file: Option<std::path::PathBuf>,
-        /// Start from a built-in manifest (zoho-mail)
+        /// Start from a built-in manifest (zoho-mail or telnyx-platform)
         #[arg(long)]
         template: Option<String>,
         /// Value for a manifest `${name}` variable, as name=value (repeatable)
-        #[arg(long = "set", value_name = "NAME=VALUE")]
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
         /// Write the manifest built by the wizard to this path
         #[arg(long)]
@@ -488,6 +514,9 @@ pub enum AdminCatalogCommands {
     },
     /// Create or update every provider and service in a manifest; safe to rerun
     Apply {
+        /// Allow disabling live platform access or clearing its owner allowlist
+        #[arg(long)]
+        allow_access_change: bool,
         #[command(flatten)]
         manifest: ManifestArgs,
         /// Show the plan without changing anything
@@ -529,7 +558,7 @@ pub enum AdminToolsCommands {
         skip_credentials: bool,
         #[arg(long)]
         credential_env: Option<String>,
-        #[arg(long = "set", value_name = "NAME=VALUE")]
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -540,7 +569,7 @@ pub enum AdminToolsCommands {
         file: std::path::PathBuf,
         #[arg(long)]
         dry_run: bool,
-        #[arg(long = "set", value_name = "NAME=VALUE")]
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -549,7 +578,7 @@ pub enum AdminToolsCommands {
     Validate {
         #[arg(long)]
         file: std::path::PathBuf,
-        #[arg(long = "set", value_name = "NAME=VALUE")]
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
         #[command(flatten)]
         auth: AuthArgs,
@@ -600,6 +629,27 @@ pub enum AdminPlatformCredentialsCommands {
 
 #[derive(Subcommand)]
 pub enum AdminUserCommands {
+    /// Reconcile one durable provider revocation outcome
+    ErasureReconcile {
+        /// User ID, including a deleted account
+        user_id: uuid::Uuid,
+        #[arg(long)]
+        effect_id: uuid::Uuid,
+        #[arg(long, value_parser = ["retry", "retry_with_current_provider_config", "record_external_revocation_confirmed", "record_remote_revocation_unavailable"])]
+        action: String,
+        #[arg(long)]
+        expected_retry_generation: u64,
+        /// UUID identifying this exact request; reuse only for an identical retry
+        #[arg(long)]
+        idempotency_key: uuid::Uuid,
+        /// Reference to operator evidence (never a credential)
+        #[arg(long)]
+        evidence_reference: String,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// List platform users (paginated)
     List {
         /// Page number (1-based)
@@ -779,12 +829,9 @@ pub struct UpdateArgs {
     /// Print installed prebuilt versions without downloading anything
     #[arg(long, conflicts_with_all = ["version", "check", "from_source", "rollback", "skills_only"])]
     pub list_versions: bool,
-    /// Compile and install from source with cargo install
+    /// Build the requested release from its resolved immutable commit (--locked)
     #[arg(long)]
     pub from_source: bool,
-    /// Continue after release attestation verification fails
-    #[arg(long)]
-    pub insecure_skip_verify: bool,
     /// NyxID base URL for skill content (uses saved URL by default)
     #[arg(long, env = "NYXID_URL")]
     pub base_url: Option<String>,
@@ -858,7 +905,7 @@ pub enum PublicCommands {
 #[derive(Args, Default)]
 #[command(
     after_help = crate::tls::ENV_HELP,
-    after_long_help = concat!("Agent login URL:\n  nyxid login --agent-key --no-wait --output json --profile my-agent\n\nShare verification_uri_complete from the JSON with the human. The request is\nnot approved until they finish the browser review. Resume after approval:\n  nyxid login resume <request_id> --once --output json\n\nAdd --scopes, --service, --service-permission, --key-source, --key-name, and\n--expiry-days to prefill the requested access. Use --device instead of\n--agent-key when either full account or restricted access is acceptable.\n\nNetwork / TLS: NYXID_CA_CERT adds a PEM CA file; SSL_CERT_FILE / SSL_CERT_DIR select system roots. HTTPS_PROXY / NO_PROXY control HTTP proxies. Run nyxid doctor for diagnostics.")
+    after_long_help = concat!("Agent login URL:\n  nyxid login --agent-key --no-wait --output json --profile my-agent\n\nShare verification_uri_complete and user_code separately with the human.\nThey must paste the code into the page and finish the browser review.\nNever append the code to the URL. Resume after approval:\n  nyxid login resume <request_id> --once --output json\n\nAdd --scopes, --service, --service-permission, --key-source, --key-name, and\n--expiry-days to prefill the requested access. Use --device instead of\n--agent-key when either full account or restricted access is acceptable.\n\nNetwork / TLS: NYXID_CA_CERT adds a PEM CA file; SSL_CERT_FILE / SSL_CERT_DIR select system roots. HTTPS_PROXY / NO_PROXY control HTTP proxies. Run nyxid doctor for diagnostics.")
 )]
 pub struct LoginArgs {
     /// NyxID base URL, e.g. https://auth.nyxid.dev
@@ -885,7 +932,7 @@ pub struct LoginArgs {
     /// Agent profile name (isolates tokens)
     #[arg(long, env = "NYXID_PROFILE", global = true)]
     pub profile: Option<String>,
-    /// Mint a complete login URL (verification_uri_complete) and exit without polling or opening a browser; combine with --output json for agents
+    /// Print a login URL and a separate code for manual entry, then exit without polling or opening a browser; combine with --output json for agents
     #[arg(long, conflicts_with_all = ["password", "code"])]
     pub no_wait: bool,
     /// Structured login events on stdout; credentials are never printed
@@ -1074,12 +1121,15 @@ pub enum SessionCommands {
 /// `docs/TELEMETRY.md` §3 for the full precedence ladder.
 #[derive(Subcommand)]
 pub enum TelemetryCommands {
-    /// Opt in: persist `{enabled=true, asked=true}` to config.
+    /// Opt this saved account/profile in on this device (account permission is separate).
     Enable,
-    /// Opt out: persist `{enabled=false, asked=true}` and clear the
-    /// local anon UUID so a future re-enable starts fresh.
+    /// Stop analytics from this CLI profile/device, including with env=on.
     Disable,
-    /// Print the resolved consent state and its source.
+    /// Enable global account analytics permission (does not opt in this device)
+    AccountEnable,
+    /// Withdraw global account permission across devices
+    AccountDisable,
+    /// Print this device choice and fresh account permission
     Status,
 }
 
@@ -1242,7 +1292,7 @@ pub enum ServicePreferenceCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Set this catalog group's discovery order with IDs or slugs
+    /// Set this catalog group's agent order; NyxBot enforces personal-first execution
     Set {
         #[arg(long)]
         group: String,
@@ -1280,7 +1330,7 @@ pub enum ServicePreferenceCommands {
 // not load-bearing — accept the lint here.
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceCommands {
-    /// Set agent discovery order within a service's connections
+    /// Set per-service agent order (enforced for NyxBot, advisory for other clients)
     Preference {
         #[command(subcommand)]
         command: ServicePreferenceCommands,
@@ -2111,12 +2161,17 @@ impl BillingUsagePeriodArg {
 
 #[derive(Subcommand)]
 pub enum BillingCommands {
+    /// Inspect self-scoped managed execution metadata
+    Executions {
+        #[command(subcommand)]
+        command: BillingExecutionCommands,
+    },
     /// Show or provision the billing wallet
     Wallet {
         /// Provision the wallet if it does not exist
         #[arg(long)]
         provision: bool,
-        /// Owner ID to manage, usually an org user ID (org admin access required)
+        /// Owner ID (org admin required); uses POST and provisions if missing
         #[arg(long)]
         owner_id: Option<String>,
         #[command(flatten)]
@@ -2187,7 +2242,7 @@ pub enum ApiKeyCommands {
         /// Scopes (space-separated: read write proxy)
         #[arg(long)]
         scopes: Option<String>,
-        /// Expiry in days (0 = no expiry)
+        /// Expiry in days (default: 90; 0 explicitly selects no expiry)
         #[arg(long)]
         expires_in_days: Option<u32>,
         /// Allowed service UUIDs or slugs (comma-separated; includes platform services)
@@ -2653,6 +2708,16 @@ pub enum OrgRoleScopeCommands {
 
 #[derive(Subcommand)]
 pub enum NodeCommands {
+    /// Internal bounded access observation; emits no credential or provider data.
+    #[command(hide = true)]
+    CustodyProbe,
+    /// Prepare the protected recipient request for managed platform attestation.
+    #[command(hide = true)]
+    ManagedPrepare(crate::node::managed_runtime::Prepare),
+    /// Internal fixed-image bootstrap; credentials are delivered sealed to this
+    /// Pod's private key and never accepted from an ordinary registration token.
+    #[command(hide = true)]
+    ManagedStart(crate::node::managed_runtime::Start),
     /// Register, enable machine access and start its daemon in one step.
     Setup(crate::node::machine::setup::Setup),
     #[command(hide = true)]
@@ -3100,8 +3165,16 @@ pub enum NodeDockerCommands {
     Start {
         #[command(flatten)]
         args: NodeDockerArgs,
+        /// New machine container intent; omission defaults to automatic.
+        #[arg(
+            long,
+            value_enum,
+            env = "NYXID_MACHINE_SEPARATION",
+            requires = "machine"
+        )]
+        separation: Option<crate::node::machine::setup::Separation>,
     },
-    /// Stop and remove the node agent container
+    /// Stop the node container (machine containers are retained for start)
     Stop {
         #[command(flatten)]
         args: NodeDockerArgs,
@@ -3110,6 +3183,14 @@ pub enum NodeDockerCommands {
     Restart {
         #[command(flatten)]
         args: NodeDockerArgs,
+        /// New machine container intent; existing containers retain their choice.
+        #[arg(
+            long,
+            value_enum,
+            env = "NYXID_MACHINE_SEPARATION",
+            requires = "machine"
+        )]
+        separation: Option<crate::node::machine::setup::Separation>,
     },
     /// Show Docker container status
     Status {
@@ -3192,7 +3273,91 @@ pub enum NodeDaemonCommands {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_machine_start_and_restart_parse_explicit_separation_only_for_machine() {
+        for verb in ["start", "restart"] {
+            for selection in ["automatic", "require-separated", "shared-legacy"] {
+                let parsed = Cli::try_parse_from([
+                    "nyxid",
+                    "node",
+                    "docker",
+                    verb,
+                    "--machine",
+                    "--separation",
+                    selection,
+                ])
+                .unwrap();
+                let Commands::Node {
+                    command: NodeCommands::Docker { command },
+                } = parsed.command
+                else {
+                    panic!("expected Docker command")
+                };
+                let (NodeDockerCommands::Start { separation, .. }
+                | NodeDockerCommands::Restart { separation, .. }) = command
+                else {
+                    panic!("expected Docker start/restart")
+                };
+                assert_eq!(separation.unwrap().as_cli_str(), selection);
+                assert!(
+                    Cli::try_parse_from([
+                        "nyxid",
+                        "node",
+                        "docker",
+                        verb,
+                        "--separation",
+                        selection
+                    ])
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn notification_approval_modes_parse_and_refuse_ambiguous_legacy_toggle() {
+        for mode in ["writes_only", "all", "off"] {
+            let cli =
+                Cli::try_parse_from(["nyxid", "notification", "update", "--approval-mode", mode])
+                    .unwrap();
+            assert!(matches!(cli.command,
+                Commands::Notification { command: NotificationCommands::Update { approval_mode: Some(value), .. } }
+                if value == mode));
+        }
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "notification",
+                "update",
+                "--approval-mode",
+                "unknown",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "notification",
+                "update",
+                "--approval-mode",
+                "writes_only",
+                "--approval-email",
+                "true",
+            ])
+            .is_err()
+        );
+    }
     use clap::Parser;
+
+    #[test]
+    fn updates_require_explicit_source_and_have_no_verification_bypass() {
+        assert!(
+            Cli::try_parse_from(["nyxid", "update", "--from-source", "--version", "1.2.3"]).is_ok()
+        );
+        assert!(Cli::try_parse_from(["nyxid", "update", "--insecure-skip-verify"]).is_err());
+        assert!(Cli::try_parse_from(["nyxid", "update", "auto", "run", "--from-source"]).is_err());
+    }
 
     #[test]
     fn ifttt_generated_node_setup_command_parses() {
@@ -4697,6 +4862,9 @@ pub enum ProxyCommands {
         /// Stream the response (for SSE, video, audio, large files)
         #[arg(long)]
         stream: bool,
+        /// Wrap the nonstreaming response in JSON (requires --output json)
+        #[arg(long, conflicts_with = "stream")]
+        envelope: bool,
         /// Use service ID instead of slug
         #[arg(long)]
         by_id: bool,
@@ -4818,6 +4986,30 @@ pub enum OpenClawCommands {
 
 #[derive(Subcommand)]
 pub enum McpCommands {
+    /// List MCP tools and input schemas through Streamable HTTP
+    Tools {
+        /// Service slug; enumerate all operations from the authoritative catalog
+        #[arg(long)]
+        service: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Invoke an MCP tool once using a saved human session
+    Call {
+        /// Fully qualified MCP tool name
+        tool: String,
+        /// JSON object or @path to a JSON arguments file
+        #[arg(long)]
+        args: String,
+        /// Include the tool name and RFC3339 execution correlation bounds
+        #[arg(long)]
+        envelope: bool,
+        /// Total timeout in seconds; 0 waits indefinitely, like proxy request
+        #[arg(long, default_value_t = 0)]
+        timeout_secs: u64,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Discover services and operations visible to the current credential, including input schemas
     Discover {
         #[command(flatten)]
@@ -4844,7 +5036,10 @@ pub enum NotificationCommands {
     },
     /// Update notification settings
     Update {
-        /// Enable/disable approval email notifications
+        /// Global approval: writes_only (default), all, or off
+        #[arg(long, value_parser = ["writes_only", "all", "off"], conflicts_with = "approval_email")]
+        approval_mode: Option<String>,
+        /// Legacy global approval toggle: true = all requests, false = off
         #[arg(long)]
         approval_email: Option<bool>,
         /// Enable/disable approval push notifications
@@ -4942,7 +5137,7 @@ pub enum ApprovalCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Enable approval protection globally (requires notification channel)
+    /// Require approval for all requests (select writes_only via notification update --approval-mode)
     Enable {
         #[command(flatten)]
         auth: AuthArgs,
@@ -6370,6 +6565,34 @@ pub enum OraclePoolCommands {
         /// Activate or deactivate the pool
         #[arg(long)]
         active: Option<bool>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Transfer pool ownership, preserving identity and history
+    Transfer {
+        pool: String,
+        /// Destination organization (UUID, slug or display name)
+        #[arg(
+            long,
+            required_unless_present = "personal",
+            conflicts_with = "personal"
+        )]
+        org: Option<String>,
+        /// Transfer to your own active personal account
+        #[arg(long)]
+        personal: bool,
+        /// Rotate the shared worker token and return its replacement once
+        #[arg(long)]
+        rotate_worker_token: bool,
+        /// Required when an org-visible pool moves to a person
+        #[arg(long, value_parser = ["private"])]
+        visibility: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete an idle pool, reserving its slug and retaining task/session history
+    Delete {
+        pool: String,
         #[command(flatten)]
         auth: AuthArgs,
     },

@@ -1110,6 +1110,45 @@ impl NodeDispatch {
         }
     }
 
+    /// Erasure retains the owner fence until terminal close is acknowledged.
+    /// Unlike administrative best-effort invalidation, a failed remote call
+    /// leaves a durable retry address instead of losing the drain obligation.
+    pub(crate) async fn drain_inactive(&self, node: &Node) -> AppResult<()> {
+        if node.is_active {
+            return Err(AppError::Conflict(
+                "Node drain requires closed admission".into(),
+            ));
+        }
+        if let Some(owner) = node.connection_owner.as_ref() {
+            let fence = NodeOwnerFence::from_owner(&node.id, owner);
+            if fence.instance_name == self.identity.instance_name
+                && fence.generation_id == self.identity.generation_id
+            {
+                self.manager
+                    .disconnect_connection_if(
+                        &node.id,
+                        &fence.connection_id,
+                        4006,
+                        "Account erasure",
+                    )
+                    .await;
+            } else {
+                self.remote_disconnect(
+                    validated_owner_url(&owner.internal_base_url)?,
+                    fence.clone(),
+                    4006,
+                    "Account erasure",
+                )
+                .await?;
+            }
+            crate::services::node_owner_service::release(&self.db, &fence).await?;
+        }
+        self.manager
+            .disconnect_connection(&node.id, 4006, "Account erasure")
+            .await;
+        Ok(())
+    }
+
     pub async fn disconnect(&self, node_id: &str, code: u16, reason: &str) -> AppResult<bool> {
         let Some(owner) =
             crate::services::node_owner_service::invalidate_current(&self.db, node_id).await?
@@ -1629,9 +1668,8 @@ async fn bridge_internal_ssh(
     loop {
         tokio::select! {
             inbound = socket.next() => match inbound.and_then(Result::ok).and_then(axum_json) {
-                Some(DuplexClientFrame::Data { data }) => {
-                    if manager.send_ssh_tunnel_data(node_id, session_id, &data).is_err() { break; }
-                }
+                Some(DuplexClientFrame::Data { data })
+                    if manager.send_ssh_tunnel_data(node_id, session_id, &data).is_err() => { break; }
                 Some(DuplexClientFrame::Close { .. }) | None => break,
                 _ => {}
             },
@@ -1665,12 +1703,10 @@ async fn bridge_internal_terminal(
     loop {
         tokio::select! {
             inbound = socket.next() => match inbound.and_then(Result::ok).and_then(axum_json) {
-                Some(DuplexClientFrame::Data { data }) => {
-                    if manager.send_web_terminal_data(node_id, session_id, &data).is_err() { break; }
-                }
-                Some(DuplexClientFrame::Resize { cols, rows }) => {
-                    if manager.send_web_terminal_resize(node_id, session_id, cols, rows).is_err() { break; }
-                }
+                Some(DuplexClientFrame::Data { data })
+                    if manager.send_web_terminal_data(node_id, session_id, &data).is_err() => { break; }
+                Some(DuplexClientFrame::Resize { cols, rows })
+                    if manager.send_web_terminal_resize(node_id, session_id, cols, rows).is_err() => { break; }
                 Some(DuplexClientFrame::Close { .. }) | None => break,
                 _ => {}
             },
@@ -1706,12 +1742,10 @@ async fn bridge_internal_ws_proxy(
     loop {
         tokio::select! {
             inbound = socket.next() => match inbound.and_then(Result::ok).and_then(axum_json) {
-                Some(DuplexClientFrame::Data { data }) => {
-                    if manager.send_ws_proxy_binary(node_id, session_id, &data).is_err() { break; }
-                }
-                Some(DuplexClientFrame::Text { data }) => {
-                    if manager.send_ws_proxy_text(node_id, session_id, &data).is_err() { break; }
-                }
+                Some(DuplexClientFrame::Data { data })
+                    if manager.send_ws_proxy_binary(node_id, session_id, &data).is_err() => { break; }
+                Some(DuplexClientFrame::Text { data })
+                    if manager.send_ws_proxy_text(node_id, session_id, &data).is_err() => { break; }
                 Some(DuplexClientFrame::Close { code, reason }) => {
                     close_code = code;
                     close_reason = reason;

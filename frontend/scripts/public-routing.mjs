@@ -62,9 +62,7 @@ export function applicationPaths(source) {
     ),
   ];
 }
-const headers = `add_header X-Frame-Options "DENY" always;
-add_header X-Content-Type-Options "nosniff" always;
-add_header Referrer-Policy $nyxid_referrer_policy always;`;
+const headers = `include @@STATIC_HEADERS@@;`;
 export async function writeRouting(root, dist, pages) {
   const app = applicationPaths(
     await fs.readFile(`${root}/src/router.tsx`, "utf8"),
@@ -119,15 +117,17 @@ ${pages
  ${p.translated ? "if ($nyxid_repeated_lang) { return 400; }\n if ($nyxid_public_redirect) { return 301 $nyxid_public_redirect$nyxid_locale_query; }" : ""}
  if ($request_method !~ ^(GET|HEAD)$) { return 405; }
  default_type text/html;
+ ${["/privacy", "/terms"].includes(p.path) ? 'etag off;\n if_modified_since off;\n if ($http_if_none_match = $nyxid_legal_etag) { return 304; }\n add_header ETag $nyxid_legal_etag;' : ''}
  add_header X-Robots-Tag $nyxid_preview_robots always;
  ${headers}
- add_header Cache-Control "no-cache" always;
+ add_header Cache-Control "${["/privacy", "/terms"].includes(p.path) ? "public, max-age=86400, must-revalidate" : "no-cache"}" always;
  try_files /${p.file} =404;
 }
 ${
   p.path === "/"
     ? ""
     : `location = ${p.path}/ {
+ ${headers}
  ${p.translated ? "if ($nyxid_repeated_lang) { return 400; }\n if ($nyxid_public_redirect) { return 301 $nyxid_public_redirect$nyxid_locale_query; }" : ""}
  return 301 ${p.path}$is_args$args;
 }`

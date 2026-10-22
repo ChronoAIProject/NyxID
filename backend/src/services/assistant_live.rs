@@ -35,6 +35,7 @@ const CHANNEL_THREADS: &str = crate::models::nyxbot_channel::THREADS_COLLECTION_
 const MACHINES: &str = crate::models::node::COLLECTION_NAME;
 const MACHINE_DESKTOPS: &str = crate::models::machine_desktop::COLLECTION_NAME;
 const MACHINE_SETUPS: &str = crate::models::machine_setup::COLLECTION_NAME;
+const CHANNEL_CONNECT_LINKS: &str = crate::models::channel_connect_link::COLLECTION_NAME;
 const CAPACITY: usize = 1024;
 /// Per-owner buffer for browser streams.
 const OWNER_CAPACITY: usize = 64;
@@ -75,6 +76,10 @@ pub enum LiveEvent {
         id: String,
         user_id: String,
         status: String,
+    },
+    ChannelBotConnection {
+        id: String,
+        user_id: String,
     },
     ChannelThread {
         id: String,
@@ -123,6 +128,7 @@ impl LiveEvent {
             | Self::Group { user_id, .. }
             | Self::OrgGroup { user_id, .. }
             | Self::ConnectLink { user_id, .. }
+            | Self::ChannelBotConnection { user_id, .. }
             | Self::ChannelBot { user_id, .. }
             | Self::ChannelThread { user_id, .. }
             | Self::Machine { user_id, .. }
@@ -443,7 +449,7 @@ fn pipeline() -> Vec<Document> {
                 {"ns.coll": crate::models::trigger::COLLECTION_NAME, "operationType": "insert", "fullDocument.setup_watch_id": {"$type":"string"}},
                 // Links and bots matter only when created or when their
                 // status or activation changes, not on every bookkeeping write.
-                {"ns.coll": {"$in": [CONNECT_LINKS, CHANNEL_BOTS, MACHINE_SETUPS, MACHINES, MACHINE_DESKTOPS]}, "$or": [
+                {"ns.coll": {"$in": [CONNECT_LINKS, CHANNEL_CONNECT_LINKS, CHANNEL_BOTS, MACHINE_SETUPS, MACHINES, MACHINE_DESKTOPS]}, "$or": [
                     {"operationType": {"$in": ["insert", "replace"]}},
                     {"updateDescription.updatedFields.status": {"$exists": true}},
                     {"updateDescription.updatedFields.is_active": {"$exists": true}},
@@ -541,6 +547,7 @@ fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
             user_id,
             watch_id: full.get_str("setup_watch_id").ok()?.into(),
         },
+        CHANNEL_CONNECT_LINKS => LiveEvent::ChannelBotConnection { id: key, user_id },
         CONNECT_LINKS => LiveEvent::ConnectLink {
             id: key,
             user_id,

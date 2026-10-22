@@ -1,3 +1,6 @@
+import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
+import { withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
+import { CAPACITY_ACKNOWLEDGEMENT } from "@/lib/assistant/capacity-wait";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as telemetry from "@/lib/telemetry";
@@ -26,6 +29,37 @@ const BASE: ChatMessage = {
 };
 
 describe("canonical chat presentation", () => {
+  it.each([
+    ["insufficient_credits", "Not enough credits", "Add credits in Billing & Usage"],
+    ["wallet_suspended", "Billing wallet suspended", "Contact support"],
+    ["plan_entitlement_required", "Service not included in your plan", "Check your plan"],
+    ["billing_not_configured", "Billing setup incomplete", "Contact support to complete the billing configuration"],
+    ["billing_provider_unavailable", "Billing service unavailable", "Try again shortly"],
+  ])("shows the billing cause and remedy before diagnostics for %s", (code, title, remedy) => {
+    render(<ChatMessageBubble message={{ ...BASE, content: "", status: "error", errorCode: code,
+      error: "Turn failed. Provide a trace.",
+      toolCalls: [{ id: "tool", name: "nyx__search_tools", status: "done", startedAt: 1 }],
+      errorDetail: { stage: "stream", turnId: "turn-billing", continuations: 0 },
+    }} />);
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(title);
+    expect(alert).toHaveTextContent(remedy);
+    expect(screen.queryByText("Turn failed. Provide a trace.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /1 action/ })).toHaveTextContent(title);
+    const details = screen.getByText("Details");
+    expect(alert.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("shows the panic stage in failure Details", () => {
+    render(<ChatMessageBubble message={{ ...BASE, status: "error", content: "",
+      errorCode: "internal_error",
+      error: "NyxBot hit an internal error on this turn. Check which actions completed before retrying.",
+      errorDetail: { stage: "panic", turnId: "turn-panic", occurredAt: "2026-10-15T00:00:00Z", continuations: 0 },
+    }} />);
+    expect(screen.getByText("Details")).toBeInTheDocument();
+    expect(screen.getByText("panic")).toBeInTheDocument();
+    expect(screen.getByText(/Check which actions completed/)).toBeInTheDocument();
+  });
   it("shows feedback only in the page-owned NyxAgent message-list composition", () => {
     const session: ChatSessionState = {
       clientId: "test-client",
@@ -304,6 +338,7 @@ describe("canonical chat presentation", () => {
           error: "Stopped responding",
           errorDetail: {
             stage: "no_progress",
+            upstreamCode: "turn_failed",
             httpStatus: 503,
             upstreamRequestId: "req-1",
             responseId: "resp_1",
@@ -315,14 +350,14 @@ describe("canonical chat presentation", () => {
       />,
     );
     fireEvent.click(screen.getByText("Details"));
-    for (const value of ["no_progress", "503", "turn-1", "resp_1", "req-1", "2"]) {
+    for (const value of ["turn_failed", "no_progress", "503", "turn-1", "resp_1", "req-1", "2"]) {
       expect(screen.getByText(value)).toBeInTheDocument();
     }
     expect(
       within(screen.getByText("Details").closest("details")!).getByRole("time"),
     ).toHaveAttribute("datetime", "2026-01-01T00:00:00Z");
     fireEvent.click(screen.getByRole("button", { name: "Copy diagnostic ID" }));
-    expect(writeText).toHaveBeenCalledWith("turn turn-1 / response resp_1 / request req-1");
+    expect(writeText).toHaveBeenCalledWith("turn turn-1 / upstream turn_failed / response resp_1 / request req-1");
   });
 
   it("shows thinking treatment only for a content-free streaming message", () => {
@@ -799,6 +834,51 @@ describe("canonical chat presentation", () => {
 });
 
 describe("turn status and action ledger", () => {
+  it("keeps total turn time across tool changes, remounts and returning to the tab", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-10-21T00:00:30Z"));
+      const startedAt = "2026-10-21T00:00:00Z";
+      const message = { ...BASE, status: "streaming" as const, turnStatus: { phase: "tool" as const, label: "Running first", startedAt, toolStartedAt: "2026-10-21T00:00:20Z" } };
+      const { container, rerender, unmount } = render(<ChatMessageBubble message={message} />);
+      expect(container.querySelector("[data-turn-status]")).toHaveTextContent("30s total");
+      rerender(<ChatMessageBubble message={{ ...message, turnStatus: { ...message.turnStatus, toolStartedAt: "2026-10-21T00:00:29Z", label: "Running second" } }} />);
+      expect(container.querySelector("[data-turn-status]")).toHaveTextContent("30s total");
+      rerender(<ChatMessageBubble message={{ ...message, turnStatus: { phase: "working", label: "Working…", startedAt } }} />);
+      expect(container.querySelector("[data-turn-status]")).toHaveTextContent("30s total");
+      // Browser background throttling skips ticks; visibility must catch up at once.
+      vi.setSystemTime(new Date("2026-10-21T00:01:05Z"));
+      fireEvent(document, new Event("visibilitychange"));
+      expect(container.querySelector("[data-turn-status]")).toHaveTextContent("1:05 total");
+      unmount();
+      const reopened = render(<ChatMessageBubble message={message} />);
+      expect(reopened.container.querySelector("[data-turn-status]")).toHaveTextContent("1:05 total");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps each tool's own duration beside the correct action", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-10-21T00:00:30Z"));
+      const from = Date.parse("2026-10-21T00:00:00Z");
+      const { container } = render(<ChatMessageBubble message={{ ...BASE, toolCalls: [
+        { id: "finished", name: "github__read", status: "done", startedAt: from, finishedAt: from + 8000 },
+        { id: "running", name: "github__search", status: "running", startedAt: from + 20000 },
+      ] }} />);
+      fireEvent.click(screen.getByRole("button", { name: /2 actions/ }));
+      const done = container.querySelector('[data-tool-status="done"]')!;
+      const running = container.querySelector('[data-tool-status="running"]')!;
+      expect(done).toHaveTextContent("8s");
+      expect(running).toHaveTextContent("10s");
+      act(() => vi.advanceTimersByTime(5000));
+      expect(done).toHaveTextContent("8s");
+      expect(running).toHaveTextContent("15s");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it.each(["approval", "retrying", "continuing", "working", "active"] as const)("keeps %s status visible after reply text", (phase) => {
     const labels = { approval: "Waiting for approval", retrying: "Retrying…", continuing: "Continuing task…", working: "Working…", active: "Working — the reply appears when it is ready" };
     const { container, rerender } = render(<ChatMessageBubble message={{ ...BASE, status: "streaming", turnStatus: { phase, label: labels[phase] } }} />);
@@ -1044,5 +1124,140 @@ describe("message timestamps", () => {
       SENT,
       new Date(at + 1000).toISOString(),
     ]);
+  });
+});
+
+it("shows capacity waiting without an error and links billing remedies", () => {
+  const { rerender } = render(<ChatMessageBubble message={{ ...BASE, content: "", status: "streaming", waitingForCapacity: true }} />);
+  expect(screen.getByText(/Waiting for the assistant/)).toBeVisible();
+  rerender(<ChatMessageBubble message={{ ...BASE, status: "error", errorCode: "wallet_suspended", error: "Wallet suspended" }} />);
+  expect(screen.queryByRole("button", { name: "Open Billing & Usage" })).not.toBeInTheDocument();
+  expect(screen.queryByText("Details")).not.toBeInTheDocument();
+});
+
+it("labels a queued reply with its queue clock", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-15T00:00:12Z"));
+  render(<ChatMessageBubble message={{ ...BASE, content: "", status: "streaming", waitingForCapacity: true, queued: true,
+    capacityWaitStartedAt: "2026-10-15T00:00:00Z", capacityWaitDeadline: "2026-10-15T00:10:00Z" }} />);
+  expect(screen.queryByText(/Waiting for the assistant/)).not.toBeInTheDocument();
+  expect(screen.getByText(/Queued until another reply finishes/).closest("[data-waiting-status]")).toHaveTextContent("0:12 of up to 10:00");
+  vi.useRealTimers();
+});
+
+it("restores the shared capacity clock after remount and clears it on acceptance", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-15T00:00:23Z"));
+  const message: ChatMessage = { ...BASE, content: "", status: "streaming", waitingForCapacity: true, systemNote: "capacity_wait",
+    capacityWaitStartedAt: "2026-10-15T00:00:00Z", capacityWaitDeadline: "2026-10-15T00:02:00Z",
+    turnStatus: { phase: "active", label: "Working — the reply appears when it is ready" } };
+  const first = render(<ChatMessageBubble message={message} />);
+  expect(screen.queryByText(/Working —/)).not.toBeInTheDocument();
+  expect(screen.getByText(/Waiting for the assistant/).closest("[data-waiting-status]")).toHaveTextContent("0:23 of up to 2:00");
+  act(() => vi.advanceTimersByTime(1000));
+  expect(screen.getByText(/Waiting for the assistant/).closest("[data-waiting-status]")).toHaveTextContent("0:24 of up to 2:00");
+  first.unmount();
+  vi.setSystemTime(new Date("2026-10-15T00:00:40Z"));
+  const second = render(<ChatMessageBubble message={message} />);
+  expect(screen.getByText(/Waiting for the assistant/).closest("[data-waiting-status]")).toHaveTextContent("0:40 of up to 2:00");
+  second.rerender(<ChatMessageBubble message={{ ...message, waitingForCapacity: false, systemNote: undefined }} />);
+  expect(screen.queryByText(/Waiting for the assistant/)).not.toBeInTheDocument();
+  expect(screen.getByText(/Working —/)).toBeVisible();
+  vi.useRealTimers();
+});
+
+it("shows attempt and capacity wait details for failed and successful replies", () => {
+  const { rerender } = render(<ChatMessageBubble message={{ ...BASE, status: "error", error: "Failed",
+    errorDetail: { stage: "stream", turnId: "turn", continuations: 0, attempts: 7, capacityWaitMs: 80_000 } }} />);
+  expect(screen.getByText("attempts").nextElementSibling).toHaveTextContent("7");
+  expect(screen.getByText("waited 1 minute 20 seconds for capacity")).toBeInTheDocument();
+  rerender(<ChatMessageBubble message={{ ...BASE, turnMetadata: { attempts: 3, capacityWaitMs: 33_000 } }} />);
+  expect(screen.getByText("attempts").nextElementSibling).toHaveTextContent("3");
+  expect(screen.getByText("waited 33 seconds for capacity")).toBeInTheDocument();
+});
+
+it("renders the system acknowledgement in the pending agent bubble and replaces it on acceptance, exhaustion and Stop", () => {
+  const copy = CAPACITY_ACKNOWLEDGEMENT;
+  const pending: ChatMessage = { ...BASE, content: "", status: "streaming", systemNote: "capacity_wait", waitingForCapacity: false };
+  const { container, rerender } = render(<ChatMessageEntry message={{ ...pending, authorName: "Ada" }} conversationId="chat" feedbackEnabled />);
+  expect(screen.getByText("Ada")).toBeVisible();
+  expect(screen.getByRole("note")).toHaveTextContent(copy);
+  expect(container.querySelector('[data-system-note="capacity_wait"]')).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Good response|Bad response/ })).not.toBeInTheDocument();
+  rerender(<ChatMessageEntry message={{ ...BASE, content: "The real reply", status: "streaming", authorName: "Ada" }} />);
+  expect(screen.queryByText(copy)).not.toBeInTheDocument();
+  expect(screen.getByText("The real reply")).toBeVisible();
+  rerender(<ChatMessageEntry message={{ ...pending, status: "error", errorCode: "capacity_exceeded", error: "NyxBot is at capacity right now (waited 2 minutes). Try again shortly." }} />);
+  expect(screen.queryByText(copy)).not.toBeInTheDocument();
+  expect(screen.getByText(/waited 2 minutes/)).toBeVisible();
+  rerender(<ChatMessageEntry message={{ ...pending, status: "complete", errorCode: "cancelled" }} />);
+  expect(screen.queryByText(copy)).not.toBeInTheDocument();
+  expect(container.querySelector('[data-system-note]')).not.toBeInTheDocument();
+});
+
+it("hides ordinary successful Details and shows retries without a wait", () => {
+  const { rerender } = render(<ChatMessageBubble message={{ ...BASE, turnMetadata: { attempts: 1, capacityWaitMs: 0 } }} />);
+  expect(screen.queryByText("Details")).not.toBeInTheDocument();
+  rerender(<ChatMessageBubble message={{ ...BASE, turnMetadata: { attempts: 2, capacityWaitMs: 0 } }} />);
+  expect(screen.getByText("Details")).toBeInTheDocument();
+  expect(screen.queryByText(/waited/)).not.toBeInTheDocument();
+  rerender(<ChatMessageBubble message={{ ...BASE, status: "error", errorDetail: {
+    stage: "stream", turnId: "turn", continuations: 0, attempts: 1, capacityWaitMs: 0,
+  } }} />);
+  expect(screen.getByText("Details")).toBeInTheDocument();
+});
+
+it.each([
+  ["/assistant", "wallet_suspended"],
+  ["/assistant/automations", "wallet_suspended"],
+  ["/replay", "wallet_suspended"],
+  ["/assistant", "insufficient_credits"],
+  ["/assistant", "plan_entitlement_required"],
+])("opens billing over the current assistant shell only: %s (%s)", async (path, code) => {
+  const root = createRootRoute();
+  const route = createRoute({ getParentRoute: () => root, path,
+    validateSearch: withAccountPanelSearch((search) => ({ c: String(search.c ?? "") })),
+    component: () => <ChatMessageBubble message={{ ...BASE, status: "error", errorCode: code }} />,
+  });
+  const router = createRouter({ routeTree: root.addChildren([route]),
+    history: createMemoryHistory({ initialEntries: [`${path}?c=current-chat&panel=settings&panelTab=profile`] }),
+  });
+  await router.load();
+  render(<RouterProvider router={router} />);
+  if (path === "/replay") {
+    expect(screen.queryByRole("button", { name: "Open Billing & Usage" })).not.toBeInTheDocument();
+    return;
+  }
+  fireEvent.click(await screen.findByRole("button", { name: "Open Billing & Usage" }));
+  await vi.waitFor(() => expect(router.state.location.search).toEqual({ c: "current-chat", panel: "billing" }));
+  expect(router.state.location.pathname).toBe(path);
+});
+
+
+describe("message body copy integration", () => {
+  it("copies sanitized assistant Markdown without thinking, activities or controls", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const markdown = "**回答**\n\n```rust\n    let n = 1;\n```";
+    render(<ChatMessageBubble message={{ ...BASE, content: `${markdown}\n<function_calls><invoke>private-tool-input</invoke></function_calls>`, thinking: "private-thought" }} />);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(markdown);
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeVisible();
+  });
+  it("copies the user's original body including literal markup and whitespace", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const original = "  <function_calls>example</function_calls>\n```js\n  x()\n```  ";
+    render(<ChatMessageBubble message={{ ...BASE, role: "user", content: original }} />);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(original);
+  });
+  it.each([
+    { content: "", status: "complete" as const },
+    { content: "Streaming text", status: "streaming" as const },
+    { content: "<function_calls>hidden</function_calls>", status: "complete" as const },
+  ])("has no body copy control for $status / $content", (message) => {
+    render(<ChatMessageBubble message={{ ...BASE, ...message }} />);
+    expect(screen.queryByRole("button", { name: "Copy message" })).not.toBeInTheDocument();
   });
 });

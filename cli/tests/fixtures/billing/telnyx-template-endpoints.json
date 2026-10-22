@@ -1,0 +1,90 @@
+{
+  "endpoints": [
+    {
+      "publication": "published",
+      "data_scope": null,
+      "cost_class": null,
+      "execution": "http_operation",
+      "id": "00000000-0000-4000-8000-000000000002",
+      "service_id": "00000000-0000-4000-8000-000000000001",
+      "name": "chat_completions",
+      "description": "Generate text with the configured Telnyx model",
+      "method": "POST",
+      "path": "/ai/openai/chat/completions",
+      "parameters": null,
+      "request_body_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_tokens": {
+            "maximum": 1024,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "messages": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "role": {
+                  "enum": [
+                    "system",
+                    "user",
+                    "assistant"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "role",
+                "content"
+              ],
+              "type": "object"
+            },
+            "maxItems": 128,
+            "minItems": 1,
+            "type": "array"
+          },
+          "model": {
+            "enum": [
+              "org/model:1"
+            ],
+            "type": "string"
+          },
+          "stream": {
+            "default": false,
+            "enum": [
+              false
+            ],
+            "type": "boolean"
+          },
+          "temperature": {
+            "maximum": 2,
+            "minimum": 0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "model",
+          "messages",
+          "max_tokens"
+        ],
+        "type": "object"
+      },
+      "request_content_type": "application/json",
+      "request_body_required": true,
+      "response_description": null,
+      "response": {
+        "content_types": [],
+        "binary_artifact": null
+      },
+      "risk": null,
+      "supports_idempotency_key": false,
+      "is_active": true,
+      "created_at": "2026-10-19T18:19:00.234+00:00",
+      "updated_at": "2026-10-19T18:19:00.234+00:00"
+    }
+  ]
+}

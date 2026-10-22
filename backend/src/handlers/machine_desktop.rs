@@ -305,6 +305,7 @@ pub async fn upgrade(
 
 fn signed(node: &str, operation: Operation, parameters: Value, secret: &[u8]) -> Request {
     let mut request = Request {
+        external_authority: None,
         version: 1,
         authority: None,
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -695,20 +696,8 @@ pub async fn watch(
             "expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::days(1))
         };
         insert.extend(provenance.fields());
-        state
-            .db
-            .collection::<bson::Document>(crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME)
-            .update_one(
-                doc! {
-                    "kind":"machine_control",
-                    "connect_link_id":&row.id,
-                    "conversation_id":conversation,
-                    "status":"pending"
-                },
-                doc! {"$setOnInsert":insert},
-            )
-            .upsert(true)
-            .await?;
+        crate::services::nyxbot_watch_service::upsert(&state.db,&row.user_id,provenance.invocation_id.as_deref(),
+            doc!{"user_id":&row.user_id,"kind":"machine_control","connect_link_id":&row.id,"conversation_id":conversation,"status":"pending"},doc!{"$setOnInsert":insert}).await?;
     }
     Ok(())
 }

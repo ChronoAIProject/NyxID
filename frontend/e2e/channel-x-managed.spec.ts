@@ -1,4 +1,5 @@
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./production-policy-fixture";
 import { mockDashboard } from "./managed-onboarding-fixtures";
 
 const connection = "11111111-1111-4111-8111-111111111111";
@@ -80,6 +81,7 @@ for (const width of [1440, 390]) {
     expect(enabled).toBe(true);
     await page.screenshot({ path: `/tmp/nyx-typed-activity-route-${width}.png`, fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await expect(page.getByText(/^Health is unavailable/)).toHaveCount(0);
     expect(errors).toEqual([]);
   });
 }
@@ -179,6 +181,7 @@ for (const viewport of [
       .getByRole("button", { name: "Connect X (Twitter) account" })
       .click();
     await expect(page).toHaveURL(/channel-bots\/connected-x$/);
+    await expect(page.getByText(/^Health is unavailable/)).toHaveCount(0);
     expect(starts).toEqual([{ label: bot.label }]);
     expect(completes).toEqual([
       { connection_id: connection, label: bot.label },
@@ -273,6 +276,7 @@ for (const viewport of [
         () => document.documentElement.scrollWidth <= window.innerWidth,
       ),
     ).toBe(true);
+    await expect(page.getByText(/^Health is unavailable/)).toHaveCount(0);
     expect(errors).toEqual([]);
   });
 }

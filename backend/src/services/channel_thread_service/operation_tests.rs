@@ -45,6 +45,8 @@ pub(crate) async fn fixture(platform: &str) -> (mongodb::Database, ChannelBot, C
         "route_id":"route","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
     }).await.unwrap();
     let inbound = InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: "42".into(),
         conversation_id: "-100".into(),
         conversation_type: "group".into(),
@@ -116,7 +118,7 @@ async fn channel_thread_service_binds_source_gates_route_and_records_every_split
             ResponseTemplate::new(200).set_body_json(json!({"ok":true,
             "result":{"message_id":n.fetch_add(1,std::sync::atomic::Ordering::SeqCst)}}))
         })
-        .expect(4)
+        .expect(3)
         .mount(&server)
         .await;
     let n = calls.clone();
@@ -132,7 +134,7 @@ async fn channel_thread_service_binds_source_gates_route_and_records_every_split
         .mount(&server)
         .await;
     let reply = OutboundReply {
-        text: Some("界".repeat(1500)),
+        text: Some("界".repeat(5000)),
         attachments: vec![crate::services::channel_platform::MaterializedAttachment {
             kind: crate::services::channel_platform::MediaKind::File,
             bytes: bytes::Bytes::from_static(b"file"),
@@ -147,7 +149,7 @@ async fn channel_thread_service_binds_source_gates_route_and_records_every_split
         .await
         .unwrap();
     assert!(result.error.is_none());
-    assert_eq!(result.message_ids, vec!["43", "44", "45", "46", "47"]);
+    assert_eq!(result.message_ids, vec!["43", "44", "45", "46"]);
     let records: Vec<ChannelMessage> = db
         .collection(MESSAGES)
         .find(doc! {"direction":"outbound"})
@@ -156,7 +158,7 @@ async fn channel_thread_service_binds_source_gates_route_and_records_every_split
         .try_collect()
         .await
         .unwrap();
-    assert_eq!(records.len(), 5);
+    assert_eq!(records.len(), 4);
     for record in records {
         assert_eq!(
             record.thread_context.as_ref().unwrap().root_id.as_deref(),
@@ -240,7 +242,7 @@ async fn channel_thread_service_binds_source_gates_route_and_records_every_split
     .await
     .unwrap();
     assert!(r.error.is_some() && r.message_ids.is_empty());
-    assert_eq!(server.received_requests().await.unwrap().len(), 5);
+    assert_eq!(server.received_requests().await.unwrap().len(), 4);
     assert_eq!(
         db.collection::<bson::Document>("nyxbot_threads")
             .count_documents(doc! {})
@@ -394,7 +396,7 @@ async fn channel_thread_partial_send_retains_ids_without_retry_and_gateway_never
         .unwrap()
         .unwrap();
     Mock::given(path("/bottoken/sendMessage"))
-        .and(body_partial_json(json!({"text":"a".repeat(2000)})))
+        .and(body_partial_json(json!({"text":"a".repeat(4096)})))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":43}})),
         )
@@ -417,7 +419,7 @@ async fn channel_thread_partial_send_retains_ids_without_retry_and_gateway_never
         &credentials(),
         &target,
         &OutboundReply {
-            text: Some("a".repeat(2000) + "tail"),
+            text: Some("a".repeat(4096) + "tail"),
             attachments: vec![],
             metadata: None,
             reply_to_platform_message_id: None,

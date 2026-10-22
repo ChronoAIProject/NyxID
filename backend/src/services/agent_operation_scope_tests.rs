@@ -686,6 +686,7 @@ async fn key_fixture(
         is_active: true,
         created_at: now,
         rotation_predecessor_id: None,
+        machine_external_grants_present: false,
         state_version: 1,
         updated_at: Some(now),
         description: None,
@@ -748,6 +749,9 @@ async fn agent_key_operation_scopes_save_fence_revisions_and_reach_auth() {
     let stale = set_key(&db, &owner, &key.id, &service, &selection(0, vec![])).await;
     assert!(matches!(stale, Err(crate::errors::AppError::Conflict(_))));
 
+    // Stored scopes still bind actual authentication and transport checks after
+    // configuration is disabled. Disabling the editor cannot widen a key.
+    crate::test_utils::set_agent_operation_scopes_enabled(&db, &owner, false).await;
     // Authentication carries the key's scopes into every transport.
     let stored = crate::services::key_service::get_api_key(&db, &owner, &key.id)
         .await
@@ -790,6 +794,7 @@ async fn agent_key_operation_scopes_save_fence_revisions_and_reach_auth() {
             .unwrap()
     );
 
+    crate::test_utils::set_agent_operation_scopes_enabled(&db, &owner, true).await;
     // Returning to all operations removes the restriction.
     let all = OperationSelection {
         all_operations: true,
@@ -927,6 +932,8 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
     };
     let guest = as_chat(
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            invocation_controlled: false,
+            invocation_id: None,
             report_to: None,
             with_nyxbot: false,
             guest: true,
@@ -958,6 +965,8 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
 
     let webhook = as_chat(
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            invocation_controlled: false,
+            invocation_id: None,
             report_to: None,
             with_nyxbot: false,
             guest: false,
@@ -1024,4 +1033,364 @@ fn widening_cards_spell_out_value_limit_changes() {
         ..selection(3, vec!["list".into()])
     };
     assert!(limit_changes(&current, &same).is_empty());
+}
+
+#[tokio::test]
+async fn receipt_bot_recipe_saves_real_lark_operations_and_checks_final_inputs() {
+    use crate::{
+        errors::AppError,
+        models::{assistant_agent::AgentGrants, downstream_service, user_service},
+        services::{
+            assistant_authority_tests::{connected, direct_fixture},
+            assistant_team_service as team, assistant_upload_service as uploads, catalog_spec_sync,
+            feature_flag_service as flags, key_service,
+            lark_attachment_tool::{
+                COMPOSITE_OPERATION, COMPOSITE_PATH, CREATE_OPERATION, FIELDS_OPERATION,
+                UPLOAD_OPERATION,
+            },
+            lark_base_writes, mcp_service, service_endpoint_service,
+        },
+    };
+    use mongodb::bson::doc;
+    use serde_json::{Value, json};
+
+    let f = direct_fixture("receipt_bot_operation_scope_recipe").await;
+    let db = &f.state.db;
+    crate::test_utils::set_agent_operation_scopes_enabled(db, &f.owner, true).await;
+    let mut catalog = downstream_service::test_helpers::dummy_service();
+    catalog.id = uuid::Uuid::new_v4().to_string();
+    catalog.slug = "api-lark".into();
+    catalog.created_by = "system".into();
+    catalog.base_url = "https://open.larksuite.com/open-apis".into();
+    db.collection::<downstream_service::DownstreamService>(downstream_service::COLLECTION_NAME)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    crate::test_utils::init_test_audit_chain_hmac_key();
+    catalog_spec_sync::sync_seeded_service_endpoints(db)
+        .await
+        .unwrap();
+    let endpoints = service_endpoint_service::list_endpoints(db, &catalog.id)
+        .await
+        .unwrap();
+    let endpoint = |name: &str| endpoints.iter().find(|row| row.name == name).unwrap();
+    let fields = endpoint(FIELDS_OPERATION);
+    let composite = endpoint(COMPOSITE_OPERATION);
+    assert_eq!(composite.path, COMPOSITE_PATH);
+    for name in [
+        FIELDS_OPERATION,
+        COMPOSITE_OPERATION,
+        CREATE_OPERATION,
+        UPLOAD_OPERATION,
+    ] {
+        assert_eq!(
+            endpoint(name).publication,
+            crate::models::service_endpoint::PublicationState::Published
+        );
+    }
+
+    let service = connected(db, &f.owner, "receipt-lark", "http://127.0.0.1:9").await;
+    db.collection::<user_service::UserService>(user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &service},
+            doc! {"$set": {"catalog_service_id": &catalog.id}},
+        )
+        .await
+        .unwrap();
+    team::set_grants(
+        db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![service.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let options = options(db, &f.state.node_ws_manager, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    let current = options
+        .iter()
+        .find(|row| row.service_id == service)
+        .unwrap();
+    assert!(current.all_operations);
+    assert_eq!(current.revision, 0);
+    for row in [fields, composite] {
+        assert!(current.operations.iter().any(|option| {
+            option.endpoint_id == row.id && option.method == row.method && option.path == row.path
+        }));
+    }
+
+    // Execute the documented selection, with server IDs replacing its placeholders.
+    let recipe = include_str!("../../../docs/AGENT_OPERATION_SCOPES.md")
+        .split_once("## Receipt-Bot recipe\n")
+        .unwrap()
+        .1
+        .split_once("```json\n")
+        .unwrap()
+        .1
+        .split_once("\n```")
+        .unwrap()
+        .0
+        .replace("<fields-endpoint-id>", &fields.id)
+        .replace("<composite-endpoint-id>", &composite.id);
+    let selection: OperationSelection = serde_json::from_str(&recipe).unwrap();
+    assert_eq!(
+        selection.endpoint_ids,
+        [fields.id.clone(), composite.id.clone()]
+    );
+    let mut invalid = selection.clone();
+    invalid.inputs.get_mut(&composite.id).unwrap().path.insert(
+        "not_a_path_parameter".into(),
+        nyxid_permissions::ValueRule::Exact {
+            value: json!("forbidden"),
+        },
+    );
+    assert!(matches!(
+        set(db, &f.owner, &f.chat.agent_id, &service, &invalid, false).await,
+        Err(AppError::ValidationError(_))
+    ));
+    let saved = set(db, &f.owner, &f.chat.agent_id, &service, &selection, false)
+        .await
+        .unwrap();
+    assert_eq!(saved.operation_scopes[&service].revision, 1);
+    assert_eq!(saved.operation_scopes[&service].operations.len(), 2);
+    assert!(matches!(
+        set(db, &f.owner, &f.chat.agent_id, &service, &selection, false).await,
+        Err(AppError::Conflict(_))
+    ));
+    let key = key_service::get_api_key(db, &f.owner, &f.chat.api_key_id)
+        .await
+        .unwrap();
+    assert_eq!(key.assistant_operation_scopes, saved.operation_scopes);
+    let auth = crate::mw::auth::api_key_auth_user(db, &key, None, None, None)
+        .await
+        .unwrap();
+    assert!(auth.assistant_chat.is_some());
+    assert_eq!(auth.assistant_operation_scopes, saved.operation_scopes);
+
+    let upload = uploads::upload(
+        db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+        "receipt.txt",
+        b"receipt fixture bytes".to_vec(),
+    )
+    .await
+    .unwrap();
+    let message = db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .find_one(doc! {"conversation_id": &f.row.id, "role": "user"})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    uploads::bind(
+        db,
+        &f.owner,
+        &f.row.id,
+        message.get_str("_id").unwrap(),
+        std::slice::from_ref(&upload.id),
+        &mut session,
+    )
+    .await
+    .unwrap();
+    session.commit_transaction().await.unwrap();
+
+    // Exercise the same final-request scope boundary as managed MCP execution.
+    // Preparation below stays local; the provider executor is never called.
+    let check = |name: &str, app: &str, table: &str, body: Option<&Value>| {
+        let row = endpoint(name);
+        let path = CanonicalPath::from_mcp_built(
+            &row.path
+                .replace("{app_token}", app)
+                .replace("{table_id}", table),
+        )
+        .unwrap();
+        authorize(
+            &auth.assistant_operation_scopes,
+            &service,
+            Some(&catalog.id),
+            Some(&row.id),
+            &row.method,
+            &path,
+            false,
+            false,
+        )?;
+        check_inputs(
+            &auth.assistant_operation_scopes,
+            &service,
+            Some(&catalog.id),
+            Some(&row.id),
+            &row.method,
+            &path,
+            None,
+            &body
+                .map(serde_json::to_vec)
+                .transpose()
+                .unwrap()
+                .unwrap_or_default(),
+            row.request_content_type.as_deref(),
+        )
+    };
+    let valid = json!({
+        "fields": {"Type": "Expense", "Card Number": "1234", "Date": 1767225600000_i64, "Amount": 12.34},
+        "attachments": {"Receipt Photos": [&upload.id]}
+    });
+    assert!(check(FIELDS_OPERATION, "bascnReceiptApp", "tblReceipts", None).is_ok());
+    assert!(
+        check(
+            COMPOSITE_OPERATION,
+            "bascnReceiptApp",
+            "tblReceipts",
+            Some(&valid)
+        )
+        .is_ok()
+    );
+    let mut cases = Vec::new();
+    let mut body = valid.clone();
+    body["fields"]["Amount"] = json!(12.345);
+    cases.push(("three fractional digits", body));
+    for field in ["Type", "Card Number", "Date", "Amount"] {
+        let mut body = valid.clone();
+        body["fields"].as_object_mut().unwrap().remove(field);
+        cases.push((field, body));
+    }
+    for field in ["Type", "Card Number"] {
+        let mut body = valid.clone();
+        body["fields"][field] = json!("not an existing option");
+        cases.push((field, body));
+    }
+    let mut body = valid.clone();
+    body["fields"]["unexpected"] = json!("closed fields");
+    cases.push(("unknown field", body));
+    let mut body = valid.clone();
+    body["unexpected"] = json!("closed top level");
+    cases.push(("unknown top-level property", body));
+    let mut body = valid.clone();
+    body["attachments"] = json!({});
+    cases.push(("empty attachment map", body));
+    let mut body = valid.clone();
+    body["attachments"]["Receipt Photos"] =
+        json!((0..11).map(|n| format!("photo-{n}")).collect::<Vec<_>>());
+    cases.push(("eleven photo IDs", body));
+    for (label, body) in cases {
+        assert!(
+            matches!(
+                check(
+                    COMPOSITE_OPERATION,
+                    "bascnReceiptApp",
+                    "tblReceipts",
+                    Some(&body)
+                ),
+                Err(AppError::ApiKeyScopeForbidden(_))
+            ),
+            "{label} must fail the saved receipt scope"
+        );
+    }
+    for name in [FIELDS_OPERATION, COMPOSITE_OPERATION] {
+        for (app, table) in [
+            ("otherBase", "tblReceipts"),
+            ("bascnReceiptApp", "otherTable"),
+        ] {
+            assert!(matches!(
+                check(name, app, table, Some(&valid)),
+                Err(AppError::ApiKeyScopeForbidden(_))
+            ));
+        }
+    }
+    for name in [CREATE_OPERATION, UPLOAD_OPERATION] {
+        assert!(
+            matches!(
+                check(name, "bascnReceiptApp", "tblReceipts", Some(&valid)),
+                Err(AppError::ApiKeyScopeForbidden(_))
+            ),
+            "{name} is not granted by the receipt recipe"
+        );
+    }
+
+    flags::set_platform_override(
+        db,
+        flags::ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
+        &flags::FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let mut tools = mcp_service::service_endpoints_to_mcp(&endpoints.iter().collect::<Vec<_>>());
+    crate::services::lark_attachment_tool::stored_projections(Some(&catalog), &mut tools);
+    let tool = tools
+        .iter()
+        .find(|row| row.name == COMPOSITE_OPERATION)
+        .unwrap()
+        .clone();
+    let managed_service = mcp_service::McpToolService {
+        workspace_destinations_pending: false,
+        service_id: service.clone(),
+        service_name: "Receipt Lark".into(),
+        service_slug: "receipt-lark".into(),
+        description: None,
+        service_category: "connection".into(),
+        endpoints: tools,
+        durable_endpoint_metadata: Default::default(),
+        source: mcp_service::McpToolSource::UserManaged {
+            user_service_id: service.clone(),
+            catalog_service_id: Some(catalog.id.clone()),
+            effective_owner_id: f.owner.clone(),
+            node_id: None,
+            has_server_credential: true,
+        },
+        executable: true,
+        is_generic_proxy: false,
+        invalid_openapi_contract: false,
+        recommended_skills: vec![],
+        recommended_skill_refs: None,
+        skills_revision: None,
+        proxy_operation_policy: None,
+    };
+    let args = json!({"app_token": "bascnReceiptApp", "table_id": "tblReceipts"});
+    assert!(
+        lark_base_writes::prepare(
+            db,
+            &f.state.encryption_keys,
+            auth.assistant_chat.as_deref(),
+            &managed_service,
+            &tool,
+            &args,
+            &valid,
+        )
+        .await
+        .is_ok()
+    );
+    let mut empty_photos = valid.clone();
+    empty_photos["attachments"]["Receipt Photos"] = json!([]);
+    // Array scopes have only a maximum; the real composite supplies the minimum.
+    assert!(
+        check(
+            COMPOSITE_OPERATION,
+            "bascnReceiptApp",
+            "tblReceipts",
+            Some(&empty_photos)
+        )
+        .is_ok()
+    );
+    assert!(matches!(
+        lark_base_writes::prepare(
+            db,
+            &f.state.encryption_keys,
+            auth.assistant_chat.as_deref(),
+            &managed_service,
+            &tool,
+            &args,
+            &empty_photos,
+        )
+        .await,
+        Err(AppError::BadRequest(message)) if message.contains("nonempty attachments")
+    ));
+    db.drop().await.unwrap();
 }

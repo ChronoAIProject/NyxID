@@ -701,6 +701,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lark_base_write_rollback_admin_deletes_seeded_attachment_operations_for_all_four_slugs()
+     {
+        use crate::models::user::{User, UserType};
+        use crate::test_utils::{connect_transaction_test_database, test_user};
+
+        let db = connect_transaction_test_database("lark_rollback_endpoint_delete").await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+        let admin_id = uuid::Uuid::new_v4().to_string();
+        let mut admin = test_user(&admin_id, UserType::Person);
+        admin.is_admin = true;
+        // Platform authority comes from the seeded Admin role, not the legacy flag.
+        admin.role_ids.push(
+            crate::services::role_service::get_platform_role_ids(&db)
+                .await
+                .unwrap()
+                .admin,
+        );
+        db.collection::<User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(admin)
+            .await
+            .unwrap();
+        let mut services = Vec::new();
+        for slug in ["api-lark", "api-lark-bot", "api-feishu", "api-feishu-bot"] {
+            let mut service = dummy_service();
+            service.id = uuid::Uuid::new_v4().to_string();
+            service.slug = slug.into();
+            service.created_by = "system".into();
+            db.collection::<crate::models::downstream_service::DownstreamService>(
+                DOWNSTREAM_SERVICES,
+            )
+            .insert_one(&service)
+            .await
+            .unwrap();
+            services.push(service);
+        }
+        crate::services::catalog_spec_sync::sync_seeded_service_endpoints(&db)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for service in &services {
+            let before = list_endpoints(
+                State(state.clone()),
+                test_auth_user(&admin_id),
+                Path(service.id.clone()),
+            )
+            .await
+            .unwrap()
+            .0
+            .endpoints;
+            let mut deleted = Vec::new();
+            for endpoint in &before {
+                if matches!(
+                    endpoint.name.as_str(),
+                    "bitable_media_upload" | "bitable_record_create_with_attachments"
+                ) {
+                    let response = delete_endpoint(
+                        State(state.clone()),
+                        test_auth_user(&admin_id),
+                        Path((service.id.clone(), endpoint.id.clone())),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(response.0.message, "Endpoint deleted");
+                    deleted.push(endpoint.id.clone());
+                }
+            }
+            assert_eq!(deleted.len(), 2, "{}", service.slug);
+            let after = list_endpoints(
+                State(state.clone()),
+                test_auth_user(&admin_id),
+                Path(service.id.clone()),
+            )
+            .await
+            .unwrap()
+            .0
+            .endpoints;
+            let expected: Vec<_> = before
+                .iter()
+                .filter(|endpoint| !deleted.contains(&endpoint.id))
+                .map(|endpoint| serde_json::to_value(endpoint).unwrap())
+                .collect();
+            assert_eq!(
+                serde_json::to_value(&after).unwrap(),
+                serde_json::json!(expected)
+            );
+            for name in ["bitable_fields_list", "bitable_record_create"] {
+                assert!(after.iter().any(|endpoint| endpoint.name == name));
+            }
+            for id in deleted {
+                assert!(
+                    db.collection::<ServiceEndpoint>(
+                        crate::models::service_endpoint::COLLECTION_NAME
+                    )
+                    .find_one(mongodb::bson::doc! {"_id": id})
+                    .await
+                    .unwrap()
+                    .is_none()
+                );
+            }
+        }
+        // A new-release startup restores the operations, so rollback must perform
+        // its final absence check after the last new-release startup or resync.
+        crate::services::catalog_spec_sync::sync_seeded_service_endpoints(&db)
+            .await
+            .unwrap();
+        for service in services {
+            assert_eq!(
+                db.collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
+                    .count_documents(mongodb::bson::doc! {
+                        "service_id": service.id,
+                        "name": {"$in": ["bitable_media_upload", "bitable_record_create_with_attachments"]}
+                    })
+                    .await
+                    .unwrap(),
+                2
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn route_service_id_cannot_mutate_or_delete_another_services_endpoint() {
         let Some(db) = connect_test_database("endpoint_handler_owner_scope").await else {
             return;

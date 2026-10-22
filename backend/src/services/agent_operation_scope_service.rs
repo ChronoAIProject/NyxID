@@ -1005,7 +1005,7 @@ fn intersect_effects(
 /// Effects of a raw call on a service without a saved scope. Stored endpoint
 /// rows are catalog contracts; with no matching row the method decides, which
 /// never treats a POST as a read.
-async fn unscoped_effects(
+pub(crate) async fn unscoped_effects(
     db: &Database,
     service: &str,
     catalog: Option<&str>,
@@ -1508,33 +1508,25 @@ pub async fn set_key(
             &field: bson::to_bson(scope)
                 .map_err(|_| AppError::Internal("Operation scope encoding failed".into()))?,
             &revision_field: next,
-            "updated_at": bson::DateTime::now(),
         }},
         None => doc! {
             "$unset": {&field: ""},
-            "$set": {&revision_field: next, "updated_at": bson::DateTime::now()},
+            "$set": {&revision_field: next},
         },
     };
-    let result = db
-        .collection::<ApiKey>(API_KEYS)
-        .update_one(filter, update)
-        .await?;
+    let result = transactions::update_one(db, filter, update, None).await?;
     if result.matched_count != 1 {
         return Err(AppError::Conflict(
             "Operation scope changed; reload its revision".into(),
         ));
     }
-    let mut updated = key;
-    match scope {
-        Some(scope) => {
-            updated
-                .assistant_operation_scopes
-                .insert(service.to_owned(), scope);
-        }
-        None => {
-            updated.assistant_operation_scopes.remove(service);
-        }
-    }
+    let updated = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {"_id": &key.id, "user_id": &key.user_id})
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict("API key changed after its operation scope update".into())
+        })?;
     super::audit_service::log_actor_event(
         db.clone(),
         &super::audit_service::AuditActor {

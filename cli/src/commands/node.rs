@@ -6,10 +6,13 @@ use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::cli::{NodeCommands, NodeDaemonCommands, NodeDockerCommands, OutputFormat};
+use crate::node::machine::setup::{Separation, offer_shared_legacy};
 use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: NodeCommands) -> Result<()> {
     match command {
+        NodeCommands::ManagedPrepare(args) => crate::node::managed_runtime::prepare(args).await,
+        NodeCommands::ManagedStart(args) => crate::node::managed_runtime::run(args).await,
         NodeCommands::Setup(args) => crate::node::machine::setup::run(args).await,
         NodeCommands::MachineBrowserInstall { port } => {
             crate::node::machine::setup::install_browser(port)
@@ -19,6 +22,13 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             config,
             profile,
         } => {
+            if !matches!(command, crate::node::machine::commands::Commands::Status) {
+                let directory = crate::node::config::resolve_config_dir_with_profile(
+                    config.as_deref(),
+                    profile.as_deref(),
+                )?;
+                crate::node::managed_runtime::require_self_hosted_mutation(&directory)?;
+            }
             crate::node::machine::commands::run(command, config.as_deref(), profile.as_deref())
                 .await
         }
@@ -468,6 +478,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
         }
 
         // --- Agent-side commands (local node operations) ---
+        NodeCommands::CustodyProbe => crate::node::custody::worker(),
         NodeCommands::Register {
             token,
             url,
@@ -476,6 +487,9 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             profile,
         } => {
             let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
+            crate::node::managed_runtime::require_self_hosted_mutation(
+                &crate::node::config::resolve_config_dir(effective_config.as_deref()),
+            )?;
             crate::node::agent::cmd_register(
                 &token,
                 url.as_deref(),
@@ -509,6 +523,9 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             profile,
         } => {
             let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
+            crate::node::managed_runtime::require_self_hosted_mutation(
+                &crate::node::config::resolve_config_dir(effective_config.as_deref()),
+            )?;
             crate::node::agent::cmd_rekey(&auth_token, &signing_secret, effective_config.as_deref())
                 .map_err(anyhow::Error::from)
         }
@@ -796,12 +813,12 @@ fn run_docker_command(command: NodeDockerCommands) -> Result<()> {
 
     match command {
         NodeDockerCommands::Build { machine } => docker_build(machine),
-        NodeDockerCommands::Start { args } => {
-            docker_start(args.profile.as_deref(), args.machine, false)
+        NodeDockerCommands::Start { args, separation } => {
+            docker_start(args.profile.as_deref(), args.machine, false, separation)
         }
         NodeDockerCommands::Stop { args } => docker_stop(args.profile.as_deref(), args.machine),
-        NodeDockerCommands::Restart { args } => {
-            docker_start(args.profile.as_deref(), args.machine, true)
+        NodeDockerCommands::Restart { args, separation } => {
+            docker_start(args.profile.as_deref(), args.machine, true, separation)
         }
         NodeDockerCommands::Status { args } => docker_status(args.profile.as_deref(), args.machine),
         NodeDockerCommands::Logs { args, follow } => {
@@ -901,7 +918,12 @@ fn docker_ca_args(ca_environment: &[(&str, String)]) -> Result<Vec<String>> {
     Ok(args)
 }
 
-fn docker_start(profile: Option<&str>, machine: bool, restart: bool) -> Result<()> {
+fn docker_start(
+    profile: Option<&str>,
+    machine: bool,
+    restart: bool,
+    separation: Option<Separation>,
+) -> Result<()> {
     crate::tls::shared_config()?;
     let ca_environment = crate::tls::environment::ca_environment_from_env()?;
     if let Some(profile) = profile {
@@ -909,7 +931,7 @@ fn docker_start(profile: Option<&str>, machine: bool, restart: bool) -> Result<(
     }
     if machine {
         let ca_args = docker_ca_args(&ca_environment)?;
-        return docker_machine_start(profile, restart, &ca_args);
+        return docker_machine_start(profile, restart, &ca_args, separation);
     }
     let config_dir = docker_config_dir(profile)?;
     let container = docker_container_name(profile, false);
@@ -961,12 +983,84 @@ fn docker_start(profile: Option<&str>, machine: bool, restart: bool) -> Result<(
     Ok(())
 }
 
-fn docker_machine_start(profile: Option<&str>, restart: bool, ca_args: &[String]) -> Result<()> {
+fn docker_machine_choice(
+    requested: Option<Separation>,
+    evidence: Option<&nyxid_machine::context::Evidence>,
+    offer: impl FnOnce(nyxid_machine::context::Choice, &str) -> Result<nyxid_machine::context::Choice>,
+) -> Result<Separation> {
+    use nyxid_machine::context::{Choice, select_new};
+    let requested = requested.unwrap_or(Separation::Automatic);
+    if let Err(reason) = select_new(requested.into(), evidence) {
+        let choice = offer(requested.into(), reason)?;
+        anyhow::ensure!(
+            choice == Choice::SharedLegacy,
+            "Shared legacy access was not selected"
+        );
+        return Ok(Separation::SharedLegacy);
+    }
+    Ok(requested)
+}
+
+fn machine_container_security_args(security: &str) -> Vec<String> {
+    [
+        "run",
+        "--security-opt",
+        security,
+        "--init",
+        "--shm-size",
+        "512m",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn machine_container_probe_args(security: &str) -> Vec<String> {
+    let mut args = machine_container_security_args(security);
+    args.extend(
+        [
+            "--rm",
+            "--entrypoint",
+            "/usr/local/bin/nyxid",
+            MACHINE_DOCKER_IMAGE,
+            "node",
+            "setup",
+            "--container",
+            "--probe-separation",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    args
+}
+
+fn machine_container_selection_args(selection: Separation) -> [String; 4] {
+    [
+        // This user-owned CLI flow uses ordinary self-hosted registration.
+        // Managed provider bootstrap retains the image's separate default.
+        "-e".into(),
+        "NYXID_MACHINE_MANAGED=0".into(),
+        "-e".into(),
+        format!("NYXID_MACHINE_SEPARATION={}", selection.as_cli_str()),
+    ]
+}
+
+fn docker_machine_start(
+    profile: Option<&str>,
+    restart: bool,
+    ca_args: &[String],
+    separation: Option<Separation>,
+) -> Result<()> {
     let container = docker_container_name(profile, true);
     let existing = std::process::Command::new("docker")
         .args(["inspect", "--format", "{{.State.Running}}", &container])
         .output()?;
     if existing.status.success() {
+        if separation.is_some() {
+            anyhow::bail!(
+                "Existing machine containers retain their recorded choice. Run nyxid node setup --separation <choice> inside this container to change intent; start or restart it without --separation to preserve it."
+            );
+        }
         if !restart && String::from_utf8_lossy(&existing.stdout).trim() == "true" {
             eprintln!("Machine container {container} is already running.");
             return Ok(());
@@ -988,25 +1082,42 @@ fn docker_machine_start(profile: Option<&str>, restart: bool, ca_args: &[String]
         include_bytes!("../../resources/machine-container/seccomp.json"),
     )?;
     let security = format!("seccomp={}", sandbox.path().display());
+    // Measure the actual image on Docker's Linux host, never the CLI host OS.
+    // This one-off receives no identity/workspace volumes or registration token.
+    // The real setup repeats the probes after provisioning before startup.
+    let evidence = if separation == Some(Separation::SharedLegacy) {
+        None
+    } else {
+        let output = std::process::Command::new("docker")
+            .args(machine_container_probe_args(&security))
+            .output()?;
+        output
+            .status
+            .success()
+            .then(|| {
+                serde_json::from_slice::<nyxid_machine::context::Evidence>(&output.stdout).ok()
+            })
+            .flatten()
+    };
+    let selection = docker_machine_choice(separation, evidence.as_ref(), offer_shared_legacy)?;
+    if selection == Separation::SharedLegacy {
+        eprintln!("{}", nyxid_machine::context::SHARED_LEGACY_WARNING);
+    }
     let mut command = std::process::Command::new("docker");
     command.args(["--log-level", "error"]);
+    command.args(machine_container_security_args(&security));
     command.args([
-        "run",
-        "--security-opt",
-        &security,
         "-d",
-        "--init",
         "--name",
         &container,
         "--restart",
         "unless-stopped",
-        "--shm-size",
-        "512m",
         "-v",
         &state,
         "-v",
         &workspace,
     ]);
+    command.args(machine_container_selection_args(selection));
     for key in ["NYXID_NODE_URL", "NYXID_NODE_TOKEN"] {
         if std::env::var_os(key).is_some() {
             command.args(["-e", key]);
@@ -1030,9 +1141,14 @@ fn docker_stop(profile: Option<&str>, machine: bool) -> Result<()> {
     let _ = std::process::Command::new("docker")
         .args(["stop", &container])
         .output();
-    let _ = std::process::Command::new("docker")
-        .args(["rm", &container])
-        .output();
+    // Retain machine containers and their recorded selection for stop/start.
+    // Recreating a container would otherwise re-run automatic selection before
+    // its existing identity volume can be opened, breaking legacy restarts.
+    if !machine {
+        let _ = std::process::Command::new("docker")
+            .args(["rm", &container])
+            .output();
+    }
     eprintln!("Stopped.");
     Ok(())
 }
@@ -1313,6 +1429,101 @@ mod tests {
             docker_container_name(Some("prod"), false),
             "nyxid-node-prod"
         );
+    }
+
+    #[test]
+    fn docker_machine_selection_never_infers_legacy_from_missing_evidence() {
+        use nyxid_machine::context::{Choice, EVIDENCE_VERSION, Evidence, MIN_LANDLOCK_ABI};
+        let supported = Evidence {
+            version: EVIDENCE_VERSION,
+            os: "linux".into(),
+            landlock_abi: Some(MIN_LANDLOCK_ABI),
+            separate_users: Some(true),
+            credential_custody: Some(true),
+            managed_browser_configured: Some(true),
+            command_seccomp: Some(true),
+            landlock_enforced: Some(true),
+            managed_browser_sandbox: Some(true),
+            managed_browser_policy: Some(true),
+            ..Default::default()
+        };
+        for requested in [
+            None,
+            Some(Separation::Automatic),
+            Some(Separation::RequireSeparated),
+            Some(Separation::SharedLegacy),
+        ] {
+            assert_eq!(
+                docker_machine_choice(requested, Some(&supported), |_, _| panic!(
+                    "supported choice must not prompt"
+                ))
+                .unwrap(),
+                requested.unwrap_or(Separation::Automatic)
+            );
+        }
+        assert_eq!(
+            docker_machine_choice(Some(Separation::SharedLegacy), None, |_, _| panic!(
+                "explicit legacy must not prompt"
+            ))
+            .unwrap(),
+            Separation::SharedLegacy
+        );
+        for evidence in [None, Some(&Evidence::default())] {
+            let error = docker_machine_choice(None, evidence, |choice, reason| {
+                assert_eq!(choice, Choice::Automatic);
+                Err(anyhow::anyhow!("{reason}"))
+            })
+            .unwrap_err();
+            assert!(error.to_string().starts_with("separated_"));
+            assert_eq!(
+                docker_machine_choice(None, evidence, |choice, _| {
+                    assert_eq!(choice, Choice::Automatic);
+                    Ok(Choice::SharedLegacy)
+                })
+                .unwrap(),
+                Separation::SharedLegacy
+            );
+            assert!(
+                docker_machine_choice(Some(Separation::RequireSeparated), evidence, |choice, _| {
+                    assert_eq!(choice, Choice::RequireSeparated);
+                    Err(anyhow::anyhow!("required separation unavailable"))
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn docker_machine_probe_uses_runtime_security_without_secrets_or_persistent_volumes() {
+        let probe = machine_container_probe_args("seccomp=/tmp/test policy.json");
+        assert!(probe.starts_with(&machine_container_security_args(
+            "seccomp=/tmp/test policy.json"
+        )));
+        assert!(
+            probe
+                .windows(2)
+                .any(|pair| pair == ["--entrypoint", "/usr/local/bin/nyxid"])
+        );
+        assert!(probe.contains(&"--probe-separation".into()));
+        assert!(probe.contains(&"--rm".into()));
+        for forbidden in ["-v", "--mount", "-e", "--privileged", "--no-sandbox"] {
+            assert!(!probe.contains(&forbidden.into()));
+        }
+        for (selection, expected) in [
+            (Separation::Automatic, "automatic"),
+            (Separation::RequireSeparated, "require-separated"),
+            (Separation::SharedLegacy, "shared-legacy"),
+        ] {
+            assert_eq!(
+                machine_container_selection_args(selection),
+                [
+                    "-e".to_owned(),
+                    "NYXID_MACHINE_MANAGED=0".to_owned(),
+                    "-e".to_owned(),
+                    format!("NYXID_MACHINE_SEPARATION={expected}")
+                ]
+            );
+        }
     }
 
     #[test]

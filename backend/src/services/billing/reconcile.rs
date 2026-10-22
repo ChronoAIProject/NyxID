@@ -72,12 +72,27 @@ impl BillingReconciler {
         if !super::exact_migration::ready(&self.db).await? {
             return Ok(ReconcileStats::default());
         }
+        // Benefit-only estimates can spill into wallet funding at settlement.
+        // Refresh before recovery: pending component/voice recovery may return
+        // early on a missing profile and must not starve its own refresh.
+        if self.config.billing_enabled
+            && let Some(lago) = &self.lago
+        {
+            super::taxes::reconcile(
+                &self.db,
+                lago.as_ref(),
+                self.config.billing_rate_cache_ttl_secs,
+            )
+            .await?;
+        }
         let mut stats = ReconcileStats::default();
         match super::pool_attempt::recover_expired(&self.db, Utc::now()).await {
             Ok(count) => stats.abandoned += count,
             Err(error) => super::pool_attempt::record_recovery_error(&self.db, None, &error).await,
         }
         stats.recovered_settlements += super::voice::reconcile(&self.db).await?;
+        stats.recovered_settlements +=
+            crate::services::managed_execution_service::reconcile(&self.db).await?;
         stats.abandoned += self.abandon_unforwarded_reserved().await?;
         stats.funding_releases_recovered +=
             super::funding::recover_terminal_releases(&self.db).await?;
@@ -121,6 +136,17 @@ impl BillingReconciler {
             &self.db,
             lago.as_ref(),
             &self.config.lago_plan_code,
+        )
+        .await?;
+        let mut runtime_billing = super::BillingService::new(self.db.clone(), self.config.clone());
+        runtime_billing.lago = self.lago.clone();
+        stats.service_price_syncs += runtime_billing.retry_machine_runtime_rates(4).await?;
+        // Price synchronization invalidates affected profiles. Refresh those
+        // within this pass; admissions also refresh individually on demand.
+        super::taxes::reconcile(
+            &self.db,
+            lago.as_ref(),
+            self.config.billing_rate_cache_ttl_secs,
         )
         .await?;
         self.push_unacked(lago.as_ref(), &mut stats).await?;
@@ -309,18 +335,41 @@ impl BillingReconciler {
                 mark_lago_acked(&self.db, &row.id).await?;
                 continue;
             }
-            let subscription_id = match subscriptions.get(&row.billing_owner_id) {
-                Some(cached) => cached.clone(),
-                None => {
-                    let resolved = self
-                        .db
-                        .collection::<BillingWallet>(BILLING_WALLET)
-                        .find_one(doc! { "owner_id": &row.billing_owner_id })
-                        .await?
-                        .and_then(|wallet| wallet.lago_subscription_id);
-                    subscriptions.insert(row.billing_owner_id.clone(), resolved.clone());
-                    resolved
+            // Runtime contracts keep their accepted rate even after retirement.
+            // Emit to the subscription verified on that plan, without a second
+            // mutable wallet lookup or the ordinary service cache.
+            let verified_subscription = match super::machine_runtime::verify_usage_provider_rate(
+                &self.db, lago, &row,
+            )
+            .await
+            {
+                Ok(binding) => binding,
+                Err(_) => {
+                    bump_attempt(
+                        &self.db,
+                        &row.id,
+                        "Machine runtime billing provider binding verification will retry",
+                    )
+                    .await?;
+                    stats.retried += 1;
+                    continue;
                 }
+            };
+            let subscription_id = match verified_subscription {
+                Some(verified) => Some(verified),
+                None => match subscriptions.get(&row.billing_owner_id) {
+                    Some(cached) => cached.clone(),
+                    None => {
+                        let resolved = self
+                            .db
+                            .collection::<BillingWallet>(BILLING_WALLET)
+                            .find_one(doc! { "owner_id": &row.billing_owner_id })
+                            .await?
+                            .and_then(|wallet| wallet.lago_subscription_id);
+                        subscriptions.insert(row.billing_owner_id.clone(), resolved.clone());
+                        resolved
+                    }
+                },
             };
             let Some(event) = LagoEvent::from_usage_row(&row, subscription_id) else {
                 mark_dead_letter(
@@ -636,6 +685,7 @@ mod tests {
     fn billing_enabled_config() -> crate::config::AppConfig {
         crate::config::AppConfig {
             billing_enabled: true,
+            billing_allocations_enabled: false,
             ..test_app_config()
         }
     }
@@ -710,6 +760,7 @@ mod tests {
             wallet_id: Some("wallet-1".to_string()),
             actor_user_id: "actor-1".to_string(),
             api_key_id: None,
+            assistant_source: None,
             user_service_id: None,
             service_id: Some("service-1".to_string()),
             service_slug: Some("service-one".to_string()),
@@ -718,6 +769,7 @@ mod tests {
             operation: None,
             credential_class: CredentialClass::UserOwned,
             model: None,
+            reported_model: None,
             token_breakdown: None,
             audio_tokens: None,
             image_tokens: None,
@@ -727,6 +779,7 @@ mod tests {
             pending_resale_quantity: None,
             pending_platform_usage: None,
             pool_attempt: None,
+            machine_usage: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: true,
@@ -1094,10 +1147,14 @@ mod tests {
         assert!(!saved.lago_acked);
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Default)]
     struct RatesLago {
         rates: Vec<super::super::lago_client::PlanRate>,
         rejected: Vec<String>,
+        expected_plan_code: Option<String>,
+        subscription: Option<super::super::lago_client::RuntimeSubscription>,
+        wallet_change_after_proof: Option<mongodb::Database>,
+        events: std::sync::Arc<std::sync::Mutex<Vec<LagoEvent>>>,
     }
 
     #[async_trait]
@@ -1118,6 +1175,7 @@ mod tests {
         }
 
         async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError> {
+            self.events.lock().unwrap().push(event.clone());
             Ok(LagoAck {
                 transaction_id: event.transaction_id.clone(),
             })
@@ -1155,13 +1213,404 @@ mod tests {
 
         async fn plan_rates(
             &self,
-            _plan_code: &str,
+            plan_code: &str,
         ) -> crate::errors::AppResult<super::super::lago_client::PlanRates> {
+            if self
+                .expected_plan_code
+                .as_deref()
+                .is_some_and(|expected| expected != plan_code)
+            {
+                return Err(crate::errors::AppError::BillingProviderUnavailable(
+                    "test unexpected billing plan".into(),
+                ));
+            }
             Ok(super::super::lago_client::PlanRates {
                 rates: self.rates.clone(),
                 rejected: self.rejected.clone(),
             })
         }
+
+        async fn runtime_subscription(
+            &self,
+            _subscription_id: &str,
+        ) -> crate::errors::AppResult<super::super::lago_client::RuntimeSubscription> {
+            if let Some(db) = &self.wallet_change_after_proof {
+                db.collection::<mongodb::bson::Document>(super::BILLING_WALLET)
+                    .update_one(
+                        doc! {"_id":"wallet-1"},
+                        doc! {"$set":{"lago_subscription_id":"changed-after-proof"}},
+                    )
+                    .await?;
+            }
+            self.subscription.clone().ok_or_else(|| {
+                crate::errors::AppError::BillingProviderUnavailable(
+                    "test subscription unavailable".into(),
+                )
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn machine_provider_rate_drift_retains_usage_and_continues_service_emission() {
+        use crate::models::credits::Credits;
+        use crate::models::machine_runtime_billing::{MachineRuntimeRate, RATE_COLLECTION};
+        use crate::models::service_billing::PricingSyncStatus;
+        use crate::models::usage_meter::UsageFunding;
+
+        let db =
+            crate::test_utils::connect_transaction_test_database("machine_provider_drift").await;
+        let rate = MachineRuntimeRate {
+            profile_version: "remote-machine".into(),
+            id: "11111111-1111-4111-8111-111111111111".into(),
+            metric: BillingMetric::MachineRunningSeconds,
+            lago_metric_code: "remote_machine_running_seconds_11111111111141118111111111111111"
+                .into(),
+            plan_code: "machine-test-plan".into(),
+            credits_per_second: Credits::from_pico(40_000_000).unwrap(),
+            sync_status: PricingSyncStatus::Synced,
+            retired: false,
+            verified_at: Some(Utc::now()),
+            created_at: Utc::now(),
+        };
+        db.collection::<MachineRuntimeRate>(RATE_COLLECTION)
+            .insert_one(&rate)
+            .await
+            .unwrap();
+        let mut machine = finalized_row("machine-provider-drift");
+        machine.metric = BillingMetric::MachineRunningSeconds;
+        machine.lago_metric_code = rate.lago_metric_code.clone();
+        machine.funding = Some(UsageFunding {
+            settlement_rate: Some(rate.credits_per_second),
+            settled: true,
+            wallet_charge_credits: Some(rate.credits_per_second),
+            lago_billable_quantity_micros: Some(1_000_000),
+            ..Default::default()
+        });
+        let service = finalized_row("service-emits-despite-machine-drift");
+        let rows = db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME);
+        rows.insert_many([&machine, &service]).await.unwrap();
+        let lago = RatesLago {
+            rates: vec![super::super::lago_client::PlanRate {
+                lago_metric_code: rate.lago_metric_code,
+                credits_per_unit_micros: 41,
+                credits_per_unit_pico: Some(41_000_000),
+            }],
+            rejected: vec![],
+            ..Default::default()
+        };
+        let reconciler = BillingReconciler::new(
+            db.clone(),
+            None,
+            std::sync::Arc::new(billing_enabled_config()),
+        );
+        let mut stats = super::ReconcileStats::default();
+        reconciler.push_unacked(&lago, &mut stats).await.unwrap();
+        assert_eq!(stats.pushed, 1);
+        assert_eq!(stats.retried, 1);
+        assert_eq!(stats.dead_lettered, 0);
+        let saved = rows
+            .find_one(doc! { "_id": &machine.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!saved.lago_acked);
+        assert_eq!(saved.status, UsageStatus::Finalized);
+        assert_eq!(saved.attempt, 1);
+        assert!(saved.expires_at.is_none());
+        assert_eq!(
+            saved.last_error.as_deref(),
+            Some("Machine runtime billing provider binding verification will retry")
+        );
+        assert!(
+            rows.find_one(doc! { "_id": &service.id })
+                .await
+                .unwrap()
+                .unwrap()
+                .lago_acked
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn machine_retired_rate_emits_only_at_accepted_provider_price() {
+        use crate::models::credits::Credits;
+        use crate::models::machine_runtime_billing::{MachineRuntimeRate, RATE_COLLECTION};
+        use crate::models::service_billing::PricingSyncStatus;
+        use crate::models::usage_meter::UsageFunding;
+
+        let db =
+            crate::test_utils::connect_transaction_test_database("machine_provider_retired").await;
+        seed_machine_emission_wallet(&db).await;
+        let rate = MachineRuntimeRate {
+            profile_version: "remote-machine".into(),
+            id: "22222222-2222-4222-8222-222222222222".into(),
+            metric: BillingMetric::MachineRunningSeconds,
+            lago_metric_code: "remote_machine_running_seconds_22222222222242228222222222222222"
+                .into(),
+            plan_code: "machine-test-plan".into(),
+            credits_per_second: Credits::from_pico(40_000_000).unwrap(),
+            sync_status: PricingSyncStatus::Synced,
+            retired: true,
+            verified_at: Some(Utc::now()),
+            created_at: Utc::now(),
+        };
+        db.collection::<MachineRuntimeRate>(RATE_COLLECTION)
+            .insert_one(&rate)
+            .await
+            .unwrap();
+        let mut machine = finalized_row("machine-provider-retired");
+        machine.metric = BillingMetric::MachineRunningSeconds;
+        machine.lago_metric_code = rate.lago_metric_code.clone();
+        machine.funding = Some(UsageFunding {
+            settlement_rate: Some(rate.credits_per_second),
+            settled: true,
+            wallet_charge_credits: Some(rate.credits_per_second),
+            lago_billable_quantity_micros: Some(1_000_000),
+            ..Default::default()
+        });
+        let rows = db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME);
+        rows.insert_one(&machine).await.unwrap();
+        let lago = RatesLago {
+            rates: vec![
+                super::super::lago_client::PlanRate {
+                    lago_metric_code: "remote_machine_running_seconds_new".into(),
+                    credits_per_unit_micros: 60,
+                    credits_per_unit_pico: Some(60_000_000),
+                },
+                super::super::lago_client::PlanRate {
+                    lago_metric_code: rate.lago_metric_code,
+                    credits_per_unit_micros: 40,
+                    credits_per_unit_pico: Some(40_000_000),
+                },
+            ],
+            rejected: vec![],
+            subscription: Some(machine_subscription()),
+            expected_plan_code: Some("machine-test-plan".into()),
+            ..Default::default()
+        };
+        let reconciler = BillingReconciler::new(
+            db.clone(),
+            None,
+            std::sync::Arc::new(billing_enabled_config()),
+        );
+        let mut stats = super::ReconcileStats::default();
+        reconciler.push_unacked(&lago, &mut stats).await.unwrap();
+        assert_eq!(stats.pushed, 1);
+        assert_eq!(stats.retried, 0);
+        assert_eq!(stats.dead_lettered, 0);
+        assert!(
+            rows.find_one(doc! { "_id": &machine.id })
+                .await
+                .unwrap()
+                .unwrap()
+                .lago_acked
+        );
+        db.drop().await.unwrap();
+    }
+
+    fn machine_subscription() -> super::super::lago_client::RuntimeSubscription {
+        super::super::lago_client::RuntimeSubscription {
+            external_id: "machine-subscription".into(),
+            external_customer_id: "machine-customer".into(),
+            plan_code: "machine-test-plan".into(),
+            status: "active".into(),
+        }
+    }
+
+    async fn seed_machine_emission_wallet(db: &mongodb::Database) {
+        let now = mongodb::bson::DateTime::now();
+        db.collection::<mongodb::bson::Document>(super::BILLING_WALLET)
+            .insert_one(doc! {
+                "_id":"wallet-1","owner_id":"owner-1",
+                "lago_customer_id":"machine-customer",
+                "lago_wallet_id":"provider-wallet","lago_subscription_id":"machine-subscription",
+                "plan_kind":"prepaid","collection_state":"good",
+                "created_at":now,"updated_at":now,"balance_synced_at":now,
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn machine_emission_fixture(db: &mongodb::Database) -> (UsageMeterRow, RatesLago) {
+        use crate::models::credits::Credits;
+        use crate::models::machine_runtime_billing::{MachineRuntimeRate, RATE_COLLECTION};
+        use crate::models::service_billing::PricingSyncStatus;
+        use crate::models::usage_meter::UsageFunding;
+
+        seed_machine_emission_wallet(db).await;
+        let id = Uuid::new_v4().to_string();
+        let rate = MachineRuntimeRate {
+            profile_version: "remote-machine".into(),
+            lago_metric_code: format!("remote_machine_running_seconds_{}", id.replace('-', "")),
+            id,
+            metric: BillingMetric::MachineRunningSeconds,
+            plan_code: "machine-test-plan".into(),
+            credits_per_second: Credits::from_pico(40_000_000).unwrap(),
+            sync_status: PricingSyncStatus::Synced,
+            retired: true,
+            verified_at: Some(Utc::now()),
+            created_at: Utc::now(),
+        };
+        db.collection::<MachineRuntimeRate>(RATE_COLLECTION)
+            .insert_one(&rate)
+            .await
+            .unwrap();
+        let mut row = finalized_row("machine-provider-binding");
+        row.metric = BillingMetric::MachineRunningSeconds;
+        row.lago_metric_code = rate.lago_metric_code.clone();
+        row.funding = Some(UsageFunding {
+            settlement_rate: Some(rate.credits_per_second),
+            settled: true,
+            wallet_charge_credits: Some(rate.credits_per_second),
+            lago_billable_quantity_micros: Some(1_000_000),
+            ..Default::default()
+        });
+        let lago = RatesLago {
+            rates: vec![super::super::lago_client::PlanRate {
+                lago_metric_code: rate.lago_metric_code,
+                credits_per_unit_micros: 40,
+                credits_per_unit_pico: Some(40_000_000),
+            }],
+            subscription: Some(machine_subscription()),
+            expected_plan_code: Some("machine-test-plan".into()),
+            ..Default::default()
+        };
+        (row, lago)
+    }
+
+    #[tokio::test]
+    async fn machine_emission_rejects_subscription_drift_without_blocking_services() {
+        for mismatch in [
+            "id",
+            "customer",
+            "plan",
+            "status",
+            "missing",
+            "wallet",
+            "wallet_replaced",
+            "subscription_missing",
+            "owner",
+        ] {
+            let db = crate::test_utils::connect_transaction_test_database(
+                "machine_provider_binding_drift",
+            )
+            .await;
+            let (machine, mut lago) = machine_emission_fixture(&db).await;
+            let subscription = lago.subscription.as_mut().unwrap();
+            match mismatch {
+                "id" => subscription.external_id = "other-subscription".into(),
+                "customer" => subscription.external_customer_id = "other-customer".into(),
+                "plan" => subscription.plan_code = "other-plan".into(),
+                "status" => subscription.status = "terminated".into(),
+                "missing" => lago.subscription = None,
+                "wallet" => {
+                    db.collection::<mongodb::bson::Document>(super::BILLING_WALLET)
+                        .delete_one(doc! {"_id":"wallet-1"})
+                        .await
+                        .unwrap();
+                }
+                "owner" => {
+                    db.collection::<mongodb::bson::Document>(super::BILLING_WALLET)
+                        .update_one(
+                            doc! {"_id":"wallet-1"},
+                            doc! {"$set":{"owner_id":"other-owner"}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                "wallet_replaced" => {
+                    let wallets = db.collection::<mongodb::bson::Document>(super::BILLING_WALLET);
+                    let mut replacement = wallets
+                        .find_one(doc! {"_id":"wallet-1"})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    wallets.delete_one(doc! {"_id":"wallet-1"}).await.unwrap();
+                    replacement.insert("_id", "replacement-wallet");
+                    wallets.insert_one(replacement).await.unwrap();
+                }
+                "subscription_missing" => {
+                    db.collection::<mongodb::bson::Document>(super::BILLING_WALLET)
+                        .update_one(
+                            doc! {"_id":"wallet-1"},
+                            doc! {"$unset":{"lago_subscription_id":""}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let service = finalized_row("service-despite-subscription-drift");
+            let rows = db.collection::<UsageMeterRow>(super::USAGE_METER);
+            rows.insert_many([&machine, &service]).await.unwrap();
+            let reconciler = BillingReconciler::new(
+                db.clone(),
+                None,
+                std::sync::Arc::new(billing_enabled_config()),
+            );
+            let mut stats = super::ReconcileStats::default();
+            reconciler.push_unacked(&lago, &mut stats).await.unwrap();
+            assert_eq!(stats.pushed, 1, "{mismatch}");
+            assert_eq!(stats.retried, 1, "{mismatch}");
+            assert_eq!(stats.dead_lettered, 0, "{mismatch}");
+            let emitted = lago.events.lock().unwrap().clone();
+            assert_eq!(emitted.len(), 1, "{mismatch}");
+            assert_eq!(
+                emitted[0].transaction_id, service.transaction_id,
+                "{mismatch}"
+            );
+            let saved = rows
+                .find_one(doc! {"_id":&machine.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!saved.lago_acked, "{mismatch}");
+            assert_eq!(saved.status, UsageStatus::Finalized, "{mismatch}");
+            assert!(saved.expires_at.is_none(), "{mismatch}");
+            db.drop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn machine_emission_uses_verified_subscription_after_wallet_changes() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("machine_provider_binding_race")
+                .await;
+        let (machine, mut lago) = machine_emission_fixture(&db).await;
+        lago.wallet_change_after_proof = Some(db.clone());
+        db.collection::<UsageMeterRow>(super::USAGE_METER)
+            .insert_one(&machine)
+            .await
+            .unwrap();
+        let reconciler = BillingReconciler::new(
+            db.clone(),
+            None,
+            std::sync::Arc::new(billing_enabled_config()),
+        );
+        let mut stats = super::ReconcileStats::default();
+        reconciler.push_unacked(&lago, &mut stats).await.unwrap();
+        assert_eq!(stats.pushed, 1);
+        assert_eq!(stats.retried, 0);
+        let emitted = lago.events.lock().unwrap().clone();
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].transaction_id, machine.transaction_id);
+        assert_eq!(emitted[0].code, machine.lago_metric_code);
+        assert_eq!(
+            emitted[0].external_subscription_id.as_deref(),
+            Some("machine-subscription")
+        );
+        assert_eq!(emitted[0].external_customer_id, None);
+        let wallet = db
+            .collection::<super::BillingWallet>(super::BILLING_WALLET)
+            .find_one(doc! {"_id":"wallet-1"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            wallet.lago_subscription_id.as_deref(),
+            Some("changed-after-proof")
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -1185,6 +1634,7 @@ mod tests {
                         credits_per_unit_pico: Some(250001),
                     },
                 ],
+                ..Default::default()
             })),
             std::sync::Arc::new(billing_enabled_config()),
         );
@@ -1240,6 +1690,7 @@ mod tests {
             Some(std::sync::Arc::new(RatesLago {
                 rates: Vec::new(),
                 rejected: Vec::new(),
+                ..Default::default()
             })),
             std::sync::Arc::new(billing_enabled_config()),
         );
@@ -1285,6 +1736,7 @@ mod tests {
                 credits_per_unit_pico: Some(9_000_000),
             }],
             rejected: vec!["platform_tokens".into()],
+            ..Default::default()
         };
         let config = Arc::new(billing_enabled_config());
         let reconciler = BillingReconciler::new(db.clone(), None, config.clone());

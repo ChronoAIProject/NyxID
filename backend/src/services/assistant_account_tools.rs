@@ -29,6 +29,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "list_agent_key_bindings",
     "bind_agent_key_credential",
     "unbind_agent_key_credential",
+    "list_channel_adapters",
     "list_channel_bots",
     "get_channel_bot",
     "update_channel_bot",
@@ -55,6 +56,7 @@ pub fn read_only(name: &str) -> bool {
         "list_agent_keys"
             | "get_agent_key"
             | "list_agent_key_bindings"
+            | "list_channel_adapters"
             | "list_channel_bots"
             | "get_channel_bot"
             | "list_channel_routes"
@@ -200,11 +202,16 @@ fn description(name: &str) -> String {
                 service. Never enter a raw credential."
         }
         "unbind_agent_key_credential" => "Delete an agent credential binding.",
+        "list_channel_adapters" => {
+            "Discover implemented phone, SMS and speech profiles, their limits and credential modes, and the owner setup URL. Setup is an owner action in Settings; no calls or messages are sent."
+        }
         "list_channel_bots" => {
             "List the user's channel bots and those of organizations they administer (owner: \
             personal or the org), without credentials or tokens."
         }
-        "get_channel_bot" => "Inspect a channel bot's non-secret settings.",
+        "get_channel_bot" => {
+            "Inspect an authorized bot's credential source/connection ID, read-only health, authenticated receive/outbound timestamps and recovery recommendation. Does not Verify, Resubscribe or send. Use channel_setup_guide for the built-in procedure; historical traffic does not prove current automatic replies."
+        }
         "update_channel_bot" => {
             "Update a channel bot label or public app id. Enter credentials in the UI."
         }
@@ -317,6 +324,7 @@ fn account_service() -> McpToolService {
         endpoints: TOOL_NAMES
             .iter()
             .map(|name| McpToolEndpoint {
+                attachment_input: None,
                 async_operation: None,
                 endpoint_id: format!("nyxid__{name}"),
                 name: (*name).into(),
@@ -987,7 +995,8 @@ impl AccountTools<'_> {
             | "list_agent_key_bindings"
             | "bind_agent_key_credential"
             | "unbind_agent_key_credential" => Box::pin(self.dispatch_keys(user, name, args)),
-            "list_channel_bots"
+            "list_channel_adapters"
+            | "list_channel_bots"
             | "get_channel_bot"
             | "update_channel_bot"
             | "delete_channel_bot"
@@ -1125,6 +1134,27 @@ impl AccountTools<'_> {
 
     async fn dispatch_channels(&self, user: &str, name: &str, args: &Value) -> AppResult<Value> {
         match name {
+            "list_channel_adapters" => {
+                let enabled = super::feature_flag_service::personal_flag_enabled(
+                    self.db,
+                    user,
+                    super::feature_flag_service::NYXBOT_ADAPTERS_FLAG_KEY,
+                )
+                .await?;
+                let adapters: Vec<_> =
+                    channel_adapters::registered_interfaces(self.token_exchange_cache)
+                        .into_iter()
+                        .map(|a| match a {
+                            channel_adapters::RegisteredInterface::Messaging(a) => {
+                                super::channel_capability::describe(a.as_ref())
+                            }
+                            channel_adapters::RegisteredInterface::Nyxbot(a) => a.descriptor(),
+                        })
+                        .collect();
+                Ok(
+                    json!({"adapters":adapters,"setup_enabled":enabled,"setup_reason":if enabled{None}else{Some("disabled")},"setup_url":format!("{}/assistant?panel=nyxbot",self.config.frontend_url.trim_end_matches('/')),"setup_instructions":"After all API replicas are upgraded, an administrator can enable nyxbot:service-adapters. Open NyxBot Settings, Phone and speech connections. Select an owner-configured specialist; for a Notion FAQ grant Notion and set Guest access to Read. Public callers never inherit owner authority."}),
+                )
+            }
             "list_channel_bots" => {
                 // The user's own bots and those of organizations they administer.
                 let bots = channel_bot_service::list_all_bots(self.db, user).await?;
@@ -1140,7 +1170,19 @@ impl AccountTools<'_> {
             "get_channel_bot" => {
                 let bot = self.managed_bot(user, text(args, "bot_id")).await?;
                 let orgs = self.org_names(user, [bot.user_id.clone()]).await?;
-                Ok(owned_bot_view(&bot, user, &orgs))
+                let mut view = owned_bot_view(&bot, user, &orgs);
+                let gateway = channel_bot_service::gateway_linked(self.db, &bot.id).await?;
+                view["health"] = super::channel_bot_health::setup_evidence(&bot, gateway);
+                view["personal_routing_available"] = json!(
+                    super::platform_bot_authority::permits_personal_routes(self.db, &bot.id)
+                        .await?
+                );
+                view["setup_url"] = json!(format!(
+                    "{}/channel-bots/{}",
+                    self.config.frontend_url.trim_end_matches('/'),
+                    bot.id
+                ));
+                Ok(view)
             }
             "update_channel_bot" | "delete_channel_bot" => {
                 let bot = self.managed_bot(user, text(args, "bot_id")).await?;
@@ -1445,6 +1487,7 @@ mod search_tests {
         home.service_name = "Home Assistant at office".into();
         home.endpoints = (0..40)
             .map(|i| McpToolEndpoint {
+                attachment_input: None,
                 async_operation: None,
                 endpoint_id: format!("home{i}"),
                 name: format!("get_states_{i}"),

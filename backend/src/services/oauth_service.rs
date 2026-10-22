@@ -96,44 +96,9 @@ pub fn resolve_authorize_scope_for_client(
     )
 }
 
-/// Create an authorization code for the OAuth authorization code flow.
+/// Create a code bound to the live protected-consent authority.
 #[allow(clippy::too_many_arguments)]
-pub async fn create_authorization_code(
-    db: &mongodb::Database,
-    client_id: &str,
-    user_id: &str,
-    redirect_uri: &str,
-    scope: &str,
-    code_challenge: Option<&str>,
-    code_challenge_method: Option<&str>,
-    nonce: Option<&str>,
-    external_subject: Option<&ExternalSubjectRef>,
-    binding_grant_id: Option<&str>,
-    resource_uris: &[String],
-    allowed_service_ids: &[String],
-    allow_all_services: bool,
-) -> AppResult<String> {
-    create_authorization_code_with_incremental(
-        db,
-        client_id,
-        user_id,
-        redirect_uri,
-        scope,
-        code_challenge,
-        code_challenge_method,
-        nonce,
-        external_subject,
-        binding_grant_id,
-        resource_uris,
-        allowed_service_ids,
-        allow_all_services,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn create_authorization_code_with_incremental(
+pub async fn create_authorization_code_with_consent(
     db: &mongodb::Database,
     client_id: &str,
     user_id: &str,
@@ -148,12 +113,22 @@ pub async fn create_authorization_code_with_incremental(
     allowed_service_ids: &[String],
     allow_all_services: bool,
     incremental_consent: Option<&crate::models::consent::IncrementalConsent>,
+    protected_consent: Option<&crate::models::consent::ProtectedConsentRef>,
 ) -> AppResult<String> {
+    super::consent_service::validate_protected_reference(
+        db,
+        user_id,
+        client_id,
+        scope,
+        protected_consent,
+    )
+    .await?;
     let code = generate_random_token();
     let code_hash = hash_token(&code);
     let now = Utc::now();
 
     let new_code = AuthorizationCode {
+        protected_consent: protected_consent.cloned(),
         incremental_consent: incremental_consent.cloned(),
         id: Uuid::new_v4().to_string(),
         code_hash,
@@ -243,6 +218,7 @@ fn validate_client_secret(client: &OauthClient, client_secret: Option<&str>) -> 
 ///
 /// Returns the minted token strings plus metadata needed by the OAuth broker path.
 pub struct ExchangedTokens {
+    pub protected_consent: Option<crate::models::consent::ProtectedConsentRef>,
     pub incremental_consent: Option<crate::models::consent::IncrementalConsent>,
     pub access_token: String,
     pub refresh_token: String,
@@ -272,6 +248,18 @@ pub struct IssuedOAuthRefreshToken {
     pub refresh_token_jti: String,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct IssuancePause {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static ISSUANCE_PAUSE: std::sync::Arc<IssuancePause>;
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn issue_oauth_refresh_token(
     db: &mongodb::Database,
@@ -283,6 +271,7 @@ pub async fn issue_oauth_refresh_token(
     resource_uris: &[String],
     allowed_service_ids: &[String],
     allow_all_services: bool,
+    protected_consent: Option<&crate::models::consent::ProtectedConsentRef>,
 ) -> AppResult<IssuedOAuthRefreshToken> {
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id for refresh token: {e}")))?;
@@ -292,6 +281,7 @@ pub async fn issue_oauth_refresh_token(
     let now = Utc::now();
     let refresh_expires = now + Duration::seconds(config.jwt_refresh_ttl_secs);
     let new_refresh = RefreshToken {
+        protected_consent: protected_consent.cloned(),
         id: Uuid::new_v4().to_string(),
         jti: refresh_token_jti.clone(),
         client_id: client_id.to_string(),
@@ -308,9 +298,29 @@ pub async fn issue_oauth_refresh_token(
         created_at: now,
     };
 
+    #[cfg(test)]
+    if let Ok(pause) = ISSUANCE_PAUSE.try_with(Clone::clone) {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
     db.collection::<RefreshToken>(REFRESH_TOKENS)
         .insert_one(&new_refresh)
         .await?;
+
+    // Broker issuance may persist an additional refresh after the primary code
+    // exchange fence. Every issued row must retain and recheck its own version.
+    if let Err(error) = super::consent_service::fence_protected_reference(
+        db,
+        user_id,
+        client_id,
+        scope,
+        protected_consent,
+    )
+    .await
+    {
+        revoke_issued_refresh(db, &refresh_token_jti).await?;
+        return Err(error);
+    }
 
     Ok(IssuedOAuthRefreshToken {
         refresh_token: refresh_token_jwt,
@@ -464,6 +474,14 @@ pub async fn exchange_authorization_code(
             .filter(|resources| !resources.is_empty())
     });
 
+    super::consent_service::validate_protected_reference(
+        db,
+        &stored.user_id,
+        client_id,
+        &stored.scope,
+        stored.protected_consent.as_ref(),
+    )
+    .await?;
     // Parse user_id back to Uuid for JWT generation
     let user_uuid = Uuid::parse_str(&stored.user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in authorization code: {e}")))?;
@@ -484,7 +502,7 @@ pub async fn exchange_authorization_code(
             .await?;
 
     // Generate tokens with RBAC claims
-    let access_token = crate::crypto::jwt::generate_oauth_access_token(
+    let access_token = crate::crypto::jwt::generate_oauth_access_token_with_consent(
         jwt_keys,
         config,
         &user_uuid,
@@ -504,6 +522,7 @@ pub async fn exchange_authorization_code(
             },
         ),
         &stored.client_id,
+        stored.protected_consent.as_ref(),
     )?;
 
     let issued_refresh = issue_oauth_refresh_token(
@@ -516,6 +535,7 @@ pub async fn exchange_authorization_code(
         &stored.resource_uris,
         &stored.allowed_service_ids,
         stored.allow_all_services,
+        stored.protected_consent.as_ref(),
     )
     .await?;
 
@@ -567,8 +587,21 @@ pub async fn exchange_authorization_code(
         revoke_issued_refresh(db, &issued_refresh.refresh_token_jti).await?;
         return Err(error);
     }
+    if let Err(error) = super::consent_service::fence_protected_reference(
+        db,
+        &stored.user_id,
+        client_id,
+        &stored.scope,
+        stored.protected_consent.as_ref(),
+    )
+    .await
+    {
+        revoke_issued_refresh(db, &issued_refresh.refresh_token_jti).await?;
+        return Err(error);
+    }
     let granted_scope = stored.scope.clone();
     Ok(ExchangedTokens {
+        protected_consent: stored.protected_consent,
         incremental_consent: stored.incremental_consent,
         access_token,
         refresh_token: issued_refresh.refresh_token,
@@ -829,7 +862,17 @@ mod tests {
             external_user_id: "ou_123".to_string(),
         };
 
-        let code = create_authorization_code(
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            "user-1",
+            "client-1",
+            "openid profile",
+            Some(vec!["svc-1".into()]),
+        )
+        .await
+        .unwrap();
+        let reference = super::super::consent_service::protected_reference(&consent).unwrap();
+        let code = create_authorization_code_with_consent(
             &db,
             "client-1",
             "user-1",
@@ -843,6 +886,8 @@ mod tests {
             &["https://nyx.example/api/v1/proxy/s/openai".to_string()],
             &["svc-1".to_string()],
             false,
+            None,
+            Some(&reference),
         )
         .await
         .expect("create authorization code");
@@ -857,6 +902,7 @@ mod tests {
         assert_ne!(stored.code_hash, code);
         assert_eq!(stored.client_id, "client-1");
         assert_eq!(stored.user_id, "user-1");
+        assert_eq!(stored.protected_consent, Some(reference));
         assert_eq!(stored.redirect_uri, "https://app.example/callback");
         assert_eq!(stored.scope, "openid profile");
         assert_eq!(stored.code_challenge.as_deref(), Some("challenge"));
@@ -885,8 +931,20 @@ mod tests {
         let code = "empty-service-grant-code";
         let now = Utc::now();
 
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            &client.id,
+            "openid",
+            Some(Vec::new()),
+        )
+        .await
+        .unwrap();
+        let reference = super::super::consent_service::protected_reference(&consent).unwrap();
+
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
+                protected_consent: Some(reference.clone()),
                 incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),
@@ -986,8 +1044,20 @@ mod tests {
         .expect("insert user services");
 
         let code = "consent-only-resource-code";
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            &client.id,
+            "openid",
+            Some(vec![service_a_id.clone()]),
+        )
+        .await
+        .unwrap();
+        let reference = super::super::consent_service::protected_reference(&consent).unwrap();
+
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
+                protected_consent: Some(reference.clone()),
                 incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),
@@ -1089,8 +1159,20 @@ mod tests {
         .expect("insert user services");
 
         let code = "consent-only-resource-reject-code";
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            &client.id,
+            "openid",
+            Some(vec![service_a_id.clone()]),
+        )
+        .await
+        .unwrap();
+        let reference = super::super::consent_service::protected_reference(&consent).unwrap();
+
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
+                protected_consent: Some(reference.clone()),
                 incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),
@@ -1159,6 +1241,7 @@ mod tests {
 
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
+                protected_consent: None,
                 incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),
@@ -1182,6 +1265,7 @@ mod tests {
             .expect("insert used auth code");
 
         let refresh = RefreshToken {
+            protected_consent: None,
             id: Uuid::new_v4().to_string(),
             jti: "jti-replay".to_string(),
             client_id: client_id.to_string(),

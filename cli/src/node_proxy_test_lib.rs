@@ -5,6 +5,8 @@
 pub mod config;
 #[path = "node/credential_store.rs"]
 pub mod credential_store;
+#[path = "node/custody.rs"]
+pub(crate) mod custody;
 #[path = "node/encryption.rs"]
 pub mod encryption;
 #[path = "node/error.rs"]
@@ -13,6 +15,10 @@ pub mod error;
 mod keychain;
 #[path = "node/machine/runtime.rs"]
 pub mod machine;
+#[path = "node/managed_config.rs"]
+pub mod managed_config;
+#[path = "node/managed_deadline.rs"]
+pub mod managed_deadline;
 #[path = "node/metrics.rs"]
 mod metrics;
 #[path = "node/proxy_executor.rs"]
@@ -23,7 +29,12 @@ pub mod proxy_upload;
 mod secret_backend;
 #[path = "node/signing.rs"]
 mod signing;
+#[path = "node/storage.rs"]
+pub(crate) mod storage;
 pub mod tls;
+#[cfg(unix)]
+#[path = "commands/update_attestation/trusted_directory.rs"]
+mod trusted_directory;
 
 pub mod ws_client {
     pub enum NodeWsMessage {
@@ -79,6 +90,8 @@ fn test_credentials(
             id: "test-node".to_string(),
             auth_token_encrypted: String::new(),
         },
+        managed_runtime: None,
+        managed_capabilities: None,
         signing: config::SigningConfig::default(),
         ssh: config::SshConfig::default(),
         machine: Default::default(),
@@ -99,5 +112,6 @@ mod test_support {
 }
 
 pub mod node {
-    pub use crate::{config, machine, proxy_upload, ws_client};
+    pub(crate) use crate::custody;
+    pub use crate::{config, machine, managed_config, managed_deadline, proxy_upload, ws_client};
 }

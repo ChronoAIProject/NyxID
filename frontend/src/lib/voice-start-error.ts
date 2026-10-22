@@ -1,7 +1,9 @@
 import { voiceStartDetailsSchema } from "@/schemas/assistant-voice";
 import { ApiError } from "./api-client";
+import { isInsufficientCreditsHttp } from "./credits-denial";
 
 export type VoiceStartStep =
+  | "settings"
   | "microphone"
   | "webrtc"
   | "server"
@@ -15,6 +17,12 @@ export function voiceStartError(error: unknown, step: VoiceStartStep): string {
       /^(Conflict: )?End the current call first$/.test(error.message)
     )
       return "End the current call first";
+    const recovery = isInsufficientCreditsHttp(
+      error.status,
+      error.errorResponse,
+    )
+      ? " Check your available credits, then retry voice."
+      : "";
     const details = voiceStartDetailsSchema.safeParse(
       error.errorResponse.details,
     );
@@ -30,18 +38,21 @@ export function voiceStartError(error: unknown, step: VoiceStartStep): string {
       const hint = provider
         ? `${provider}${d.provider_status ? ` ${d.provider_status}` : ""}${category ? `: ${category}` : ""}${d.provider_param ? ` · ${d.provider_param}` : ""}`
         : d.stage;
-      return `${error.message} (${hint} · code ${error.errorCode})`;
+      return `${error.message} (${hint} · code ${error.errorCode})${recovery}`;
     }
+    const billingCode = error.status === 402 ? error.errorCode : undefined;
     const message =
-      error.errorCode === 11300
+      billingCode === 11300
         ? "Insufficient voice credits"
-        : error.errorCode === 11307
+        : billingCode === 11307
           ? "Voice billing wallet is suspended"
-          : error.errorCode === 11301 || error.errorCode === 11302
+          : billingCode === 11301 || billingCode === 11302
             ? "Voice billing is unavailable"
             : error.message;
-    return `${message} (code ${error.errorCode})`;
+    return `${message} (code ${error.errorCode})${recovery}`;
   }
+  if (step === "settings")
+    return "Voice preferences could not be saved. Please try again.";
   if (step === "microphone") {
     const name =
       error instanceof Error || error instanceof DOMException ? error.name : "";

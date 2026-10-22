@@ -73,7 +73,9 @@ export function LegalDocumentScreen({ title, docKey, telemetryBackTarget, onBack
         // Drop the first H1 since the screen renders `title` in its own header.
         const withoutH1 = body.replace(/^#\s+.+\n+/, "");
         setContent(withoutH1);
-        setEffectiveDate(date);
+        // The canonical raw document includes a readable date for Markdown
+        // consumers. Render the metadata date only when the body lacks it.
+        setEffectiveDate(date && body.includes(`**Effective date: ${date}**`) ? null : date);
       })
       .catch((e) => {
         if (cancelled) return;

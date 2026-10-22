@@ -492,7 +492,8 @@ pub async fn poll_auth_device_web(
             method: "device_code_web".to_string(),
             mfa_required: false,
         },
-    );
+    )
+    .await;
 
     tracing::info!(
         client_ip_hash = %client_ip_hash,
@@ -653,6 +654,7 @@ async fn approve_device_grant(
             input,
             selection,
             expiry,
+            user.mfa_assured,
         )
         .await?;
     } else {
@@ -668,6 +670,7 @@ async fn approve_device_grant(
             &state.encryption_keys,
             state.auth_device_hmac_key.as_slice(),
             input,
+            user.mfa_assured,
         )
         .await?;
     }
@@ -2116,6 +2119,7 @@ mod tests {
                 approver_ip: Some("127.0.0.1".to_string()),
                 approver_user_agent: Some("nyxid-cli/0.8.0".to_string()),
             },
+            false,
         )
         .await
         .expect("approve");

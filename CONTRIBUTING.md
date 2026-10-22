@@ -235,6 +235,20 @@ Wait until `db.hello().isWritablePrimary` is `true` before starting the suite.
 The CI workflow uses the same startup contract and verifies the effective
 parameter with `getParameter` before running tests.
 
+Database setup shares one 90-second readiness deadline across ping, a unique
+probe write, and initial run-lease publication. A busy shared mongod can recover
+after the former five-second probe limit; the original operation waits within
+this budget without retrying the test. Errors still fail immediately, a server
+that remains unavailable fails at the deadline, and an explicit URI never falls
+back to another server. Heartbeat, stale-sweep, and cleanup fencing retain their
+separate short deadlines.
+
+If readiness fails, inspect the reported phase and elapsed time alongside the
+`resources-backend-test` artifact and the job's MongoDB diagnostics. Clustered
+setup failures alone do not establish the cause of a server stall. Preserve
+these diagnostics and fix recurring setup failures instead of repeatedly
+rerunning the full workflow or adding test retries.
+
 ```bash
 # Backend unit tests
 cargo test
@@ -334,6 +348,13 @@ coverage instrumentation; keep the full test selection and coverage thresholds.
 When a runner exits with code 143 during compilation, inspect the last completed
 step before treating it as a test failure. Repeated shutdowns at the same compile
 stage need a build-resource correction rather than repeated full-workflow retries.
+
+The CI profile schedules the capacity-wait heartbeat test alone to keep
+concurrent database creation and cleanup out of its timing window. Head and
+base coverage use the same checked-out nextest configuration, which is included
+in the coverage-cache fingerprint.
+Backend test and coverage jobs allow 120 minutes for compilation and the full
+suite. Each test retains the CI profile's five-minute deadline and no retries.
 
 ### Rollup Health Triage
 

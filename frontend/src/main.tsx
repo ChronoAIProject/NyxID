@@ -1,3 +1,6 @@
+import "./lib/zod-csp";
+import "./lib/platform-personal-handoff";
+import "./lib/platform-onboarding-handoff";
 import { recoverFromAssetError } from "./lib/chunk-recovery";
 import { isContentPath } from "./features/public-site/routes";
 window.addEventListener("vite:preloadError", (event) => {

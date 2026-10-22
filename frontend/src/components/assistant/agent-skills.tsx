@@ -29,9 +29,11 @@ import type {
 import { ProposalDraftEditor } from "./learning-draft-editor";
 import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
+import { SkillPreloadSettings } from "./skill-preload-settings";
 
 const HISTORY_LABELS: Record<string, string> = {
   assistant_skills_updated: "Attached skills changed",
+  assistant_skill_preload_updated: "Skill preload settings changed",
   assistant_learning_proposal_edited: "Skill draft edited",
   assistant_learning_proposal_rejected: "Skill draft rejected",
   assistant_learning_proposal_reprepared: "Skill draft package rebuilt",
@@ -344,6 +346,15 @@ export function AgentSkills({
             )
           }
         >
+          <SkillPreloadSettings
+            agentId={agentId}
+            skillId={skill.skill_id}
+            name={skill.name}
+            revision={current.data.revision}
+            paths={current.data.metadata[skill.skill_id]?.preload_paths ?? []}
+            bytes={current.data.metadata[skill.skill_id]?.preload_bytes ?? 0}
+            disabled={disabled || improve.isPending || Boolean(skill.disabled)}
+          />
           {improving?.skillId === skill.skill_id ? (
             <div className="space-y-2 border-t border-border/50 pt-2">
               <p className="text-11 text-muted-foreground">

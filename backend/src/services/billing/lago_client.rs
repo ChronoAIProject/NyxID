@@ -24,6 +24,15 @@ const MAX_WALLET_TRANSACTION_PAGES: u32 = 100;
 
 #[async_trait]
 pub trait LagoApi: Send + Sync {
+    async fn tax_config(
+        &self,
+        _customer_id: &str,
+        _subscription_id: &str,
+    ) -> AppResult<LagoTaxConfig> {
+        Err(AppError::BillingProviderUnavailable(
+            "Lago tax configuration is unavailable".into(),
+        ))
+    }
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String>;
     async fn ensure_subscription(&self, customer_id: &str, plan_code: &str) -> AppResult<String>;
     async fn ensure_wallet(&self, customer_id: &str) -> AppResult<LagoWallet> {
@@ -58,10 +67,27 @@ pub trait LagoApi: Send + Sync {
             .map(Credits::from_whole)
     }
     async fn entitlements(&self, subscription_id: &str) -> AppResult<Vec<Entitlement>>;
+    /// Strict live subscription identity for paid Machine admission. Older
+    /// adapters must opt in; feature entitlements alone are not billing proof.
+    async fn runtime_subscription(&self, _subscription_id: &str) -> AppResult<RuntimeSubscription> {
+        Err(AppError::BillingProviderUnavailable(
+            "Lago runtime subscription verification is not supported".into(),
+        ))
+    }
     /// Per-unit rates for the plan's standard charges, used to refresh the
     /// local rate cache. Defaults to empty so fakes opt in explicitly.
     async fn plan_rates(&self, _plan_code: &str) -> AppResult<PlanRates> {
         Ok(PlanRates::default())
+    }
+    async fn subscription_invoices(
+        &self,
+        _customer_id: &str,
+        _page: u32,
+        _per_page: u32,
+    ) -> AppResult<Value> {
+        Err(AppError::BillingProviderUnavailable(
+            "Lago subscription invoices are unavailable".into(),
+        ))
     }
     /// Credit (top-up) invoices for a customer, used to resolve payment
     /// outcomes for the top-up history. Defaults to empty for fakes.
@@ -122,6 +148,13 @@ pub trait LagoApi: Send + Sync {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct LagoTaxConfig {
+    pub customer: Value,
+    pub plan: Value,
+    pub billing_entity: Value,
+}
+
 /// A trimmed Lago invoice used for top-up history and receipt downloads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InvoiceSummary {
@@ -134,6 +167,16 @@ pub struct InvoiceSummary {
     pub payment_status: String,
     pub external_customer_id: Option<String>,
     pub issuing_date: Option<String>,
+}
+
+/// Provider-owned identity and lifecycle of the subscription that will receive
+/// runtime events. No customer profile, payment data or credentials are exposed.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct RuntimeSubscription {
+    pub external_id: String,
+    pub external_customer_id: String,
+    pub plan_code: String,
+    pub status: String,
 }
 
 /// A per-unit price from a Lago plan charge, converted to micro-credits
@@ -301,6 +344,16 @@ fn existing_charge_for_plan_update(mut charge: Value) -> AppResult<Value> {
     let object = charge.as_object_mut().ok_or_else(|| {
         AppError::BillingProviderUnavailable("Lago plan returned a non-object charge".to_string())
     })?;
+    for field in [
+        "taxes",
+        "tax_codes",
+        "applied_taxes",
+        "taxes_rate",
+        "taxes_amount_cents",
+        "taxes_precise_amount_cents",
+    ] {
+        object.remove(field);
+    }
     if object.get("id").is_none_or(|value| value.is_null()) {
         let id = object
             .get("lago_id")
@@ -689,6 +742,41 @@ impl LagoApi for LagoClient {
             .unwrap_or_default())
     }
 
+    async fn runtime_subscription(&self, subscription_id: &str) -> AppResult<RuntimeSubscription> {
+        if subscription_id.is_empty() || subscription_id != subscription_id.trim() {
+            return Err(AppError::BillingProviderUnavailable(
+                "Lago runtime subscription identity is invalid".into(),
+            ));
+        }
+        let value = self
+            .get_one_by_external_id("subscriptions", "subscription", subscription_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::BillingProviderUnavailable(
+                    "Lago runtime subscription was not found".into(),
+                )
+            })?;
+        let subscription: RuntimeSubscription = serde_json::from_value(value).map_err(|_| {
+            AppError::BillingProviderUnavailable(
+                "Lago runtime subscription proof is incomplete".into(),
+            )
+        })?;
+        if subscription.external_id != subscription_id
+            || [
+                subscription.external_customer_id.as_str(),
+                subscription.plan_code.as_str(),
+                subscription.status.as_str(),
+            ]
+            .iter()
+            .any(|value| value.is_empty() || *value != value.trim())
+        {
+            return Err(AppError::BillingProviderUnavailable(
+                "Lago runtime subscription proof does not match".into(),
+            ));
+        }
+        Ok(subscription)
+    }
+
     async fn wallet_transaction_invoices(
         &self,
         wallet_id: &str,
@@ -826,6 +914,93 @@ impl LagoApi for LagoClient {
                 "Lago wallet response did not include a balance".to_string(),
             )
         })
+    }
+
+    async fn tax_config(
+        &self,
+        customer_id: &str,
+        subscription_id: &str,
+    ) -> AppResult<LagoTaxConfig> {
+        let customer = self
+            .json_request(
+                reqwest::Method::GET,
+                &format!("customers/{}", urlencoding::encode(customer_id)),
+                None,
+            )
+            .await
+            .map_err(lago_error_to_app)?;
+        let subscription = self
+            .json_request(
+                reqwest::Method::GET,
+                &format!("subscriptions/{}", urlencoding::encode(subscription_id)),
+                None,
+            )
+            .await
+            .map_err(lago_error_to_app)?;
+        if customer
+            .pointer("/customer/external_id")
+            .and_then(Value::as_str)
+            != Some(customer_id)
+            || subscription
+                .pointer("/subscription/external_id")
+                .and_then(Value::as_str)
+                != Some(subscription_id)
+            || subscription
+                .pointer("/subscription/external_customer_id")
+                .and_then(Value::as_str)
+                != Some(customer_id)
+        {
+            return Err(AppError::BillingProviderUnavailable(
+                "Lago tax configuration owner mismatch".into(),
+            ));
+        }
+        let entity_code = customer
+            .pointer("/customer/billing_entity_code")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AppError::BillingProviderUnavailable(
+                    "Lago customer billing entity is missing".into(),
+                )
+            })?;
+        // Subscription plans may be customized while retaining the public code.
+        // GET subscription includes its actual plan, charges and applied taxes.
+        let plan = subscription
+            .pointer("/subscription/plan")
+            .cloned()
+            .ok_or_else(|| {
+                AppError::BillingProviderUnavailable("Lago subscription plan is missing".into())
+            })?;
+        let entity = self
+            .json_request(
+                reqwest::Method::GET,
+                &format!("billing_entities/{}", urlencoding::encode(entity_code)),
+                None,
+            )
+            .await
+            .map_err(lago_error_to_app)?;
+        Ok(LagoTaxConfig {
+            customer: customer["customer"].clone(),
+            plan,
+            billing_entity: entity["billing_entity"].clone(),
+        })
+    }
+
+    async fn subscription_invoices(
+        &self,
+        customer_id: &str,
+        page: u32,
+        per_page: u32,
+    ) -> AppResult<Value> {
+        self.json_request(
+            reqwest::Method::GET,
+            &format!(
+                "invoices?external_customer_id={}&invoice_type=subscription&status=finalized&page={page}&per_page={per_page}",
+                urlencoding::encode(customer_id)
+            ),
+            None,
+        )
+        .await
+        .map_err(lago_error_to_app)
     }
 
     async fn credit_invoices(&self, external_customer_id: &str) -> AppResult<Vec<InvoiceSummary>> {
@@ -1867,6 +2042,155 @@ mod tests {
             metric_description: "NyxID-managed platform usage price".to_string(),
             credits_per_unit: "0.125".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn tax_configuration_reads_custom_subscription_plan_and_customer_billing_entity_exactly()
+    {
+        let app = axum::Router::new()
+            .route("/api/v1/customers/owner", axum::routing::get(|| async {
+                axum::Json(json!({"customer":{"external_id":"owner","billing_entity_code":"entity-b","taxes":[{"code":"customer","name":"Customer","rate":"9"}]}}))
+            }))
+            .route("/api/v1/subscriptions/sub", axum::routing::get(|| async {
+                ([(axum::http::header::CONTENT_TYPE,"application/json")], r#"{"subscription":{"external_id":"sub","external_customer_id":"owner","plan":{"code":"custom-plan","taxes":[],"charges":[{"billable_metric_code":"requests","taxes":[{"code":"exact","name":"Exact tax","rate":9.123456789012}]}]}}}"#)
+            }))
+            .route("/api/v1/billing_entities/entity-b", axum::routing::get(|| async {
+                axum::Json(json!({"billing_entity":{"code":"entity-b","taxes":[{"code":"default","name":"Default","rate":"20"}]}}))
+            }));
+        let client = LagoClient::new(spawn_lago_mock(app).await, "test-key".into()).unwrap();
+        let config = client.tax_config("owner", "sub").await.unwrap();
+        let profile =
+            crate::services::billing::taxes::resolve_config("owner", "sub", &config).unwrap();
+        assert_eq!(profile.billing_entity_code, "entity-b");
+        assert_eq!(profile.plan_code, "custom-plan");
+        assert_eq!(
+            crate::services::billing::taxes::snapshot(&profile, "requests")
+                .unwrap()
+                .rate_percent
+                .to_string(),
+            "9.123456789012"
+        );
+        assert_eq!(
+            crate::services::billing::taxes::snapshot(&profile, "other")
+                .unwrap()
+                .rate_percent
+                .to_string(),
+            "9"
+        );
+    }
+
+    #[test]
+    fn plan_add_update_remove_preserve_provider_tax_assignments_by_omission() {
+        let input = service_price_sync();
+        let response = json!({"plan": {"name":"Standard", "code":"standard", "interval":"monthly", "amount_cents":0, "amount_currency":"USD", "taxes":[{"code":"plan-gst","rate":9}], "tax_codes":["stale"],
+            "charges":[{"lago_id":"existing", "billable_metric_id":"old", "billable_metric_code":"old", "taxes":[{"code":"charge-gst","rate":5}], "tax_codes":["stale"], "charge_model":"standard", "properties":{"amount":"1"}}]}});
+        for metric in ["old", "new"] {
+            let mut input = input.clone();
+            input.metric_code = metric.into();
+            let payload =
+                super::plan_update_with_standard_charge(&response, metric, &input).unwrap();
+            assert!(payload["plan"].get("taxes").is_none());
+            assert!(payload["plan"].get("tax_codes").is_none());
+            for charge in payload["plan"]["charges"].as_array().unwrap() {
+                assert!(charge.get("taxes").is_none());
+                assert!(charge.get("tax_codes").is_none());
+            }
+            assert_eq!(payload["plan"]["charges"][0]["id"], "existing");
+        }
+        let mut response = response;
+        response["plan"]["charges"].as_array_mut().unwrap().push(json!({
+            "lago_id":"to-remove", "billable_metric_code":"remove", "taxes":[{"code":"other-tax","rate":2}]
+        }));
+        let removed = super::plan_update_without_metric_charge(&response, "remove")
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed["plan"]["charges"].as_array().unwrap().len(), 1);
+        assert_eq!(removed["plan"]["charges"][0]["id"], "existing");
+        assert!(removed["plan"]["charges"][0].get("tax_codes").is_none());
+        assert!(removed["plan"].get("tax_codes").is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_subscription_reads_live_provider_identity_without_provisioning() {
+        let app = axum::Router::new().route(
+            "/api/v1/subscriptions/subscription-1",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "subscription": {
+                    "external_id": "subscription-1", "external_customer_id": "owner-1",
+                    "plan_code": "nyxid-standard", "status": "active",
+                    "lago_id": "provider-internal-id", "unrelated_field": true,
+                } }))
+            }),
+        );
+        let client = LagoClient::new(spawn_lago_mock(app).await, "test-api-key".into()).unwrap();
+        let proof = client.runtime_subscription("subscription-1").await.unwrap();
+        assert_eq!(proof.external_id, "subscription-1");
+        assert_eq!(proof.external_customer_id, "owner-1");
+        assert_eq!(proof.plan_code, "nyxid-standard");
+        assert_eq!(proof.status, "active");
+    }
+
+    #[tokio::test]
+    async fn runtime_subscription_rejects_missing_malformed_and_mismatched_proof() {
+        let valid = json!({
+            "external_id": "subscription-1", "external_customer_id": "owner-1",
+            "plan_code": "nyxid-standard", "status": "active",
+        });
+        let mut missing_plan = valid.clone();
+        missing_plan.as_object_mut().unwrap().remove("plan_code");
+        let mut wrong_id = valid.clone();
+        wrong_id["external_id"] = json!("another-subscription");
+        let mut numeric_customer = valid.clone();
+        numeric_customer["external_customer_id"] = json!(1234);
+        let mut empty_status = valid.clone();
+        empty_status["status"] = json!("");
+        for body in [
+            Value::Null,
+            json!({}),
+            missing_plan,
+            wrong_id,
+            numeric_customer,
+            empty_status,
+        ] {
+            let app = axum::Router::new().route(
+                "/api/v1/subscriptions/subscription-1",
+                axum::routing::get(move || {
+                    let body = body.clone();
+                    async move { axum::Json(json!({ "subscription": body })) }
+                }),
+            );
+            let client =
+                LagoClient::new(spawn_lago_mock(app).await, "test-api-key".into()).unwrap();
+            assert!(client.runtime_subscription("subscription-1").await.is_err());
+        }
+        let client = LagoClient::new(
+            spawn_lago_mock(axum::Router::new()).await,
+            "test-api-key".into(),
+        )
+        .unwrap();
+        assert!(client.runtime_subscription("missing").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn runtime_subscription_preserves_inactive_status_for_admission_to_reject() {
+        let app = axum::Router::new().route(
+            "/api/v1/subscriptions/subscription-1",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "subscription": {
+                    "external_id": "subscription-1", "external_customer_id": "owner-1",
+                    "plan_code": "nyxid-standard", "status": "terminated",
+                } }))
+            }),
+        );
+        let client = LagoClient::new(spawn_lago_mock(app).await, "test-api-key".into()).unwrap();
+        assert_eq!(
+            client
+                .runtime_subscription("subscription-1")
+                .await
+                .unwrap()
+                .status,
+            "terminated"
+        );
     }
 
     fn plan_response(charges: serde_json::Value) -> serde_json::Value {
@@ -3164,6 +3488,7 @@ mod tests {
             wallet_id: Some("wallet-1".to_string()),
             actor_user_id: "owner-1".to_string(),
             api_key_id: None,
+            assistant_source: None,
             user_service_id: None,
             service_id: Some("service-1".to_string()),
             service_slug: Some("service-one".to_string()),
@@ -3172,6 +3497,7 @@ mod tests {
             operation: None,
             credential_class: crate::models::usage_meter::CredentialClass::UserOwned,
             model: None,
+            reported_model: None,
             token_breakdown: None,
             audio_tokens: None,
             image_tokens: None,
@@ -3187,6 +3513,7 @@ mod tests {
             pending_resale_quantity: None,
             pending_platform_usage: None,
             pool_attempt: None,
+            machine_usage: None,
             status: crate::models::usage_meter::UsageStatus::Finalized,
             forwarded: true,
             released: true,

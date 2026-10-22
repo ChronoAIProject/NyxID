@@ -1,0 +1,35 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nyxid-machine-identity-review
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  # Direct API observations only: node readiness/heartbeat prevents unsafe
+  # native successor admission.
+  # No nodes/proxy, nodes/stats, exec or resource mutation is granted.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+  # Independent read-only investigation may read a known PV by name.
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get"]
+  # Resolve existing explicit or cluster-default storage without provisioning.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nyxid-machine-identity-review
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nyxid-machine-identity-review
+subjects:
+  - kind: ServiceAccount
+    name: nyxid-machine-manager
+    namespace: nyxid-machine

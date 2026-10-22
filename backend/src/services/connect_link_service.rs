@@ -239,9 +239,7 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         webhook_event_delivered_at: None,
     };
 
-    db.collection::<ConnectLink>(CONNECT_LINKS)
-        .insert_one(&link)
-        .await?;
+    super::erasure_admission::insert_owned(db, CONNECT_LINKS, &link.user_id, &link).await?;
 
     Ok(CreatedLink { link, raw_token })
 }
@@ -1026,6 +1024,18 @@ pub async fn dispatch_terminal_webhook_if_needed(
     dispatcher: &crate::services::developer_webhook_service::DeveloperWebhookDispatcher,
     link_id: &str,
 ) {
+    let owner = match db
+        .collection::<ConnectLink>(CONNECT_LINKS)
+        .find_one(doc! {"_id":link_id})
+        .await
+    {
+        Ok(Some(link)) => link.user_id,
+        _ => return,
+    };
+    let mut tx = match super::erasure_admission::begin_write(db, &owner).await {
+        Ok(tx) => tx,
+        Err(_) => return,
+    };
     let event_id = Uuid::new_v4().to_string();
     let now = Utc::now();
     let claimed = db
@@ -1048,7 +1058,10 @@ pub async fn dispatch_terminal_webhook_if_needed(
             }},
         )
         .return_document(ReturnDocument::After)
-        .await;
+        .session(&mut tx)
+        .await
+        .map_err(AppError::from);
+    let claimed = super::org_membership_authority::finish(tx, claimed).await;
     let link = match claimed {
         Ok(Some(link)) => link,
         Ok(None) => return,
@@ -1606,6 +1619,7 @@ mod tests {
 
     fn test_oauth_provider() -> ProviderConfig {
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             slug: format!("connect-link-oauth-{}", Uuid::new_v4()),
             name: "Connect Link OAuth".to_string(),
@@ -1636,6 +1650,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "test".to_string(),
             revocation_seed_version: 0,

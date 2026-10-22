@@ -1,3 +1,4 @@
+import { BillingBill } from "@/components/billing/billing-bill";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { billingPanelSearch, type AccountPanelParams } from "@/lib/assistant/account-panel-search";
 import { useEffect, useEffectEvent, useState } from "react";
@@ -13,6 +14,7 @@ import {
 } from "@/hooks/use-billing";
 import { useCatalog } from "@/hooks/use-keys";
 import { BillingBenefits } from "@/components/billing/billing-benefits";
+import { BillingMachines } from "@/components/billing/billing-machines";
 import { BillingWalletCard } from "@/components/billing/billing-wallet-card";
 import { BillingTopUpHistory } from "@/components/billing/billing-topup-history";
 import { BillingUsageSummary } from "@/components/billing/billing-usage-summary";
@@ -212,9 +214,15 @@ export function BillingPage({
             onTopUpOpenChange={setTopUpOpen}
           />
           <BillingBenefits catalog={catalog} />
+          <BillingMachines />
+          <BillingBill enabled={billingReady} />
           <BillingTopUpHistory />
         </TabsContent>
         <TabsContent value="usage" className="mt-6 space-y-6">
+          <p className="text-12 text-text-tertiary">
+            Credit usage includes voice calls, dictation, and assistant tasks.
+            Explore a service below for its recorded usage and charges.
+          </p>
           <UsageFilters
             services={services}
             values={selected}

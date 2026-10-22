@@ -60,12 +60,14 @@ import {
 interface ApiKeyCreateResponse {
   readonly id: string;
   readonly full_key: string;
+  readonly expires_at?: string | null;
 }
 
 export interface ApiKeyCreateSuccess {
   readonly kind: "api-key-create";
   readonly api_key_id: string;
   readonly full_key: string;
+  readonly expires_at?: string | null;
 }
 
 interface ApiKeyCreateConfirmProps {
@@ -105,17 +107,8 @@ function initialAccessScope(prefill: ApiKeyCreatePrefill): AccessScopeState {
       .filter(Boolean),
   );
 
-  // Default to "Allow all" when the CLI didn't pass an explicit
-  // allowed_*_csv. Presence of a CSV is what tells us the user wants
-  // a scoped key (matches `nyxid api-key create --allowed-services
-  // a,b,c` CLI semantics). The raw `prefill.allow_all_*` flag from
-  // the CLI's ApiKeyCreatePrefill struct defaults to `false` in Rust,
-  // so we can't trust it as "user explicitly unticked" — we have to
-  // infer from the CSV presence instead.
-  const allowAllServices =
-    prefill.allow_all_services ||
-    (!servicesCsv && !prefill.allow_auto_connected_services);
-  const allowAllNodes = !nodesCsv;
+  const allowAllServices = prefill.allow_all_services ?? false;
+  const allowAllNodes = prefill.allow_all_nodes ?? false;
 
   return {
     allowAllServices,
@@ -146,6 +139,11 @@ export function ApiKeyCreateConfirm({
   // (wizard.js:1938-2040) so org admins who run the command without
   // the flag can still switch ownership in the browser.
   const [ownerId, setOwnerId] = useState(prefill.org_id ?? "");
+  const [lifetime, setLifetime] = useState(() => {
+    if (prefill.never_expires && (prefill.expires_in_days ?? 0) > 0) return "conflict";
+    if (prefill.never_expires || prefill.expires_in_days === 0) return "never";
+    return prefill.expires_in_days == null ? "default" : String(prefill.expires_in_days);
+  });
   const orgs = useOrgs();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -171,14 +169,13 @@ export function ApiKeyCreateConfirm({
       if (!access.allowAllNodes) {
         body.allowed_node_ids = Array.from(access.selectedNodeIds);
       }
-      // Match the terminal path's convention (`cli/src/commands/api_key.rs`):
-      // a positive `expires_in_days` becomes an RFC-3339 `expires_at`; a
-      // value of `0` means "no expiry" and is omitted so the backend
-      // stores null (not an already-expired key).
-      if (prefill.expires_in_days != null && prefill.expires_in_days > 0) {
-        const expiry = new Date();
-        expiry.setDate(expiry.getDate() + prefill.expires_in_days);
-        body.expires_at = expiry.toISOString();
+      if (lifetime === "conflict") {
+        throw new Error("Choose either an expiry date or no expiry");
+      }
+      if (lifetime === "never") {
+        body.never_expires = true;
+      } else if (lifetime !== "default") {
+        body.expires_at = new Date(Date.now() + Number(lifetime) * 86400000).toISOString();
       }
 
       await reservePairingAction(pairingId);
@@ -189,6 +186,7 @@ export function ApiKeyCreateConfirm({
         kind: "api-key-create",
         api_key_id: res.id,
         full_key: res.full_key,
+        ...(res.expires_at !== undefined ? { expires_at: res.expires_at } : {}),
       });
     } catch (e) {
       setError(errorMessage(e));
@@ -302,11 +300,14 @@ export function ApiKeyCreateConfirm({
               value={ownerId}
               onChange={(e) => {
                 setOwnerId(e.target.value);
+                setLifetime("default");
                 setAccess((current) => ({
                   ...current,
                   selectedServiceIds: new Set(),
                   selectedNodeIds: new Set(),
                   allowAutoConnectedServices: false,
+                  allowAllServices: false,
+                  allowAllNodes: false,
                 }));
               }}
               className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-13 text-foreground transition-colors duration-300 focus-visible:outline-none focus-visible:border-input-focus"
@@ -326,6 +327,25 @@ export function ApiKeyCreateConfirm({
             </p>
           </Field>
         ) : null}
+        <Field label="Key expiry" htmlFor="pair-api-key-expiry">
+          <select id="pair-api-key-expiry" value={lifetime}
+            onChange={(event) => setLifetime(event.target.value)}
+            className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-13 text-foreground">
+            <option value="default">90 days (default)</option>
+            {["7", "30", "90", "365"].map((days) => <option key={days} value={days}>{days} days</option>)}
+            {prefill.expires_in_days != null && prefill.expires_in_days > 0 &&
+              ![7, 30, 90, 365].includes(prefill.expires_in_days)
+              ? <option value={String(prefill.expires_in_days)}>{prefill.expires_in_days} days</option> : null}
+            <option value="never">No expiry</option>
+            {lifetime === "conflict" ? <option value="conflict">Conflicting prefill; select a lifetime</option> : null}
+          </select>
+          <p className="text-12 text-muted-foreground">
+            Key expiry: {lifetime === "never" ? "No expiry (explicitly selected)"
+              : lifetime === "default" ? "90 days (default)"
+              : lifetime === "conflict" ? "Choose either an expiry date or no expiry"
+              : `${lifetime} days`}.
+          </p>
+        </Field>
         <ScopePicker value={scopes} onChange={setScopes} />
         <AccessScopeCard
           value={access}

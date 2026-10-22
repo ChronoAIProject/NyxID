@@ -4,7 +4,7 @@ use crate::models::service_billing::BillingMetric;
 use crate::models::usage_meter::{CredentialClass, PoolAttemptAccounting};
 use crate::services::billing::{BillingIngress, NodeIntent};
 
-async fn fixture(
+pub(super) async fn fixture(
     label: &str,
 ) -> (
     mongodb::Database,
@@ -17,6 +17,7 @@ async fn fixture(
     let now = bson::DateTime::now();
     let wallet: BillingWallet = bson::from_document(doc! {
         "_id": Uuid::new_v4().to_string(), "owner_id": "pool-owner", "lago_customer_id": "customer",
+        "lago_subscription_id": "test-subscription",
         "plan_kind": "prepaid", "balance_credits": Credits::from_pico(100).unwrap(),
         "reserved_credits": Credits::ZERO, "collection_state": "good",
         "balance_synced_at": now, "created_at": now, "updated_at": now,
@@ -26,6 +27,7 @@ async fn fixture(
         .insert_one(&wallet)
         .await
         .unwrap();
+    crate::services::billing::taxes::seed_test_profiles(&db).await;
     db.collection::<Document>("users")
         .insert_one(doc! {
             "_id": "pool-owner", "user_type": "person", "is_active": true,
@@ -82,11 +84,13 @@ async fn fixture(
         reserved_credits: Credits::from_pico(10).unwrap(),
         allowance_reservations: vec![],
         grant_reservations: vec![],
+        tax_cache_ttl_secs: 900,
+        applied_tax: None,
     }];
     (db, ctx, wallet, layers)
 }
 
-async fn holds(db: &mongodb::Database) -> (i64, Credits, Credits) {
+pub(super) async fn holds(db: &mongodb::Database) -> (i64, Credits, Credits) {
     let period = db
         .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
         .find_one(doc! {})
@@ -176,5 +180,42 @@ async fn pool_admission_atomicity_preserves_exact_allowance_grant_wallet_precede
     .await
     .unwrap();
     assert_eq!(holds(&db).await, (0, Credits::ZERO, Credits::ZERO));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn mixed_pool_funding_taxes_only_the_exact_wallet_remainder() {
+    let (db, ctx, wallet, layers) = fixture("pool_mixed_tax").await;
+    let profile_collection = db
+        .collection::<crate::models::billing_tax_profile::BillingTaxProfile>(
+            crate::models::billing_tax_profile::COLLECTION_NAME,
+        );
+    let mut profile = profile_collection.find_one(doc! {}).await.unwrap().unwrap();
+    profile.default_taxes = vec![crate::models::billing_tax_profile::TaxComponent {
+        code: "gst".into(),
+        name: "GST".into(),
+        rate_percent: "9".parse().unwrap(),
+    }];
+    profile_collection
+        .replace_one(doc! {"_id":&profile.id}, profile)
+        .await
+        .unwrap();
+    let reservation = reserve_and_open_pool(&db, &ctx, &wallet, layers)
+        .await
+        .unwrap();
+    // Base: 2 allowance units, 3 grant picos, 3 wallet picos. Admission tax
+    // ceilings the 0.27 pico tax to one pico; neither benefit is taxed.
+    assert_eq!(
+        holds(&db).await,
+        (
+            2,
+            Credits::from_pico(3).unwrap(),
+            Credits::from_pico(4).unwrap()
+        )
+    );
+    assert_eq!(
+        reservation.total_reserved_credits,
+        Credits::from_pico(4).unwrap()
+    );
     db.drop().await.unwrap();
 }

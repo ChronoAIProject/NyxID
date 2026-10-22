@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: remote-machine-quota
+spec:
+  hard:
+    count/sandboxes.agents.x-k8s.io: "100"
+    requests.cpu: "200"
+    limits.cpu: "200"
+    requests.memory: 200Gi
+    limits.memory: 200Gi
+    persistentvolumeclaims: "100"

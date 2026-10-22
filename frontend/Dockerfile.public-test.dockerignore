@@ -3,3 +3,8 @@
 !dist/**
 !nginx.conf.template
 !Dockerfile.public-test
+
+!nginx-default.conf
+!scripts/
+!scripts/render-nginx.py
+!scripts/nginx-policy-entrypoint.sh

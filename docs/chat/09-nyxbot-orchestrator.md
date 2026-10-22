@@ -49,7 +49,7 @@ several agents, routines/scheduled triggers, and cross-user agents.
 | --- | --- |
 | One NyxAgent conversation = one `assistant_conversations` row + one restricted `nyxid-assistant` key + encrypted raw key; NyxAgent binds its session to that key | A thread keeps its own key; an agent's authority is applied to every thread key |
 | Execution authority is the key (`allow_all_services`, `allowed_service_ids`, `allowed_platform_service_ids`, `assistant:account`), enforced in MCP (`chat_access`, gates, `ensure_service_in_scope`) | Specialist grants are enforced by NyxID, never by prompts |
-| Per-user turn limiter: 2 in flight, 10 starts per 60 s | Server-started turns need their own owner-level pool |
+| Per-user browser turn limiter: 4 running, 8 queued, 30 starts per 60 s | Server-started turns need their own owner-level pool |
 | NyxAgent per turn: 600 s, 40 tool calls, results truncated; NyxID calls time out at 150 s | Waiting is bounded (120 s) and completion wakes NyxBot later |
 | NyxAgent disables Codex multi-agent | Codex subagents would share one key and vanish; NyxID owns agents instead |
 | Turns are detached server tasks | NyxID can start turns itself for tasks, wake-ups and chat apps |
@@ -219,8 +219,10 @@ which still requires the separate owner card.
 `start_server_turn` reuses the browser turn machinery with the owner's identity.
 A specialist's NyxBot-assigned (or event-resumed) turn reports back to its
 `report_to` thread as a `subagent_settled` event; a direct chat never reports.
-Events queue on the thread (at most 20) and one event turn drains them when it
-is idle; other turns carry drained events in their instructions. Loop guards: 20
+Events queue on the thread (at most 20). When idle, an Event turn selects at
+most one message question; ordinary system events retain their existing drain
+policy and async-operation priority. Other turns can carry ordinary events, but
+leave queued message questions for Event admission. Loop guards: 20
 event turns per owner per hour and 3 consecutive event turns per NyxBot thread
 without a user message. Specialist and event turns share an owner pool of
 `max_concurrent_subagent_turns` (default 3, at most 8; NyxBot gets one extra
@@ -379,9 +381,12 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   creates the gateway channel as the owner, points the route key's callback at the
   gateway, creates the default route, and attaches it. Channel management
   (create, attach, delete) authenticates as the owner with a 120-second delegated
-  token carrying only `account:read`, because the gateway resolves creators with
-  `GET /api/v1/users/me`, which refuses API keys. The agent key is the channel's
-  provider and event-tool bearer, never a creator bearer. NyxID is the gateway's
+  token carrying only `account:read` and reserved actor
+  `nyxid:nyxbot-gateway-creator`, separate from the provider/event-tool agent key.
+  Its actor-scoped management grant is restricted to the catalog-associated
+  confidential gateway caller. See the [gateway creator contract](../CHANNEL_EVENT_GATEWAY.md#nyxbot-gateway-creator-authorization-and-recovery)
+  for both validators, the full-client-ID association, permission boundaries,
+  failure responses and HTTP limits. NyxID is the gateway's
   `nyxbot` provider (`/api/v1/nyxbot/{agent-card,bindings/…,responses}`) and
   streams only the final answer as a committed message; `event_context` is stored
   encrypted and served verbatim for `readEventContext`.
@@ -426,9 +431,13 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   retried the next day; a manual connect never rebuilds a working bot just to
   change transport. A new bot on a listed platform the gateway refuses is
   connected through NyxID's relay with a fresh route key the gateway never saw;
-  Telegram failures are still reported as errors. Through the gateway, Lark and
-  Feishu accept plain text input only (incoming images, files and rich posts are
-  refused there, while NyxID's relay passes them on). NyxID sends tool-returned
+  Telegram failures are still reported as errors. With the default-off personal
+  `assistant:channel-media` flag enabled, verified owner Lark/Feishu images,
+  files and rich posts reach the assistant on both relay and gateway transports.
+  Gateway support requires CMA ≥ `a570be21` and `CMAEG_MEDIA_ENABLED=true`;
+  downloads begin at run start after admission, preserving the default 30-second
+  provider header budget. Text-only, audio/video and native Telegram input keep
+  their existing behavior. NyxID sends tool-returned
   images directly through its adapters on both transports, before the reply text. A message whose route the relay looked up
   just before the swap committed reaches NyxID's relay endpoint after it and is
   refused and reported like any lost message. A move whose replica stopped
@@ -464,8 +473,9 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   behaviour, removes the org route, releases the gateway channel, and deletes
   active and pending keys under their respective owners. No event reaches the
   linking person's agent after that check fails. Telegram org bots always use
-  the gateway. Lark/Feishu org bots have the same gateway input limitation
-  as personal bots; outbound tool images use NyxID's adapters.
+  the gateway. Lark/Feishu org bots use the linking person's media flag and
+  the same owner-media rules as personal bots; live org-admin authority is
+  rechecked before each fetch. Outbound tool images use NyxID's adapters.
 - **Right user.** The owner is verified through NyxID's Telegram notification
   link, a one-time link code (a `t.me/<bot>?start=<code>` link for Telegram), or,
   for a Telegram bot created inside Telegram through NyxID, as the account that
@@ -481,22 +491,36 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   sender, and whether the sender is the owner.
 - **Delivery health.** A linked chat app must never go quiet silently. The
   15-second sweep judges each active channel's newest inbound message: a failed
-  relay callback (NyxID keeps the HTTP status, never the body) is lost
+  relay callback (NyxID keeps the HTTP status, never the raw body) is lost
   (`refused_{status}`, or `undelivered` when nothing answered or NyxID could not
-  send it). Through the gateway, a private plain-text message that was accepted
-  but has no provider admission for its message ID after two minutes is lost too
-  (`not_received`; the gateway's event ID is NyxID's message ID). Group
-  messages, photos and other events the gateway may drop on purpose are skipped
-  and never change the status. A lost message marks the channel `failing` and
+  send it). For HTTP 202, NyxID parses at most 2 KiB of CMA's closed callback
+  disposition, storing only `accepted`/`refused` and a fixed refusal code;
+  malformed, oversized or unrecognized responses are `unknown`. Intentional
+  refusals stay skipped. Through the gateway, a private plain-text message, or
+  an eligible verified-owner image/file/post with media enabled and an explicit
+  accepted disposition, is lost when no provider event appears for its message
+  ID after two minutes (`not_received`; the gateway event ID is NyxID's message
+  ID). The judge window remains twelve hours; its first check looks back one
+  hour. Unsupported content, unknown/legacy media dispositions and unaddressed
+  groups stay skipped. Media with pending item outcomes remains pending. An
+  interrupted source event reports `interrupted`; ingestion failures report
+  `media_failed` with a fixed class and reason. Suppressed native duplicates
+  resolve through their alias to the winning event, never becoming `Lost`.
+  A lost message marks the channel `failing` and
   tells the thread that set the bot up (else the agent's home), at most once per
   six hours; the channel list shows the reason, and the next message that
-  arrives marks it `ok`. A channel's first check looks back one hour only.
+  arrives marks it `ok`. Media failures/interruption do not send the delivery-loss
+  reconnect notice; they have their own per-turn or next-owner-turn notes.
   Reconnecting a failing channel rebuilds it from scratch and keeps its verified
   owners. Chat-specific routes win over a channel's default route, so the owner's
   private messages that another route on the bot takes (typically a leftover
   from an earlier setup) are lost as `routed_elsewhere`, and the agent is told
   to show the user that route and remove it with their OK; connecting reports
   such routes up front (`other_routes`).
+- **Failed connections and listing.** Failed rows offer explicit **Reconnect**
+  with the selected live agent; channel listings show one current record per
+  owner/bot while retaining history. See the [gateway recovery contract](../CHANNEL_EVENT_GATEWAY.md#nyxbot-gateway-creator-authorization-and-recovery)
+  for action behavior, error guidance and the current-row selection rules.
 - **Verification hints.** While the owner has not verified a channel, the chat's
   waiting note and `nyxid__list_channel_agents` (`inbound_hint`) say what NyxID saw
   from the bot since the code was issued: nothing at all (check the platform's
@@ -544,10 +568,12 @@ The provider stream owns a `waiting` delivery until it atomically claims
 (including an unpolled response body) changes only `waiting` to `pending`. A
 separate 15-second, bounded sweep makes the same transition after 570 seconds
 from provider admission; it does not block the live-change or team workers.
-When that deadline expires and the conversation still has this live, unstopped
-turn, NyxID completes the gateway response with “I'm still working on this. I'll
-post the answer here when it is ready.” This is a progress message, not a claim
-on the eventual answer. NyxAgent keeps working. Useful text from a failed turn
+At that deadline NyxID completes the gateway response without text and leaves
+the eventual answer pending. NyxAgent keeps working. NyxID emits no queue
+acknowledgement or continuing-work notice. Successful empty or whitespace-only
+answers atomically settle as `silent`; they produce no “Done” message. Image-only
+answers still deliver their images, and failed-image notes remain visible.
+Useful text from a failed turn
 is retained with a bounded **Incomplete** suffix, in both streamed and late
 replies; a failure with no text retains the failure response.
 
@@ -580,11 +606,19 @@ attempts. They cannot guarantee external delivery after an ambiguous network
 failure (see the CMA contract request in `CHANNEL_EVENT_GATEWAY.md`). Audit and
 warnings contain only event/conversation/turn IDs, transport and fixed outcomes.
 
-Rolling deployment is additive: old callbacks cannot win a new admission already
-claimed by a new replica, and old settlement hooks do not send channel-origin
-answers. New workers never adopt legacy events. Rollback stops the new sweep;
-settled text remains in the web transcript. No new flags or environment variables
-are required.
+Before guaranteeing source retention, drain old queue writers and upgrade all
+replicas. Older writers using `$slice: -20` can evict accepted sources; mixed
+writers are not safe for this guarantee. New generic writers evict only ordinary
+events; a queue containing twenty accepted questions refuses a new write
+transactionally so durable callers retain their retry opportunity. New source
+admission refuses capacity rather than evicting accepted work. Legacy native
+message events retain their exact thread origin and are isolated one per Event
+turn; generic legacy messages without an anchored source are dropped as
+unavailable, never redirected to the latest inbound. Before rollback, quiesce
+old and new writers and drain or explicitly settle all new accepted source work.
+Previous binaries also run sweepers and their old selection can consume or
+redirect these events; automatic mixed-writer rollback is not safe. Settled
+answers remain in the web transcript.
 
 **Managed Telegram bots.** Bots created inside Telegram through NyxID's manager
 bot are `telegram-new`, and NyxID stamps that platform on every relay artifact,
@@ -610,7 +644,7 @@ Telegram bots can be linked:
 `max_inflight` caps concurrent gateway calls to NyxID across all NyxBot
 channels; each running turn holds a slot for its whole duration. 256 equals
 the gateway-wide ceiling (`CMAEG_PROVIDER_MAX_INFLIGHT`) and `cma_codex`, and
-each provider has its own pool. NyxID still limits each owner to two
+each provider has its own pool. NyxID still limits each owner to four
 concurrent channel turns and queues the rest.
 
 ### 12a. Chats, groups and guests
@@ -661,8 +695,9 @@ judged from the update (an @username or text mention, a reply to the bot); Lark
 and Feishu count only a mention of the bot itself, by its `open_id` (looked up
 through the adapter's `bot_user_id` when a message mentions someone and cached
 in memory per bot and app for an hour; apps granted every group message also
-get mentions of other people, and `@all` is not a mention of the bot), or any
-mention for five minutes after a failed lookup (logged as a warning); Slack
+get mentions of other people, and `@all` is not a mention of the bot). Missing
+identity supplies no positive native mention evidence (failed lookups are
+cached for five minutes and logged); Slack
 counts `app_mention` events and
 Discord its `mentions` and replied-to author; a reply to one of the bot's sent
 messages counts everywhere, and Discord slash commands always do. When a
@@ -801,6 +836,16 @@ per-image counts (`sent_now`, `previously_delivered`, `failed`, `skipped`,
 this call's attempts. Tool-image notes mention `include_images` when the turn's
 images would not otherwise reach a chat the agent posts to. Guests cannot post.
 
+Chat destinations add a bounded turn-only length note using the delivery
+planner's platform budget (Telegram 4,096 UTF-16 code units; Discord 2,000).
+Prefer one message unless the user explicitly asks for long or complete output;
+the planner still splits longer output without truncation. This follows channel,
+followed-thread, manager and automation destinations, including additional
+recipients. Assigned specialists capture their requesting turn's guidance at
+assignment. Chat-list tool results provide `reply_length_guidance` for drafting
+explicit posts, whose input bound is 32,768 characters. App-only turns receive no
+channel-length note, and destination advice stays out of stable instructions.
+
 Upgrade from 0.71.0 keeps v1 image barriers in `nyxbot_image_deliveries`
 (read-only, original seven-day TTL) before every v2 attempt in the separate
 `nyxbot_image_deliveries_v2` collection. The guard matches the source turn and
@@ -829,9 +874,10 @@ context never flows through an organization's bot. The app and every chat app sh
 that one transcript and live context. The thread is not a channel thread
 (`channel` stays unset, so the sidebar keeps it with the agent's own threads);
 instead `reply_channel` remembers the chat the owner last wrote from. A channel
-turn's answer goes back to the chat that asked; asynchronous replies (event
-turns such as a specialist's report, or a message queued while the agent was
-busy) go to `reply_channel`, which a message written in the app clears. Each
+turn's answer goes back to the chat that asked. General asynchronous updates
+(such as a specialist's report) use `reply_channel`, which a message written in
+the app clears. Accepted queued questions instead retain their original source
+destinations independently of `reply_channel`. Each
 user message records the chat app it came from (`via`), shown as a badge in the
 app, and the turn's instructions tell the agent where its reply is read (plain
 text, full URLs, word confirmations) and that this is its own thread with the
@@ -845,20 +891,50 @@ leading @mentions ignored; short messages such as "yes" are never keyed) and a
 short excerpt. When a message arrives while its thread is busy:
 
 - if it is the question being answered, it is not queued: from the chat that
-  asked, the sender is told the answer is coming; from another chat (e.g. the
-  owner asked on Telegram and again on Lark), that chat is added to the running
-  answer's recipients (`also_deliver`, at most four), and at settlement the
-  answer is sent there too (`deliver_also`, taken once by the settlement hook);
+  asked, no additional busy message is sent; from another chat (e.g. the
+  owner asked on Telegram and again on Lark), another original-source record
+  joins the exact running answer. Each source retains its own destination and
+  irreversible delivery claim; the bound is `MAX_ALSO_DELIVER + 1` (five
+  destinations including the first);
 - if the same question is already queued, it is not queued again, and a repeat
-  from another chat is added to the queued message's recipients.
+  from another eligible chat adds its independently anchored source to that
+  question within the same destination bound. Guest busy/refusal behavior
+  remains separate; owner-source coalescing never promotes guest authority.
 
-Queued messages remember the chats that asked them (`reply_to`); on the
-owner's own thread the turn that drains them also answers there, even when the
-owner's next message comes from the app. On a chat app thread (a group's), a
-message the owner writes in the app never takes the chat's queued messages: its
-reply stays in the app, and the queued messages wait for a turn that answers in
-the chat. When a turn fails, chats that were promised its answer are told to ask
-again. The agent's own threads are also told, in the owner's turn instructions,
+Accepted queued questions retain bounded encrypted original targets and source
+metadata, including every coalesced destination. Their source rows and queue
+acceptance commit together; eventual Event admission binds all eligible sources
+to the exact new turn in that same transaction. Only one message question is
+consumed per Event turn; app/channel turns leave unrelated queued questions
+alone, while ordinary system-event and async-operation selection retains its
+existing policy. One destination's expiry or revoked access removes only that
+destination; remaining valid sources can still receive the answer. Every send
+rechecks live authority and uses its own claim. No newer-message fallback is
+allowed. The queue remains bounded at twenty, with the existing three-event-turn
+streak, twenty-per-hour budget and owner pool limits. Guest work is not admitted
+as owner work. A compatible owner app/home question already in progress can also
+accept a personal-channel source claim without another execution; the app stays
+the primary response destination. Guest, group, native-thread, platform, adapter
+and trigger authority never join through that compatibility path.
+
+Generic queued sources also capture the original managed route and API key.
+Event admission checks and write-fences that exact active route's owner, bot,
+platform and assigned key inside its transaction. Deleting or rebinding the
+route refuses only its affected source; another valid coalesced destination can
+still proceed. Legacy generic source records missing captured route/key authority
+are unavailable, with no replacement-route fallback. Once source acceptance
+commits, an async `reply_channel` preference failure cannot cancel it or erase
+its original encrypted context. A full direct queue asks the sender to retry;
+it does not promise to answer an unaccepted question.
+
+The existing sweep mints gateway targets during the original event's 29-minute
+safety window even when work has no turn yet or wakeups are budget-blocked;
+checks advance so older entries cannot starve the queue. Sealed targets expire
+within twenty-four hours. Expired or invalid sources settle durably, including
+poison queue heads. A failed turn retains the genuine failure/partial/stopped
+policy; successful silence closes each eligible source without a send.
+
+The agent's own threads are also told, in the owner's turn instructions,
 what its other threads are answering right now (thread title and question
 excerpt, the same question marked), so it does not start that work again;
 channel threads never get this note, so no chat hears about another.
@@ -1109,7 +1185,17 @@ persisted-profile relaunches and package repair. Follow 12413 recovery guidance;
 
 ## Owner attachments
 
-The owner can attach documents and images to direct or group messages; see [Assistant uploads](10-uploads.md). Each agent receives safe metadata only for the message it is answering. Documents are untrusted, paginated tool data. Group members share the group’s bound uploads while they remain members; unrelated specialist threads and guests cannot read them. Images use capability negotiation, with an explicit fallback to saving the attachment on a granted machine when the deployed agent cannot view them. Channel-media ingestion remains a follow-up.
+The owner can attach documents and images to direct or group messages; see [Assistant uploads](10-uploads.md). Each agent receives safe metadata only for the message it is answering. Documents are untrusted, paginated tool data. Group members share the group’s bound uploads while they remain members; unrelated specialist threads and guests cannot read them. Images use capability negotiation, with an explicit fallback to saving the attachment on a granted machine when the deployed agent cannot view them.
+
+Verified-owner Lark/Feishu images, files and rich posts use the same encrypted
+upload and retention lifecycle under `assistant:channel-media`. Ingestion starts
+in the consuming run, rechecks live source authority, and commits an immutable
+bind receipt. Stop, timeout and orphan settlement finalize pending items outside
+the cancelled run. Guests receive the fixed note `attachments from guests are
+not shared with the assistant` and cause no download or upload. Media-bearing
+messages never answer approval/text decisions or coalesce by question digest.
+See [Inbound channel media](10-uploads.md#inbound-channel-media) for item/byte/time
+limits, dedup horizons, queued expiry and the admin drain/rollback procedure.
 
 ## Drafting agent skills
 
@@ -1148,8 +1234,9 @@ admission; NyxID filters admitted events with the same sender, mention, live org
 and follow policies as relay events. An other-person-only mention is context,
 not a new turn; broadcasts never activate follow. Native replies explicitly bind
 to the original event and root, including delayed replies. Legacy gateways keep
-follow unavailable. Lark/Feishu input on the gateway remains text-only, including org
-bots; media and edit parity are separate work.
+follow unavailable. Owner Lark/Feishu image/file/post ingestion has the separate
+media flag and CMA prerequisites described above, including for org bots and
+admitted followed threads. Edit parity remains separate work.
 
 ## Asynchronous service results
 
@@ -1211,7 +1298,10 @@ Specialist threads are sandboxed. Only the owner, and the owner's NyxBot for wor
 NyxBot approval behavior is controlled by the owner-level `access_mode` setting:
 **Auto** (`nyxmode`, default) confirms sensitive and destructive actions, **Ask every time** (`ask_every_time`)
 confirms every changing action, and **Full access** (`autopilot`) never asks.
-It bypasses every confirmation, including webhook automation, machine and
+Auto and Ask every time also confirm organization connection use, including
+reads and model inference. All three modes enforce saved personal-first
+connection order and exact owner selection; see [service execution](../NYXBOT_SERVICE_EXECUTION.md).
+Full access bypasses every confirmation, including webhook automation, machine and
 saved-login policies, pairing/updates, authored publication and service approvals.
 Each successful bypass leaves a non-consumable automatic receipt
 (`decided_by: access_mode`, reason `access_mode`, `webhook`, `policy` or `approval`),
@@ -1296,3 +1386,32 @@ Authored skill cards return `review_url` instead of `confirm_phrase`. Send the
 full link in channel chats and groups; replies cannot approve publication.
 Group pending actions offer **Review draft** to the reviewing owner and open
 the full file review at the exact card, including hidden member threads.
+
+Exact native bot-authored group mentions use the same receiving bot's linked
+agent and chat consent as human guests. They require a known native receiver,
+foreign bot actor and positive native mention (Telegram entities or Lark open ID).
+Bots are always guests, never owner-link/card/queue participants, and `all` or a
+reply alone never admits them. Mongo atomically spends the existing chat's
+`max_group_handoffs` allowance and owner hourly handoff budget, with replay
+claims; admitted human messages alone reset the chat allowance. Busy/uncertain
+work is not refunded. Bots cannot allocate chat settings or open/renew following.
+Gateway opt-in is capability negotiated and reconciled on existing connections;
+see [relay rollout and authority contract](../CHANNEL_BOT_RELAY.md).
+
+### Receipt placement and copying messages
+
+Cards carry an independent nullable `creation_turn_id`, captured server-side
+when created and preserved through reuse and authored-draft recovery. History
+and live projection attach receipts to that exact assistant response.
+`requested_turn_id` continues to bind denial to the initiating user request,
+including decisions created on later event turns. Legacy or unloaded anchors
+retain standalone cards and deep links. Approval and the final published/pinned
+outcome remain distinct; Full access receipts are best-effort evidence and never
+authorize execution or cause publication to rerun when a receipt is missing.
+Group review remains a full card without exposing hidden member context.
+
+Normal and group message renderers share an accessible Copy action. Assistants
+copy the sanitized Markdown displayed in the message; users copy the original
+body. Hidden tool markup, thinking, controls and receipts are excluded. Blank,
+image-only and streaming assistant messages have no Copy action. Clipboard
+success is reported only after the write resolves; a failure remains retryable.

@@ -16,6 +16,13 @@ async fn fixture(label: &str) -> (mongodb::Database, HealthScope, HealthScope) {
         .expect("production indexes");
     let pool_id = Uuid::new_v4().to_string();
     let owner_id = Uuid::new_v4().to_string();
+    db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            &owner_id,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
     let first_id = Uuid::new_v4().to_string();
     let second_id = Uuid::new_v4().to_string();
     db.collection::<Document>("service_pools")
@@ -380,4 +387,106 @@ async fn service_pool_runtime_observation_preserves_configuration_timestamp() {
     assert_eq!(before.get("updated_at"), after.get("updated_at"));
     assert_eq!(after.get_i64("health_observation_sequence").unwrap(), 1);
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn held_observation_cannot_recreate_health_after_completed_owner_erasure() {
+    use crate::services::personal_erasure_service as erasure;
+    let (db, scope, _) = fixture("health_ticket_erasure_race").await;
+    crate::test_utils::init_test_audit_chain_hmac_key();
+    let state = crate::test_utils::test_app_state(db.clone());
+    let pause = std::sync::Arc::new(health::TicketAdmissionPause::default());
+    let held = health::TICKET_ADMISSION_PAUSE.scope(
+        pause.clone(),
+        health::issue_observation_ticket(&db, scope.clone()),
+    );
+    let erase = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.notified())
+            .await
+            .unwrap();
+        loop {
+            match erasure::accept(&db, &scope.owner_id, &scope.owner_id, None).await {
+                Ok(_) => break,
+                Err(crate::errors::AppError::ErasurePreparing) => {
+                    erasure::prepare_one_for_test(&db, &state.encryption_keys)
+                        .await
+                        .unwrap();
+                }
+                Err(error) => panic!("health race acceptance: {error:?}"),
+            }
+        }
+        loop {
+            if erasure::status(&db, &scope.owner_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                == crate::models::personal_erasure::ErasureStatus::Complete
+            {
+                break;
+            }
+            db.collection::<bson::Document>(crate::models::personal_erasure::COLLECTION_NAME)
+                .update_many(doc! {}, doc! {"$set":{"retry_at":bson::DateTime::now()}})
+                .await
+                .unwrap();
+            erasure::process_one(&state).await.unwrap();
+            if db
+                .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+                .find_one(doc! {"_id":&scope.owner_id})
+                .await
+                .unwrap()
+                .is_none()
+                && crate::services::telemetry_erasure_service::completion_evidence(
+                    &db,
+                    &scope.owner_id,
+                )
+                .await
+                .unwrap()
+                .is_none()
+            {
+                crate::services::telemetry_erasure_service::drain_once(
+                    &db,
+                    &crate::telemetry::erasure::ErasureClients::default(),
+                )
+                .await
+                .unwrap();
+                crate::services::telemetry_erasure_service::operator_reconcile_empty_inventory(
+                    &db,
+                    &scope.owner_id,
+                    "fixture-operator",
+                    "fixture://never-configured",
+                    "Synthetic deployment has never configured telemetry",
+                )
+                .await
+                .unwrap();
+            }
+            tokio::task::yield_now().await;
+        }
+        pause.release.notify_one();
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::join!(held, erase)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(crate::errors::AppError::Conflict(_))));
+    for collection in [
+        HEALTH,
+        crate::models::service_pool_member_health::OBSERVATION_COLLECTION_NAME,
+    ] {
+        assert_eq!(
+            db.collection::<Document>(collection)
+                .count_documents(doc! {"pool_id":&scope.pool_id})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    assert!(
+        db.collection::<Document>("service_pools")
+            .find_one(doc! {"_id":&scope.pool_id})
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

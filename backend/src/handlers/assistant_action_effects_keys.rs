@@ -951,6 +951,7 @@ mod tests {
             is_active: true,
             created_at: now,
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(now),
             description: Some("assistant key fixture".to_string()),
@@ -974,6 +975,7 @@ mod tests {
 
     fn fixture_user_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_epoch: 1,
             credential_source: None,

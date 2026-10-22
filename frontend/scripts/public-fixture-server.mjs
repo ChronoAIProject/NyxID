@@ -3,6 +3,11 @@ import http from "node:http";
 http
   .createServer((req, res) => {
     res.setHeader("Content-Type", "application/json");
+    if (req.url === "/api/__policy-probe.js" || req.url.startsWith("/credential-accept/")) {
+      res.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; frame-ancestors 'none'");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    }
     if (
       req.url === "/api/v1/users/me" &&
       req.headers.cookie?.includes("fixture-auth=1")

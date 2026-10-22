@@ -1,5 +1,8 @@
 //! Read-only slug metadata selection shared by proxy ingress and alias discovery.
 //! Concrete credential resolution always follows this selection and rechecks ACLs.
+use futures::TryStreamExt;
+use mongodb::bson::doc;
+
 use super::{proxy_service, service_pool_service};
 use crate::errors::{AppError, AppResult};
 
@@ -56,6 +59,32 @@ pub async fn agent_pools_with_services(
     Ok(pools)
 }
 
+async fn route_member_is_eligible(
+    db: &mongodb::Database,
+    encryption_keys: &crate::crypto::aes::EncryptionKeys,
+    actor_user_id: &str,
+    user_service_id: &str,
+    allowed_node_ids: Option<&[String]>,
+) -> AppResult<bool> {
+    match proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+        db,
+        encryption_keys,
+        actor_user_id,
+        user_service_id,
+        None,
+    )
+    .await
+    {
+        Ok(Some(resolution)) => Ok(!resolution
+            .node_id
+            .as_ref()
+            .is_some_and(|id| allowed_node_ids.is_some_and(|ids| !ids.contains(id)))),
+        Ok(None) => Ok(false),
+        Err(error) if service_pool_service::member_unavailable(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 pub async fn select_slug_metadata(
     db: &mongodb::Database,
     encryption_keys: &crate::crypto::aes::EncryptionKeys,
@@ -63,7 +92,69 @@ pub async fn select_slug_metadata(
     allowed_node_ids: Option<&[String]>,
     actor_user_id: &str,
     slug: &str,
+    org_agent_access: Option<&crate::services::org_agent_service::RequestAccess>,
 ) -> AppResult<SlugMetadataRoute> {
+    // Organization-bound keys prefer the granted connection owned by the bound
+    // organization. Reuse the request snapshot so membership is not resolved
+    // a second time during routing; credential availability is checked later
+    // by execution and must not change the selected connection identity.
+    if let Some(access) = org_agent_access
+        && access.matches(actor_user_id, access.owner())
+    {
+        let owner = access.owner();
+        if let Some(service) =
+            crate::services::user_service_service::find_by_slug(db, owner, slug).await?
+            && access.allows_service(&service)
+            && allowed_service_ids.is_none_or(|ids| ids.contains(&service.id))
+        {
+            return Ok(SlugMetadataRoute::Service(service.id));
+        }
+        if let Some(pool) = service_pool_service::find_pool_by_slug(db, owner, slug).await? {
+            let member_ids: Vec<&str> = pool
+                .members
+                .iter()
+                .filter(|member| {
+                    member.enabled
+                        && allowed_service_ids
+                            .is_none_or(|ids| ids.contains(&member.user_service_id))
+                })
+                .map(|member| member.user_service_id.as_str())
+                .collect();
+            let services: Vec<crate::models::user_service::UserService> = if member_ids.is_empty() {
+                Vec::new()
+            } else {
+                db.collection(crate::models::user_service::COLLECTION_NAME)
+                    .find(doc! {
+                        "_id": { "$in": &member_ids },
+                        "user_id": owner,
+                        "is_active": true,
+                    })
+                    .await?
+                    .try_collect()
+                    .await?
+            };
+            let mut eligible = false;
+            for service in &services {
+                if access.allows_service(service)
+                    && route_member_is_eligible(
+                        db,
+                        encryption_keys,
+                        actor_user_id,
+                        &service.id,
+                        allowed_node_ids,
+                    )
+                    .await?
+                {
+                    eligible = true;
+                    break;
+                }
+            }
+            if eligible {
+                return Ok(SlugMetadataRoute::Pool(Box::new(pool)));
+            }
+        }
+    }
+
     // Preserve the established proxy cascade: an active personal UserService
     // with this slug owns the route before any pool can intercept it.
     if let Some(service) =
@@ -125,29 +216,17 @@ pub async fn select_slug_metadata(
             if allowed_service_ids.is_some_and(|ids| !ids.contains(&member.user_service_id)) {
                 continue;
             }
-            match proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            if route_member_is_eligible(
                 db,
                 encryption_keys,
                 actor_user_id,
                 &member.user_service_id,
-                None,
+                allowed_node_ids,
             )
-            .await
+            .await?
             {
-                Ok(Some(resolution)) => {
-                    if resolution
-                        .node_id
-                        .as_ref()
-                        .is_some_and(|id| allowed_node_ids.is_some_and(|ids| !ids.contains(id)))
-                    {
-                        continue;
-                    }
-                    eligible = true;
-                    break;
-                }
-                Ok(None) => {}
-                Err(error) if service_pool_service::member_unavailable(&error) => {}
-                Err(error) => return Err(error),
+                eligible = true;
+                break;
             }
         }
         if eligible {
@@ -178,7 +257,8 @@ mod tests {
                 None,
                 None,
                 &actor,
-                "ordinary-legacy"
+                "ordinary-legacy",
+                None,
             )
             .await
             .unwrap(),

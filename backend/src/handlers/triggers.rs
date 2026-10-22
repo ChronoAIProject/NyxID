@@ -71,15 +71,15 @@ pub struct TriggerResponse {
 #[derive(Serialize)]
 pub struct CreateTriggerResponse {
     pub trigger: TriggerResponse,
-    pub secret: Option<String>,
-    pub delivery_signing_secret: Option<String>,
+    pub secret: Option<zeroize::Zeroizing<String>>,
+    pub delivery_signing_secret: Option<zeroize::Zeroizing<String>>,
     pub delivery_signing_key_id: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct UpdateTriggerResponse {
     pub trigger: TriggerResponse,
-    pub delivery_signing_secret: Option<String>,
+    pub delivery_signing_secret: Option<zeroize::Zeroizing<String>>,
     pub delivery_signing_key_id: Option<String>,
 }
 
@@ -91,15 +91,21 @@ pub struct ListTriggersResponse {
 #[derive(Serialize)]
 pub struct RotateTriggerSecretResponse {
     pub trigger: TriggerResponse,
-    pub secret: String,
+    pub secret: zeroize::Zeroizing<String>,
 }
 
 #[derive(Serialize)]
 pub struct RotateTriggerDeliverySecretResponse {
     pub trigger: TriggerResponse,
-    pub delivery_signing_secret: String,
+    pub delivery_signing_secret: zeroize::Zeroizing<String>,
     pub key_id: String,
 }
+crate::errors::redacted_debug!(
+    CreateTriggerResponse,
+    UpdateTriggerResponse,
+    RotateTriggerSecretResponse,
+    RotateTriggerDeliverySecretResponse
+);
 
 #[derive(Debug, Deserialize)]
 pub struct ListTriggerDeliveriesQuery {
@@ -630,6 +636,8 @@ pub struct RunResponse {
     pub reason: Option<String>,
     pub thread_id: Option<String>,
     pub duration_ms: Option<i64>,
+    pub attempts: Option<u32>,
+    pub capacity_wait_ms: Option<u64>,
     pub missed: Option<MissedResponse>,
 }
 
@@ -650,6 +658,8 @@ pub(crate) fn run_response(run: crate::models::trigger_run::TriggerRun) -> RunRe
         reason: run.reason,
         thread_id: run.thread_id,
         duration_ms: run.duration_ms,
+        attempts: run.attempts,
+        capacity_wait_ms: run.capacity_wait_ms,
         missed: run.missed.map(|missed| MissedResponse {
             count: missed.count,
             from: missed.from.to_rfc3339(),
@@ -776,6 +786,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<Trigger>(TRIGGERS)
             .insert_one(Trigger {
+                secret_context_versions: Default::default(),
                 source: Default::default(),
                 setup_watch_id: None,
                 schedule: None,
@@ -803,6 +814,7 @@ mod tests {
             .unwrap();
         db.collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
             .insert_one(TriggerDeliveryRecord {
+                secret_context_versions: Default::default(),
                 id: "record-id".to_string(),
                 trigger_id: trigger_id.clone(),
                 user_id: owner.clone(),

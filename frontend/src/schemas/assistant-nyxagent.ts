@@ -1,3 +1,4 @@
+import { platformThreadSchema, platformTurnOriginSchema } from "./platform-personal";
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
 import { machineReceiptSchema } from "./machine-activity";
@@ -78,6 +79,7 @@ export type NyxAgentChannelOrigin = z.infer<typeof nyxAgentChannelOriginSchema>;
 export const nyxAgentConversationSchema = z.object({
   id: conversationId,
   title: z.string(),
+  platform_thread: platformThreadSchema.nullish(),
   title_source: z.enum(["provisional", "generated", "user"]).optional(),
   model: z.string(),
   created_at: z.string(),
@@ -86,8 +88,21 @@ export const nyxAgentConversationSchema = z.object({
   pending_acknowledgements: z.number().int().nonnegative().default(0),
   active_turn: z
     .object({
+      platform_origin: platformTurnOriginSchema.nullish(),
       turn_id: z.string(),
+      reply: z.object({
+        message_id: z.string(),
+        block_id: z.string(),
+        cursor: z.number().int().nonnegative(),
+        text: z.string(),
+      }).nullish(),
       response_id: z.string().nullish(),
+      queued: z.boolean().optional(),
+      waiting_for_capacity: z.boolean().optional(),
+      capacity_wait_note_origin: z.string().nullish(),
+      engine_request_started_at: z.string().nullish(),
+      capacity_wait_started_at: z.string().nullish(),
+      capacity_wait_deadline: z.string().nullish(),
       steering_allowed: z.boolean().optional(),
       stop_requested: z.boolean().optional(),
       continuations: z.number().int().nonnegative().optional(),
@@ -131,6 +146,7 @@ export const nyxAgentRecoverySchema = z.object({
 });
 export type NyxAgentRecovery = z.infer<typeof nyxAgentRecoverySchema>;
 export const nyxAgentMessageSchema = z.object({
+  platform_origin: platformTurnOriginSchema.nullish(),
   recovery: nyxAgentRecoverySchema.nullable().optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
   steering: nyxAgentSteeringSchema.nullish(),
@@ -143,7 +159,10 @@ export const nyxAgentMessageSchema = z.object({
   status: z.enum(["completed", "failed"]),
   error_code: z.string().nullable(),
   upstream_error_code: z.string().nullable().optional(),
+  turn_metadata: z.object({ attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(), channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish() }).nullish(),
   error_detail: z.object({
+    attempts: z.number().int().nonnegative().nullish(),
+    capacity_wait_ms: z.number().nonnegative().nullish(),
     stage: z.string(),
     http_status: z.number().int().nullable(),
     upstream_request_id: z.string().nullable(),
@@ -182,6 +201,7 @@ export const nyxAgentModelSchema = z.object({
 export type NyxAgentModel = z.infer<typeof nyxAgentModelSchema>;
 
 export const nyxAgentAcknowledgementSchema = z.object({
+  creation_turn_id: z.string().nullish(),
   authored_skill: z.object({ agent_id: z.string(), proposal_id: z.string(), revision: z.number(), skills_revision: z.number() }).nullish(),
   continuation_owner: z.literal("server").nullish(),
   continuation_receipt_id: z.string().uuid().nullish(),
@@ -251,7 +271,15 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     event: z.literal("turn.status"),
     conversation_id: conversationId,
     turn_id: z.string(),
+    started_at: z.string().optional(),
     status: z.enum(["running", "waiting"]),
+    queued: z.boolean().optional(),
+    waiting_for_capacity: z.boolean().optional(),
+    engine_accepted: z.boolean().optional(),
+    capacity_wait_note_origin: z.string().nullish(),
+    engine_request_started_at: z.string().nullish(),
+    capacity_wait_started_at: z.string().nullish(),
+    capacity_wait_deadline: z.string().nullish(),
   }),
   base.extend({ event: z.literal("turn.continuing"), turn_id: z.string(), continuation: z.number().int().positive() }),
   base.extend({
@@ -278,7 +306,13 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     event: z.literal("turn.completed"),
     turn_id: z.string(),
     status: z.enum(["completed", "failed", "cancelled"]),
-    error: z.object({ code: z.string(), message: z.string() }).nullable(),
+    turn_metadata: z.object({ attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(), channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish() }).nullish(),
+    error: z.object({
+      attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(),
+      code: z.string(), message: z.string(), upstream_error_code: z.string().nullish(),
+      stage: z.string().optional(), http_status: z.number().nullish(),
+      upstream_request_id: z.string().nullish(), response_id: z.string().nullish(),
+    }).nullable(),
   }),
 ]);
 export type NyxAgentConversation = z.infer<typeof nyxAgentConversationSchema>;
@@ -605,7 +639,7 @@ export const nyxAgentChannelAgentSchema = z.object({
   org_id: z.string().nullable().default(null),
   /** Who may talk to the agent in private chats with the bot. */
   private_chats: z.enum(["owner", "everyone"]).catch("owner"),
-  /** `ok` or `failing` once a message has been judged; null before. */
+  /** `ok`, `failing`, `interrupted`, or `media_failed`; null before a message is judged. */
   delivery_status: z.string().nullable().default(null),
   delivery_error: z.string().nullable().default(null),
   /** Plain words for `delivery_error`. */

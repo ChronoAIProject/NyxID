@@ -1,4 +1,5 @@
 import { AgentSkills } from "./agent-skills";
+import { AgentConnections } from "./agent-connections";
 import { AgentLearningReview } from "./agent-learning-review";
 import { MachineCapabilities } from "./machine-capabilities";
 import { AgentOperationScopes } from "./agent-operation-scopes";
@@ -75,6 +76,8 @@ import {
   agentTitle,
   effectiveAccessMode,
 } from "@/lib/assistant/nyxbot-labels";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { ModelSelect } from "@/components/assistant/nyxbot-access-controls";
 import { formatDateTime } from "@/lib/utils";
 import {
@@ -313,6 +316,7 @@ export function AgentDetailsSheet({
                   <MachineCapabilities agentId={agent.id} disabled={agent.status === "destroyed"} />
                 </Section>
               )}
+              <AgentConnections key={agent.id} agent={agent} />
               <AgentSkills id={SKILLS_SECTION_ID} agentId={agent.id} readOnly={agent.status === "destroyed" || agent.can_maintain === false
                 } />
               <AgentLearningReview key={`${agent.id}:${proposalId ?? ""}`} agentId={agent.id} proposalId={proposalId} readOnly={agent.status === "destroyed" || agent.can_maintain === false} />
@@ -346,6 +350,7 @@ export function AgentDetailsSheet({
 const INHERIT = "inherit";
 
 function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
+  const advancedControls = useFeature(FEATURE_FLAG.ASSISTANT_MODEL_CONTROLS);
   const update = useUpdateNyxBotAgent();
   const workspaceMode = useNyxBotSettings().data?.access_mode;
   const nyxbot = agent.kind === "nyxbot";
@@ -433,7 +438,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               </FormItem>
             )}
           />
-          <FormField
+          {advancedControls && <FormField
             control={form.control}
             name="model"
             render={({ field }) => (
@@ -446,12 +451,12 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                   onChange={field.onChange}
                 />
                 <FormDescription className="text-11">
-                  Used by this agent's new threads. Each thread can switch from its header.
+                  Used by this agent's new threads. Each thread can switch from its composer.
                 </FormDescription>
                 <FormMessage />
               </FormItem>
             )}
-          />
+          />}
           <FormField
             control={form.control}
             name="access_mode_override"

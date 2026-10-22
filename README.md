@@ -70,6 +70,11 @@ billing from either services or linked providers. See [Service configuration and
 vendor retirement](docs/SERVICE_CONFIGURATION.md). They can also give a role read-only
 access to platform-wide usage reports, for example with the seeded **Usage
 Viewer** role, without granting other admin access. See [Admin usage](docs/BILLING_UI_GLOSSARY.md#admin-usage).
+Admins and operators can open **Usage → NyxBot** for cost and billing, token
+traffic, and top billing accounts split by model, alongside active-session
+counts, turn outcomes, and reply feedback. See [NyxBot model usage](docs/BILLING_ANALYTICS.md#nyxbot-model-usage)
+for exact values, attribution, and historical coverage, and
+[NyxBot activity](docs/chat/08-nyxagent-engine.md#admin-nyxbot-activity) for activity definitions.
 
 Feature flag access can be delegated to any user or group with
 `feature-flag-operator` (create flags and manage their own) or
@@ -78,10 +83,25 @@ Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-
 
 ## What NyxID Does
 
+- **Allocate repeatable credits** — admin Credits supports exact one-time or recurring allocations, optional shared-total service ceilings, and reclaim of each allocation's unspent remainder. Existing free-unit allowances stay separate. New policy authoring is off until all billing writers are upgraded; see [credit allocation accounting and rollout](docs/BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim).
+
+- **Connect phone and speech services to NyxBot** — [service adapters](docs/NYXBOT_SERVICE_ADAPTERS.md) add Telnyx/Twilio inbound calls and SMS plus ElevenLabs Custom LLM, with declared capabilities, verified connections and specialist tools. The feature is disabled by default; shared-platform Telnyx voice is unavailable.
+
+- **Manage Oracle pool ownership and retirement** — transfer a pool between your account and organizations you manage while preserving its identity, or delete an idle pool through the API and CLI. See [Oracle pool lifecycle](docs/ORACLE_RELAY.md#pool-ownership-and-deletion-unreleased-1527-1542) for credential renewal and coordinated rollout requirements. Available in the first tagged release containing these changes.
+
+- **Speak to NyxBot and specialists** — voice calls show live captions and audio activity in the composer. Dictation offers click-to-toggle or hold-to-talk capture, microphone selection, and transcript review before insertion into a draft. Platform audio requires enabled voice features, a configured provider and tariff, and sufficient funding; microphone access is requested when capture is activated. See [voice and dictation](docs/chat/11-voice.md#19-implemented-composer-voice-and-dictation).
+
+- **Display source images in NyxBot** — supported Notion reads return image references that NyxBot can retain as encrypted chat attachments and deliver through supported channels. The shared retrieval tool rechecks source access; see [source resources and image display](docs/chat/10-source-resources.md).
+
+- **Control NyxBot service use** — NyxBot enforces saved connection order, prefers suitable working personal connections, and asks before organization use in Auto and Ask every time. Choose an exact connection for the next message without changing permission modes. See [NyxBot service execution](docs/NYXBOT_SERVICE_EXECUTION.md).
+
+- **Spend NyxID credits on Telnyx tools** — the [Telnyx platform offering](docs/TELNYX_PLATFORM_BILLING.md) supports a restricted pilot of one model's nonstreaming text chat through HTTP or MCP, including NyxBot tool calls. Administrators must configure and enable the shared credential, verified model bounds, prices, billing, and pilot access before use; users do not connect Telnyx OAuth.
 - **Connect Stripe to agents** — [Stripe Apps OAuth](docs/STRIPE_OAUTH.md) supports a managed account connection and read-only customer, invoice, payment, and subscription tools.
 
 - **Connect email to agents** — [Aurinko Email](docs/AURINKO_INTEGRATION.md) provides an AI Service for mailbox API/MCP operations and an email channel bot for signed incoming notifications and replies. Connect with an account token; the channel additionally uses the application's signing secret.
 - **Create a Telegram channel bot** — [Telegram New](docs/TELEGRAM_NEW.md) uses a platform-managed creation flow so customers can create and connect a bot without copying a token. The existing Telegram option still connects bots using their current tokens. Administrators configure a dedicated manager before enabling Telegram New.
+- **Use BotFather as your Telegram assistant** — linked managers deliver full replies in ordered messages and retain forwarded text, quotes, links and attachments. Pair with a copyable command or Telegram return link, and edit shared FAQ/use-case libraries with preview, publication history and rollback in Admin → Platform Bots. Multiple managers can share one library. See [BotFather setup and gateway rollout](docs/TELEGRAM_NEW.md).
+- **Mention channel specialists** — Exact native Telegram and Lark/Feishu mentions reach the receiving bot's linked agent in an enabled group without participant OAuth. Bot-authored messages remain guests with durable handoff limits. See [channel admission and gateway rollout](docs/CHANNEL_BOT_RELAY.md#callback-contract).
 - **Reach anything** — public APIs, internal APIs, localhost services via credential nodes (`nyxid node`). SSH (Secure Shell) tunneling (`nyxid ssh`) reaches remote hosts. No VPN (Virtual Private Network), no port forwarding.
 - **Never expose keys** — the reverse proxy injects credentials automatically. Your agent talks to NyxID; NyxID talks to the API with the real key.
 - **MCP auto-wrap** — REST APIs with OpenAPI specs become [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) tools. `nyxid mcp config --tool cursor` generates the config. Works with Claude Code, Cursor, VS Code, and any MCP client.
@@ -92,8 +112,9 @@ Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-
 ## See It in Action
 
 The web app checks for frontend updates every ten minutes. Assistant updates
-apply on safe chat or view switches; updates still pending after two hours show
-a refresh reminder. See [deployment behavior](docs/DEPLOYMENT.md#frontend).
+apply on safe chat or view switches; every frontend build still pending after
+15 minutes shows a refresh reminder, including on Nyxbot pages.
+See [deployment behavior](docs/DEPLOYMENT.md#frontend).
 
 The end-to-end loop is short: connect a service to NyxID once, then any AI agent pointed at your NyxID MCP endpoint can use it — without ever seeing the raw API key.
 
@@ -230,10 +251,11 @@ For production deployment (TLS, custom domain, email verification), see [docs/DE
 
 ### 2. Pick a workflow
 
-With NyxID running and an Agent Key in hand, pick the workflow that matches what you want to build. Each is a step-by-step procedure that ends with a working integration; the guides are independent and can be completed in any order.
+With a NyxID account, pick the workflow that matches what you want to build and use the identity its guide requires. Each is a step-by-step procedure that ends with a working integration; the guides are independent and can be completed in any order.
 
 | Quickstart | Outcome | NyxID capability |
 |---|---|---|
+| [**Run NyxBot from your terminal**](docs/site/cli/reference/nyxbot.md) | Submit prompts from text, files, or stdin; inspect, wait for, and cancel durable work using a first-party owner login. The CLI runs locally and uses your hosted or self-hosted NyxID instance. | Owner CLI and invocation API; requires server admission enabled |
 | [**n8n: Daily AI News Digest with One NyxID Credential**](docs/quickstarts/n8n.md) | An n8n workflow pulls an RSS feed, summarizes each article with Gemini, and posts to Telegram — using one `Header Auth` credential in n8n while NyxID stores the upstream Gemini and Telegram secrets. | Per-service credential injection |
 | [**Per-Agent Keys for Claude Code and Codex**](docs/quickstarts/claude-code.md) | Two coding agents on one machine, each scoped to a distinct service and credential, attributed independently in the audit log. | Agent isolation, scoped Agent Keys |
 | [**Reach a Localhost API from a Cloud-Hosted Agent**](docs/quickstarts/node-proxy.md) | A private-host API is reachable from a cloud agent without VPN, port forwarding, or a tunneling service. | Credential Node, outbound-only NAT traversal |
@@ -255,6 +277,7 @@ With NyxID running and an Agent Key in hand, pick the workflow that matches what
 | Connecting AI Services | [docs/connecting-services/](docs/connecting-services/) | Add your first (or Nth) AI Service — Web UI / CLI / AI-driven / Direct API |
 | Setup | [docs/SETUP.md](docs/SETUP.md) | Optional self-hosted backend + troubleshooting (macOS, Linux, Windows via WSL) |
 | Nyxbot Onboarding | [docs/NYXBOT_ONBOARDING.md](docs/NYXBOT_ONBOARDING.md) | Onboarding entry, existing integrations, and pending backend contracts |
+| NyxBot CLI and API | [docs/chat/09-owner-cli-api.md](docs/chat/09-owner-cli-api.md) | Owner commands, invocation lifecycle, security boundaries, and rollout |
 | Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
 | Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and data flows |

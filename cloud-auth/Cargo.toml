@@ -30,6 +30,7 @@ aws-sigv4 = { version = "1.4", default-features = false, features = ["sign-http"
 # stable import path.
 aws-credential-types = "1.2"
 thiserror = "2"
+zeroize = { version = "1", features = ["serde"] }
 dashmap = "6"
 tracing = { workspace = true }
 

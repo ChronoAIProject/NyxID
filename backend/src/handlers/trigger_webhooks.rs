@@ -244,6 +244,7 @@ mod tests {
                 None
             };
         let trigger = Trigger {
+            secret_context_versions: Default::default(),
             source: Default::default(),
             setup_watch_id: None,
             schedule: None,

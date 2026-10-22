@@ -19,6 +19,8 @@ pub struct AuthorizationCode {
     pub id: String,
     pub code_hash: String,
     pub client_id: String,
+    #[serde(default)]
+    pub protected_consent: Option<crate::models::consent::ProtectedConsentRef>,
     pub user_id: String,
     pub redirect_uri: String,
     pub scope: String,
@@ -124,6 +126,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let code = AuthorizationCode {
+            protected_consent: None,
             incremental_consent: None,
             id: uuid::Uuid::new_v4().to_string(),
             code_hash: "hash123".to_string(),
@@ -162,6 +165,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_no_pkce() {
         let code = AuthorizationCode {
+            protected_consent: None,
             incremental_consent: None,
             id: uuid::Uuid::new_v4().to_string(),
             code_hash: "hash123".to_string(),

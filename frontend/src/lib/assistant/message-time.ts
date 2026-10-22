@@ -7,7 +7,7 @@ export interface MessageTimeLabels {
 }
 
 export interface MessageTimeOptions {
-  /** Tests pin these; the browser's own apply otherwise. */
+  /** Overrides the browser's preferred language or local time zone. */
   readonly locale?: string;
   readonly timeZone?: string;
 }
@@ -24,10 +24,15 @@ const LABEL = {
 const formatters = new Map<string, Intl.DateTimeFormat>();
 
 function formatter({ locale, timeZone }: MessageTimeOptions): Intl.DateTimeFormat {
-  const key = `${locale ?? ""}|${timeZone ?? ""}`;
+  const resolvedLocale = locale ?? (
+    typeof navigator === "undefined"
+      ? undefined
+      : navigator.languages?.[0] ?? navigator.language
+  );
+  const key = `${resolvedLocale ?? ""}|${timeZone ?? ""}`;
   let cached = formatters.get(key);
   if (!cached) {
-    cached = new Intl.DateTimeFormat(locale, { ...LABEL, timeZone });
+    cached = new Intl.DateTimeFormat(resolvedLocale, { ...LABEL, timeZone });
     formatters.set(key, cached);
   }
   return cached;

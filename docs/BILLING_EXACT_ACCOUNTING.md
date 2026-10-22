@@ -65,6 +65,20 @@ retry either observes the entire committed split or recomputes both together.
 A worker that outlives its claim returns the committed wallet share together
 with its committed Lago quantity, never its stale computed share.
 
+### Allocation-local service ceilings and reclaim
+
+An allocation remains one `CreditGrant` and one journal account. Optional disjoint `service_limits` contain server-resolved catalog IDs, compatibility slugs, a stable key, and exact `limit`, `consumed`, and `reserved` Decimal128 credit counters. A shared total of 10,000 with Twitter up to 500 and OpenAI+Anthropic up to 300 does not earmark 800 credits: unspecified eligible services may use the shared total. Other allocations and purchased credits fund excess independently. Canonical IDs take precedence over slugs; a historical user-connection ID is not treated as a catalog identity. Missing policy fields mean uncapped, not pending reclaim.
+
+Ordinary and durable public/pool/managed admission commit total/rule holds, allowance/wallet holds and all meter rows in the same transaction. Machine windows use their existing caller-owned lifecycle transaction. Reservation excludes an active resource operation; relevant operations are helped before admission, and contention fails closed rather than silently changing funding order. Existing frozen rates, public/managed dispatch gates, pool leases, machine finite/no-overdraft/evidence/reserved-only settlement and carry transactions remain authoritative.
+
+`revoke_requested_at` immediately fences new holds and unreserved extra usage. Existing holds and acquired durable locks finish. Finalization requires zero reservations and no resource lock, atomically captures exact remaining value as `terminal_amount`, and confirms the existing balanced `grant-revoked:{id}` journal movement once. Release, settlement and reconciliation retry it. Reclaim never debits another allocation or wallet. Expiry uses its own terminal movement and remains distinct from reclaim. Effective `held` includes unapplied extra lock commitments; raw `reserved` fields remain unchanged, including per-rule responses.
+
+Resource lock acquisition checks durable operation history and writes the usage row under its immutable invocation claim in the same transaction. Takeover drains locks for the usage, including exhausted resources, before recomputing coverage. Allowance and grant coverage comes from recorded histories, so a competing consumer reducing an extra operation cannot reduce wallet funding incorrectly. New admissions cannot create a hold without recoverable usage intent. Historical orphan holds without durable intent are not automatically inferred or released.
+
+Optional actor-scoped UUID submission keys freeze exact payloads and recipient/policy snapshots. Deterministic per-recipient IDs resume partial/concurrent retries without resetting spent, held or reclaimed state; a changed payload conflicts. Schedule periods preserve their existing deterministic identities, recipient cutoffs and frozen policies; every issuance gets fresh counters. Sparse pause/note edits do not re-resolve unchanged rules after catalog retirement.
+
+Enable `BILLING_ALLOCATIONS_ENABLED` only after every API replica and billing worker is upgraded and old writers drained. Dedicated authoring routes prevent old servers silently ignoring policy fields; the flag does not attest worker versions. Disabling authoring cannot make already-persisted policies safe for old binaries. No migration invents allocation balances.
+
 ## D3. Balanced journal and account verification
 
 New entries use `event_type: accounting_v2`, a `movement`, and ordered positive
@@ -276,6 +290,8 @@ unchanged.
 
 ## D6. API and clients
 
+Remote Machine runtime rates additionally bind immutable `profile_version` to the controlled resource spec. New staging accepts only the approved `remote-machine` profile and exact 0.000040 Credits/second; historical settlement reads retain their accepted exact prices. Quote and preflight share the profile/plan/sync/verification/retirement selector, while pinned quotes and active runs validate their original rate/profile/price/terms without repricing. Missing `profile_version` only in historical rates (including embedded run snapshots) means literal `remote-machine`, established by the original sole-profile constructor; explicit null and unknown bindings do not admit. No migration, ledger rewrite or recharge is performed. Upgrade every backend replica and runtime billing worker before enabling any additional profile's rates. See [Remote Machine API contracts](REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md#controlled-profile-and-runtime-rate-contract-2026-10-15).
+
 Exact API amounts are additive Credits fields encoded as decimal strings. Wallets
 expose balance, reserved, pending debits/expiry, available, available with overdraft
 and overdraft cap. Usage exposes estimated, wallet, grant and allowance credits.
@@ -384,3 +400,61 @@ measurements of the integrated release.
 All window/filter cases passed the exact-oracle, index-coverage and median-budget
 assertions. The remaining overhead relative to the integer base is reflected in
 these measurements.
+
+### Assistant provenance in usage summaries
+
+Assistant provenance is additive display-partition metadata, not a root rollup
+identity. Existing root hashes/grouping and the exact-v2 normalization contract
+remain stable. Modern free meters retain the low-cardinality assistant source;
+they do not introduce per-key/ack partitions for unrelated free traffic. Existing
+connection attribution remains available. Source snapshots and zero-cost
+partitions survive API-key revoke/soft delete and credential removal.
+
+Upgrade all rollup writers to preserve this provenance through folding. An old
+writer ignores the source field and may fold newly captured free usage into a
+source-less summary during a mixed-version rollout. The scoped report excludes
+that uncovered summary even when its underlying meters were captured recently.
+
+A legacy free root can have measures but no cost partitions. When modern source
+partitions join that root, readers recover the root-minus-partitions residual
+for every additive measure. It remains unattributed and is never assigned to the
+new source. This calculation is on the atomic document read, including late old
+writers and daily bootstrap/promotion. A single-display accelerator is valid
+only when its sole partition accounts for all root rows. NyxBot free-summary
+reads always expand partitions plus residual, so an old writer rebuilding its
+older shortcut cannot assign the combined root to one new source. Normalization
+still writes exact money and scalar query mirrors atomically with concurrent
+folds; this reporting change adds no hot-path migration or money admission gate.
+
+Mixed exact and legacy groups preserve the exact gross/wallet/allowance subtotal
+when the legacy cached rate is absent. Cost presence remains null for an
+unknown-only group, while known zero exact settlements remain known. Model
+account Other rows subtract in Mongo before presentation count clamping and
+subtract cost-presence counts separately, retaining unknown-only remainders as
+unavailable. No quantities or distinct cardinalities are fabricated in the
+model-report DTO.
+
+### Wallet usage tax
+
+`UsageFunding.wallet_funded` and `total_charge` remain exact **pre-tax** funding
+amounts. Newly admitted rows set `tax_accounting` and retain an optional applied
+Lago rate snapshot. Only a nonzero wallet share requires a fresh tax profile;
+benefits remain untaxed. A benefit-only estimate that spills into wallet funding
+at settlement uses the latest verified stored profile regardless of age, since
+upstream work is complete; no verified profile leaves settlement retryable.
+This snapshot read occurs before the Lago carry transaction, which persists it
+atomically with the claim-fenced funding split. Wallet holds use base plus tax ceiled at one pico;
+settlement uses base plus proportional tax rounded half-up at one pico.
+`wallet_tax_credits` records that tax and `wallet_charge_credits` records the gross
+debit. All wallet reserved/pending counters and overdraft checks are gross.
+Machine runtime windows use the same rule; preflight keeps grant seconds separate
+from wallet seconds priced at the gross per-second rate.
+
+The claim-fenced Lago carry still uses only `wallet_funded`, so tax never changes
+emitted quantities or cumulative residue. The existing usage-settled ledger
+append journals pre-tax usage and tax as separate balanced transfers from the
+wallet, using `usage:<row>` and `tax:usage:<owner>`. Locks remain until that entry
+is durable. Lago fee/tax cent rounding remains an ordinary provider-refresh
+`external:lago` adjustment. No ledger/hash encoding, dedupe key or checkpoint
+protocol changes. Legacy rows without tax fields settle pre-tax. Deploy all
+replicas before enabling Lago customer taxes; see [operations](BILLING_OPERATIONS.md).

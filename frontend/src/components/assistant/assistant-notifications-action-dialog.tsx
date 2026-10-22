@@ -12,6 +12,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { globalApprovalModeSchema } from "@/schemas/approvals";
+import type { GlobalApprovalMode } from "@/types/approvals";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
 import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
@@ -36,6 +39,7 @@ const evidenceSchema = z
     telegram_link_pending: z.boolean(),
     telegram_enabled: z.boolean(),
     approval_required: z.boolean(),
+    global_approval_mode: globalApprovalModeSchema.optional(),
     approval_timeout_secs: z.number().int().min(10).max(300),
     grant_expiry_days: z.number().int().min(1).max(365),
     push_enabled: z.boolean(),
@@ -79,7 +83,7 @@ export function AssistantNotificationsActionDialog({
 }) {
   const [before, setBefore] = useState<NotificationEvidence | null>(null);
   const [telegramEnabled, setTelegramEnabled] = useState(false);
-  const [approvalRequired, setApprovalRequired] = useState(false);
+  const [approvalMode, setApprovalMode] = useState<GlobalApprovalMode>("writes_only");
   const [approvalTimeoutSecs, setApprovalTimeoutSecs] = useState("30");
   const [grantExpiryDays, setGrantExpiryDays] = useState("30");
   const [pushEnabled, setPushEnabled] = useState(false);
@@ -98,7 +102,7 @@ export function AssistantNotificationsActionDialog({
         if (!active) return;
         setBefore(evidence);
         setTelegramEnabled(evidence.telegram_enabled);
-        setApprovalRequired(evidence.approval_required);
+        setApprovalMode(evidence.global_approval_mode ?? (evidence.approval_required ? "all" : "off"));
         setApprovalTimeoutSecs(String(evidence.approval_timeout_secs));
         setGrantExpiryDays(String(evidence.grant_expiry_days));
         setPushEnabled(evidence.push_enabled);
@@ -139,7 +143,11 @@ export function AssistantNotificationsActionDialog({
       if (destructive) payload.confirmed = confirmed;
       if (action === "update") {
         payload.telegramEnabled = telegramEnabled;
-        payload.approvalRequired = approvalRequired;
+        if (before.global_approval_mode === undefined && approvalMode !== "writes_only") {
+          payload.approvalRequired = approvalMode === "all";
+        } else {
+          payload.globalApprovalMode = approvalMode;
+        }
         payload.approvalTimeoutSecs = Number(approvalTimeoutSecs);
         payload.grantExpiryDays = Number(grantExpiryDays);
         payload.pushEnabled = pushEnabled;
@@ -160,7 +168,7 @@ export function AssistantNotificationsActionDialog({
       if (action === "update") {
         if (
           after.telegram_enabled !== telegramEnabled
-          || after.approval_required !== approvalRequired
+          || (after.global_approval_mode ?? (after.approval_required ? "all" : "off")) !== approvalMode
           || after.approval_timeout_secs !== Number(approvalTimeoutSecs)
           || after.grant_expiry_days !== Number(grantExpiryDays)
           || after.push_enabled !== pushEnabled
@@ -211,7 +219,7 @@ export function AssistantNotificationsActionDialog({
           </div>
         ) : (
           <div className="space-y-4 border-y border-border py-4">
-            {action === "update" ? <><label className="flex items-center gap-2 text-sm"><Checkbox checked={telegramEnabled} onCheckedChange={(value) => setTelegramEnabled(value === true)} />Telegram notifications</label><label className="flex items-center gap-2 text-sm"><Checkbox checked={pushEnabled} onCheckedChange={(value) => setPushEnabled(value === true)} />Push notifications</label><label className="flex items-center gap-2 text-sm"><Checkbox checked={approvalRequired} onCheckedChange={(value) => setApprovalRequired(value === true)} />Require approval</label><div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label htmlFor="approval-timeout">Timeout (seconds)</Label><Input id="approval-timeout" type="number" min={10} max={300} value={approvalTimeoutSecs} onChange={(event) => setApprovalTimeoutSecs(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="grant-expiry">Grant expiry (days)</Label><Input id="grant-expiry" type="number" min={1} max={365} value={grantExpiryDays} onChange={(event) => setGrantExpiryDays(event.target.value)} /></div></div></> : <p className="font-mono text-xs text-muted-foreground">{before?.id ?? "Loading"}</p>}
+            {action === "update" ? <><label className="flex items-center gap-2 text-sm"><Checkbox checked={telegramEnabled} onCheckedChange={(value) => setTelegramEnabled(value === true)} />Telegram notifications</label><label className="flex items-center gap-2 text-sm"><Checkbox checked={pushEnabled} onCheckedChange={(value) => setPushEnabled(value === true)} />Push notifications</label><div className="space-y-2"><Label>Approval (Global Default)</Label><Select value={approvalMode} onValueChange={(value) => setApprovalMode(globalApprovalModeSchema.parse(value))}><SelectTrigger aria-label="Approval (Global Default)"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="writes_only">Writes only (default)</SelectItem><SelectItem value="all">All requests</SelectItem><SelectItem value="off">Off</SelectItem></SelectContent></Select></div><div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label htmlFor="approval-timeout">Timeout (seconds)</Label><Input id="approval-timeout" type="number" min={10} max={300} value={approvalTimeoutSecs} onChange={(event) => setApprovalTimeoutSecs(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="grant-expiry">Grant expiry (days)</Label><Input id="grant-expiry" type="number" min={1} max={365} value={grantExpiryDays} onChange={(event) => setGrantExpiryDays(event.target.value)} /></div></div></> : <p className="font-mono text-xs text-muted-foreground">{before?.id ?? "Loading"}</p>}
             {destructive ? <label className="flex items-start gap-2 text-xs"><Checkbox checked={confirmed} onCheckedChange={(value) => setConfirmed(value === true)} /><span className="flex items-center gap-1"><ShieldAlert className="size-3" />I understand Telegram will be disconnected.</span></label> : null}
           </div>
         )}

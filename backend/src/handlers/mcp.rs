@@ -43,6 +43,7 @@ pub struct McpCatalogDiagnostics {
     pub service_scope_restricted: bool,
     pub node_scope_restricted: bool,
     pub node_scope_exclusions_present: bool,
+    pub shadowed_connections: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,11 +124,14 @@ pub async fn get_mcp_config(
     // Match MCP tools/list: chat keys discover services before acknowledgement.
     // allowed_platform_service_ids and account_acknowledged gate execution,
     // not this catalog. MCP-only account/meta-tools are added by the transport.
-    let service_scope = if chat.is_some() || auth_user.allow_all_services {
-        mcp_service::ServiceScope::Unrestricted
-    } else {
-        mcp_service::ServiceScope::Allowed(auth_user.allowed_service_ids.as_slice())
-    };
+    let service_scope = mcp_service::caller_service_scope(
+        &user_id,
+        auth_user.assistant_agent_owner_id.as_deref(),
+        auth_user.org_agent_access.as_deref(),
+        chat.as_ref(),
+        auth_user.allow_all_services,
+        auth_user.allowed_service_ids.as_slice(),
+    );
     let mut catalog = mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
@@ -137,6 +141,11 @@ pub async fn get_mcp_config(
     )
     .await?;
 
+    for service in &mut catalog.services {
+        service.endpoints.retain(|endpoint| {
+            !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+        });
+    }
     crate::services::agent_operation_scope_service::filter_catalog(
         &auth_user.assistant_operation_scopes,
         &mut catalog.services,
@@ -191,6 +200,7 @@ pub async fn get_mcp_config(
             service_scope_restricted: catalog.diagnostics.service_scope_restricted,
             node_scope_restricted: catalog.diagnostics.node_scope_restricted,
             node_scope_exclusions_present: catalog.diagnostics.node_scope_exclusions_present,
+            shadowed_connections: catalog.diagnostics.shadowed_connections,
         },
     }))
 }
@@ -323,6 +333,7 @@ mod tests {
             service_category: "user_service".to_string(),
             recommended_skills: Vec::new(),
             endpoints: vec![McpToolEndpoint {
+                attachment_input: None,
                 async_operation: None,
                 target_id: None,
                 endpoint_id: "endpoint-1".to_string(),
@@ -374,6 +385,7 @@ mod tests {
             service_scope_restricted: true,
             node_scope_restricted: true,
             node_scope_exclusions_present: true,
+            shadowed_connections: 0,
         };
 
         let value = serde_json::to_value(diagnostics).expect("serialize diagnostics");

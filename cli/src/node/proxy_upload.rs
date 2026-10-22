@@ -71,6 +71,7 @@ impl Uploads {
         let mut metadata = request.parameters;
         metadata["_authority"] = serde_json::to_value(&request.authority)?;
         metadata["_authority_version"] = request.version.into();
+        metadata["_authority_timestamp"] = request.timestamp.into();
         let git = metadata["git"].as_bool().unwrap_or(false);
         let limit = metadata["max_bytes"]
             .as_u64()
@@ -190,6 +191,7 @@ mod tests {
         let mut request = Request {
             version: 1,
             authority: None,
+            external_authority: None,
             request_id: Uuid::new_v4().to_string(),
             node_id: "credential-node".into(),
             operation: Operation::ProxyUpload,

@@ -70,6 +70,16 @@ const BILLING_FLAG_TEST: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+/// Personal rollout for new hosted Machine admission and runtime-rate writes.
+/// Existing management, runtime accounting and cleanup remain available.
+pub const REMOTE_MACHINES_FLAG_KEY: &str = "experimental:remote-machines";
+
+const REMOTE_MACHINES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: REMOTE_MACHINES_FLAG_KEY,
+    description: "Enable hosted Remote Machine creation, resume/rekey and administrative runtime-rate writes for the acting person; existing management and accounting continue when off.",
+    default_enabled: false,
+};
+
 /// Operator gate for the Aevatar chat wire-log diagnostic. Off by default and
 /// toggled at runtime (platform-global, org cohort, or per user) so enabling a
 /// browser-side capture of raw assistant payloads never needs a redeploy.
@@ -119,6 +129,12 @@ const ASSISTANT_VOICE_FLAG: FeatureFlagDef = FeatureFlagDef {
 };
 
 pub const NYXBOT_THREAD_FOLLOW_FLAG_KEY: &str = "nyxbot:thread-follow";
+pub const NYXBOT_ADAPTERS_FLAG_KEY: &str = "nyxbot:service-adapters";
+const NYXBOT_ADAPTERS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: NYXBOT_ADAPTERS_FLAG_KEY,
+    description: "Phone/SMS/Custom LLM bindings. Enable only after every API replica enforces channel_adapter_origin at tool dispatch.",
+    default_enabled: false,
+};
 const NYXBOT_THREAD_FOLLOW_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXBOT_THREAD_FOLLOW_FLAG_KEY,
     description: "Staged direct-relay channel thread follow. Gateway follow remains unavailable until a compatible gateway is negotiated.",
@@ -129,6 +145,13 @@ pub const SKILL_PIN_DISABLE_FLAG_KEY: &str = "assistant:skill-pin-disable";
 const SKILL_PIN_DISABLE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: SKILL_PIN_DISABLE_FLAG_KEY,
     description: "Enables persisted disabled skill pins after all replicas understand the field.",
+    default_enabled: false,
+};
+
+pub const ASSISTANT_MODEL_CONTROLS_FLAG_KEY: &str = "assistant:model-controls";
+const ASSISTANT_MODEL_CONTROLS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_MODEL_CONTROLS_FLAG_KEY,
+    description: "Shows advanced model and reasoning controls for internal assistant users. Other users see Thinking and Permissions.",
     default_enabled: false,
 };
 
@@ -149,6 +172,26 @@ pub const AGENT_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:operation-scopes";
 const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: AGENT_OPERATION_SCOPES_FLAG_KEY,
     description: "Allows configuring specialist operation scopes after every replica supports enforcement. Existing scopes are always enforced.",
+    default_enabled: false,
+};
+
+pub const ASSISTANT_CHANNEL_MEDIA_FLAG_KEY: &str = "assistant:channel-media";
+const ASSISTANT_CHANNEL_MEDIA_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+    description: "Admit owner Lark/Feishu media after every replica supports channel uploads.",
+    default_enabled: false,
+};
+pub const ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY: &str = "assistant:attachment-writes";
+const ASSISTANT_ATTACHMENT_WRITES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
+    description: "Enable managed attachment writes after every replica supports their enforcement.",
+    default_enabled: false,
+};
+
+pub const ASSISTANT_INVOCATIONS_FLAG_KEY: &str = "assistant:owner-invocations";
+const ASSISTANT_INVOCATIONS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_INVOCATIONS_FLAG_KEY,
+    description: "Admit owner CLI/API invocations only after every replica supports their lineage. After first admission, use forward fixes; disabling admission and draining work do not permit older binaries to return.",
     default_enabled: false,
 };
 
@@ -246,10 +289,15 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
+    ASSISTANT_MODEL_CONTROLS_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
+    ASSISTANT_INVOCATIONS_FLAG,
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
     AGENT_LEARNING_FLAG,
@@ -260,6 +308,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
+    REMOTE_MACHINES_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
     NYXBOT_GATEWAY_FLAG_DEFS[0],
@@ -277,10 +326,15 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
+    ASSISTANT_MODEL_CONTROLS_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
+    ASSISTANT_INVOCATIONS_FLAG,
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
     AGENT_LEARNING_FLAG,
@@ -291,6 +345,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
+    REMOTE_MACHINES_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
     NYXBOT_GATEWAY_FLAG_DEFS[0],
@@ -870,10 +925,14 @@ pub async fn personal_flag_enabled(
     user_id: &str,
     flag_key: &str,
 ) -> AppResult<bool> {
-    Ok(resolve_personal_features(db, user_id)
+    let enabled = resolve_personal_features(db, user_id)
         .await?
         .iter()
-        .any(|key| key == flag_key))
+        .any(|key| key == flag_key);
+    if enabled {
+        super::security_readiness_service::require(db, flag_key).await?;
+    }
+    Ok(enabled)
 }
 
 /// Who a flag can be on for, so background work can skip a flag nobody has
@@ -1547,6 +1606,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn remote_machines_defaults_off_and_personal_overrides_stay_actor_scoped() {
+        let flag = find_flag("experimental:remote-machines")
+            .expect("Remote Machines flag is registered in test builds");
+        assert!(!flag.default_enabled);
+        assert!(
+            !resolve_personal_from_overrides(&[], &[], &[], "owner")
+                .iter()
+                .any(|key| key == flag.key)
+        );
+        let personal = [override_row(
+            None,
+            flag.key,
+            FlagTargetKind::User,
+            Some("owner"),
+            true,
+        )];
+        for (actor, expected) in [("owner", true), ("other-owner", false)] {
+            assert_eq!(
+                resolve_personal_from_overrides(&personal, &[], &[], actor)
+                    .iter()
+                    .any(|key| key == flag.key),
+                expected,
+                "personal flag must resolve for the authenticated actor"
+            );
+        }
+        let global = override_row(None, flag.key, FlagTargetKind::Global, None, true);
+        let personal_off = override_row(None, flag.key, FlagTargetKind::User, Some("owner"), false);
+        assert!(
+            !resolve_personal_from_overrides(&[global, personal_off], &[], &[], "owner")
+                .iter()
+                .any(|key| key == flag.key),
+            "the existing personal override must retain precedence over global rollout"
+        );
+    }
+
     #[tokio::test]
     async fn invitation_code_gate_defaults_on_and_uses_only_global_override() {
         let Some(db) = connect_test_database("invitation_code_flag").await else {
@@ -1707,7 +1802,7 @@ mod tests {
     #[test]
     fn precedence_matrix_matches_in_personal_and_org_contexts() {
         // Exercise absent, disabled, and enabled overrides over both defaults.
-        for flag in ["example_ui", BILLING_FLAG_KEY] {
+        for flag in ["example_ui", BILLING_FLAG_KEY, REMOTE_MACHINES_FLAG_KEY] {
             for global in [None, Some(false), Some(true)] {
                 for org in [None, Some(false), Some(true)] {
                     for user in [None, Some(false), Some(true)] {
@@ -2412,10 +2507,15 @@ mod tests {
             vec![
                 "auth:invitation-code",
                 "assistant:nyxagent-engine",
+                "assistant:model-controls",
                 "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
+                "nyxbot:service-adapters",
                 "assistant:operation-scopes",
+                "assistant:channel-media",
+                "assistant:attachment-writes",
                 "assistant:live-turn-gate",
+                "assistant:owner-invocations",
                 "assistant:machine-capabilities",
                 "assistant:machine-contexts",
                 "assistant:agent-learning",
@@ -2426,6 +2526,7 @@ mod tests {
                 "assistant:voice-grok-platform",
                 "experimental:ai-assistant",
                 "experimental:billing",
+                "experimental:remote-machines",
                 "experimental:aevatar-chat-wire-log",
                 "experimental:direct-chat-engine",
                 "nyxbot:gateway-lark",
@@ -2436,6 +2537,12 @@ mod tests {
                 "nyxbot:gateway-x",
                 "nyxbot:gateway-aurinko",
             ]
+        );
+        assert!(
+            !find_flag(ASSISTANT_MODEL_CONTROLS_FLAG_KEY)
+                .expect("model controls flag is registered")
+                .default_enabled,
+            "advanced model controls must default to off"
         );
         assert_eq!(
             AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
@@ -2928,5 +3035,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(replaced.owner.is_none());
+    }
+
+    #[test]
+    fn channel_media_and_attachment_writes_are_registered_default_off() {
+        for key in [
+            ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+            ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
+        ] {
+            let flag = FEATURE_FLAGS.iter().find(|flag| flag.key == key).unwrap();
+            assert!(!flag.default_enabled);
+        }
     }
 }

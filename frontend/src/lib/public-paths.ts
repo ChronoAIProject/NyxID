@@ -25,6 +25,7 @@ export function isPublicPath(path: string): boolean {
     path === "/login" ||
     path === "/register" ||
     path === "/nyxbot/onboarding" ||
+    path === "/nyxbot/link" ||
     path === "/onboarding" ||
     path === "/onboarding/link" ||
     path === "/privacy" ||

@@ -1,4 +1,6 @@
+mod bills;
 mod operations;
+mod taxes;
 mod usage;
 
 use std::collections::BTreeSet;
@@ -202,6 +204,13 @@ const COVERAGE_CASES: &[CoverageCase] = &[
 
 #[derive(Default)]
 pub(crate) struct FakeLago {
+    tax_rate: Option<String>,
+    tax_unavailable: bool,
+    tax_delay: Option<std::time::Duration>,
+    tax_fetches: AtomicUsize,
+    bill_data: Option<serde_json::Value>,
+    invoice_data: Option<serde_json::Value>,
+    invoice: Option<crate::services::billing::lago_client::InvoiceSummary>,
     wallet_creates: AtomicUsize,
     wallet_balance: Option<crate::models::credits::Credits>,
     wallet_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
@@ -227,6 +236,41 @@ impl FakeLago {
 
 #[async_trait]
 impl LagoApi for FakeLago {
+    async fn tax_config(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
+        self.tax_fetches.fetch_add(1, Ordering::SeqCst);
+        if let Some(delay) = self.tax_delay {
+            tokio::time::sleep(delay).await;
+        }
+        if self.tax_unavailable {
+            return Err(AppError::BillingProviderUnavailable(
+                "test tax outage".into(),
+            ));
+        }
+        let mut config = crate::services::billing::taxes::zero_config();
+        if let Some(rate) = &self.tax_rate {
+            config.customer["taxes"] = serde_json::json!([{"code":"gst","name":"GST","rate":rate}]);
+        }
+        Ok(config)
+    }
+    async fn subscription_invoices(&self, _: &str, _: u32, _: u32) -> AppResult<serde_json::Value> {
+        Ok(self
+            .invoice_data
+            .clone()
+            .unwrap_or(serde_json::json!({"invoices":[], "meta":{"total_count":0}})))
+    }
+    async fn invoice_summary(
+        &self,
+        id: &str,
+    ) -> AppResult<Option<crate::services::billing::lago_client::InvoiceSummary>> {
+        Ok(self.invoice.clone().filter(|i| i.lago_id == id))
+    }
+    async fn invoice_download_url(&self, _: &str) -> AppResult<Option<String>> {
+        Ok(Some("https://example.test/invoice.pdf".into()))
+    }
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
         Ok(owner.external_customer_id.clone())
     }
@@ -272,7 +316,7 @@ impl LagoApi for FakeLago {
         Ok(LagoUsage {
             customer_id: customer_id.to_string(),
             subscription_id: subscription_id.to_string(),
-            raw: serde_json::json!({}),
+            raw: self.bill_data.clone().unwrap_or(serde_json::json!({})),
         })
     }
 
@@ -327,6 +371,9 @@ async fn run_billing_route_coverage_smoke() {
 
     let lago = Arc::new(FakeLago::default());
     let owner_id = insert_owner(&db).await;
+    // Billing-route tests select the owner's ordinary no-prompt preference.
+    // Fresh users otherwise require approval, including without delivery.
+    set_billing_fixture_approval_required(&db, &owner_id, false).await;
     let (downstream_url, downstream) = start_billing_downstream().await;
     let mut proxy_catalog = crate::models::downstream_service::test_helpers::dummy_service();
     proxy_catalog.id = Uuid::new_v4().to_string();
@@ -402,6 +449,56 @@ async fn run_billing_route_coverage_smoke() {
         exercised_routes.insert(inventory_path);
     }
 
+    // The public callback has its own primary-key authority boundary. Neither
+    // an owner JWT nor an ordinary API key may enter its sponsor funding path.
+    let ordinary_key = crate::services::key_service::create_api_key(
+        &db,
+        &owner_id,
+        "public-callback-boundary",
+        "proxy",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("create ordinary callback-refusal key");
+    for (credential, status) in [
+        (token.as_str(), StatusCode::UNAUTHORIZED),
+        (ordinary_key.full_key.as_str(), StatusCode::FORBIDDEN),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(route_request(
+                Method::POST,
+                &format!(
+                    "/api/v1/public-nyxbot/models/{}/v1/responses",
+                    proxy_catalog.id
+                ),
+                credential,
+                Body::from(r#"{"model":"test","input":"route boundary"}"#),
+            ))
+            .await
+            .expect("call public model callback boundary");
+        assert_eq!(response.status(), status);
+    }
+    exercised_routes.insert("/api/v1/public-nyxbot/models/{service_id}/{*path}");
+    assert_eq!(
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0,
+        "refused public callback credentials must not open sponsor meters"
+    );
+
     let aliases = call_mounted_route(
         &app,
         route_request(Method::GET, "/api/v1/llm/pools", &token, Body::empty()),
@@ -445,7 +542,23 @@ async fn run_billing_route_coverage_smoke() {
         &downstream_url,
     ))
     .await;
+    // Admission is disabled by default; still exercise the mounted billing boundary.
+    let refusal = app
+        .clone()
+        .oneshot(route_request(
+            Method::POST,
+            "/api/v1/assistant/nyxagent/invocations",
+            &token,
+            Body::from(
+                serde_json::json!({"idempotency_key":Uuid::new_v4().to_string(),"text":"boundary"})
+                    .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refusal.status(), StatusCode::NOT_FOUND);
     exercised_routes.extend([
+        "/api/v1/assistant/nyxagent/invocations",
         "/api/v1/assistant/nyxagent/turns",
         "/api/v1/assistant/nyxagent/models",
         "/api/v1/assistant/nyxagent/conversations/{id}",
@@ -657,27 +770,36 @@ async fn run_billing_route_coverage_smoke() {
     exercised_routes.insert("/mcp (POST)");
 
     let now = Utc::now();
-    db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
-        .insert_one(NotificationChannel {
-            id: Uuid::new_v4().to_string(),
-            user_id: owner_id.clone(),
-            // Global approval protection is enforced only while a delivery
-            // channel is active; a linked Telegram chat keeps it enforced here.
-            telegram_chat_id: Some(4242),
-            telegram_username: Some("billing-smoke".to_string()),
-            telegram_enabled: true,
-            telegram_link_code: None,
-            telegram_link_code_expires_at: None,
-            approval_timeout_secs: 300,
-            grant_expiry_days: 30,
-            approval_required: true,
-            push_enabled: false,
-            push_devices: vec![],
-            created_at: now,
-            updated_at: now,
-        })
+    // Toggle the same stored preference to required for the exact redemption
+    // cases; notification delivery is independent of the approval requirement.
+    let channel = crate::services::notification_service::get_or_create_channel(&db, &owner_id)
+        .await
+        .expect("load billing owner approval preference");
+    let updated = db
+        .collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+        .update_one(
+            doc! { "_id": &channel.id, "user_id": &owner_id },
+            doc! { "$set": {
+                "approval_required": true,
+                "approval_timeout_secs": 300_i64,
+                "telegram_chat_id": 4242_i64,
+                "telegram_username": "billing-smoke",
+                "telegram_enabled": true,
+                "updated_at": bson::DateTime::from_chrono(now),
+            } },
+        )
         .await
         .expect("enable per-request approval for exact redemption smoke");
+    assert_eq!(updated.matched_count, 1);
+    assert!(
+        crate::services::approval_service::user_requires_approval(
+            &db,
+            &owner_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .unwrap()
+    );
     let exact_arguments = serde_json::json!({
         "method": "GET",
         "path": "/exact-billing?source=approval",
@@ -806,6 +928,7 @@ async fn run_billing_route_coverage_smoke() {
                         .to_string(),
                     digest: execution_authority_digest,
                 }),
+                optional_provider_authority_digest: None,
                 redemption: None,
             }),
             created_at: now,
@@ -834,10 +957,9 @@ async fn run_billing_route_coverage_smoke() {
     assert_eq!(redeemed["state"], "redeemed");
     assert_route_settled_count(&db, &mcp.slug, BillingMetric::Requests, 2).await;
     exercised_routes.insert("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
-    db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
-        .delete_one(doc! { "user_id": &owner_id })
-        .await
-        .expect("clear exact redemption approval policy before later route smoke cases");
+    // Absence selects the fresh-user true default. Restore the explicit false
+    // preference for the remaining billing routes instead of deleting the row.
+    set_billing_fixture_approval_required(&db, &owner_id, false).await;
 
     let node_mcp = insert_route_service(
         &db,
@@ -1336,6 +1458,7 @@ async fn buffered_route_preserves_success_when_settlement_failure_is_replayed() 
     create_usage_index(&db).await;
     insert_fresh_rates(&db).await;
     let owner_id = insert_owner(&db).await;
+    set_billing_fixture_approval_required(&db, &owner_id, false).await;
     let (downstream_url, forwarded_request, release_response, downstream) =
         start_controlled_billing_downstream().await;
     // Platform charging is opt-in per catalog service, so the recovery
@@ -2079,6 +2202,8 @@ fn route_request(method: Method, uri: &str, token: &str, body: Body) -> Request<
 }
 
 async fn call_mounted_route(app: &Router, request: Request<Body>) -> bytes::Bytes {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
     let response = app
         .clone()
         .oneshot(request)
@@ -2090,7 +2215,7 @@ async fn call_mounted_route(app: &Router, request: Request<Body>) -> bytes::Byte
         .expect("consume mounted route response");
     assert!(
         status.is_success(),
-        "mounted route returned {status}: {}",
+        "mounted route {method} {path} returned {status}: {}",
         String::from_utf8_lossy(&body)
     );
     body
@@ -2143,6 +2268,7 @@ async fn insert_route_node(state: &crate::AppState, owner_id: &str, name: &str) 
         status: NodeStatus::Online,
         auth_token_hash: crate::crypto::token::hash_token("billing-route-node-token"),
         signing_secret_encrypted: None,
+        signing_secret_context_version: None,
         signing_secret_hash: String::new(),
         last_heartbeat_at: Some(now),
         connected_at: Some(now),
@@ -2451,6 +2577,7 @@ async fn insert_llm_route_service(
 ) -> DownstreamService {
     let now = Utc::now();
     let provider = ProviderConfig {
+        secret_context_versions: Default::default(),
         id: Uuid::new_v4().to_string(),
         slug: "deepseek".to_string(),
         name: "DeepSeek".to_string(),
@@ -2481,6 +2608,7 @@ async fn insert_llm_route_service(
         extra_auth_params: None,
         device_code_format: "rfc8628".to_string(),
         client_id_param_name: None,
+        authorization_nonce_required: false,
         requires_gateway_url: false,
         created_by: "billing-route-test".to_string(),
         revocation_seed_version: 0,
@@ -2515,6 +2643,7 @@ async fn insert_llm_route_service(
     .await;
     db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
         .insert_one(UserProviderToken {
+            secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),
             provider_config_id: provider.id,
@@ -2732,7 +2861,7 @@ fn usage_for(case: &CoverageCase) -> (PlatformUsage, i64) {
         BillingMetric::Tokens => {
             if case.scenario.contains("usage-omitted") {
                 let usage = if case.ingress == BillingIngress::Proxy {
-                    crate::handlers::proxy::llm_platform_usage(None, 19)
+                    crate::services::proxy_http_response::llm_platform_usage(None, 19)
                 } else {
                     crate::handlers::llm_gateway::llm_platform_usage(None, 19)
                 };
@@ -2782,6 +2911,43 @@ pub(crate) fn rate(metric: &str, synced_at: chrono::DateTime<Utc>) -> BillingRat
         synced_at,
         retired_at: None,
     }
+}
+
+async fn set_billing_fixture_approval_required(
+    db: &mongodb::Database,
+    owner_id: &str,
+    required: bool,
+) {
+    let channel = crate::services::notification_service::get_or_create_channel(db, owner_id)
+        .await
+        .expect("create or load billing fixture approval preference");
+    let updated = db
+        .collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+        .update_one(
+            doc! { "_id": &channel.id, "user_id": owner_id },
+            doc! { "$set": { "approval_required": required } },
+        )
+        .await
+        .expect("set explicit billing fixture approval preference");
+    assert_eq!(updated.matched_count, 1);
+    assert_eq!(
+        db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+            .count_documents(doc! { "user_id": owner_id })
+            .await
+            .unwrap(),
+        1,
+        "billing fixture must retain one authoritative preference row"
+    );
+    assert_eq!(
+        crate::services::approval_service::user_requires_approval(
+            db,
+            owner_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .unwrap(),
+        required
+    );
 }
 
 async fn insert_owner(db: &mongodb::Database) -> String {

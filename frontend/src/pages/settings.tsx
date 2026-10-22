@@ -1,3 +1,4 @@
+import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { PageHeader } from "@/components/shared/page-header";
@@ -7,8 +8,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
 import { useUser, useMfaDisable, useRevokeSession } from "@/hooks/use-auth";
-import { api, ApiError } from "@/lib/api-client";
+import { api, apiClient, ApiError } from "@/lib/api-client";
+import { ACCOUNT_DELETION_POLICY_VERSION } from "@/lib/account-deletion-policy";
+import { AccountDeletionDisclosure } from "@/components/shared/account-deletion-disclosure";
 import { disableTelemetry } from "@/lib/telemetry";
+import { readAnalyticsConsent, saveAnalyticsConsent } from "@/lib/analytics-consent";
 import type { User, Session } from "@/types/api";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -94,7 +98,8 @@ import {
 
 interface DeleteAccountResponse {
   readonly status: string;
-  readonly deleted_at: string;
+  readonly accepted_at: string;
+  readonly completed_at: string | null;
 }
 
 export function SettingsPage({
@@ -261,6 +266,7 @@ function SecurityTab() {
   const queryClient = useQueryClient();
   const [mfaDialogOpen, setMfaDialogOpen] = useState(false);
   const [disableMfaDialogOpen, setDisableMfaDialogOpen] = useState(false);
+  const [disableMfaCode, setDisableMfaCode] = useState("");
   const [disableMfaPassword, setDisableMfaPassword] = useState("");
   const [disableMfaError, setDisableMfaError] = useState<string | null>(null);
   const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
@@ -283,9 +289,9 @@ function SecurityTab() {
   const [showNewPw, setShowNewPw] = useState(false);
   const [showConfirmPw, setShowConfirmPw] = useState(false);
 
-  // Password changes only make sense for email/password accounts. Social
-  // (OAuth) accounts have no password — social_provider is set for them.
-  const isPasswordUser = !user?.social_provider;
+  // Linked social accounts may retain a password. Older servers omit the
+  // explicit availability flag, so retain the legacy inference as a fallback.
+  const isPasswordUser = user?.has_password ?? !user?.social_provider;
   const providerLabel = user?.social_provider
     ? user.social_provider.charAt(0).toUpperCase() +
       user.social_provider.slice(1)
@@ -321,14 +327,22 @@ function SecurityTab() {
   }
 
   async function handleDisableMfa() {
-    if (!disableMfaPassword) {
-      setDisableMfaError("Password is required");
+    if (!disableMfaCode.trim()) {
+      setDisableMfaError("Enter your authenticator or recovery code");
+      return;
+    }
+    if (isPasswordUser && !disableMfaPassword) {
+      setDisableMfaError("Password is required for this account");
       return;
     }
     try {
-      await disableMfa.mutateAsync(disableMfaPassword);
+      await disableMfa.mutateAsync({
+        code: disableMfaCode.trim(),
+        ...(isPasswordUser ? { password: disableMfaPassword } : {}),
+      });
       toast.success("MFA disabled");
       setDisableMfaDialogOpen(false);
+      setDisableMfaCode("");
       setDisableMfaPassword("");
       setDisableMfaError(null);
     } catch (error) {
@@ -342,6 +356,7 @@ function SecurityTab() {
 
   function handleDisableMfaClose() {
     setDisableMfaDialogOpen(false);
+    setDisableMfaCode("");
     setDisableMfaPassword("");
     setDisableMfaError(null);
   }
@@ -354,8 +369,11 @@ function SecurityTab() {
     }
     setIsDeletingAccount(true);
     try {
-      await api.delete<DeleteAccountResponse>("/users/me");
-      toast.success("Account deleted successfully");
+      const result = await withErasurePreparation(() => apiClient<DeleteAccountResponse>("/users/me", {
+        method: "DELETE",
+        headers: { "X-NyxID-Account-Deletion-Policy": ACCOUNT_DELETION_POLICY_VERSION },
+      }));
+      toast.success(result.status === "complete" ? "Account erasure complete" : "Account deletion accepted. Cleanup continues until verified.");
       try {
         await logout();
       } catch {
@@ -421,8 +439,9 @@ function SecurityTab() {
           <DialogHeader>
             <DialogTitle>Disable Two-Factor Authentication</DialogTitle>
             <DialogDescription>
-              Enter your password to confirm disabling two-factor
-              authentication. This will make your account less secure.
+              Enter a current authenticator or recovery code to confirm.{" "}
+              {isPasswordUser && "Enter your password too. "}
+              This will make your account less secure.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -437,6 +456,23 @@ function SecurityTab() {
             <div className="space-y-2">
               <label
                 className="text-12 font-medium"
+                htmlFor="disable-mfa-code"
+              >
+                Authenticator or recovery code
+              </label>
+              <Input
+                id="disable-mfa-code"
+                value={disableMfaCode}
+                onChange={(e) => setDisableMfaCode(e.target.value)}
+                placeholder="000000 or recovery code"
+                autoComplete="one-time-code"
+                inputMode="text"
+                autoFocus
+              />
+            </div>
+            {isPasswordUser && <div className="space-y-2">
+              <label
+                className="text-12 font-medium"
                 htmlFor="disable-mfa-password"
               >
                 Password
@@ -448,9 +484,8 @@ function SecurityTab() {
                 value={disableMfaPassword}
                 onChange={(e) => setDisableMfaPassword(e.target.value)}
                 placeholder="Enter your password"
-                autoFocus
               />
-            </div>
+            </div>}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={handleDisableMfaClose}>
@@ -626,8 +661,9 @@ function SecurityTab() {
           <div className="space-y-1.5">
             <CardTitle className="text-destructive">Delete Account</CardTitle>
             <CardDescription className="text-destructive/70">
-              Permanently delete your account and all associated data. This action
-              cannot be undone.
+              Permanently delete your account and queue managed Machine workspace
+              cleanup.
+              Necessary security and financial records are retained.
             </CardDescription>
           </div>
           <Button
@@ -646,10 +682,12 @@ function SecurityTab() {
           <DialogHeader>
             <DialogTitle>Delete Account</DialogTitle>
             <DialogDescription>
-              Please enter your email address to confirm account deletion. This
-              action cannot be undone.
+              Enter your email address to confirm deletion of your account and
+              the Machine data described below.
             </DialogDescription>
           </DialogHeader>
+
+          <AccountDeletionDisclosure />
 
           <div className="space-y-2">
             <label
@@ -1101,48 +1139,62 @@ function SessionsTab() {
 
 function PrivacyTab() {
   const consentEnabled = useConsentStore((s) => s.enabled);
-  const consentAsked = useConsentStore((s) => s.asked);
+  const persistenceError = useConsentStore((s) => s.persistenceError);
   const setConsent = useConsentStore((s) => s.setConsent);
-
-  // When the user flips OFF here after a prior opt-in, tear down the
-  // running PostHog client immediately so no further events fire even
-  // while the tab stays open. The `useEffect` in main.tsx that drives
-  // `initTelemetry` already re-runs whenever `enabled` changes, so the
-  // ON path only needs to flip the store — main.tsx picks it up and
-  // re-initializes cleanly against the `inited` guard.
-  function handleToggle(next: boolean) {
-    setConsent(next);
-    if (!next) {
-      disableTelemetry();
-    }
+  const accountId = useAuthStore((s) => s.user?.id);
+  const [saving, setSaving] = useState(false);
+  const permission = useQuery({
+    queryKey: ["analytics-consent", accountId],
+    queryFn: () => readAnalyticsConsent(accountId!),
+    enabled: Boolean(accountId),
+    staleTime: 0,
+  });
+  async function handleToggle(next: boolean) {
+    if (!accountId) return;
+    setSaving(true);
+    try {
+      await saveAnalyticsConsent(accountId, next);
+      await permission.refetch();
+    } catch {
+      toast.error("Could not save account analytics permission. This browser remains off; retry to withdraw across devices.");
+    } finally { setSaving(false); }
   }
-
-  const statusLabel = !consentAsked
-    ? "Not yet answered"
-    : consentEnabled
-      ? "Enabled"
-      : "Disabled";
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Anonymous Usage Telemetry</CardTitle>
+        <CardTitle>Usage Analytics</CardTitle>
         <CardDescription>
-          Help us improve NyxID by sharing anonymous usage events. We never
-          capture credentials, form content, or the contents of your
-          requests. This choice applies to this browser only — other
-          devices and the CLI manage their own telemetry settings.
+          Optional usage events are linked to your account. Account permission
+          applies across devices. Each device must also opt in locally; Do Not
+          Track always disables collection. Security audit and billing records
+          have separate retention rules.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex items-center gap-3">
           <Switch
-            checked={consentEnabled}
-            onCheckedChange={handleToggle}
-            aria-label="Toggle anonymous usage telemetry"
+            checked={permission.data?.enabled === true}
+            disabled={saving || !accountId || !permission.data || permission.isError || permission.isFetching}
+            onCheckedChange={(next) => void handleToggle(next)}
+            aria-label="Allow account usage analytics"
           />
-          <span className="text-12">{statusLabel}</span>
+          <span className="text-12" role="status">{permission.isFetching ? "Loading account permission…" : permission.isError ? "Account permission unavailable" : permission.data?.enabled ? "Account permission enabled" : "Account permission disabled"}</span>
+          {permission.isError && (
+            <Button variant="outline" size="sm" isLoading={permission.isFetching}
+              onClick={() => void permission.refetch()}>Retry</Button>
+          )}
         </div>
+        <div className="flex items-center gap-3">
+          <Switch checked={consentEnabled} disabled={!consentEnabled && (permission.data?.enabled !== true || permission.isError || permission.isFetching)}
+            onCheckedChange={(next) => { setConsent(next); if (!next) disableTelemetry(); }}
+            aria-label="Allow usage analytics on this browser" />
+          <span className="text-12">Allow on this browser</span>
+        </div>
+        {persistenceError && <div role="alert" className="space-y-2 text-12 text-muted-foreground">
+          <p>This browser's choice could not be saved. Analytics is off in this session; retry before closing this page.</p>
+          <Button variant="outline" size="sm" onClick={() => setConsent(false)}>Retry saving browser choice</Button>
+        </div>}
         <Separator />
         <div className="space-y-2 text-12 text-muted-foreground">
           <p>

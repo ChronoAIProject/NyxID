@@ -258,6 +258,8 @@ fn parse_event(event: &serde_json::Value, raw: serde_json::Value) -> Option<Inbo
     let attachments = extract_attachments(event);
 
     Some(InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: ts.to_string(),
         conversation_id: channel.to_string(),
         conversation_type: map_conversation_type(channel).to_string(),
@@ -284,6 +286,14 @@ fn build_post_message_body(reply: &OutboundReply, conversation_id: &str) -> serd
         "text": text,
     });
 
+    if let Some(markdown) = reply
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("mrkdwn"))
+        .and_then(|m| m.as_bool())
+    {
+        body["mrkdwn"] = markdown.into();
+    }
     let thread_ts = crate::services::channel_image_audience::native_thread("slack", reply);
     if let Some(ts) = thread_ts {
         body["thread_ts"] = serde_json::json!(ts);
@@ -709,6 +719,7 @@ impl PlatformAdapter for SlackAdapter {
         let body = build_post_message_body(reply, conversation_id);
 
         let url = format!("{}/chat.postMessage", self.base_url);
+        crate::services::channel_platform::mark_provider_attempt();
         let response = http
             .post(&url)
             .header("Authorization", format!("Bearer {bot_token}"))
@@ -1013,6 +1024,7 @@ mod tests {
 
     fn make_test_bot(_signing_secret: &str) -> ChannelBot {
         ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,

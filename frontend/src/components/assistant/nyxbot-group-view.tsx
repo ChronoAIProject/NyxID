@@ -1,4 +1,6 @@
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
+import { AssistantErrorNotice } from "./assistant-error-notice";
+import { assistantErrorSummary } from "@/lib/assistant/request-error";
 import { MachineToolCard } from "./machine-tool-card";
 import { ThumbsDown, ThumbsUp } from "lucide-react";
 import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
@@ -19,6 +21,7 @@ import { UploadComposer } from "@/components/assistant/upload-composer";
 import { ToolImage } from "@/components/assistant/blocks/tool-image";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
+import { MessageCopyAction } from "./message-copy-action";
 import { MessageTime } from "@/components/assistant/message-time";
 import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { GroupSettingsDialog } from "@/components/assistant/nyxbot-group-forms";
@@ -101,7 +104,7 @@ function UserText({
 }
 
 /** "to Luna, researcher": the agents a sent message was addressed to. */
-export function recipientLine(
+function recipientLine(
   ids: readonly string[],
   members: readonly AssistantGroupMember[],
 ): string {
@@ -177,7 +180,7 @@ export function GroupMessageRow({
             />
           ))}
         </div>
-        <MessageTime value={message.created_at} reveal />
+        <div className="flex items-center gap-1"><MessageCopyAction text={message.text} /><MessageTime value={message.created_at} reveal /></div>
       </div>
     );
   }
@@ -235,6 +238,7 @@ export function GroupMessageRow({
           ))}
           <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
           <div className="mt-2 flex gap-1">
+            <MessageCopyAction text={sanitizeAssistantMessageContent(message.text)} />
             {(["up", "down"] as const).map((next) => (
               <button
                 key={next}
@@ -739,6 +743,12 @@ export function NyxAgentGroupPage({
   const agents = useNyxBotAgents();
   const transcript = useNyxBotGroupMessages(groupId);
   const [deciding, setDeciding] = useState(false);
+  const [requestError, setRequestError] = useState<{ owner: string | undefined; message: string }>();
+  function reportError(error: unknown, fallback: string) {
+    const message = error instanceof Error ? error.message : fallback;
+    setRequestError({ owner: user?.id, message });
+    toast.error(assistantErrorSummary(message));
+  }
   const decideApproval = useDecideApproval();
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerHeight, setComposerHeight] = useState(0);
@@ -817,6 +827,7 @@ export function NyxAgentGroupPage({
       }
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
+        <AssistantErrorNotice message={transcript.error ? `Could not open this group. ${transcript.error.message}` : requestError?.owner === user?.id ? requestError?.message : undefined} />
         {group ? (
           <>
             <GroupHeader
@@ -849,9 +860,6 @@ export function NyxAgentGroupPage({
           </>
         ) : transcript.error ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-            <p className="text-12 text-muted-foreground">
-              Could not open this group. {transcript.error.message}
-            </p>
             <Button variant="outline" size="sm" onClick={() => goTo()}>
               Back to home
             </Button>
@@ -878,6 +886,7 @@ export function NyxAgentGroupPage({
             members={group?.members ?? []}
             sending={transcript.post.isPending || deciding}
             onDecide={async (action, decision) => {
+              setRequestError(undefined);
               setDeciding(true);
               try {
                 if (action.approval_request_id) {
@@ -894,29 +903,22 @@ export function NyxAgentGroupPage({
                 }
                 await transcript.refetch();
               } catch (error) {
-                toast.error(
-                  error instanceof Error
-                    ? error.message
-                    : "Could not decide this action.",
-                );
+                reportError(error, "Could not decide this action.");
               } finally {
                 setDeciding(false);
               }
             }}
             onAnswer={async (text) => {
+              setRequestError(undefined);
               try {
                 await transcript.post.mutateAsync(text);
               } catch (error) {
-                toast.error(
-                  error instanceof Error
-                    ? error.message
-                    : "The answer was not delivered.",
-                );
+                reportError(error, "The answer was not delivered.");
               }
             }}
           />
           <UploadComposer
-            toolbar={<AccessModeSwitcher disabled={transcript.post.isPending} />}
+            footerControls={<AccessModeSwitcher disabled={transcript.post.isPending} />}
             key={`${user?.id}:${groupId}`}
             scope={{ kind: "groups", id: groupId }}
             active={false}
@@ -930,6 +932,7 @@ export function NyxAgentGroupPage({
             placeholder={GROUP_COMPOSER_PLACEHOLDER}
             mentions={mentions}
             onSend={async (text, uploads) => {
+              setRequestError(undefined);
               if (recipients.edited && !recipients.ids.length) {
                 const error = new Error("Choose at least one recipient.");
                 toast.error(error.message);
@@ -945,11 +948,7 @@ export function NyxAgentGroupPage({
                 });
                 setRecipientSelection(NO_RECIPIENT_EDITS);
               } catch (error) {
-                toast.error(
-                  error instanceof Error
-                    ? error.message
-                    : "The message was not delivered.",
-                );
+                reportError(error, "The message was not delivered.");
                 throw error;
               }
             }}

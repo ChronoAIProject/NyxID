@@ -9,12 +9,30 @@ use crate::errors::AppError;
 /// The `ciphertext` field holds already-encrypted data, so zeroization is
 /// defense-in-depth rather than strictly necessary. We wrap it in
 /// `Zeroizing` to scrub wrapped key material from memory on drop.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WrappedKey {
     /// Stable identifier stored in the ciphertext header for the wrapping key.
     pub key_id: u8,
     /// The wrapped (encrypted) DEK bytes. Zeroized on drop for defense-in-depth.
     pub ciphertext: Zeroizing<Vec<u8>>,
+}
+
+impl std::fmt::Debug for WrappedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WrappedKey")
+            .field("key_id", &"[REDACTED]")
+            .field("ciphertext", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// A configured cloud resource can decrypt historical internal versions. The
+/// one-byte selector identifies a resource, so primary-only authentication alone
+/// cannot attest that an individual historical cloud version is destroyable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyVersionRetirementEvidence {
+    ExactCurrentVersion,
+    OperatorUnverifiedInternalVersions,
 }
 
 /// Abstraction over KEK wrap/unwrap operations.
@@ -23,6 +41,13 @@ pub struct WrappedKey {
 /// Phase 4: async trait via `async-trait` crate for KMS network I/O.
 #[async_trait]
 pub trait KeyProvider: Send + Sync + std::fmt::Debug {
+    /// Conservative by default for providers without version-pinned evidence.
+    /// AWS/GCP logical resources deliberately retain this default. A migration
+    /// runner must surface it as an unresolved version-retirement prerequisite.
+    fn key_version_retirement_evidence(&self) -> KeyVersionRetirementEvidence {
+        KeyVersionRetirementEvidence::OperatorUnverifiedInternalVersions
+    }
+
     /// Wrap (encrypt) a plaintext DEK with the current KEK.
     async fn wrap_dek(&self, plaintext_dek: &[u8]) -> Result<WrappedKey, AppError>;
 
@@ -126,12 +151,15 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_key_debug_does_not_panic() {
+    fn wrapped_key_debug_redacts_key_identifier_and_material() {
         let wk = WrappedKey {
-            key_id: 0,
-            ciphertext: Zeroizing::new(vec![]),
+            key_id: 239,
+            ciphertext: Zeroizing::new(vec![187, 188, 189, 190]),
         };
-        let debug = format!("{:?}", wk);
-        assert!(!debug.is_empty());
+        for debug in [format!("{wk:?}"), format!("{wk:#?}")] {
+            assert!(!debug.contains("239"));
+            assert!(!debug.contains("187"));
+            assert!(debug.contains("[REDACTED]"));
+        }
     }
 }

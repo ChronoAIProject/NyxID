@@ -12,14 +12,14 @@ const mentions = [
   { handle: "image-1", label: "chart.png", kind: "image" as const },
   { handle: "image-10", label: "other.png", kind: "image" as const },
   { handle: "file-1", label: "report.pdf", kind: "file" as const },
-  { handle: "pasted-text-1", label: "pasted-text-1.md", kind: "pasted-text" as const },
+  { handle: "text-1", label: "pasted-text-1.md", kind: "pasted-text" as const },
 ];
 
 describe("attachment mentions", () => {
   it("names each mentioned file in the prompt and leaves look-alikes alone", () => {
     expect(
       resolveAttachmentMentions(
-        "Compare @image-1 with @image-10, see (@file-1) and @pasted-text-1. Mail me@image-1.",
+        "Compare @image-1 with @image-10, see (@file-1) and @text-1. Mail me@image-1.",
         mentions,
       ),
     ).toBe(
@@ -37,37 +37,37 @@ describe("attachment mentions", () => {
 
   it("saves drafts with pasted text inline and other files described, never a dangling handle", () => {
     expect(
-      draftWithoutHandles("Compare @pasted-text-1 with @image-1", [
-        { handle: "pasted-text-1", label: "pasted-text-1.txt", kind: "pasted-text", text: "line 1\nline 2" },
+      draftWithoutHandles("Compare @text-1 with @image-1", [
+        { handle: "text-1", label: "pasted-text-1.txt", kind: "pasted-text", text: "line 1\nline 2" },
         { handle: "image-1", label: "chart.png", kind: "image" },
       ]),
     ).toBe('Compare line 1\nline 2 with image "chart.png"');
     expect(
-      draftWithoutHandles("@pasted-text-1", [
-        { handle: "pasted-text-1", label: "p.txt", kind: "pasted-text", text: "x".repeat(40_000) },
+      draftWithoutHandles("@text-1", [
+        { handle: "text-1", label: "p.txt", kind: "pasted-text", text: "x".repeat(40_000) },
       ]),
     ).toHaveLength(32_768);
   });
 
   it("keeps handle-like text inside a pasted document verbatim", () => {
     const pastes = [
-      { handle: "pasted-text-1", label: "pasted-text-1.txt", kind: "pasted-text" as const, text: "example: @pasted-text-2" },
-      { handle: "pasted-text-2", label: "pasted-text-2.txt", kind: "pasted-text" as const, text: "second document" },
+      { handle: "text-1", label: "pasted-text-1.txt", kind: "pasted-text" as const, text: "example: @text-2" },
+      { handle: "text-2", label: "pasted-text-2.txt", kind: "pasted-text" as const, text: "second document" },
     ];
-    expect(draftWithoutHandles("@pasted-text-1 and @pasted-text-2", pastes)).toBe(
-      "example: @pasted-text-2 and second document",
+    expect(draftWithoutHandles("@text-1 and @text-2", pastes)).toBe(
+      "example: @text-2 and second document",
     );
   });
 
   it("stops a saved draft at the textbox limit without expanding what it drops", () => {
     const huge = "y".repeat(8 * 1024 * 1024);
-    const draft = draftWithoutHandles("@pasted-text-1 @pasted-text-1 @pasted-text-1 @pasted-text-1", [
-      { handle: "pasted-text-1", label: "p.txt", kind: "pasted-text", text: huge },
+    const draft = draftWithoutHandles("@text-1 @text-1 @text-1 @text-1", [
+      { handle: "text-1", label: "p.txt", kind: "pasted-text", text: huge },
     ]);
     expect(draft).toHaveLength(32_768);
     // A cut never leaves half of a surrogate pair.
-    const emoji = draftWithoutHandles("@pasted-text-1", [
-      { handle: "pasted-text-1", label: "p.txt", kind: "pasted-text", text: `${"x".repeat(32_767)}😀` },
+    const emoji = draftWithoutHandles("@text-1", [
+      { handle: "text-1", label: "p.txt", kind: "pasted-text", text: `${"x".repeat(32_767)}😀` },
     ]);
     expect(emoji).toBe("x".repeat(32_767));
   });

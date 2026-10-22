@@ -151,6 +151,7 @@ impl Fixture {
         (Self::with_db(db).await, memberships, reads)
     }
     async fn with_db(db: mongodb::Database) -> Self {
+        super::security_readiness_service::ready_test_replica(&db).await;
         engine::ensure_indexes(&db).await.unwrap();
         let ids: Vec<_> = (0..5).map(|_| Uuid::new_v4().to_string()).collect();
         for (i, id) in ids.iter().enumerate() {
@@ -244,7 +245,7 @@ impl Fixture {
         .unwrap()
         .unwrap()
     }
-    async fn service(&self, owner: &str, slug: &str) -> String {
+    pub(crate) async fn service(&self, owner: &str, slug: &str) -> String {
         let endpoint = Uuid::new_v4().to_string();
         let id = Uuid::new_v4().to_string();
         self.state
@@ -268,7 +269,7 @@ impl Fixture {
             .unwrap();
         id
     }
-    async fn key(&self, row: &AssistantConversation) -> ApiKey {
+    pub(crate) async fn key(&self, row: &AssistantConversation) -> ApiKey {
         self.state
             .db
             .collection(crate::models::api_key::COLLECTION_NAME)
@@ -1823,8 +1824,9 @@ async fn org_agent_machine_gateway_checks_member_and_node_owner_live() {
     let row = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
         .await
         .unwrap();
-    let (_, token, _) = super::node_service::create_registration_token(
+    let (_, token, _) = super::node_service::create_registration_token_for_actor(
         &f.state.db,
+        &f.admin,
         &f.org,
         "org-machine",
         100,
@@ -1864,6 +1866,23 @@ async fn org_agent_machine_gateway_checks_member_and_node_owner_live() {
     .unwrap();
     // This fixture represents an existing shared v1 assignment after cutover.
     f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME).update_one(doc! {"_id": &agent.id},doc! {"$set": {format!("machine_access.assignments.{}",node.id): bson::to_bson(&crate::models::machine_access::Assignment { capabilities: nyxid_machine::authority::Capabilities {shell:true,..Default::default()},legacy:true,..Default::default()}).unwrap()}}).await.unwrap();
+    let row = engine::begin_turn(
+        &f.state.db,
+        &f.member,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            conversation_id: Some(row.id.clone()),
+            agent_id: None,
+            text: "Use the organization machine".into(),
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
     let chat = acks::for_key(&f.state.db, &f.member, Some(&row.credential_api_key_id))
         .await
         .unwrap()
@@ -2065,6 +2084,22 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
         .insert_one(&catalog)
         .await
         .unwrap();
+    // Isolate skill pinning/organization authority from the separate generic
+    // service-approval policy. Native Ornn reads still traverse the real proxy.
+    for actor in [&f.member, &f.admin] {
+        super::approval_service::set_service_approval_config(
+            &f.state.db,
+            actor,
+            &catalog.id,
+            &catalog.name,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     zip.start_file("SKILL.md", zip::write::SimpleFileOptions::default())
         .unwrap();
@@ -2435,6 +2470,19 @@ async fn org_specialist_access_request_is_denied_by_default_and_routed_when_allo
             .await
             .unwrap(),
         0
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {
+                "event_type": "mcp_tool_call",
+                "event_data.service_id": &service,
+            })
+            .await
+            .unwrap(),
+        0,
+        "a service-gate refusal must not reach upstream execution or MCP audit"
     );
     let audit = f
         .state

@@ -141,6 +141,7 @@ fn test_node(id: &str) -> Node {
         status: NodeStatus::Offline,
         auth_token_hash: "auth-hash".to_string(),
         signing_secret_encrypted: None,
+        signing_secret_context_version: None,
         signing_secret_hash: "signing-hash".to_string(),
         last_heartbeat_at: None,
         connected_at: None,
@@ -163,12 +164,14 @@ fn proxy_request(request_id: &str) -> NodeProxyRequest {
         method: "GET".to_string(),
         path: "/v1/data".to_string(),
         query: None,
-        headers: vec![],
+        headers: vec![].into(),
         body: None,
     }
 }
 
-async fn next_outbound(outbound: &mut mpsc::Receiver<NodeOutboundMessage>) -> String {
+async fn next_outbound(
+    outbound: &mut mpsc::Receiver<NodeOutboundMessage>,
+) -> zeroize::Zeroizing<String> {
     let message = tokio::time::timeout(Duration::from_secs(3), outbound.recv())
         .await
         .expect("node outbound timeout")
@@ -453,7 +456,7 @@ async fn remote_ssh_exec_and_duplex_sessions_forward_both_directions() {
                     host: "host.internal".to_string(),
                     port: 22,
                     principal: "user".to_string(),
-                    private_key_pem: "private".to_string(),
+                    private_key_pem: "private".to_string().into(),
                     certificate_openssh: "certificate".to_string(),
                     command: "id".to_string(),
                     timeout_secs: 5,
@@ -616,7 +619,7 @@ async fn remote_ws_passthrough_forwards_text_binary_and_close() {
                     base_url: "wss://socket.invalid".to_string(),
                     path: "/events".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     ws_frame_injections: vec![],
                 },
                 None,
@@ -702,7 +705,7 @@ async fn remote_ws_passthrough_preserves_large_binary_frames() {
                     base_url: "wss://socket.invalid".to_string(),
                     path: "/events".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     ws_frame_injections: vec![],
                 },
                 None,
@@ -946,6 +949,7 @@ async fn machine_gateway_upload_streams_across_replicas_without_buffering() {
     );
     let id = uuid::Uuid::new_v4();
     let mut request = nyxid_machine::Request {
+        external_authority: None,
         version: 1,
         authority: None,
         request_id: id.to_string(),

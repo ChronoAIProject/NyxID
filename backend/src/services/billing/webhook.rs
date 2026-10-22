@@ -46,6 +46,38 @@ pub async fn handle_lago_webhook_event(
     event_type: &str,
     payload: &Value,
 ) -> AppResult<LagoWebhookOutcome> {
+    if event_type.starts_with("customer.")
+        || event_type.starts_with("subscription.")
+        || event_type.starts_with("plan.")
+    {
+        let profiles =
+            db.collection::<bson::Document>(crate::models::billing_tax_profile::COLLECTION_NAME);
+        if let Some(customer) = extract_external_customer_id(payload) {
+            if let Some(wallet) = db
+                .collection::<BillingWallet>(BILLING_WALLET)
+                .find_one(doc! {"lago_customer_id": &customer})
+                .await?
+            {
+                profiles
+                    .update_many(
+                        doc! {"owner_id": &wallet.owner_id},
+                        doc! {"$set": {"fetched_at": bson::DateTime::from_millis(0)}},
+                    )
+                    .await?;
+                if let Some(lago) = lago
+                    && let Err(error) = super::taxes::refresh(db, lago, &wallet).await
+                {
+                    // Keep the invalidated profile stale and complete unrelated
+                    // entitlement handling (notably terminated subscriptions).
+                    tracing::warn!(owner_id = %wallet.owner_id, %error, "Webhook tax refresh will retry");
+                }
+            }
+        } else if let Some(plan) = payload.pointer("/plan/code").and_then(Value::as_str) {
+            super::taxes::invalidate_plan(db, plan).await?;
+            // Admissions refresh their own profile inline; the bounded sweep
+            // refreshes the remaining subscribers in order of staleness.
+        }
+    }
     if is_lago_wallet_event(event_type) {
         let Some(customer_id) = extract_external_customer_id(payload) else {
             return Ok(ignored());
@@ -760,6 +792,7 @@ mod tests {
             wallet_id: Some(wallet_id.to_string()),
             actor_user_id: owner_id.to_string(),
             api_key_id: None,
+            assistant_source: None,
             user_service_id: None,
             service_id: Some("svc-1".to_string()),
             service_slug: Some("svc".to_string()),
@@ -768,6 +801,7 @@ mod tests {
             operation: None,
             credential_class: CredentialClass::UserOwned,
             model: None,
+            reported_model: None,
             token_breakdown: None,
             audio_tokens: None,
             image_tokens: None,
@@ -777,6 +811,7 @@ mod tests {
             pending_resale_quantity: None,
             pending_platform_usage: None,
             pool_attempt: None,
+            machine_usage: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: true,

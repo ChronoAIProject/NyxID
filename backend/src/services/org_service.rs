@@ -603,45 +603,40 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     db.collection::<bson::Document>(crate::models::user_provider_token::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id })
         .await?;
-    // Developer OAuth clients: snapshot owned client ids BEFORE deleting
-    // the client tombstones so we can clean up `refresh_tokens` whose
-    // `client_id` references them. Without this, refresh tokens minted
-    // by an org-owned developer app would linger forever -- the live
-    // validation in `token_service::refresh_tokens` already rejects
-    // them on the next refresh attempt, so this is belt-and-suspenders
-    // cleanup that keeps the collection from accumulating dead rows.
-    let owned_oauth_client_ids: Vec<String> = db
-        .collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
-        .distinct("_id", doc! { "created_by": org_user_id })
-        .await?
-        .into_iter()
-        .filter_map(|value| match value {
-            bson::Bson::String(id) => Some(id),
-            _ => None,
-        })
-        .collect();
-    db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
-        .delete_many(doc! { "created_by": org_user_id, "is_active": false })
-        .await?;
-    if !owned_oauth_client_ids.is_empty() {
-        let oauth_client_id_array: Vec<bson::Bson> = owned_oauth_client_ids
-            .iter()
-            .cloned()
-            .map(bson::Bson::String)
-            .collect();
-        db.collection::<bson::Document>(crate::models::refresh_token::COLLECTION_NAME)
-            .delete_many(doc! { "client_id": { "$in": &oauth_client_id_array } })
+    // Retire inactive developer clients through the same source epoch/outbox
+    // transaction as their deletion. An inactive-only CAS preserves the active
+    // client blocker if an administrator re-enabled one after preflight.
+    loop {
+        let clients: Vec<bson::Document> = db
+            .collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+            .find(doc! {"created_by":org_user_id,"is_active":false})
+            .projection(doc! {"_id":1})
+            .sort(doc! {"_id":1})
+            .limit(100)
+            .max_time(Duration::from_secs(3))
+            .await?
+            .try_collect()
             .await?;
-        // Consent grants users gave to the org's developer apps. Hard-
-        // deleted, no DELETE handler that targets them by client, and
-        // they remain enumerable via `/consents` and the admin
-        // listing after the org is gone (see `handlers/consent.rs`
-        // and `handlers/admin.rs`). Cascade by client_id so deleted
-        // org apps disappear from every user's "Authorized Apps"
-        // surface.
-        db.collection::<bson::Document>(crate::models::consent::COLLECTION_NAME)
-            .delete_many(doc! { "client_id": { "$in": &oauth_client_id_array } })
-            .await?;
+        if clients.is_empty() {
+            break;
+        }
+        for client in clients {
+            let client_id = client
+                .get_str("_id")
+                .map_err(|_| AppError::Internal("OAuth client identity invalid".into()))?;
+            delete_inactive_org_oauth_client(db, org_user_id, client_id).await?;
+            for collection in [
+                crate::models::refresh_token::COLLECTION_NAME,
+                crate::models::consent::COLLECTION_NAME,
+            ] {
+                db.collection::<bson::Document>(collection)
+                    .delete_many(doc! {"client_id":client_id})
+                    .await?;
+            }
+            db.collection::<bson::Document>(crate::models::authorization_code::COLLECTION_NAME)
+                .delete_many(doc! {"client_id":client_id,"used":false})
+                .await?;
+        }
     }
     // Credential nodes. Active nodes are blocked above so what remains
     // here is soft-deleted node tombstones plus their associated
@@ -816,6 +811,76 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     Ok(())
 }
 
+/// The public grant hook is session-aware. Calling the broader client-delete
+/// wrapper here would lose the inactive-only CAS and could disable a client
+/// reactivated after the organization's blocker check. Epoch, exact cancellation
+/// receipts and source removal therefore commit together. The bounded source
+/// sweep rejects a missing source for grants beyond the inline batch; no
+/// inactive source tombstone is required for that fail-closed path.
+async fn delete_inactive_org_oauth_client(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    client_id: &str,
+) -> AppResult<()> {
+    let db = db.clone();
+    let owner = org_user_id.to_owned();
+    let client_id = client_id.to_owned();
+    db.client()
+        .start_session()
+        .await?
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            let result: AppResult<()> = async {
+                let clients =
+                    db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME);
+                let changed = clients
+                    .update_one(
+                        doc! {"_id":&client_id,"created_by":&owner,"is_active":false},
+                        doc! {"$inc":{"machine_external_security_revision":1_i64},
+                        "$set":{"updated_at":bson::DateTime::now()}},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                if changed.matched_count == 0 {
+                    if clients
+                        .find_one(doc! {"_id":&client_id,"created_by":&owner})
+                        .session(&mut *session)
+                        .await?
+                        .is_some()
+                    {
+                        return Err(AppError::Conflict(
+                            "Organization OAuth client became active during deletion".into(),
+                        ));
+                    }
+                    return Ok(());
+                }
+                super::machine_external_grant_service::invalidate_client_in_session(
+                    &db,
+                    &client_id,
+                    "oauth_client_deleted",
+                    100,
+                    session,
+                )
+                .await?;
+                let deleted = clients
+                    .delete_one(doc! {"_id":&client_id,"created_by":&owner,"is_active":false})
+                    .session(&mut *session)
+                    .await?;
+                if deleted.deleted_count != 1 {
+                    return Err(AppError::Conflict(
+                        "Organization OAuth client changed during deletion".into(),
+                    ));
+                }
+                Ok(())
+            }
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Membership CRUD
 // ─────────────────────────────────────────────────────────────────────────────
@@ -857,6 +922,14 @@ pub async fn create_membership(
         ));
     }
 
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result: AppResult<OrgMembership> = async {
+    super::org_membership_authority::fence_live_member(db, member_user_id, &mut transaction).await?;
+    super::org_membership_authority::fence_org(db, org_user_id, &mut transaction).await?;
     let collection = db.collection::<OrgMembership>(ORG_MEMBERSHIPS);
 
     // Look up any existing row (active or revoked) for this pair.
@@ -865,6 +938,7 @@ pub async fn create_membership(
             "org_user_id": org_user_id,
             "member_user_id": member_user_id,
         })
+        .session(&mut transaction)
         .await?;
 
     if let Some(row) = existing {
@@ -893,6 +967,7 @@ pub async fn create_membership(
                     "created_at": now_bson,
                 }},
             )
+            .session(&mut transaction)
             .await?;
         if changed.matched_count != 1 {
             return Err(AppError::Conflict(
@@ -923,13 +998,15 @@ pub async fn create_membership(
         revoked_at: None,
     };
 
-    match collection.insert_one(&membership).await {
+    match collection.insert_one(&membership).session(&mut transaction).await {
         Ok(_) => Ok(membership),
         Err(e) if is_duplicate_key_error(&e) => Err(AppError::Conflict(
             "User is already a member of this org".to_string(),
         )),
         Err(e) => Err(AppError::DatabaseError(e)),
     }
+    }.await;
+    super::org_membership_authority::finish(transaction, result).await
 }
 
 /// List the memberships of a given member user. Active by default;
@@ -1036,17 +1113,56 @@ pub async fn update_membership(
         return Err(AppError::BadRequest("No fields to update".to_string()));
     }
 
-    db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .update_one(
-            doc! { "_id": membership_id, "revoked_at": bson::Bson::Null },
-            doc! { "$set": update },
-        )
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
-
-    db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .find_one(doc! { "_id": membership_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("membership {membership_id}")))
+    let result: AppResult<OrgMembership> = async {
+        let current = db
+            .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .find_one(doc! {"_id":membership_id,"revoked_at":null})
+            .session(&mut transaction)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Active membership not found".into()))?;
+        super::org_membership_authority::fence_org(db, &current.org_user_id, &mut transaction)
+            .await?;
+        if role.is_some_and(|role| role != OrgRole::Admin) && current.role == OrgRole::Admin {
+            super::org_membership_authority::ensure_other_admin(
+                db,
+                &current.org_user_id,
+                &current.member_user_id,
+                &mut transaction,
+            )
+            .await?;
+            super::node_service::retire_org_registrations_in_session(
+                db,
+                &current.org_user_id,
+                &current.member_user_id,
+                &mut transaction,
+            )
+            .await?;
+        }
+        if role == Some(OrgRole::Admin) {
+            super::org_membership_authority::fence_live_member(
+                db,
+                &current.member_user_id,
+                &mut transaction,
+            )
+            .await?;
+        }
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .find_one_and_update(
+                doc! {"_id": membership_id,"revoked_at":null},
+                doc! {"$set":update},
+            )
+            .return_document(mongodb::options::ReturnDocument::After)
+            .session(&mut transaction)
+            .await?
+            .ok_or_else(|| AppError::Conflict("Membership changed; reload before editing".into()))
+    }
+    .await;
+    super::org_membership_authority::finish(transaction, result).await
 }
 
 /// Soft-delete a membership by setting `revoked_at`.
@@ -1055,25 +1171,54 @@ pub async fn revoke_membership(
     org_user_id: &str,
     member_user_id: &str,
 ) -> AppResult<()> {
-    let now = bson::DateTime::from_chrono(Utc::now());
-    let result = db
-        .collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .update_one(
-            doc! {
-                "org_user_id": org_user_id,
-                "member_user_id": member_user_id,
-                "revoked_at": bson::Bson::Null,
-            },
-            doc! { "$set": { "revoked_at": now } },
-        )
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound(
-            "active membership not found".to_string(),
-        ));
+    let result: AppResult<()> = async {
+        super::org_membership_authority::fence_org(db, org_user_id, &mut transaction).await?;
+        let current = db
+            .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .find_one(doc! {
+                "org_user_id":org_user_id,"member_user_id":member_user_id,"revoked_at":null
+            })
+            .session(&mut transaction)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Active membership not found".into()))?;
+        if current.role == OrgRole::Admin {
+            super::org_membership_authority::ensure_other_admin(
+                db,
+                org_user_id,
+                member_user_id,
+                &mut transaction,
+            )
+            .await?;
+            super::node_service::retire_org_registrations_in_session(
+                db,
+                org_user_id,
+                member_user_id,
+                &mut transaction,
+            )
+            .await?;
+        }
+        let result = db
+            .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .update_one(
+                doc! {"_id":&current.id,"revoked_at":null},
+                doc! {"$set":{"revoked_at":bson::DateTime::now()}},
+            )
+            .session(&mut transaction)
+            .await?;
+        if result.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Membership changed; reload before removal".into(),
+            ));
+        }
+        Ok(())
     }
-    Ok(())
+    .await;
+    super::org_membership_authority::finish(transaction, result).await
 }
 
 /// True when the actor is an active admin of the given org.
@@ -1126,7 +1271,8 @@ pub async fn list_admin_user_ids(
 /// Find all active memberships for `member_user_id`, bounded by a wall-clock
 /// timeout (see [`ORG_FALLBACK_TIMEOUT`]). The result is **already ordered**
 /// for proxy resolution: the user's `primary_org_id` (if set) comes first,
-/// then the rest by ascending `created_at` (earliest membership wins).
+/// then the rest by ascending `created_at` (earliest membership wins), with
+/// `org_user_id` as the deterministic tie-breaker.
 ///
 /// Returns `OrgQueryTimeout` if the underlying MongoDB query exceeds the
 /// timeout. Returns `Ok(vec![])` when the user has no memberships.
@@ -1145,7 +1291,7 @@ pub async fn find_active_memberships_with_timeout(
     let primary_org_id = user.primary_org_id.clone();
 
     let opts = FindOptions::builder()
-        .sort(doc! { "created_at": 1 })
+        .sort(doc! { "created_at": 1, "org_user_id": 1 })
         .build();
 
     let query = async {
@@ -1375,6 +1521,150 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn org_client_cascade_fences_existing_machine_grants_and_sweeps_overflow() {
+        use crate::models::machine_external_grant::{
+            COLLECTION_NAME as GRANTS, ExternalGrantBinding, GrantStatus, MachineExternalGrant,
+        };
+        let db = crate::test_utils::connect_transaction_test_database("org_machine_cascade").await;
+        let org = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        let client = Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+            .insert_one(doc! {"_id":&client,"created_by":&org,"is_active":false,
+            "machine_external_security_revision":0_i64})
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let mut users = Vec::new();
+        let mut grants = Vec::new();
+        // More than the inline source-hook bound proves that source removal
+        // remains fail-closed and the existing bounded sweeper can finish.
+        for _ in 0..101 {
+            let user = Uuid::new_v4().to_string();
+            users.push(crate::test_utils::test_user(&user, UserType::Person));
+            grants.push(MachineExternalGrant {
+                id: Uuid::new_v4().to_string(),
+                user_id: user,
+                binding: ExternalGrantBinding::OAuth {
+                    oauth_client_id: client.clone(),
+                    consent_id: Uuid::new_v4().to_string(),
+                    consent_revision: Uuid::new_v4().to_string(),
+                },
+                policy: Default::default(),
+                restrictions: Default::default(),
+                revision: 1,
+                status: GrantStatus::Active,
+                admission_fence: 0,
+                user_security_revision: 0,
+                client_security_revision: Some(0),
+                expires_at: now + chrono::Duration::days(30),
+                created_at: now,
+                updated_at: now,
+                revoked_at: None,
+                revoked_reason: None,
+            });
+        }
+        db.collection::<User>(USERS)
+            .insert_many(users)
+            .await
+            .unwrap();
+        db.collection::<MachineExternalGrant>(GRANTS)
+            .insert_many(grants)
+            .await
+            .unwrap();
+        for collection in [
+            crate::models::consent::COLLECTION_NAME,
+            crate::models::refresh_token::COLLECTION_NAME,
+            crate::models::authorization_code::COLLECTION_NAME,
+        ] {
+            db.collection::<bson::Document>(collection)
+                .insert_one(
+                    doc! {"_id":Uuid::new_v4().to_string(),"client_id":&client,"used":false},
+                )
+                .await
+                .unwrap();
+        }
+        delete_org_user(&db, &org).await.unwrap();
+        assert!(
+            db.collection::<User>(USERS)
+                .find_one(doc! {"_id":&org})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+                .find_one(doc! {"_id":&client})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(GRANTS)
+                .count_documents(doc! {"status":"revoked"})
+                .await
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::machine_access::OUTBOX)
+                .count_documents(doc! {"kind":"external","reason":"oauth_client_deleted"})
+                .await
+                .unwrap(),
+            100
+        );
+        let batch =
+            crate::services::machine_external_grant_service::sweep_invalid_sources(&db, None, 100)
+                .await
+                .unwrap();
+        assert_eq!(batch.examined, 1);
+        assert_eq!(batch.invalidated, 1);
+        assert_eq!(
+            db.collection::<bson::Document>(GRANTS)
+                .count_documents(doc! {"status":"active"})
+                .await
+                .unwrap(),
+            0
+        );
+        for collection in [
+            crate::models::consent::COLLECTION_NAME,
+            crate::models::refresh_token::COLLECTION_NAME,
+            crate::models::authorization_code::COLLECTION_NAME,
+        ] {
+            assert_eq!(
+                db.collection::<bson::Document>(collection)
+                    .count_documents(doc! {"client_id":&client})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        // The join cannot broaden cleanup to a client reactivated after the
+        // earlier org blocker check: the session mutation retains its CAS.
+        let active = Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+            .insert_one(doc! {"_id":&active,"created_by":&org,"is_active":true})
+            .await
+            .unwrap();
+        assert!(
+            delete_inactive_org_oauth_client(&db, &org, &active)
+                .await
+                .is_err()
+        );
+        assert!(
+            db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+                .find_one(doc! {"_id":&active,"is_active":true})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        db.drop().await.unwrap();
+    }
 
     #[test]
     fn fallback_timeout_constant_is_500ms() {

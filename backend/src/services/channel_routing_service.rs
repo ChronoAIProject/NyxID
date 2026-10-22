@@ -300,7 +300,8 @@ async fn insert_bot_conversation(
                         .update_one(
                             doc! { "_id": bot_id, "user_id": &conversation.user_id,
                             "platform": &conversation.platform, "is_active": true,
-                            "platform_profile_id": {"$exists": false}, "platform_installation_id": {"$exists": false} },
+                            "platform_profile_id": {"$exists": false}, "platform_installation_id": {"$exists": false},
+                            "platform_entry_version":{"$exists":false},"platform_entry_pending":{"$exists":false} },
                             doc! { "$inc": { "route_revision": 1_i64 } },
                         )
                         .session(&mut *session)
@@ -612,6 +613,7 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(Utc::now()),
             description: None,

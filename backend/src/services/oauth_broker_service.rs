@@ -264,13 +264,19 @@ pub async fn create_binding(
     let raw_binding_id = generate_binding_id();
     let binding_hash = hash_binding_id(&raw_binding_id);
 
-    let refresh_token_encrypted = encryption_keys
-        .encrypt_with_aad(refresh_token.as_bytes(), binding_hash.as_bytes())
-        .await
-        .map_err(|e| AppError::Internal(format!("broker binding encrypt failed: {e}")))?;
+    let refresh_token_encrypted = super::oauth_broker_record_service::encrypt(
+        encryption_keys,
+        &binding_hash,
+        user_id,
+        client_id,
+        refresh_token.as_bytes(),
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("broker binding encrypt failed: {e}")))?;
 
     let now = Utc::now();
     let binding = OauthBrokerBinding {
+        secret_context_versions: super::oauth_broker_record_service::versions(encryption_keys),
         id: binding_hash.clone(),
         client_id: client_id.to_string(),
         user_id: user_id.to_string(),
@@ -360,10 +366,17 @@ pub async fn update_binding_grant_with_version(
         .ok_or_else(|| {
             AppError::Internal("replacement refresh token was not persisted".to_string())
         })?;
-    let encrypted_refresh = encryption_keys
-        .encrypt_with_aad(refresh_token.as_bytes(), binding_hash.as_bytes())
-        .await
-        .map_err(|error| AppError::Internal(format!("broker binding encrypt failed: {error}")))?;
+    let encrypted_refresh = super::oauth_broker_record_service::encrypt(
+        encryption_keys,
+        binding_hash,
+        user_id,
+        client_id,
+        refresh_token.as_bytes(),
+    )
+    .await
+    .map_err(|error| AppError::Internal(format!("broker binding encrypt failed: {error}")))?;
+
+    let storage_versions = super::oauth_broker_record_service::version_update(encryption_keys)?;
 
     if let Some(snapshot) = incremental {
         let expected = snapshot
@@ -426,7 +439,7 @@ pub async fn update_binding_grant_with_version(
                     doc! { "_id": binding_hash, "revoked": false, "grant_version": version_condition.clone(),
                         "rotation_version": binding.rotation_version,
                         "refresh_token_jti": &binding.refresh_token_jti },
-                    doc! { "$set": { "refresh_token_encrypted": Binary {
+                    doc! { "$set": { "secret_context_versions":storage_versions.clone(), "refresh_token_encrypted": Binary {
                         subtype: BinarySubtype::Generic, bytes: encrypted_refresh.clone() },
                         "refresh_token_jti": refresh_token_jti, "scopes": scopes,
                         "grant_version": i64::from(expected) + 1,
@@ -476,6 +489,7 @@ pub async fn update_binding_grant_with_version(
                     "rotation_version": binding.rotation_version,
                 },
                 doc! { "$set": {
+                    "secret_context_versions":storage_versions.clone(),
                     "refresh_token_encrypted": Binary {
                         subtype: BinarySubtype::Generic,
                         bytes: encrypted_refresh.clone(),
@@ -661,16 +675,10 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
     }
     verify_binding_sender_constraint(ctx, &binding)?;
 
-    let encrypted_refresh = binding
-        .refresh_token_encrypted
-        .as_ref()
-        .ok_or_else(invalid_grant)?;
-    let refresh_token_bytes = ctx
-        .encryption_keys
-        .decrypt_with_aad(encrypted_refresh, binding_hash.as_bytes())
-        .await
-        .map_err(|_| invalid_grant())?;
-    let refresh_token_str = String::from_utf8(refresh_token_bytes).map_err(|_| invalid_grant())?;
+    let refresh_token_str =
+        super::oauth_broker_record_service::text(&ctx.encryption_keys, &binding)
+            .await
+            .map_err(|_| invalid_grant())?;
 
     let refresh_token_doc = db
         .collection::<RefreshToken>(REFRESH_TOKENS)
@@ -705,6 +713,7 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
     let now = Utc::now();
     let refresh_expires = now + Duration::seconds(ctx.config.jwt_refresh_ttl_secs);
     let new_refresh = RefreshToken {
+        protected_consent: refresh_token_doc.protected_consent.clone(),
         id: new_refresh_id.clone(),
         jti: new_jti.clone(),
         client_id: binding.client_id.clone(),
@@ -747,11 +756,16 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
         .await;
     }
 
-    let new_blob = ctx
-        .encryption_keys
-        .encrypt_with_aad(new_refresh_jwt.as_bytes(), binding_hash.as_bytes())
-        .await
-        .map_err(|e| AppError::Internal(format!("broker binding encrypt failed: {e}")))?;
+    let new_blob = super::oauth_broker_record_service::encrypt(
+        &ctx.encryption_keys,
+        binding_hash,
+        &binding.user_id,
+        &binding.client_id,
+        new_refresh_jwt.as_bytes(),
+    )
+    .await?;
+    let storage_versions =
+        super::oauth_broker_record_service::version_update(&ctx.encryption_keys)?;
 
     let updated = db
         .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
@@ -761,6 +775,7 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
                 "rotation_version": binding.rotation_version,
             },
             doc! { "$set": {
+                "secret_context_versions":storage_versions,
                 "refresh_token_encrypted": Binary {
                     subtype: BinarySubtype::Generic,
                     bytes: new_blob,
@@ -776,6 +791,18 @@ async fn try_exchange_once(ctx: &BrokerExchangeContext<'_>) -> AppResult<Exchang
         return Ok(ExchangeOutcome::ChainFollow);
     }
 
+    if let Err(error) = super::consent_service::fence_protected_reference(
+        db,
+        &binding.user_id,
+        &binding.client_id,
+        &granted_scope,
+        refresh_token_doc.protected_consent.as_ref(),
+    )
+    .await
+    {
+        cleanup_refresh_token(db, &new_refresh_id).await?;
+        return Err(error);
+    }
     Ok(ExchangeOutcome::Success(BindingExchangeResult {
         access_token,
         token_type: broker_access_token_type(ctx.dpop_jkt).to_string(),
@@ -803,16 +830,10 @@ async fn try_chain_follow(
     }
     verify_binding_sender_constraint(ctx, &binding)?;
 
-    let encrypted_refresh = binding
-        .refresh_token_encrypted
-        .as_ref()
-        .ok_or_else(invalid_grant)?;
-    let refresh_token_bytes = ctx
-        .encryption_keys
-        .decrypt_with_aad(encrypted_refresh, ctx.binding_hash.as_bytes())
-        .await
-        .map_err(|_| invalid_grant())?;
-    let refresh_token_str = String::from_utf8(refresh_token_bytes).map_err(|_| invalid_grant())?;
+    let refresh_token_str =
+        super::oauth_broker_record_service::text(&ctx.encryption_keys, &binding)
+            .await
+            .map_err(|_| invalid_grant())?;
     verify_binding_refresh_jwt(ctx.jwt_keys, ctx.config, &refresh_token_str, &binding)?;
 
     let refresh_token_doc = ctx
@@ -989,12 +1010,22 @@ async fn mint_broker_access_token(
     granted_scope: &str,
     refresh_token_doc: &RefreshToken,
 ) -> AppResult<String> {
+    super::consent_service::fence_protected_reference(
+        ctx.db,
+        user_id,
+        &refresh_token_doc.client_id,
+        granted_scope,
+        refresh_token_doc.protected_consent.as_ref(),
+    )
+    .await?;
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in broker binding: {e}")))?;
     let rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(ctx.db, user_id, granted_scope)
             .await?;
-    jwt::generate_access_token(
+    // Even a non-Machine broker token is an OAuth client credential. Losing
+    // that identity would let it cross first-party human approval boundaries.
+    jwt::generate_oauth_access_token_with_consent(
         ctx.jwt_keys,
         ctx.config,
         &user_uuid,
@@ -1009,6 +1040,8 @@ async fn mint_broker_access_token(
             allowed_node_ids: &[],
             allow_all_nodes: true,
         }),
+        &refresh_token_doc.client_id,
+        refresh_token_doc.protected_consent.as_ref(),
     )
 }
 
@@ -1541,6 +1574,8 @@ mod tests {
             encoding: jsonwebtoken::EncodingKey::from_secret(b"unused"),
             decoding: jsonwebtoken::DecodingKey::from_secret(b"unused"),
             kid: "unused".to_string(),
+            retained: Default::default(),
+            public_jwk: None,
         }
     }
 
@@ -1556,6 +1591,7 @@ mod tests {
     fn refresh_token_doc(jti: &str, client_id: &str, user_id: &str, revoked: bool) -> RefreshToken {
         let now = Utc::now();
         RefreshToken {
+            protected_consent: None,
             id: Uuid::new_v4().to_string(),
             jti: jti.to_string(),
             client_id: client_id.to_string(),
@@ -1619,7 +1655,32 @@ mod tests {
         let user_uuid = Uuid::parse_str(user_id).expect("valid user id");
         let (refresh_jwt, refresh_jti) =
             jwt::generate_refresh_token(jwt_keys, config, &user_uuid).expect("refresh jwt");
-        let refresh = insert_refresh_token(db, &refresh_jti, client_id, user_id, false).await;
+        let consent =
+            match crate::services::consent_service::check_consent(db, user_id, client_id, "")
+                .await
+                .unwrap()
+            {
+                Some(consent) => consent,
+                None => crate::services::consent_service::grant_consent_with_services(
+                    db,
+                    user_id,
+                    client_id,
+                    "openid profile offline_access proxy",
+                    None,
+                )
+                .await
+                .unwrap(),
+            };
+        let reference = crate::services::consent_service::ensure_issuance_reference(db, &consent)
+            .await
+            .unwrap();
+        let mut refresh = refresh_token_doc(&refresh_jti, client_id, user_id, false);
+        refresh.protected_consent = Some(reference);
+        refresh.scope = Some(consent.scopes.clone());
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(&refresh)
+            .await
+            .unwrap();
         (refresh_jwt, refresh)
     }
 
@@ -1686,6 +1747,7 @@ mod tests {
             .await
             .expect("encrypt refresh token");
         let binding = OauthBrokerBinding {
+            secret_context_versions: Default::default(),
             id: binding_hash,
             client_id: seed.client_id.to_string(),
             user_id: seed.user_id.to_string(),
@@ -1852,6 +1914,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn actual_broker_exchange_survives_staged_migration_and_strict_owner_client_binding() {
+        use super::super::oauth_broker_record_service as storage;
+        let db =
+            crate::test_utils::connect_transaction_test_database("broker_storage_rollout").await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let mut staged = test_encryption_keys();
+        staged.set_contextual_record_writes(false);
+        let current = test_encryption_keys();
+        let mut strict = test_encryption_keys();
+        strict.set_allow_legacy_record_reads(false);
+        let (jwt_keys, config) = real_jwt_keys_and_config();
+        let owner = Uuid::new_v4().to_string();
+        let (refresh_jwt, refresh) =
+            insert_refresh_token_jwt(&db, &jwt_keys, &config, "broker-rollout-client", &owner)
+                .await;
+        let (raw, id) = create_binding(
+            &db,
+            &staged,
+            "broker-rollout-client",
+            &owner,
+            &refresh_jwt,
+            &refresh.jti,
+            &["openid".into()],
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let load_raw = || async {
+            db.collection::<bson::Document>(OAUTH_BROKER_BINDINGS)
+                .find_one(doc! {"_id":&id})
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        let source = load_raw().await;
+        let row = load_binding(&db, &id).await;
+        assert_eq!(
+            storage::text(&staged, &row).await.unwrap().as_str(),
+            refresh_jwt
+        );
+        assert!(storage::text(&strict, &row).await.is_err());
+        assert!(matches!(
+            storage::migrate_snapshot(&db, &staged, &source).await,
+            Err(AppError::Conflict(_))
+        ));
+        // Exact-source CAS must refuse concurrent additions without normalizing
+        // away unknown fields or overwriting the live record.
+        db.collection::<bson::Document>(OAUTH_BROKER_BINDINGS)
+            .update_one(
+                doc! {"_id":&id},
+                doc! {"$set":{"concurrent_extension":true}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            !storage::migrate_snapshot(&db, &current, &source)
+                .await
+                .unwrap()
+        );
+        assert!(
+            storage::migrate_snapshot(&db, &current, &load_raw().await)
+                .await
+                .unwrap()
+        );
+        let migrated = load_raw().await;
+        assert_eq!(migrated.get_bool("concurrent_extension"), Ok(true));
+        storage::verify_current_snapshot(&strict, &migrated)
+            .await
+            .unwrap();
+        assert!(
+            !storage::migrate_snapshot(&db, &strict, &migrated)
+                .await
+                .unwrap()
+        );
+        let original = load_binding(&db, &id).await;
+        for altered in 0..3 {
+            let mut swapped = original.clone();
+            match altered {
+                0 => swapped.id = hash_binding_id(&generate_binding_id()),
+                1 => swapped.user_id = Uuid::new_v4().to_string(),
+                _ => swapped.client_id = "other-client".into(),
+            }
+            assert!(storage::text(&strict, &swapped).await.is_err());
+        }
+        let result = exchange_via_binding(
+            &db,
+            Arc::new(strict),
+            &reqwest::Client::new(),
+            &jwt_keys,
+            &config,
+            false,
+            "broker-rollout-client",
+            &raw,
+            Some("openid"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let claims = jwt::verify_token(&jwt_keys, &config, &result.access_token).unwrap();
+        assert_eq!(claims.token_type, "access");
+        assert_eq!(claims.scope, "openid");
+        let rotated = load_binding(&db, &id).await;
+        assert_eq!(rotated.rotation_version, original.rotation_version + 1);
+        assert_eq!(
+            rotated
+                .secret_context_versions
+                .get("refresh_token_encrypted"),
+            Some(&3)
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn create_binding_persists_and_decrypts() {
         let Some(db) = connect_test_database("broker_create").await else {
             return;
@@ -1891,17 +2069,11 @@ mod tests {
         assert!(!restored.revoked);
         assert_eq!(restored.external_subject, Some(external_subject));
         assert_eq!(restored.cnf, Some(cnf));
-        let decrypted = encryption_keys
-            .decrypt_with_aad(
-                restored
-                    .refresh_token_encrypted
-                    .as_ref()
-                    .expect("encrypted refresh token"),
-                binding_hash.as_bytes(),
-            )
-            .await
-            .expect("decrypt refresh token");
-        assert_eq!(decrypted, b"test-refresh-token-123");
+        let decrypted =
+            super::super::oauth_broker_record_service::text(&encryption_keys, &restored)
+                .await
+                .expect("authenticate stored broker refresh token");
+        assert_eq!(decrypted.as_str(), "test-refresh-token-123");
     }
 
     #[tokio::test]
@@ -2089,17 +2261,10 @@ mod tests {
         assert_eq!(binding.refresh_token_jti, "grant-new");
         assert_eq!(binding.rotation_version, 1);
         assert_eq!(binding.scopes, vec!["openid", "proxy"]);
-        let decrypted = encryption_keys
-            .decrypt_with_aad(
-                binding
-                    .refresh_token_encrypted
-                    .as_ref()
-                    .expect("encrypted replacement refresh token"),
-                binding.id.as_bytes(),
-            )
+        let decrypted = super::super::oauth_broker_record_service::text(&encryption_keys, &binding)
             .await
-            .expect("decrypt replacement refresh token");
-        assert_eq!(decrypted, b"refresh-new");
+            .expect("authenticate stored broker refresh token");
+        assert_eq!(decrypted.as_str(), "refresh-new");
 
         let previous = load_refresh_by_jti(&db, "grant-old").await;
         assert!(previous.revoked);
@@ -2218,17 +2383,10 @@ mod tests {
             assert!(!refresh_b.revoked);
             (b"refresh-b".as_slice(), vec!["svc-b"])
         };
-        let decrypted = encryption_keys
-            .decrypt_with_aad(
-                binding
-                    .refresh_token_encrypted
-                    .as_ref()
-                    .expect("encrypted final refresh token"),
-                binding.id.as_bytes(),
-            )
+        let decrypted = super::super::oauth_broker_record_service::text(&encryption_keys, &binding)
             .await
-            .expect("decrypt final refresh token");
-        assert_eq!(decrypted, expected_secret);
+            .expect("authenticate stored broker refresh token");
+        assert_eq!(decrypted.as_bytes(), expected_secret);
         let snapshot =
             resolve_binding_grant(&db, "client-1", "user-1", &external_subject, &binding.id)
                 .await
