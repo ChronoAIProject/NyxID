@@ -794,6 +794,37 @@ The core user identity collection. Password hash is nullable to support social-o
 
 Server-side session records. Token is stored as SHA-256 hash.
 
+Browser cookie sessions keep a fixed 30-day lifetime. Token sessions (CLI, mobile,
+password/device-code/login-code token delivery) start with the later of 30 days
+and the refresh JWT expiry. Renew before the current refresh JWT expires; each
+successful rotation restarts `JWT_REFRESH_TTL_SECS` (7 days by default). The
+session retains its deadline or extends to the returned refresh expiry, whichever
+is later. No additional absolute cap applies to token sessions.
+
+The refresh JWT, refresh row and session extension share one issuance instant.
+Rotation CAS, successor insertion and the first-party session slide commit in a
+majority MongoDB transaction. The slide is owner- and authenticated-purpose-scoped,
+requires `expires_at > $$NOW`, and uses `$max`; a zero match aborts rotation.
+Grace reuse and concurrent recovery extend using the token actually returned.
+OAuth grants retain client/consent policy and do not slide sessions. Browser
+poll-web delivery creates a separate fixed cookie session.
+
+A usable refresh credential can sustain full-account authority, including existing
+`mfa_assured`, indefinitely while renewals succeed. Controls are rotation/reuse
+detection, live revocation, MFA-state gates and the idle refresh limit. Missing
+replacement links are retryable only within a known 120-second rotation grace;
+terminal/deep chains and reuse outside grace revoke authority. Grace never bypasses
+expiry of the presented JWT. Unknown commits retry COMMIT on the same transaction;
+unresolved commits return 503 without revocation or credential delivery. The
+post-commit consent fence revokes successors only on definitive authority denial;
+transient failures retain the chain for a retry that revalidates consent.
+
+Refresh and bearer middleware share scoped session diagnostics: revoked, expired,
+or ended (absent/ineligible). A live second read or database failure is a server
+availability error. CLI and mobile keep transient refresh errors distinct from
+login-required outcomes and persist rotated refresh credentials before access.
+
+
 | Field           | Type          | Constraints     | Description                     |
 |-----------------|---------------|-----------------|---------------------------------|
 | `_id`           | ObjectId      | PK              | MongoDB document ID             |
@@ -1871,7 +1902,7 @@ Layer 5: Monitoring
 
 | Token Type      | Generation             | Storage              | Lifetime        |
 |-----------------|------------------------|----------------------|-----------------|
-| Session token   | `generate_random_token`| SHA-256 hash in DB   | 30 days         |
+| Browser cookie token | `generate_random_token`| SHA-256 hash in DB | 30 days (fixed) |
 | Access JWT      | RS256 signed           | Client-side only     | 15 min (default)|
 | Refresh JWT     | RS256 signed           | JTI hash in DB       | 7 days (default)|
 | Authorization code | Random + hash       | SHA-256 hash in DB   | ~60 seconds     |

@@ -111,8 +111,100 @@ nyxid mfa status
 ## session
 
 ```bash
-nyxid session list         # active sessions for your account
+nyxid session list                       # active sessions, with a Current column
+nyxid session status --output json       # inspect the saved profile; never refresh
+nyxid session refresh --output json      # renew now without opening a browser
 ```
+
+Renew before the current refresh JWT expires. Every successful rotation restarts
+`JWT_REFRESH_TTL_SECS` (7 days by default). The session row retains its deadline or
+extends to the returned refresh expiry, whichever is later. Token sessions have
+no additional absolute cap; browser cookie sessions retain a fixed 30-day lifetime.
+A usable refresh credential can sustain full-account authority, including existing
+`mfa_assured`, indefinitely while renewals succeed. Rotation/reuse detection, live
+revocation, MFA-state gates and the refresh idle limit control this authority.
+
+For unattended jobs, schedule `nyxid session refresh` well inside the refresh
+lifetime. A successful ordinary command can use a still-valid access token and
+leave the refresh window unchanged. Renewal serializes profile access across
+processes and retries the same token up to three times within 60 seconds, with a
+20-second attempt timeout. Grace recovery requires the original JWT to remain
+valid and a recoverable replacement chain; it does not bypass JWT expiry. Do not
+copy one profile's credentials between tools or machines that rotate independently.
+
+`session status` captures the saved profile's credential pair, login generation
+and destination under one lock. It ignores `--access-token`, `--access-token-env`,
+`NYXID_ACCESS_TOKEN`, `NYXID_API_KEY` and other credential overrides, reporting
+`credential_overrides_ignored` when present. It sends zero refresh requests and
+makes at most one 10-second `/sessions` lookup using the captured, locally valid
+access token. It never prompts for login. JSON is one envelope on every exit,
+including local storage errors and login-required results.
+Local diagnostics also work before a destination has been configured. If an
+otherwise eligible server lookup has no saved or explicit destination, it reports
+`server_check: unavailable` with `unavailable_reason: profile_destination_missing`.
+
+The envelope includes `profile`, `auth_kind`, `local_state`, access and refresh
+expiry, `refresh_issued_at`, `refresh_issued_lifetime_secs`, `refresh_expired`,
+`server_check`, optional `http_status`/`server_error`, `session_expires_at`,
+`renew_by` and `renew_by_source`. Issued lifetime is the saved JWT's `exp - iat`,
+not a statement of current server policy. Unknown/malformed fields are null.
+`renew_by` uses the local refresh expiry, or its minimum with the verified server
+session expiry; sources are `local_refresh` and `local_refresh_and_server_session`.
+It is a deadline derived from known expiries. Refresh usability is never tested
+(`refresh_usability_tested: false`, `renewal: unknown`).
+
+Server checks are `verified`, `no_current_session`, `session_ended`, `rejected`,
+`unavailable`, `invalid_response`, `unexpected_status`, or `skipped` with a
+`skip_reason` (`agent_key`, `no_session`, `no_access_token`, `access_token_expired`,
+`access_unparseable`, or `storage_error`). Generic 401/403 and access-token
+`token_expired` are diagnostic only; the latter sets
+`access_token_expired_on_server: true`. They do not prove refresh expiry or require
+login. Only explicitly ended server sessions or definitive local failures exit 3.
+`refresh_only` and unparseable refresh tokens exit 0 with unknown renewal unless
+the server explicitly reports session death. Agent Key profiles exit 0 and skip
+the lookup. Storage errors exit 1.
+
+`session refresh` JSON includes `status: refreshed`, `access_expires_at`,
+`refresh_expires_at` and `session_expires_at`. The last field is an optional lookup
+and can be null without failing a successful renewal. Credentials are persisted
+refresh first, access second, metadata last, with bounded retries of the same pair.
+If refresh storage fails, fix storage and immediately run `nyxid session refresh`;
+recovery is best effort inside the server's grace window. Ordinary commands do
+not repair this while the old access token stays fresh. If only access storage
+fails, explicit renewal succeeds with a warning; preflight/SSH stop with exit 4
+because they must reread the saved access token. In-flight requests and the wizard
+continue with the new in-memory access token. Metadata-only failures warn.
+Unreadable credential or profile-provenance files also stop renewal with exit 4,
+preserving the saved login for a retry after storage is repaired.
+
+| Code | Exit | Meaning and action |
+| --- | --- | --- |
+| `refresh_token_expired` | 3 | The saved refresh JWT expired, or the server explicitly reported refresh expiry. Run `nyxid login`. |
+| `session_expired` | 3 | Server observed an expired session row. Run `nyxid login`. |
+| `session_ended` | 3 | Session absent or legacy response omitted the cause. Run `nyxid login`. |
+| `session_revoked` | 3 | `session status` observed explicit server session revocation. Run `nyxid login`. |
+| `refresh_token_revoked` | 3 | Revoked on the server, for example stale-token reuse, sign-out, or account session reset. Run `nyxid login`. |
+| `refresh_token_not_found` | 3 | Refresh credential missing locally or unknown on the server. Run `nyxid login`. |
+| `refresh_rejected` | 3 | Other definitive rejection; preserved server message explains the cause. Review it, then sign in again. |
+| `not_logged_in` | 3 | No saved access credential for an ordinary session command. Run `nyxid login`. |
+| `agent_key_does_not_refresh` | 3 | Agent Key profiles do not renew account sessions; authorize with `nyxid login --agent-key`. |
+| `refresh_unavailable` | 4 | Network/timeout, rotation conflict, indeterminate response/commit, lock, or credential storage failure. Retry; this does not diagnose session expiry. |
+| `profile_storage_error` | 1 | `session status` could not capture profile storage/destination. Fix storage or profile configuration. |
+
+Compatibility for the 0.74.0 fix:
+
+| CLI / server | Behaviour |
+| --- | --- |
+| Old CLI / new server | Renewal works. Revoked diagnosis is corrected; `Session has expired` still produces the old refresh-lifetime headline, and `Session has ended` gives generic `refresh_rejected`. CLIs older than the fixed release classify HTTP 409 rotation conflicts as terminal (exit 3); indeterminate commits use 503 and remain retryable. |
+| New CLI / old server | Combined expiry/revocation text becomes `session_ended`. The old session cap and non-atomic rotation race remain until the server is upgraded. |
+| Mixed server replicas | Old replicas honour extended deadlines but neither slide them nor rotate atomically. Guarantees apply only after all replicas upgrade. |
+| Existing sessions | Live sessions begin sliding on their first refresh served by new code. Already expired/deleted sessions require one new login. |
+
+For incident diagnosis, retain only non-secret status output, client clock offset,
+and whether another tool/profile or copied credential directory shares the login.
+Administrators can inspect session creation/expiry/revocation, refresh-chain and
+reuse warnings, and effective `JWT_REFRESH_TTL_SECS` on every replica. Never share
+raw access or refresh tokens.
 
 ## notification
 
