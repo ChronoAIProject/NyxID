@@ -497,6 +497,11 @@ jobs:
         run: bash .github/scripts/prepare-backend-runner.sh
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+      - name: Locate published backend build cache
+        id: backend-cache
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "ref=ghcr.io/${owner}/nyxid/backend:buildcache-linux-amd64" >> "$GITHUB_OUTPUT"
       - name: Build backend release image without publishing
         uses: docker/build-push-action@v7
         with:
@@ -508,9 +513,12 @@ jobs:
           outputs: type=cacheonly
           push: false
           cache-from: |
+            type=registry,ref=${{ steps.backend-cache.outputs.ref }}
             type=gha,scope=backend-pr-linux-amd64
             type=gha,scope=backend-linux-amd64
-          cache-to: type=gha,mode=max,scope=backend-pr-linux-amd64
+          # The shared registry retains intermediate compiler layers. Keep PR
+          # exports small so they do not evict the Rust and coverage caches.
+          cache-to: type=gha,mode=min,scope=backend-pr-linux-amd64
           provenance: false
 
   # ---------------------------------------------------------------------------

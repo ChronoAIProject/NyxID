@@ -2175,7 +2175,7 @@ pub async fn delete_api_key(db: &mongodb::Database, user_id: &str, key_id: &str)
     Ok(())
 }
 
-/// Update last_used_at and updated_at timestamps (fire-and-forget, called from proxy).
+/// Advance last_used_at without changing the edit timestamp (called from proxy).
 pub async fn touch_last_used(db: &mongodb::Database, key_id: &str) {
     let _ = crate::services::service_history::mutation::touch_credential_usage(db, key_id).await;
 }
@@ -5711,7 +5711,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn touch_last_used_updates_timestamps() {
+    async fn touch_last_used_preserves_edit_timestamp() {
         let Some(db) = connect_test_database("user_api_key_svc_touch").await else {
             return;
         };
@@ -5742,13 +5742,16 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(key.last_used_at.is_none());
+        // Compare persisted timestamps: BSON stores milliseconds, while the
+        // value returned by create_api_key can retain submillisecond precision.
+        let before = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
+        assert!(before.last_used_at.is_none());
 
         super::touch_last_used(&db, &key.id).await;
 
         let updated = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
-        assert!(updated.last_used_at.is_some());
-        assert!(updated.updated_at >= key.updated_at);
+        assert!(updated.last_used_at.unwrap() >= before.created_at);
+        assert_eq!(updated.updated_at, before.updated_at);
     }
 
     #[tokio::test]

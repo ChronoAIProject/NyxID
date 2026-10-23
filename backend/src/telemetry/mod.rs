@@ -742,18 +742,31 @@ mod tests {
             ..Default::default()
         };
         let admitted_revision = consent::read(db, actor).await.unwrap().revision;
+        await_responsive_consent_reads(db, actor).await;
+        let capacity = client.tx.capacity();
         first_state
             .telemetry
             .as_ref()
             .unwrap()
             .track(actor, TelemetryEvent::AuthLoggedOut, &allowed(actor), None)
             .await;
+        assert_eq!(
+            client.tx.capacity(),
+            capacity - 1,
+            "first replica must enqueue"
+        );
+        await_responsive_consent_reads(&remote_db, actor).await;
         second_state
             .telemetry
             .as_ref()
             .unwrap()
             .track(actor, TelemetryEvent::AuthLoggedOut, &allowed(actor), None)
             .await;
+        assert_eq!(
+            second_state.telemetry.as_ref().unwrap().tx.capacity(),
+            0,
+            "second replica must enqueue before withdrawal"
+        );
         consent::set(&second_state.db, actor, false).await.unwrap();
         consent::set(&second_state.db, actor, true).await.unwrap();
         drop(first_state);
@@ -787,9 +800,16 @@ mod tests {
                 .await
                 .unwrap();
             consent::set(&remote_db, id, true).await.unwrap();
+            await_responsive_consent_reads(db, id).await;
+            let capacity = client.tx.capacity();
             client
                 .track(id, TelemetryEvent::AuthLoggedOut, &allowed(id), None)
                 .await;
+            assert_eq!(
+                client.tx.capacity(),
+                capacity - 1,
+                "permission-change case must start admitted"
+            );
         }
         consent::set(&remote_db, &withdrawn, false).await.unwrap();
         client
@@ -944,6 +964,7 @@ mod tests {
             let (failure_tx, failure_rx) = mpsc::channel(1);
             let mut admitted = client.clone();
             admitted.tx = failure_tx;
+            await_responsive_consent_reads(db, &sentinel).await;
             admitted
                 .track(
                     &sentinel,
@@ -963,6 +984,8 @@ mod tests {
             )
             .await;
         }
+        await_responsive_consent_reads(db, &sentinel).await;
+        let capacity = client.tx.capacity();
         client
             .track(
                 &sentinel,
@@ -975,6 +998,7 @@ mod tests {
                 None,
             )
             .await;
+        assert_eq!(client.tx.capacity(), capacity - 1, "sentinel must enqueue");
         // End the bounded stream after the sentinel; worker completion proves all
         // items were processed, including any erroneously admitted extra jobs.
         drop(no_db);

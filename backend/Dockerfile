@@ -6,12 +6,6 @@ WORKDIR /build
 # Bound simultaneous compiler work in both backend release builds.
 ENV CARGO_BUILD_JOBS=1
 
-# Commit hash baked into the binary for /health. `.git` is excluded from the
-# Docker context, so CI must pass this ARG explicitly; otherwise the build
-# script falls back to "unknown".
-ARG NYXID_GIT_HASH=unknown
-ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
-
 # Copy workspace manifests and lock file for dependency caching.
 # `cloud-auth/` (NyxID#716) and `nyxid-crypto/` (NyxID#773) are workspace
 # members; cargo refuses to resolve the workspace if any member's manifest
@@ -93,6 +87,10 @@ COPY integrations/oracle/cdp-worker/worker.mjs integrations/oracle/cdp-worker/wo
 RUN touch backend/src/main.rs cloud-auth/src/lib.rs service-adapters/src/lib.rs machine/src/lib.rs machine-updater/src/lib.rs permissions/src/lib.rs
 
 # Build the real binary
+# Scope the per-commit identity to the application build. Declaring it before
+# dependency compilation invalidates that expensive layer on every commit.
+ARG NYXID_GIT_HASH=unknown
+ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
 RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
 
 # The standalone page is served by the backend with its own SRI-bound CSP.

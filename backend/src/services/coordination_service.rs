@@ -976,6 +976,13 @@ fn active_lease_filter(id: &str, holder: &CoordinationHolder, lease_id: &str) ->
     filter
 }
 
+// A task-local clock lets database integration tests cross an exact window
+// boundary without depending on the runner's speed. Production uses $$NOW.
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_RATE_WINDOW_NOW: std::cell::Cell<DateTime>;
+}
+
 fn rate_window_pipeline(
     namespace: &str,
     key_hash: &str,
@@ -983,9 +990,14 @@ fn rate_window_pipeline(
     limit: i64,
     window_ms: i64,
 ) -> Vec<Document> {
+    let now = Bson::String("$$NOW".into());
+    #[cfg(test)]
+    let now = TEST_RATE_WINDOW_NOW
+        .try_with(|clock| Bson::DateTime(clock.get()))
+        .unwrap_or(now);
     let current_window = doc! {
         "$dateTrunc": {
-            "date": "$$NOW",
+            "date": now,
             "unit": "millisecond",
             "binSize": window_ms,
         }

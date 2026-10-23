@@ -55,8 +55,8 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Build each component for each platform on its native runner while CI runs.
-  # Each job pushes by digest only (no tags). A failed CI gate leaves no tagged
-  # release because `merge` waits for both the builds and the gate.
+  # Each image is pushed by digest only. Backend buildcache-* references may
+  # update during builds; release tags wait for both the builds and the CI gate.
   # ---------------------------------------------------------------------------
   build:
     name: Build ${{ matrix.component }} (${{ matrix.platform }})
@@ -115,7 +115,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Labels only -- tags are applied by the merge job on the manifest list.
+      # Labels only -- release tags are applied by merge on the manifest list.
       - name: Extract metadata (labels)
         id: meta
         uses: docker/metadata-action@v6
@@ -145,8 +145,15 @@ jobs:
           build-args: |
             NYXID_GIT_HASH=${{ steps.git.outputs.hash }}
           outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
+          # Backend compiler layers exceed the shared Actions cache budget.
+          # Only this trusted publish workflow writes the per-platform registry
+          # cache; PRs can read it from the existing public backend repository.
+          # Retain the old cache as an import fallback during the transition.
+          cache-from: |
+            ${{ matrix.component == 'backend' && format('type=registry,ref={0}:buildcache-{1}', steps.repo.outputs.image, matrix.platform_pair) || '' }}
+            type=gha,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
+          cache-to: >-
+            ${{ matrix.component == 'backend' && format('type=registry,ref={0}:buildcache-{1},mode=max,ignore-error=true', steps.repo.outputs.image, matrix.platform_pair) || format('type=gha,mode=max,scope={0}-{1}', matrix.component, matrix.platform_pair) }}
           provenance: false
 
       - name: Verify machine browser and desktop

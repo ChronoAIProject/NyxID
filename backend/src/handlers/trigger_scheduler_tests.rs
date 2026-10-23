@@ -181,7 +181,22 @@ async fn completed(state: &AppState, trigger: &Trigger) -> TriggerRun {
                 .await
                 .unwrap()
             {
-                return run;
+                // finish() commits the terminal run before finish_record()
+                // projects it onto the trigger. Wait for that write too: an
+                // exact-source owner edit must not race the finishing worker.
+                let projected = state
+                    .db
+                    .collection::<Document>(TRIGGERS)
+                    .find_one(doc! {
+                        "_id": &trigger.id,
+                        "schedule_state.last_run._id": &run.id,
+                        "schedule_state.last_run.outcome": run.outcome.as_str(),
+                    })
+                    .await
+                    .unwrap();
+                if projected.is_some() {
+                    return run;
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
