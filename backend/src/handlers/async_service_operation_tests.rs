@@ -1861,8 +1861,22 @@ async fn guest_policy_async_transport_refuses_before_approval_or_submission() {
                 .await
                 .unwrap()
                 .unwrap();
+        let catalog_id = row.catalog_service_id.unwrap();
+        if platform {
+            // Legacy discovery prefers an executable owner connection over its
+            // catalog service. Keep this platform-only case free of that shadow.
+            a.f.state
+                .db
+                .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id": &a.service},
+                    doc! {"$set": {"is_active": false}},
+                )
+                .await
+                .unwrap();
+        }
         let id = if platform {
-            row.catalog_service_id.unwrap()
+            catalog_id.clone()
         } else {
             a.service.clone()
         };
@@ -2008,10 +2022,11 @@ async fn guest_policy_async_transport_refuses_before_approval_or_submission() {
         // Main evaluates approval policy before durable-watch admission.
         a.f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
             .update_one(doc! {"_id": &a.f.chat.agent_id},doc! {"$set": {"guest_policy": {"enabled":false,"default_access":"read","escalation":"ask_owner","share_skills":true},"guest_access": {&id:"all"}}}).await.unwrap();
+        // Both connection and platform calls resolve this catalog policy.
         crate::services::approval_service::set_service_approval_config(
             &a.f.state.db,
             &a.f.owner,
-            &id,
+            &catalog_id,
             &service.service_slug,
             Some(true),
             Some(&crate::models::service_approval_config::ApprovalMode::PerRequest),

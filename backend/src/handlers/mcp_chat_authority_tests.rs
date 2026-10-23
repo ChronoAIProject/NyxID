@@ -5781,6 +5781,23 @@ async fn guest_policy_approval_gates_and_owner_grants_never_authorize_guests() {
 #[tokio::test]
 async fn guest_policy_redirects_never_execute_another_operation() {
     use tower::ServiceExt;
+    async fn assert_mcp_redirect(response: Response, enabled: bool) {
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(envelope["result"]["isError"], enabled, "{envelope}");
+        if enabled {
+            assert!(
+                envelope["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Error (307):"),
+                "{envelope}"
+            );
+        }
+    }
     let (f, connection, tool, hits, server) = guest_policy_fixture("guest_redirects").await;
     f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
         .update_one(doc! {"_id": &f.chat.agent_id}, doc! {"$set": {"guest_policy.default_access":"read", "guest_policy.escalation":"ask_owner"}}).await.unwrap();
@@ -5803,7 +5820,7 @@ async fn guest_policy_redirects_never_execute_another_operation() {
             } else {
                 direct_call(&f, &auth, &tool, args).await
             };
-            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            assert_mcp_redirect(response, enabled).await;
             assert_eq!(
                 hits.load(Ordering::SeqCst) - before,
                 if enabled { 1 } else { 2 }
@@ -5820,7 +5837,8 @@ async fn guest_policy_redirects_never_execute_another_operation() {
                     direct_call(&f, &auth, &tool, args).await
                 }
             };
-            let (_, request) = tokio::join!(pending, decide_next_guest(&f, true, false));
+            let (response, request) = tokio::join!(pending, decide_next_guest(&f, true, false));
+            assert_mcp_redirect(response, enabled).await;
             assert!(
                 approval_service::get_request(&f.state.db, &request.id)
                     .await
@@ -5834,7 +5852,20 @@ async fn guest_policy_redirects_never_execute_another_operation() {
                 if enabled { 1 } else { 2 }
             );
         }
-        let catalog_id = guest_connection_catalog(&f, &connection).await;
+    }
+    // Linking a catalog replaces the custom connection's generic MCP tool with
+    // the catalog's published operations. Finish generic MCP calls first.
+    let catalog_id = guest_connection_catalog(&f, &connection).await;
+    for enabled in [false, true] {
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &f.chat.agent_id},
+                doc! {"$set": {"guest_policy.enabled": enabled}},
+            )
+            .await
+            .unwrap();
         let credential = credentials::load_for_conversation(
             &f.state.db,
             &f.state.encryption_keys,
@@ -7000,8 +7031,9 @@ async fn guest_policy_all_websocket_upgrades_and_exchanges_frames_direct_and_via
 #[tokio::test]
 async fn guest_policy_off_keeps_main_catalog_lookup_and_denial_bodies() {
     use crate::models::service_approval_config::{ApprovalEffect, ApprovalMode};
-    let (f, service, tool, hits, server) = guest_policy_fixture("guest_off_lookup").await;
+    let (f, service, _, hits, server) = guest_policy_fixture("guest_off_lookup").await;
     let catalog = guest_connection_catalog(&f, &service).await;
+    guest_catalog_endpoints(&f, &catalog).await;
     use tower::ServiceExt;
     let credential = credentials::load_for_conversation(
         &f.state.db,
@@ -7071,11 +7103,15 @@ async fn guest_policy_off_keeps_main_catalog_lookup_and_denial_bodies() {
             let auth = authenticate(&f).await;
             for (method, error) in [("POST", false), ("DELETE", true)] {
                 let before = hits.load(Ordering::SeqCst);
-                let args = json!({"method":method,"path":"/one"});
-                let response = if meta {
-                    call(&f, &auth, &tool, args).await
+                let tool = if method == "POST" {
+                    "guest-policy__create"
                 } else {
-                    direct_call(&f, &auth, &tool, args).await
+                    "guest-policy__delete"
+                };
+                let response = if meta {
+                    call(&f, &auth, tool, json!({})).await
+                } else {
+                    direct_call(&f, &auth, tool, json!({})).await
                 };
                 let value = result(response, error).await;
                 if error {
@@ -7101,10 +7137,11 @@ async fn guest_policy_off_keeps_main_catalog_lookup_and_denial_bodies() {
             crate::services::assistant_acknowledgement_service::guest_refusal().to_string(),
         ),
     ] {
+        // Catalog-backed connections resolve approval policies by catalog ID.
         approval_service::set_service_approval_config(
             &f.state.db,
             &f.owner,
-            &service,
+            &catalog,
             "guest-policy",
             Some(true),
             Some(&ApprovalMode::PerRequest),
@@ -7115,11 +7152,10 @@ async fn guest_policy_off_keeps_main_catalog_lookup_and_denial_bodies() {
         .unwrap();
         for meta in [false, true] {
             let auth = authenticate(&f).await;
-            let args = json!({"method":"POST","path":"/one"});
             let response = if meta {
-                call(&f, &auth, &tool, args).await
+                call(&f, &auth, "guest-policy__create", json!({})).await
             } else {
-                direct_call(&f, &auth, &tool, args).await
+                direct_call(&f, &auth, "guest-policy__create", json!({})).await
             };
             let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
                 .await
