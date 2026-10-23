@@ -546,6 +546,37 @@ fn service_create_denied_fields(body: &CreateServiceRequest) -> Vec<&'static str
     .collect()
 }
 
+/// Ingress authority `PUT /services/{id}` grants over `service` for `body`:
+/// the row gate (`require_tool_writer` for Tools; otherwise Admin when the
+/// body converts the row to a Tool, else `require_catalog_row_writer`), then
+/// the Tools/Catalog Manager field classifier. `None` is the plain creator
+/// rule. Manager checks that compare against stored values stay with the
+/// caller. Identity resync passes a body setting every identity field.
+pub async fn require_service_update_authority(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service: &DownstreamService,
+    body: &UpdateServiceRequest,
+) -> AppResult<Option<CatalogAuthority>> {
+    use crate::models::downstream_service::OfferingKind;
+    if service.offering_kind == OfferingKind::Tool {
+        let authority = require_tool_writer(state, auth_user, Some(service)).await?;
+        if authority == CatalogAuthority::ToolsManager {
+            check_tool_update(body)?;
+        }
+        return Ok(Some(authority));
+    }
+    if body.offering_kind == Some(OfferingKind::Tool) {
+        super::services_helpers::require_admin(state, auth_user).await?;
+        return Ok(Some(CatalogAuthority::Admin));
+    }
+    let authority = require_catalog_row_writer(state, auth_user, service).await?;
+    if authority == Some(CatalogAuthority::CatalogManager) {
+        check_service_update(body)?;
+    }
+    Ok(authority)
+}
+
 /// On rows they created, Catalog Managers edit descriptive metadata, the
 /// destination URL and the active flag.
 pub fn check_service_update(body: &UpdateServiceRequest) -> AppResult<()> {
