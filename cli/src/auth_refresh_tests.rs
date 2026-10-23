@@ -622,6 +622,39 @@ fn destination_configuration_errors_are_not_retryable_refresh_failures() {
 }
 
 #[test]
+fn matching_disallowed_http_destination_is_configuration_in_every_refresh_path() {
+    let _home = Home::new();
+    runtime().block_on(async {
+        let auth = args("http://remote.example");
+        seed(&auth, &jwt(1), &jwt(Utc::now().timestamp() + 3600));
+        assert!(matches!(
+            refresh_saved_session(&auth).await,
+            SessionRefresh::Configuration(_)
+        ));
+        for error in [
+            ensure_session(&auth).await.unwrap_err(),
+            force_refresh_session(&auth).await.unwrap_err(),
+        ] {
+            assert!(error.is::<ProfileDestinationError>());
+            assert!(!error.is::<RefreshUnavailable>());
+        }
+        let outcome = refresh_captured_session(
+            &reqwest::Client::new(),
+            auth.profile.as_deref(),
+            auth.base_url.as_deref().unwrap(),
+            None,
+            "old-access",
+            true,
+        )
+        .await;
+        assert!(matches!(outcome, InFlightRefreshOutcome::Configuration(_)));
+        let error = outcome.access_token().unwrap_err();
+        assert!(error.is::<ProfileDestinationError>());
+        assert!(!error.is::<RefreshUnavailable>());
+    });
+}
+
+#[test]
 fn saved_profile_helpers_share_auth_kind_destination_and_jwt_timestamps() {
     let _home = Home::new();
     runtime().block_on(async {

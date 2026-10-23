@@ -237,14 +237,9 @@ enum Delivery {
 }
 
 pub(crate) fn normalized_destination(raw: &str) -> Result<String> {
-    let url = url::Url::parse(raw).map_err(|_| LoginError::DestinationMismatch)?;
-    if !matches!(url.scheme(), "https" | "http")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
+    let url =
+        crate::api::credential_request_url(raw).map_err(|_| LoginError::DestinationMismatch)?;
+    if url.query().is_some() {
         return Err(LoginError::DestinationMismatch.into());
     }
     Ok(url.as_str().trim_end_matches('/').to_owned())

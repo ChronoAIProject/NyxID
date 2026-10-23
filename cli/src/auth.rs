@@ -235,7 +235,9 @@ fn read_login_generation(profile: Option<&str>) -> Result<Option<String>> {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ProfileDestinationError {
-    #[error("Invalid profile destination; supply a valid HTTP(S) base URL")]
+    #[error(
+        "Invalid profile destination; supply an HTTPS base URL (HTTP is allowed only on localhost, 127.0.0.1 or [::1])"
+    )]
     Invalid,
     #[error(
         "Profile destination changed or differs from --base-url. Re-run the command with the intended profile."
@@ -1218,7 +1220,7 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
 
     let client = match build_credential_http_client_for_url(profile, &base_url) {
         Ok(c) => c,
-        Err(e) => return SessionRefresh::Network(e),
+        Err(e) => return SessionRefresh::Configuration(e),
     };
 
     match exchange_refresh_token(&client, &base_url, &refresh_token).await {

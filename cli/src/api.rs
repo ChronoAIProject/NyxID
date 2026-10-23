@@ -132,7 +132,7 @@ fn cli_http_client_builder(profile: Option<&str>) -> Result<reqwest::ClientBuild
     Ok(builder)
 }
 
-fn credential_request_url(address: &str) -> Result<url::Url> {
+pub(crate) fn credential_request_url(address: &str) -> Result<url::Url> {
     let address =
         url::Url::parse(address).map_err(|_| anyhow::anyhow!("Invalid credential request URL"))?;
     if address.host().is_none()
@@ -1130,6 +1130,10 @@ mod tests {
         ] {
             assert!(super::credential_request_url(address).is_ok(), "{address}");
             assert!(
+                crate::auth::login_exchange::normalized_destination(address).is_ok(),
+                "{address}"
+            );
+            assert!(
                 ApiClient::new(address, uuid::Uuid::new_v4().to_string()).is_ok(),
                 "{address}"
             );
@@ -1151,6 +1155,10 @@ mod tests {
             "service.example/hidden",
         ] {
             assert!(super::credential_request_url(address).is_err(), "{address}");
+            assert!(
+                crate::auth::login_exchange::normalized_destination(address).is_err(),
+                "{address}"
+            );
             assert!(
                 ApiClient::new(address, uuid::Uuid::new_v4().to_string()).is_err(),
                 "{address}"
