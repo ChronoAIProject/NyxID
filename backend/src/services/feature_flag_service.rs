@@ -157,6 +157,13 @@ const ASSISTANT_MODEL_CONTROLS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY: &str = "assistant:workspace-preview";
+const ASSISTANT_WORKSPACE_PREVIEW_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY,
+    description: "Shows the Activity and Artifacts workspace previews for an explicitly selected rollout audience.",
+    default_enabled: false,
+};
+
 pub const NYXAGENT_ENGINE_FLAG_KEY: &str = "assistant:nyxagent-engine";
 const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXAGENT_ENGINE_FLAG_KEY,
@@ -308,6 +315,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
+    ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_ADAPTERS_FLAG,
@@ -346,6 +354,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
+    ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_ADAPTERS_FLAG,
@@ -2848,6 +2857,7 @@ mod tests {
                 "auth:mobile-mfa",
                 "assistant:nyxagent-engine",
                 "assistant:model-controls",
+                "assistant:workspace-preview",
                 "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
                 "nyxbot:service-adapters",
@@ -2980,6 +2990,77 @@ mod tests {
                 .await
                 .expect_err("unknown flag rejected");
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn workspace_preview_defaults_off_and_supports_targeted_user_rollout() {
+        let db = crate::test_utils::connect_transaction_test_database("workspace_preview_audience")
+            .await;
+        let actor = Uuid::new_v4().to_string();
+        let selected_id = Uuid::new_v4().to_string();
+        let ordinary_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&selected_id, UserType::Person),
+                test_user(&ordinary_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        for id in [&selected_id, &ordinary_id] {
+            assert!(
+                !resolve_personal_features(&db, id)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|key| key == ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY)
+            );
+        }
+        set_platform_override(
+            &db,
+            ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY,
+            &FlagTarget::User(selected_id.clone()),
+            true,
+            &actor,
+        )
+        .await
+        .unwrap();
+        for (id, expected) in [(&selected_id, true), (&ordinary_id, false)] {
+            assert_eq!(
+                resolve_personal_features(&db, id)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|key| key == ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY),
+                expected
+            );
+            assert_eq!(
+                resolve_enabled_features(&db, &org_id, id, OrgRole::Member)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|key| key == ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY),
+                expected
+            );
+        }
+        set_platform_override(
+            &db,
+            ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY,
+            &FlagTarget::User(selected_id.clone()),
+            false,
+            &actor,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !resolve_personal_features(&db, &selected_id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|key| key == ASSISTANT_WORKSPACE_PREVIEW_FLAG_KEY)
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

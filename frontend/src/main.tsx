@@ -127,13 +127,13 @@ function Root() {
   }, [ready, publicConfig, consentEnabled, isAuthenticated, agentKeyLogin, telemetryAccountId]);
 
   // When auth resolves, redirect as needed:
-  // - Authenticated user on landing → dashboard
+  // - Authenticated user on landing → assistant
   // - Unauthenticated user on protected route → login
   useEffect(() => {
     if (!ready) return;
     const path = window.location.pathname;
     if (isAuthenticated && path === "/") {
-      router.navigate({ to: "/dashboard" });
+      router.navigate({ to: "/assistant" });
     } else if (!isAuthenticated) {
       // Send unauthenticated users on a real protected route to login,
       // but let a genuinely-unmatched path fall through to the router's
