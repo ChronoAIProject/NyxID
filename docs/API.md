@@ -1535,9 +1535,14 @@ Get a single downstream service by ID.
   "identity_jwt_audience": null,
   "created_by": "550e8400-e29b-41d4-a716-446655440000",
   "created_at": "2025-06-01T10:00:00+00:00",
-  "updated_at": "2025-06-01T10:00:00+00:00"
+  "updated_at": "2025-06-01T10:00:00+00:00",
+  "can_resync_identity": false
 }
 ```
+
+`can_resync_identity` says whether the caller may use
+[`POST /api/v1/services/{service_id}/resync-identity`](#post-apiv1servicesservice_idresync-identity).
+Only this endpoint computes it; list, create and update responses omit it.
 
 **Errors:**
 - `1003 not_found` -- Service does not exist
@@ -1644,6 +1649,70 @@ Deactivate a downstream service (soft delete). Only admins or the original servi
 ```bash
 curl -X DELETE http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef \
   -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### POST /api/v1/services/{service_id}/resync-identity
+
+Overwrite the identity-forwarding settings on every connection (`UserService`)
+created from this catalog service with the service's current settings,
+including connections whose settings were customized. The fields are
+`identity_propagation_mode`, `identity_include_user_id`,
+`identity_include_email`, `identity_include_name`, `identity_jwt_audience`,
+`forward_access_token`, `inject_delegation_token` and `delegation_token_scope`.
+Connections whose stored values already match are not rewritten, so their
+`updated_at` and history are unchanged. It also clears a pending or failed
+identity propagation marker on the service. It does not touch stored
+credentials or anyone's sign-in with the downstream service.
+
+Ordinary service edits (`PUT /api/v1/services/{service_id}`) already copy
+identity changes to connections that still match the previous value, and skip
+customized ones. Resync is the deliberate override for that drift.
+
+**Auth:** First-party human session (API keys, service accounts, delegated and
+relay tokens are refused). The caller must be allowed to change this service's
+identity fields through `PUT /api/v1/services/{service_id}`: an Admin, or the
+service's creator under the plain creator rule. Catalog Managers and Tools
+Managers are refused because identity fields are Admin-only for them, including
+on rows they created; person-owned rows are Admin-only. The service must be an
+HTTP service. The write commits in one transaction that rechecks this authority
+against the live service row.
+
+**Response (200):**
+
+```json
+{
+  "catalog_service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
+  "matched_count": 37,
+  "changed_count": 2,
+  "affected_count": 2
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `matched_count` | Connections to this service that were checked |
+| `changed_count` | Connections whose settings differed and were rewritten |
+| `affected_count` | Deprecated alias of `changed_count`. Earlier releases counted every connection here, changed or not |
+
+The `catalog_identity_resync_succeeded` audit event records the actor,
+`authority` (`admin` or `creator`), the field list, `matched_count` and
+`changed_count`.
+
+**Errors:**
+- `1002 forbidden` -- Not a first-party human session, or not allowed to change this service's identity fields
+- `1003 not_found` -- Service does not exist
+- `1000 bad_request` -- The service is not an HTTP service
+- `1004 conflict` -- The service's authority or identity settings changed while the request ran; reload and retry
+
+**CLI:** `nyxid catalog resync-identity <SERVICE_ID_OR_SLUG> [--yes] [--output json]`
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/resync-identity \
+  -H "Authorization: Bearer <access_token>"
 ```
 
 ---
