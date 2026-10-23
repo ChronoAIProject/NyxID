@@ -350,7 +350,7 @@ fn captured_refresh_serializes_current_thread_callers_and_fences_replaced_login(
         assert!(matches!(b, InFlightRefreshOutcome::Adopted(_)));
         for (destination, generation, eligible) in [
             (server.uri(), None, false),
-            ("http://different.test".into(), None, true),
+            ("https://different.test".into(), None, true),
             (server.uri(), Some("replaced"), true),
         ] {
             assert!(matches!(

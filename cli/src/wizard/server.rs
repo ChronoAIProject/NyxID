@@ -2464,7 +2464,7 @@ mod tests {
                     .is_none()
             );
             let mut other_destination = auth.clone();
-            other_destination.base_url = Some("http://different.test".into());
+            other_destination.base_url = Some("https://different.test".into());
             assert!(ProxyContext::from_auth(&other_destination).await.is_err());
             server.verify().await;
         });

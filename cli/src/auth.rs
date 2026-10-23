@@ -236,7 +236,7 @@ fn read_login_generation(profile: Option<&str>) -> Result<Option<String>> {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ProfileDestinationError {
     #[error(
-        "Invalid profile destination; supply an HTTPS base URL (HTTP is allowed only on localhost, 127.0.0.1 or [::1])"
+        "Invalid profile destination; credential transport requires HTTPS (HTTP is allowed only on localhost, 127.0.0.1 or [::1])"
     )]
     Invalid,
     #[error(
@@ -2843,10 +2843,14 @@ mod tests {
             .await
             .expect_err("preflight must reject HTTP");
         assert!(error.to_string().contains("requires HTTPS"));
+        assert!(error.is::<super::ProfileDestinationError>());
+        assert!(!error.is::<super::RefreshUnavailable>());
         let error = super::force_refresh_session(&auth)
             .await
             .expect_err("explicit refresh must reject HTTP");
         assert!(error.to_string().contains("requires HTTPS"));
+        assert!(error.is::<super::ProfileDestinationError>());
+        assert!(!error.is::<super::RefreshUnavailable>());
         assert!(
             super::read_saved_refresh_token_for(auth.profile.as_deref()).as_deref()
                 == Some(refresh.as_str())
