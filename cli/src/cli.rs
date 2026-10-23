@@ -1108,7 +1108,9 @@ pub enum SessionCommands {
     /// Ignores --access-token, --access-token-env, NYXID_API_KEY and other
     /// credential overrides. Refresh usability is not tested; renew_by is a
     /// deadline derived from known expiries. Exit 3 = locally dead credentials
-    /// or an explicitly ended server session; 1 = profile storage error.
+    /// or an explicitly ended server session; 4 = profile_lock_timeout;
+    /// 1 = storage or configuration errors (profile_storage_error,
+    /// profile_destination_mismatch).
     Status {
         #[command(flatten)]
         auth: AuthArgs,

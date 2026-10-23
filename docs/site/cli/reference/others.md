@@ -132,7 +132,7 @@ processes and retries the same token up to three times within 60 seconds, with a
 valid and a recoverable replacement chain; it does not bypass JWT expiry. Do not
 copy one profile's credentials between tools or machines that rotate independently.
 
-`session status` captures the saved profile's credential pair, login generation
+`session status` captures the saved profile's credential kind, credential pair
 and destination under one lock. It ignores `--access-token`, `--access-token-env`,
 `NYXID_ACCESS_TOKEN`, `NYXID_API_KEY` and other credential overrides, reporting
 `credential_overrides_ignored` when present. It sends zero refresh requests and

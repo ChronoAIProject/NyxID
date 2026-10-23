@@ -1,6 +1,24 @@
 use std::process::Command;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 
+#[test]
+fn status_help_documents_lock_storage_and_configuration_exit_codes() {
+    let output = Command::new(env!("CARGO_BIN_EXE_nyxid"))
+        .args(["session", "status", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for text in [
+        "4 = profile_lock_timeout",
+        "1 = storage or configuration errors",
+        "profile_storage_error",
+        "profile_destination_mismatch",
+    ] {
+        assert!(help.contains(text), "missing {text}: {help}");
+    }
+}
+
 #[tokio::test]
 async fn status_process_prints_one_json_envelope_on_exit_three_and_never_refreshes() {
     use base64::Engine;
