@@ -463,7 +463,6 @@ mod tests {
                 .get_str("generation"),
             Ok(generation.as_str())
         );
-        crate::test_utils::await_responsive_majority_io(&db).await;
         assert!(begin(&db, &user, &consent.revision).await.is_none());
         let actor = super::super::audit_service::AuditActor::from_auth_user(
             &crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string()),
@@ -535,7 +534,6 @@ mod tests {
                 .unwrap(),
             31
         );
-        crate::test_utils::await_responsive_majority_io(&db).await;
         let resumed = begin(&db, &user, &renewed.revision)
             .await
             .expect("repaired slot resumes opted-in capture");
