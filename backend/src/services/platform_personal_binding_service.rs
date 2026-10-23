@@ -54,6 +54,7 @@ pub struct CapturedPersonalStop {
 
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     super::platform_entry_migration::ensure_indexes(db).await?;
+    super::platform_use_case_service::ensure_indexes(db).await?;
     let rows = db.collection::<PlatformPersonalBinding>(COLLECTION_NAME);
     for index in [
         IndexModel::builder()

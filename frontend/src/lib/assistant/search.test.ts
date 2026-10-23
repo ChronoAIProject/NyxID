@@ -164,3 +164,19 @@ it("accepts UUID card links while preserving the other search fields", () => {
     expect(parseAssistantSearch({ card: invalid })).toEqual({});
   }
 });
+
+it("validates and deduplicates starter ids, retaining at most eight", () => {
+  expect(parseAssistantSearch({ draft: "true", starter: "queue-manager,queue-manager,business-faq,Bad,-bad,bad-,a--b,has space,123" }))
+    .toEqual({ draft: true, starter: "queue-manager,business-faq,123" });
+  expect(parseAssistantSearch({ starter: "a,b,c,d,e,f,g,h,i" }).starter).toBe("a,b,c,d,e,f,g,h");
+  for (const starter of [null, true, 1, ["a"], "", "Bad,/"]) expect(parseAssistantSearch({ starter })).toEqual({});
+});
+
+it("round-trips a starter and removes it with history replace", async () => {
+  const router = buildAssistantRouter("/assistant?draft=true&starter=queue-manager,business-faq");
+  await router.load();
+  expect(parseAssistantSearch(router.state.location.search).starter).toBe("queue-manager,business-faq");
+  await router.navigate({ to: "/assistant", search: (previous) => ({ ...previous, starter: undefined }), replace: true });
+  expect(parseAssistantSearch(router.state.location.search)).toEqual({ draft: true });
+  expect(router.history.length).toBe(1);
+});

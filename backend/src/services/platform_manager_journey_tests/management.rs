@@ -17,7 +17,7 @@ async fn command(j: &Journey, sequence: i64, text: &str) -> String {
     result
 }
 
-async fn next_personal_request(j: &Journey, account: &str, sequence: i64) -> Value {
+pub(super) async fn next_personal_request(j: &Journey, account: &str, sequence: i64) -> Value {
     let expected = j.egress.0.load(Ordering::SeqCst) + 1;
     j.webhook(&j.update(sequence, "Help me with my selected setup", false))
         .await;

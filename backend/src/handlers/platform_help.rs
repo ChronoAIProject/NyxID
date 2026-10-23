@@ -31,6 +31,30 @@ pub struct UseCase {
     description: String,
     example_prompts: Vec<String>,
 }
+impl From<model::HelpUseCase> for UseCase {
+    fn from(a: model::HelpUseCase) -> Self {
+        Self {
+            id: a.id,
+            title: a.title,
+            description: a.description,
+            example_prompts: a.example_prompts,
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct PublicUseCases {
+    use_cases: Vec<UseCase>,
+}
+pub async fn public_use_cases(
+    State(state): State<AppState>,
+) -> AppResult<(HeaderMap, Json<PublicUseCases>)> {
+    let use_cases = service::public_use_cases(&state.db)
+        .await?
+        .into_iter()
+        .map(UseCase::from)
+        .collect();
+    Ok((headers(), Json(PublicUseCases { use_cases })))
+}
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Content {
@@ -303,4 +327,51 @@ pub async fn assign(
         Some(serde_json::json!({"profile_id":id,"library_id":r.library_id,"version":r.version})),
     );
     Ok((headers(), Json(r.into())))
+}
+
+#[cfg(test)]
+mod public_use_cases_tests {
+    use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn public_use_cases_handler_anonymous_published_response() {
+        let db = crate::test_utils::connect_test_database("public_use_cases_handler")
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let (_, router) = crate::routes::build_router_with_state(state.clone());
+        let app = router.with_state(state);
+        let request = || {
+            Request::builder()
+                .uri("/api/v1/public/help/use-cases")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 20_000).await.unwrap()).unwrap();
+        assert_eq!(body, serde_json::json!({"use_cases": []}));
+        service::ensure(&db).await.unwrap();
+        db.collection::<bson::Document>(model::LIBRARIES)
+            .update_one(
+                bson::doc! {"_id": model::DEFAULT_LIBRARY},
+                bson::doc! {"$set": {"draft.use_cases": []}},
+            )
+            .await
+            .unwrap();
+        let response = app.oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 20_000).await.unwrap()).unwrap();
+        let expected = serde_json::to_value(service::seed_content().unwrap().use_cases).unwrap();
+        assert_eq!(body, serde_json::json!({"use_cases": expected}));
+        db.drop().await.unwrap();
+    }
 }

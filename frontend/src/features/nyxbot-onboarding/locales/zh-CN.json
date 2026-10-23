@@ -108,5 +108,10 @@
   "openChat": "打开 {{channel}}",
   "linkNext": "下一步：从 {{channel}} 发送配对码",
   "linkReason": "确认你拥有此渠道",
-  "linkThen": "随后 Nyxbot 会引导你继续设置"
+  "linkThen": "随后 Nyxbot 会引导你继续设置",
+  "starterTitle": "你想让 NyxBot 帮你做什么？",
+  "starterDescription": "最多选择 8 个使用场景。发送前，你可以查看并编辑起始消息。",
+  "starterContinue": "在 NyxBot 中继续",
+  "starterEmpty": "暂无可用的使用场景。",
+  "starterLoadError": "无法加载使用场景，请重试。"
 }
