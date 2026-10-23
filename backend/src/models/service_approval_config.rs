@@ -106,7 +106,7 @@ pub struct ApprovalRule {
 ///
 /// If no config exists for a (user, service) pair, the active global
 /// `notification_channels.approval_required` setting applies. That global default
-/// is suspended without a notification channel and exempted for auto-connected
+/// remains enforced without notification delivery and is exempted for auto-connected
 /// services; this explicit configuration remains authoritative in both cases.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceApprovalConfig {

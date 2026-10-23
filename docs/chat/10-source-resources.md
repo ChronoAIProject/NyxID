@@ -27,6 +27,82 @@ unsupported-media result. This version does not traverse nested blocks or fetch
 additional pages automatically. Their normal read operations can return their
 own resource references.
 
+## Compact Notion evidence
+
+For assistant chat keys, a verified Notion block-children response is presented
+as compact evidence instead of the provider's repeated metadata. It includes
+block IDs, last-edited times, text, rich-text links, table cells, child-block
+markers and the provider's pagination cursor. The default view includes a
+bounded section index and preview. The original `ToolResponse.text` remains
+unchanged for execution receipts and non-chat consumers.
+
+To retrieve relevant sections from the same source read, pass `result_query`
+beside the arguments of `nyx__call_tool`:
+
+```json
+{
+  "tool_name": "my-notion__notion_list_block_children",
+  "arguments_json": "{\"block_id\":\"<known page or block UUID>\",\"page_size\":100}",
+  "result_query": "signature dishes vegetarian"
+}
+```
+
+This field is presentation metadata and never reaches the provider. It accepts
+1–256 characters and is available only for chat calls to a durable published
+block-children GET. Normal live source authorization, operation restrictions,
+guest rules, confirmations, execution and billing still run. Actual source
+provenance must satisfy the Notion adapter before any content is interpreted.
+An unsupported or malformed response retains its ordinary source text; a
+requested query reports that compact retrieval was unavailable.
+
+The deterministic lexical ranker favors matching section headings and their
+parent headings, returning at most four sections within a 6,000-byte escaped
+text budget. It marks omitted blocks, truncated text/links and omitted index
+entries. Matching paragraphs precede other blocks within a selected section;
+long paragraphs use a bounded excerpt around the first match, with its original
+UTF-8 byte offset. A non-match applies only to the returned block page. Use `next_cursor`
+for subsequent pages and `has_children` block IDs for nested tables/content;
+never infer workspace-wide absence from an empty or partial result. This
+per-read index has no embeddings, persistent cache or background sync.
+
+Image resource annotations still precede the evidence and use the same opaque
+references. Compaction does not attach an image: `nyx__resource_get` with
+`output: "attach"` is required. Resource replay and image validation continue
+to operate on the original source response.
+
+A local fixture can be measured without printing its content:
+
+```sh
+NYXID_NOTION_EVIDENCE_FIXTURE=/path/to/block-list.json \
+NYXID_NOTION_EVIDENCE_QUERY='signature dishes vegetarian' \
+cargo test -p nyxid notion_evidence_local_fixture_probe -- --ignored --nocapture
+```
+
+The probe reports source/output bytes, returned/omitted counts and extraction
+time. This measures parsing and retrieval; it is not a model completion or
+production latency benchmark.
+
+### Specialist configuration and reuse
+
+This capability adds no persisted specialist setting or source-binding editor.
+It applies to any assistant chat's verified Notion block read. `result_query`
+is a per-call option; its response scope and output bounds are shared runtime
+behaviour. Restaurant names, outlet aliases, page IDs, database IDs and answers
+do not belong in the retrieval implementation.
+
+Use the existing specialist configuration: linked-service grants select the
+authorized connection, Role describes the task and starting sources, and
+attached skills hold repeatable procedures and source guides. Source identifiers
+in that configuration are guidance, not a page-level access restriction. Skills
+do not grant service access, and guest turns omit attached skills; a channel
+bot's guest-facing source routing must therefore remain available without a
+private skill. The existing agent model setting controls new specialist threads
+unless the owner explicitly chooses a model for the thread.
+
+A structured Knowledge sources editor, persistent retrieval index, scheduled
+refresh and per-agent retrieval policy would be additional features. None is
+introduced by compact evidence presentation.
+
 ## Request flow
 
 1. NyxBot calls the ordinary connected-source read. Its existing grants,

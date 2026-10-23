@@ -278,6 +278,10 @@ pub struct UsageMeterRow {
     pub credential_class: CredentialClass,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Model the provider reported in its response. Reports fall back to it
+    /// when no pricing `model` was recorded; it never affects charges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_model: Option<String>,
     /// Provider-reported token classes (LLM traffic only; observability,
     /// not priced separately). Follows each provider's own accounting.
     #[serde(default, skip_serializing_if = "Option::is_none")]

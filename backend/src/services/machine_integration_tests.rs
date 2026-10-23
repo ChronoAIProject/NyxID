@@ -1021,6 +1021,8 @@ async fn machine_setup_pairing_races_delivery_hashes_and_expiry() {
         &f.owner,
         Some(&f.row.id),
         Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
             automatic_updates: None,
             owner_id: None,
             name: "test-machine".into(),
@@ -1067,12 +1069,17 @@ async fn machine_setup_pairing_races_delivery_hashes_and_expiry() {
 async fn machine_page_setup_grant_is_atomic_and_never_restored_on_reconnect() {
     use super::{assistant_team_service as team, machine_setup_service as setup};
     let f = fixture("machine_page_setup_grant").await;
-    let machine = node(&f, &f.owner).await;
+    let mut machine = node(&f, &f.owner).await;
+    machine.machine.as_mut().unwrap().separation_choice =
+        Some(nyxid_machine::context::Choice::SharedLegacy);
+    save_node(&f, &machine).await;
     let mut intent = setup::create_link(
         &f.state.db,
         &f.owner,
         None,
         crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
             automatic_updates: None,
             owner_id: None,
             name: "setup-machine".into(),
@@ -1139,6 +1146,8 @@ async fn machine_watch_settlement_queues_exactly_one_durable_secret_free_event()
         &f.owner,
         Some(&f.row.id),
         crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
             automatic_updates: None,
             owner_id: None,
             name: "watched".into(),
@@ -1374,6 +1383,8 @@ async fn machine_setup_change_stream_wakes_thread_without_sweep() {
         &f.owner,
         Some(&f.row.id),
         crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
             automatic_updates: None,
             owner_id: None,
             name: "live-machine".into(),
@@ -1897,6 +1908,8 @@ async fn machine_watches_and_jobs_carry_validated_report_provenance() {
         &f.owner,
         Some(&f.row.id),
         crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
             automatic_updates: None,
             owner_id: None,
             name: "provenance".into(),
@@ -1933,6 +1946,8 @@ async fn machine_watches_and_jobs_carry_validated_report_provenance() {
         &f.owner,
         Some(&f.row.id),
         crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
             automatic_updates: None,
             owner_id: None,
             name: "page".into(),
@@ -2074,5 +2089,133 @@ async fn hosted_machine_jobs_keep_runtime_binding_and_live_report_provenance() {
             .unwrap(),
         3,
     );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_setup_missing_selection_is_actionable_and_grants_nothing() {
+    use super::machine_setup_service as setup;
+    let f = fixture("machine_setup_selection_required").await;
+    let machine = ungranted_node(&f, &f.owner).await;
+    let mut intent = setup::create_link(
+        &f.state.db,
+        &f.owner,
+        None,
+        crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
+            automatic_updates: None,
+            owner_id: None,
+            name: "new-machine".into(),
+            location: "vm".into(),
+            capabilities: vec!["shell".into()],
+            grant_to: Some(f.chat.agent_id.clone()),
+        },
+        &super::nyxbot_watch_service::ReportProvenance::LEGACY,
+    )
+    .await
+    .unwrap();
+    let setups = f
+        .state
+        .db
+        .collection::<crate::models::machine_setup::MachineSetup>(
+            crate::models::machine_setup::COLLECTION_NAME,
+        );
+    setups.delete_one(doc! {"_id":&intent.id}).await.unwrap();
+    intent.id = machine.id.clone();
+    intent.status = "waiting".into();
+    setups.insert_one(&intent).await.unwrap();
+    setup::complete_page_setup(&f.state.db, &machine.id)
+        .await
+        .unwrap();
+    let row = setup::get(&f.state.db, &f.owner, &machine.id)
+        .await
+        .unwrap();
+    assert_eq!(row.status, "selection_required");
+    let agent = super::assistant_team_service::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert!(!agent.machine_node_ids.contains(&machine.id));
+    let response = crate::handlers::machine_setup::get(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.owner),
+        axum::extract::Path(machine.id.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    let value = serde_json::to_value(response).unwrap();
+    assert_eq!(value["status"], "selection_required");
+    assert!(
+        value["selection_reason"]
+            .as_str()
+            .unwrap()
+            .contains("Assistant → Machines")
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_setup_chat_watch_settles_selection_required_once() {
+    use super::machine_setup_service as setup;
+    let f = orchestrator_fixture("machine_setup_selection_watch").await;
+    let intent = setup::create_link(
+        &f.state.db,
+        &f.owner,
+        Some(&f.row.id),
+        crate::models::machine_setup::Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
+            automatic_updates: None,
+            owner_id: None,
+            name: "watched-machine".into(),
+            location: "vm".into(),
+            capabilities: vec!["shell".into()],
+            grant_to: None,
+        },
+        &super::nyxbot_watch_service::ReportProvenance::from_chat(&f.chat),
+    )
+    .await
+    .unwrap();
+    let token = setup::mint(&f.state.db, &f.owner, &intent.id, None, 100, "review")
+        .await
+        .unwrap();
+    let (mut node, _, _) =
+        node_service::register_node(&f.state.db, &f.state.encryption_keys, &token, None)
+            .await
+            .unwrap();
+    node.status = NodeStatus::Online;
+    node.machine = Some(MachineProfile {
+        version: nyxid_machine::PROTOCOL_VERSION,
+        runtime_id: Uuid::new_v4().to_string(),
+        shell: true,
+        ..Default::default()
+    });
+    save_node(&f, &node).await;
+    crate::handlers::nyxbot::process_watches(&f.state)
+        .await
+        .unwrap();
+    assert_eq!(
+        setup::get(&f.state.db, &f.owner, &intent.id)
+            .await
+            .unwrap()
+            .status,
+        "selection_required"
+    );
+    let first = super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(first.pending_events.len(), 1);
+    let event = serde_json::to_string(&first.pending_events).unwrap();
+    assert!(event.contains("selection_required"));
+    assert!(event.contains("Owner settings:"));
+    assert!(!event.contains(token.as_str()));
+    crate::handlers::nyxbot::process_watches(&f.state)
+        .await
+        .unwrap();
+    let second = super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(second.pending_events.len(), 1);
     f.state.db.drop().await.unwrap();
 }

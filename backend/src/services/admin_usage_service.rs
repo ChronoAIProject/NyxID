@@ -372,6 +372,18 @@ fn legacy_cost(quantity: &str) -> Bson {
     doc! { "$multiply": [ { "$toDecimal": quantity }, "$rate_pico", crate::models::credits::Credits::from_pico(1).expect("one pico")] }.into()
 }
 
+/// Report model: the pricing model, else the provider-reported model. Legacy
+/// billable rows keep their pricing model alone because their historical cost
+/// is estimated from a model-keyed cached rate. Requires `meter_flags`.
+fn reported_model_fallback() -> Bson {
+    doc! { "$ifNull": ["$model", { "$cond": [
+        { "$or": ["$exact", { "$eq": [{ "$ifNull": ["$wallet_id", null] }, null] }] },
+        { "$ifNull": ["$reported_model", null] },
+        null,
+    ] }] }
+    .into()
+}
+
 pub(crate) fn meter_group(legacy_dimensions: bool) -> Document {
     let mut group = doc! {
         "_id": {
@@ -379,7 +391,7 @@ pub(crate) fn meter_group(legacy_dimensions: bool) -> Document {
             "service_id": { "$ifNull": ["$service_id", null] },
             "service_slug": { "$ifNull": ["$service_slug", null] },
             "class": "$credential_class", "metric": "$metric", "code": "$lago_metric_code",
-            "model": { "$ifNull": ["$model", null] }, "layer": "$layer",
+            "model": reported_model_fallback(), "layer": "$layer",
             "assistant_source": { "$ifNull": ["$assistant_source", null] },
             "api_key": { "$ifNull": ["$api_key_id", null] }, "acked": "$lago_acked",
             "billable": { "$ne": [{ "$ifNull": ["$wallet_id", null] }, null] },

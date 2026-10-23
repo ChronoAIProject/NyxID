@@ -14,11 +14,13 @@ import type {
 import type { ApiKey } from "@/types/api";
 import { ApiError } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
+import { SHARED_LEGACY_WARNING } from "@/schemas/machines";
 import { formatDate } from "@/lib/utils";
 import { MachineGrantEditor } from "./machine-grant-editor";
 import { ErrorBanner } from "./error-banner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
@@ -128,6 +130,7 @@ function MachineGrantCardContent({
     id: string;
     revision: number;
   } | null>(null);
+  const [removeLegacyAccepted, setRemoveLegacyAccepted] = useState(false);
   const [error, setError] = useState<string>();
   const [needsReview, setNeedsReview] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -255,6 +258,7 @@ function MachineGrantCardContent({
     setError(undefined);
     try {
       if (Object.keys(grant.assignments).length > 1) {
+        if (!removeLegacyAccepted) return;
         const assignments = Object.fromEntries(
           Object.entries(grant.assignments).filter(
             ([nodeId]) => nodeId !== machineId,
@@ -267,7 +271,12 @@ function MachineGrantCardContent({
           Number.isSafeInteger(currentStateVersion)
             ? { expected_state_version: currentStateVersion }
             : {}),
-          selection: { assignments, expires_at: grant.expires_at },
+          selection: {
+            assignments,
+            expires_at: grant.expires_at,
+            separation: "shared_legacy",
+            legacy_warning_acknowledged: true,
+          },
         });
       } else {
         await revoke.mutateAsync({
@@ -544,12 +553,13 @@ function MachineGrantCardContent({
                   <Button
                     variant="outline"
                     disabled={save.isPending || revoke.isPending || needsReview}
-                    onClick={() =>
+                    onClick={() => {
+                      setRemoveLegacyAccepted(false);
                       setRemoveReview({
                         id: grant!.id,
                         revision: grant!.revision,
-                      })
-                    }
+                      });
+                    }}
                   >
                     Remove current Machine
                   </Button>
@@ -669,7 +679,10 @@ function MachineGrantCardContent({
         <Dialog
           open={removeReview !== null}
           onOpenChange={(open) => {
-            if (!open) setRemoveReview(null);
+            if (!open) {
+              setRemoveReview(null);
+              setRemoveLegacyAccepted(false);
+            }
           }}
         >
           <DialogContent>
@@ -712,6 +725,21 @@ function MachineGrantCardContent({
                   ))
                 : null}
             </div>
+            {grant && Object.keys(grant.assignments).length > 1 ? (
+              <div className="space-y-2 text-12">
+                <p>{SHARED_LEGACY_WARNING}</p>
+                <label className="flex items-start gap-2">
+                  <Checkbox
+                    checked={removeLegacyAccepted}
+                    onCheckedChange={(checked) =>
+                      setRemoveLegacyAccepted(checked === true)
+                    }
+                  />
+                  I explicitly allow shared legacy access for the retained
+                  Machines and acknowledge this warning.
+                </label>
+              </div>
+            ) : null}
             <DialogFooter>
               <Button variant="outline" onClick={() => setRemoveReview(null)}>
                 Cancel
@@ -720,6 +748,8 @@ function MachineGrantCardContent({
                 variant="destructive"
                 disabled={
                   !removeReviewCurrent ||
+                  (Object.keys(grant?.assignments ?? {}).length > 1 &&
+                    !removeLegacyAccepted) ||
                   query.isFetching ||
                   save.isPending ||
                   revoke.isPending

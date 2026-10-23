@@ -26,12 +26,16 @@ pub(crate) async fn execute_command(
     let command = OriginalManagerCommand::from_verified(
         admission.verified_update(),
         TurnInput {
+            channel_uploads: Vec::new(),
             text: admission.text().into(),
         },
     )
     .ok_or_else(refused)?;
-    let producers =
-        super::super::platform_manager_transport::compose(state.clone(), Arc::new(Settled));
+    let producers = super::super::platform_manager_transport::compose(
+        state.clone(),
+        Arc::new(Settled),
+        crate::handlers::agent_skills::preload_context(state.clone()),
+    );
     let lifecycle = super::super::platform_personal_binding_service::LifecycleProducer {
         personal: producers.personal.clone(),
         public: producers.public.clone(),

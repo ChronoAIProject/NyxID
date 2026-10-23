@@ -4,7 +4,19 @@ import {
   type ModelFilter,
 } from "@/hooks/use-nyxbot-model-usage";
 import type { NyxbotUsageModel } from "@/schemas/nyxbot-model-usage";
-import { modelCost } from "@/lib/nyxbot-model-usage";
+import {
+  accountAnalytics,
+  modelCost,
+  serviceAnalytics,
+  serviceLabel,
+} from "@/lib/nyxbot-model-usage";
+import {
+  BREAKDOWN_LABELS,
+  MEASURE_LABELS,
+  newPanel,
+} from "@/lib/usage-analytics";
+import { ChartView } from "@/components/billing-analytics/chart-view";
+import { ChevronDown } from "lucide-react";
 import { ModelTrends } from "./nyxbot-model-trends";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -12,6 +24,20 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorBanner } from "@/components/shared/error-banner";
 const count = (n: number) => n.toLocaleString();
+// The Usage dashboard's Top billing accounts panel, rendered from NyxBot data.
+const ACCOUNTS_PANEL = newPanel({
+  title: "Top billing accounts",
+  breakdown: "owner",
+  chart: "bar",
+  top: 10,
+});
+const SERVICES_PANEL = newPanel({
+  title: "Model services",
+  measure: "requests",
+  breakdown: "service",
+  chart: "bar",
+  top: 20,
+});
 function Table({
   title,
   columns,
@@ -293,9 +319,8 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                   Traffic by model
                 </h2>
                 <p className="mt-1 text-12 text-muted-foreground">
-                  Provider-reported token counts. Total = input +
-                  output. Cache counts can overlap input; audio and image counts
-                  are subsets.
+                  Provider-reported token counts. Total = input + output. Cache
+                  counts can overlap input; audio and image counts are subsets.
                 </p>
               </div>
               <ModelTrends data={data} kind="traffic" />
@@ -336,45 +361,43 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                   </tr>
                 ))}
               </Table>
-              <div>
-                <h2 className="font-display text-15 font-semibold">
-                  Top billing accounts
-                </h2>
-                <p className="mt-1 text-12 text-muted-foreground">
-                  Top 10 across all billing accounts, ranked by known gross
-                  credits, then requests. Missing prices can affect cost
-                  ranking. Each account shows up to 20 models and a summed Other
-                  row.
-                </p>
-              </div>
-              <div className="space-y-3">
-                {data.accounts.map(({ account, usage, models }) => (
-                  <Card key={account.id} className="min-w-0 space-y-3 p-4">
-                    <div className="flex flex-wrap justify-between gap-2">
-                      <div>
-                        <h3 className="text-13 font-semibold">
-                          {account.display_name}
-                        </h3>
-                        <p className="text-11 text-text-tertiary">
-                          {account.user_type === "org"
-                            ? "Organization"
-                            : (account.email ?? "Billing account")}
-                        </p>
-                      </div>
-                      <p className="text-12 tabular-nums">
-                        {modelCost(usage, "gross_cost")} credits ·{" "}
-                        {count(usage.requests)} requests ·{" "}
-                        {count(usage.total_tokens)} tokens
-                      </p>
-                    </div>
+              <Card
+                role="article"
+                aria-label="Model services"
+                className="min-w-0 p-4"
+              >
+                <div className="mb-4">
+                  <h2 className="font-display text-15 font-semibold leading-none tracking-tight">
+                    Model services
+                  </h2>
+                  <p className="mt-1 text-12 text-muted-foreground">
+                    {MEASURE_LABELS.requests} · {BREAKDOWN_LABELS.service}
+                  </p>
+                </div>
+                <ChartView
+                  data={serviceAnalytics(data)}
+                  panel={SERVICES_PANEL}
+                />
+                <details className="group mt-4 border-t border-border/50 pt-3">
+                  <summary className="flex cursor-pointer list-none items-center justify-between text-11 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+                    Cost and tokens by service
+                    <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+                  </summary>
+                  <p className="mt-2 text-11 text-muted-foreground">
+                    The inference service is recorded on every model execution,
+                    including usage from before model names were captured.
+                  </p>
+                  <div className="mt-3">
                     <Table
-                      title={`${account.display_name} usage by model`}
-                      columns={["Model", "Gross credits", ...tokenLabels]}
+                      title="Model services usage"
+                      columns={["Service", "Gross credits", ...tokenLabels]}
                     >
-                      {models.map((row, index) => (
+                      {data.services.map((row, index) => (
                         <tr key={index}>
                           <Cell heading>
-                            <ModelName row={row} onSelect={changeFilter} />
+                            {row.is_other
+                              ? `Other · ${count(row.groups)} services`
+                              : serviceLabel(row)}
                           </Cell>
                           <Cell>{modelCost(row.usage, "gross_cost")}</Cell>
                           {tokenFields.map((field) => (
@@ -383,23 +406,91 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                         </tr>
                       ))}
                     </Table>
-                  </Card>
-                ))}
-                {data.other_accounts && (
-                  <Card className="p-4 text-12">
-                    <strong>
-                      Other · {count(data.other_accounts.groups)} billing
-                      accounts
-                    </strong>
-                    <p className="mt-1 tabular-nums">
-                      {modelCost(data.other_accounts.usage, "gross_cost")}{" "}
-                      credits · {count(data.other_accounts.usage.requests)}{" "}
-                      requests · {count(data.other_accounts.usage.total_tokens)}{" "}
-                      tokens
-                    </p>
-                  </Card>
-                )}
-              </div>
+                  </div>
+                </details>
+              </Card>
+              <Card
+                role="article"
+                aria-label="Top billing accounts"
+                className="min-w-0 p-4"
+              >
+                <div className="mb-4">
+                  <h2 className="font-display text-15 font-semibold leading-none tracking-tight">
+                    Top billing accounts
+                  </h2>
+                  <p className="mt-1 text-12 text-muted-foreground">
+                    {MEASURE_LABELS.cost} · {BREAKDOWN_LABELS.owner}
+                  </p>
+                </div>
+                <ChartView
+                  data={accountAnalytics(data)}
+                  panel={ACCOUNTS_PANEL}
+                />
+                <details className="group mt-4 border-t border-border/50 pt-3">
+                  <summary className="flex cursor-pointer list-none items-center justify-between text-11 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+                    Models by billing account
+                    <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+                  </summary>
+                  <p className="mt-2 text-11 text-muted-foreground">
+                    Ranked by known gross credits, then requests. Missing prices
+                    can affect cost ranking. Each account shows up to 20 models
+                    and a summed Other row.
+                  </p>
+                  <div className="mt-3 space-y-4">
+                    {data.accounts.map(({ account, usage, models }) => (
+                      <div key={account.id} className="min-w-0 space-y-2">
+                        <div className="flex flex-wrap justify-between gap-2">
+                          <div>
+                            <h3 className="text-13 font-semibold">
+                              {account.display_name}
+                            </h3>
+                            <p className="text-11 text-text-tertiary">
+                              {account.user_type === "org"
+                                ? "Organization"
+                                : (account.email ?? "Billing account")}
+                            </p>
+                          </div>
+                          <p className="text-12 tabular-nums">
+                            {modelCost(usage, "gross_cost")} credits ·{" "}
+                            {count(usage.requests)} requests ·{" "}
+                            {count(usage.total_tokens)} tokens
+                          </p>
+                        </div>
+                        <Table
+                          title={`${account.display_name} usage by model`}
+                          columns={["Model", "Gross credits", ...tokenLabels]}
+                        >
+                          {models.map((row, index) => (
+                            <tr key={index}>
+                              <Cell heading>
+                                <ModelName row={row} onSelect={changeFilter} />
+                              </Cell>
+                              <Cell>{modelCost(row.usage, "gross_cost")}</Cell>
+                              {tokenFields.map((field) => (
+                                <Cell key={field}>
+                                  {count(row.usage[field])}
+                                </Cell>
+                              ))}
+                            </tr>
+                          ))}
+                        </Table>
+                      </div>
+                    ))}
+                    {data.other_accounts && (
+                      <p className="text-12 tabular-nums">
+                        <strong>
+                          Other · {count(data.other_accounts.groups)} billing
+                          accounts
+                        </strong>{" "}
+                        · {modelCost(data.other_accounts.usage, "gross_cost")}{" "}
+                        credits · {count(data.other_accounts.usage.requests)}{" "}
+                        requests ·{" "}
+                        {count(data.other_accounts.usage.total_tokens)} tokens
+                      </p>
+                    )}
+                  </div>
+                </details>
+              </Card>
             </>
           )}
           <details className="text-11 text-muted-foreground">
@@ -414,7 +505,8 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
               Historical attribution also needs retained assistant credential,
               rotation, conversation, or provisioning evidence. Unknown model
               means an execution had no recorded billing model; it does not use
-              a conversation’s selected model.
+              a conversation’s selected model. Proxied executions record the
+              provider-reported model; earlier rows remain unknown.
             </p>
             {data.excluded
               .filter((e) => e.population !== "unattributable_legacy")

@@ -4377,10 +4377,53 @@ async fn execute_resolved_proxy_inner<'a>(
         },
     );
 
-    if machine_git && method_str == "POST" && path.ends_with("/git-upload-pack") {
-        // Smart-HTTP fetch uses POST for its negotiation body but cannot
-        // mutate repository refs. Receive-pack remains an ordinary write.
+    let method_override = crate::services::mcp_service::http_carries_method_override(
+        &method_str,
+        &all_headers,
+        query.as_deref(),
+        &body_bytes,
+    );
+    // Only POST needs catalog authority to become a read. Preserve method
+    // classification and the existing endpoint-query budget for other raw
+    // requests; guest/operation-scope authorization has already run above.
+    let effects = if method == reqwest::Method::POST {
+        crate::services::agent_operation_scope_service::unscoped_effects(
+            &state.db,
+            operation_scope_id,
+            operation_catalog_id,
+            &method,
+            operation_path.as_ref(),
+        )
+        .await?
+    } else {
+        crate::services::mcp_service::operation_effects(&method, Default::default())
+    };
+    operation_descriptor::apply_operation_effects(&mut operation, effects, method_override);
+    operation_descriptor::apply_inference_contract(
+        &mut operation,
+        &target.service,
+        Some(&body_bytes),
+        method_override,
+    );
+    // The unforgeable extension is installed only after the server admits an
+    // owner turn and validates the fixed engine contract. Tool effects retain
+    // their own approval checks on callbacks; arbitrary raw POSTs do not qualify.
+    if nyxagent_admission
+        && !method_override
+        && !effects.destructive
+        && method_str == "POST"
+        && path.trim_matches('/') == "v1/responses"
+        && crate::services::assistant_nyxagent::row_contract(Some(&target.service), None).valid()
+    {
         operation.verb = crate::models::service_approval_config::ApprovalVerb::Read;
+    }
+
+    if machine_git {
+        operation_descriptor::apply_machine_git_contract(
+            &mut operation,
+            &all_headers,
+            method_override,
+        );
     }
 
     let assistant_ack = all_headers
@@ -11311,6 +11354,8 @@ mod proxy_resolution_integration_tests {
         });
 
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&user_id, UserType::Person))
             .await
@@ -11679,6 +11724,8 @@ mod proxy_resolution_integration_tests {
 
     fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
         AuthUser {
+            mfa_assured: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -11712,6 +11759,8 @@ mod proxy_resolution_integration_tests {
 
     fn access_token_auth(user_id: &str) -> AuthUser {
         AuthUser {
+            mfa_assured: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -11755,7 +11804,7 @@ mod proxy_resolution_integration_tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: timeout_secs,
             grant_expiry_days: 30,
-            approval_required: false,
+            approval_required: Some(false),
             push_enabled: false,
             push_devices: vec![],
             created_at: now,
@@ -12205,6 +12254,8 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let org_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &org_id, false).await;
+
         let sa_id = insert_general_service_account(&db, &org_id).await;
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&org_id, UserType::Org))
@@ -12246,6 +12297,8 @@ mod proxy_resolution_integration_tests {
             .unwrap();
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &member_id, false).await;
+
         seed_org_actor(&db, &org_id, &member_id, OrgRole::Member).await;
         let state = test_app_state(db.clone());
         let (base_url, echo_server) = start_node_echo_downstream().await;
@@ -12366,6 +12419,8 @@ mod proxy_resolution_integration_tests {
                 .unwrap();
             let state = test_app_state(db.clone());
             let owner = Uuid::new_v4().to_string();
+            crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+
             db.collection::<crate::models::user::User>(USERS)
                 .insert_one(test_user(&owner, UserType::Person))
                 .await
@@ -12502,6 +12557,8 @@ mod proxy_resolution_integration_tests {
 
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &member_id, false).await;
+
         seed_org_actor(&db, &org_id, &member_id, OrgRole::Member).await;
 
         let state = test_app_state(db.clone());
@@ -12590,6 +12647,8 @@ mod proxy_resolution_integration_tests {
         let (base_url, server) = start_auth_downstream().await;
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &member_id, false).await;
+
         seed_org_actor(&db, &org_id, &member_id, OrgRole::Member).await;
 
         let state = test_app_state(db.clone());
@@ -12851,6 +12910,8 @@ mod proxy_resolution_integration_tests {
 
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &member_id, false).await;
+
         seed_org_actor(&db, &org_id, &member_id, OrgRole::Member).await;
 
         let state = test_app_state(db.clone());
@@ -12905,6 +12966,8 @@ mod proxy_resolution_integration_tests {
         };
 
         let owner_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &owner_id, false).await;
+
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&owner_id, UserType::Person))
             .await
@@ -13008,6 +13071,8 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let owner_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &owner_id, false).await;
+
         let sa_id = insert_general_service_account(&db, &owner_id).await;
         let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
         catalog.base_url = base_url.clone();
@@ -13218,6 +13283,8 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&user_id, UserType::Person))
             .await
@@ -13237,6 +13304,7 @@ mod proxy_resolution_integration_tests {
                 name: "scoped-proxy-key".to_string(),
                 scopes: Some("proxy".to_string()),
                 expires_at: None,
+                never_expires: false,
                 description: None,
                 allowed_service_ids: vec![allowed_service.id.clone()],
                 allowed_node_ids: vec![allowed_node.id.clone()],
@@ -13370,6 +13438,8 @@ mod proxy_resolution_integration_tests {
         });
 
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&user_id, UserType::Person))
             .await
@@ -13461,6 +13531,8 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&user_id, UserType::Person))
             .await
@@ -13520,6 +13592,8 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&user_id, UserType::Person))
             .await
@@ -13729,6 +13803,8 @@ mod proxy_resolution_integration_tests {
         });
 
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         crate::services::role_service::seed_system_roles(&db)
             .await
             .expect("seed platform roles");
@@ -14375,6 +14451,7 @@ mod proxy_resolution_integration_tests {
 
         enable_wire_log_flag(&db).await;
         let non_admin_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &non_admin_id, false).await;
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&non_admin_id, UserType::Person))
             .await
@@ -14547,6 +14624,8 @@ mod proxy_resolution_integration_tests {
         });
 
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         crate::services::role_service::seed_system_roles(&db)
             .await
             .expect("seed platform roles");
@@ -15640,6 +15719,222 @@ mod nyxagent_admission_tests {
                 }
             }
         }
+        db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod nyxbot_readiness_tests {
+    use super::*;
+    use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
+    use crate::services::assistant_nyxagent as engine;
+    use axum::http::Method;
+    use axum::response::IntoResponse;
+    use axum::{Router, body::Body, http::Request, routing::post};
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn conversation_key_model_call_succeeds_with_gated_flags_on_and_readiness_unready() {
+        let f = crate::services::org_agent_tests::Fixture::new("nyxbot_model_call_readiness").await;
+        let db = f.state.db.clone();
+        let owner = f.admin.clone();
+        // Mirror prod: readiness-gated flags are globally on while the fleet
+        // readiness roster was never declared (security_replicas empty of this process).
+        for flag in [
+            "assistant:live-turn-gate",
+            "assistant:operation-scopes",
+            "assistant:org-agents",
+            "assistant:machine-capabilities",
+            "assistant:machine-contexts",
+        ] {
+            crate::services::feature_flag_service::set_platform_override(
+                &db,
+                flag,
+                &crate::services::feature_flag_service::FlagTarget::Global,
+                true,
+                &owner,
+            )
+            .await
+            .unwrap();
+        }
+
+        let upstream = Router::new().route(
+            "/{*path}",
+            post(|| async {
+                (
+                    [("content-type", "application/json")],
+                    r#"{"id":"resp_1","object":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#,
+                )
+                    .into_response()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let mut model = crate::models::downstream_service::test_helpers::dummy_service();
+        model.id = Uuid::new_v4().to_string();
+        model.slug = "chrono-llm-public".into();
+        model.name = "Chrono LLM (public)".into();
+        model.base_url = format!("http://{address}");
+        // Mirror prod: legacy public master-credential service (bearer master key).
+        model.auth_method = "bearer".into();
+        model.requires_user_credential = false;
+        model.service_category = "internal".into();
+        model.visibility = "public".into();
+        model.platform_key = None;
+        model.credential_encrypted = f
+            .state
+            .encryption_keys
+            .encrypt(b"operator-secret")
+            .await
+            .unwrap();
+        model.inference = Some(
+            serde_json::from_value(
+                serde_json::json!({"wire_protocol":"openai_responses","model_list":true}),
+            )
+            .unwrap(),
+        );
+        db.collection::<DownstreamService>(SERVICES)
+            .insert_one(&model)
+            .await
+            .unwrap();
+        // Mirror prod: the owner has an auto-connected catalog UserService for it.
+        let endpoint_id = Uuid::new_v4().to_string();
+        let user_service_id = Uuid::new_v4().to_string();
+        db.collection(crate::models::user_endpoint::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user_endpoint(
+                &endpoint_id,
+                &owner,
+                "chrono-llm-public",
+                &format!("http://{address}"),
+                None,
+                Some(&model.id),
+            ))
+            .await
+            .unwrap();
+        db.collection(crate::models::user_service::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user_service(
+                &user_service_id,
+                &owner,
+                "chrono-llm-public",
+                &endpoint_id,
+                Some(&model.id),
+                None,
+            ))
+            .await
+            .unwrap();
+        // Mirror prod: ordinary (non-autopilot) assistant settings.
+        db.collection::<mongodb::bson::Document>(
+            crate::models::assistant_settings::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"user_id": &owner},
+            doc! {"$set": {"access_mode": "nyxmode"}},
+        )
+        .await
+        .unwrap();
+
+        db.collection::<mongodb::bson::Document>(crate::models::security_replica::COLLECTION_NAME)
+            .delete_many(doc! {})
+            .await
+            .unwrap();
+        assert!(
+            !crate::services::security_readiness_service::report(&db, "assistant:live-turn-gate")
+                .await
+                .unwrap()
+                .ready
+        );
+
+        let input = serde_json::from_value::<engine::TurnRequest>(
+            serde_json::json!({"text":"Reply with the single word pong."}),
+        )
+        .unwrap();
+        let row = Box::pin(engine::begin_turn(
+            &db,
+            &owner,
+            &input,
+            &f.state.encryption_keys,
+        ))
+        .await
+        .unwrap();
+        let key = f.key(&row).await;
+        let credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &db,
+                &f.state.encryption_keys,
+                &owner,
+                &row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, _, credential_id) =
+            crate::services::key_service::validate_api_key(&db, &credential.raw_key)
+                .await
+                .unwrap();
+        let auth = crate::mw::auth::api_key_auth_user(&db, &key, credential_id, None, None)
+            .await
+            .unwrap();
+        assert!(
+            auth.assistant_chat.is_some(),
+            "conversation key must load chat authority"
+        );
+
+        let body = serde_json::json!({
+            "model":"gpt-6.1-sol","store":false,"stream":false,"instructions":"You are NyxBot.",
+            "input":[{"role":"user","content":[{"type":"input_text","text":"Reply with the single word pong."}]}],
+            "tools":[],"tool_choice":"auto","parallel_tool_calls":false,
+            "reasoning":{"effort":"medium","summary":"auto"},"include":["reasoning.encrypted_content"],
+            "prompt_cache_key":"thread-1","text":{"verbosity":"medium"}
+        })
+        .to_string();
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/proxy/s/chrono-llm-public/responses")
+            .header("content-type", "application/json")
+            .header("user-agent", "codex_cli_rs/0.1")
+            .body(Body::from(body))
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::OriginalUri(
+            "/api/v1/proxy/s/chrono-llm-public/responses"
+                .parse()
+                .unwrap(),
+        ));
+        request.extensions_mut().insert(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        );
+        let mut resolved_slug = String::new();
+        let result = Box::pin(proxy_request_by_slug_inner(
+            &f.state,
+            &auth,
+            "chrono-llm-public",
+            "responses",
+            request,
+            &mut resolved_slug,
+        ))
+        .await;
+        let response = result.expect("conversation-key model call must reach the upstream");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["id"], "resp_1");
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(
+                crate::models::security_replica::COLLECTION_NAME
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+            0,
+            "the successful request must not depend on a readiness heartbeat"
+        );
+        _server.abort();
         db.drop().await.unwrap();
     }
 }

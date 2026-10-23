@@ -13,6 +13,198 @@ pub struct Support {
     pub reason: Option<String>,
 }
 
+/// Versioned, node-observed prerequisites for selecting a *new* separated
+/// assignment. The older Support advertisement is deliberately insufficient:
+/// it predates browser launch diagnostics. None means not observed, never true.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Evidence {
+    pub version: u32,
+    pub os: String,
+    pub landlock_abi: Option<u32>,
+    pub separate_users: Option<bool>,
+    /// Real node/sibling file and selected key-service denial under every role.
+    pub credential_custody: Option<bool>,
+    pub managed_browser_configured: Option<bool>,
+    pub command_seccomp: Option<bool>,
+    pub landlock_enforced: Option<bool>,
+    /// Live renderer namespace, identity, NNP and additional seccomp filters
+    /// observed under both configured browser identities.
+    pub managed_browser_sandbox: Option<bool>,
+    /// The secure identity positively refused DevTools without opening a listener.
+    pub managed_browser_policy: Option<bool>,
+    /// Diagnostic only: actual browser launch decides support under AppArmor.
+    pub apparmor_userns_restricted: Option<bool>,
+    /// Diagnostic classification of a failed probe; never evidence of support.
+    pub probe_timed_out: bool,
+    /// Required browser observations were inaccessible in the container. This
+    /// diagnostic can only deny support, never substitute for a positive probe.
+    pub browser_sandbox_unobservable_in_container: bool,
+}
+
+// v1 inferred pre-exec namespaces; v2 used DevTools-backed DOM diagnostics
+// incompatible with secure policy. v3 observes live OS sandbox and policy effects.
+// v4 additionally requires observed credential custody under every worker identity.
+pub const EVIDENCE_VERSION: u32 = 4;
+pub const MIN_LANDLOCK_ABI: u32 = 6;
+
+impl Evidence {
+    pub fn unavailable_reason(&self) -> Option<&'static str> {
+        if self.version != EVIDENCE_VERSION {
+            return Some("separated_probe_version_unsupported");
+        }
+        if self.os != "linux" {
+            return Some("separated_requires_linux");
+        }
+        if self.browser_sandbox_unobservable_in_container {
+            return Some("separated_browser_sandbox_unobservable_in_container");
+        }
+        if self.probe_timed_out {
+            return Some("separated_probe_timeout");
+        }
+        if self.managed_browser_policy == Some(false) {
+            return Some("separated_browser_policy_not_effective");
+        }
+        if self.landlock_abi.is_none_or(|abi| abi < MIN_LANDLOCK_ABI) {
+            return Some("separated_requires_landlock_abi_6");
+        }
+        for (observation, failure) in [
+            (self.separate_users, "separated_requires_separate_users"),
+            (
+                self.managed_browser_configured,
+                "separated_requires_managed_browser",
+            ),
+            (self.command_seccomp, "separated_seccomp_probe_failed"),
+            (self.landlock_enforced, "separated_landlock_probe_failed"),
+            (
+                self.managed_browser_policy,
+                "separated_browser_policy_not_effective",
+            ),
+            (
+                self.managed_browser_sandbox,
+                "separated_browser_sandbox_probe_failed",
+            ),
+        ] {
+            match observation {
+                Some(true) => {}
+                Some(false) => return Some(failure),
+                None => return Some("separated_probe_evidence_incomplete"),
+            }
+        }
+        if self.credential_custody != Some(true) {
+            return Some("node_custody_unverified");
+        }
+        None
+    }
+
+    pub fn support(&self) -> Support {
+        let reason = self.unavailable_reason();
+        Support {
+            available: reason.is_none(),
+            landlock_abi: self.landlock_abi,
+            reason: reason.map(str::to_owned),
+        }
+    }
+}
+
+/// New setup intent only. Existing persisted assignments keep their own mode;
+/// this selector is never a migration or a fallback for failed separated work.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Choice {
+    #[default]
+    Automatic,
+    RequireSeparated,
+    SharedLegacy,
+}
+
+impl Choice {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::RequireSeparated => "require_separated",
+            Self::SharedLegacy => "shared_legacy",
+        }
+    }
+}
+
+pub const SHARED_LEGACY_WARNING: &str = "Shared legacy access gives agent commands the full access of their OS user. A misbehaving or prompt-injected agent may read node tokens, signing secrets and stored credentials accessible to that user, including the node config and local credential store. Workspace roots constrain file tools and working directories, not the shell. Supported separated contexts still share the host kernel and retain kernel-exploit and supervisor-compromise risks; they are not a VM boundary. Use a separate machine container or VM per agent for stronger isolation; containers also share their host kernel.";
+
+/// Fixed, actionable text suitable for CLI, API and tool responses. Never
+/// include probe output, browser contents or a node-supplied diagnostic here.
+pub fn unavailable_message(reason: &str) -> &'static str {
+    match reason {
+        "separated_browser_sandbox_unobservable_in_container" => {
+            "This container does not expose every kernel observation required to confirm the managed browser sandbox. Separated contexts are unavailable; use a supported native Linux installation or a separate machine container or VM per agent. Do not add tracing capabilities or disable the browser sandbox."
+        }
+        "node_custody_unverified" => {
+            "Node credential custody could not be verified under every command and browser identity. Protect node tokens, signing secrets and stored credentials with a separate supervisor identity and private storage, then restart the node to repeat the probes. Shared legacy mode retains the owner's OS access."
+        }
+        "separated_probe_timeout" => {
+            "A separation capability probe exceeded its five-second bound. A cold Chromium start can cause this; rerun setup when the host is less busy. Separation remains unavailable until every probe succeeds."
+        }
+        "separated_browser_policy_not_effective" => {
+            "The actual managed secure browser did not confirm that its policy blocks DevTools. Reinstall managed browser policies for this executable and rerun setup; separation remains unavailable until the live policy check succeeds."
+        }
+        "separated_requires_linux" => {
+            "This runtime supports per-agent separation only on Linux; macOS has no supported per-agent sandbox. Use a supported Linux host."
+        }
+        "separated_requires_separate_users" => {
+            "Separation requires a root supervisor with distinct non-root command, secure-browser and developer-browser users. On Linux, rerun setup with sudo and --separate-users."
+        }
+        "separated_requires_landlock_abi_6" => {
+            "Separation requires working Landlock ABI 6 or newer. Upgrade the Linux kernel or use a supported host."
+        }
+        "separated_requires_managed_browser" => {
+            "Separation requires a configured managed Chromium executable. Install Chromium and rerun setup with --browser and managed browser policies enabled."
+        }
+        "separated_seccomp_probe_failed" => {
+            "The command user's seccomp policy could not be confirmed. Check the host security policy before retrying setup."
+        }
+        "separated_landlock_probe_failed" => {
+            "The command user's Landlock enforcement could not be confirmed. Check the host security policy before retrying setup."
+        }
+        "separated_browser_sandbox_probe_failed" => {
+            "The managed Chromium sandbox could not be confirmed under both browser users. Check the configured executable and its AppArmor user-namespace policy before retrying setup."
+        }
+        "separated_probe_version_unsupported"
+        | "separated_capabilities_not_reported"
+        | "separated_probe_evidence_incomplete" => {
+            "The node has not reported complete supported separation evidence. Upgrade or reconnect the node and rerun setup to confirm its capabilities."
+        }
+        _ => {
+            "Separation is unavailable. Check the node's capability report and rerun setup on a supported host."
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    Separated,
+    SharedLegacy,
+}
+
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Separated => MODE,
+            Self::SharedLegacy => "shared_legacy",
+        }
+    }
+}
+
+pub fn select_new(choice: Choice, evidence: Option<&Evidence>) -> Result<Mode, &'static str> {
+    if choice == Choice::SharedLegacy {
+        return Ok(Mode::SharedLegacy);
+    }
+    let evidence = evidence.ok_or("separated_capabilities_not_reported")?;
+    if let Some(reason) = evidence.unavailable_reason() {
+        return Err(reason);
+    }
+    Ok(Mode::Separated)
+}
+
 pub const MODE: &str = "separated";
 pub const MAX_CONTEXTS: usize = 128;
 pub const MAX_GENERATIONS: usize = 128;
@@ -200,6 +392,297 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn confirmed() -> Evidence {
+        Evidence {
+            version: EVIDENCE_VERSION,
+            os: "linux".into(),
+            landlock_abi: Some(MIN_LANDLOCK_ABI),
+            separate_users: Some(true),
+            credential_custody: Some(true),
+            managed_browser_configured: Some(true),
+            command_seccomp: Some(true),
+            landlock_enforced: Some(true),
+            managed_browser_sandbox: Some(true),
+            managed_browser_policy: Some(true),
+            apparmor_userns_restricted: None,
+            probe_timed_out: false,
+            browser_sandbox_unobservable_in_container: false,
+        }
+    }
+
+    #[test]
+    fn inaccessible_container_browser_observations_never_claim_support() {
+        for sandbox in [None, Some(false), Some(true)] {
+            let report = Evidence {
+                browser_sandbox_unobservable_in_container: true,
+                managed_browser_sandbox: sandbox,
+                ..confirmed()
+            };
+            let reason = "separated_browser_sandbox_unobservable_in_container";
+            assert_eq!(report.unavailable_reason(), Some(reason));
+            assert!(!report.support().available);
+            assert!(
+                unavailable_message(reason).contains("separate machine container or VM per agent")
+            );
+            for choice in [Choice::Automatic, Choice::RequireSeparated] {
+                assert_eq!(select_new(choice, Some(&report)), Err(reason));
+            }
+            assert_eq!(
+                select_new(Choice::SharedLegacy, Some(&report)),
+                Ok(Mode::SharedLegacy)
+            );
+        }
+        let old = serde_json::to_value(confirmed()).unwrap();
+        let mut missing = old.as_object().unwrap().clone();
+        missing.remove("browser_sandbox_unobservable_in_container");
+        let restored: Evidence = serde_json::from_value(missing.into()).unwrap();
+        assert!(!restored.browser_sandbox_unobservable_in_container);
+        assert!(restored.support().available);
+    }
+
+    #[test]
+    fn new_selection_uses_confirmed_support_and_never_implicitly_falls_back() {
+        for abi in [6, 8] {
+            let evidence = Evidence {
+                landlock_abi: Some(abi),
+                ..confirmed()
+            };
+            for choice in [Choice::Automatic, Choice::RequireSeparated] {
+                assert_eq!(select_new(choice, Some(&evidence)), Ok(Mode::Separated));
+                assert!(select_new(choice, None).is_err());
+                assert!(select_new(choice, Some(&Evidence::default())).is_err());
+            }
+        }
+        for evidence in [None, Some(Evidence::default()), Some(confirmed())] {
+            assert_eq!(
+                select_new(Choice::SharedLegacy, evidence.as_ref()),
+                Ok(Mode::SharedLegacy)
+            );
+        }
+        for version in [0, 1, 2, 3, EVIDENCE_VERSION + 1] {
+            let old = Evidence {
+                version,
+                ..confirmed()
+            };
+            for choice in [Choice::Automatic, Choice::RequireSeparated] {
+                assert_eq!(
+                    select_new(choice, Some(&old)),
+                    Err("separated_probe_version_unsupported")
+                );
+            }
+            assert_eq!(
+                select_new(Choice::SharedLegacy, Some(&old)),
+                Ok(Mode::SharedLegacy)
+            );
+        }
+        assert_eq!(Choice::default(), Choice::Automatic);
+        assert_eq!(Mode::Separated.as_str(), "separated");
+        assert_eq!(Mode::SharedLegacy.as_str(), "shared_legacy");
+    }
+
+    #[test]
+    fn timeout_is_distinct_actionable_and_cannot_confirm_support() {
+        let report = Evidence {
+            probe_timed_out: true,
+            ..confirmed()
+        };
+        assert_eq!(
+            report.support().reason.as_deref(),
+            Some("separated_probe_timeout")
+        );
+        for choice in [Choice::Automatic, Choice::RequireSeparated] {
+            assert_eq!(
+                select_new(choice, Some(&report)),
+                Err("separated_probe_timeout")
+            );
+        }
+        let message = unavailable_message("separated_probe_timeout");
+        assert!(message.contains("five-second") && message.contains("rerun"));
+        for warning in ["node tokens", "signing secrets", "stored credentials"] {
+            assert!(SHARED_LEGACY_WARNING.contains(warning));
+        }
+    }
+
+    #[test]
+    fn v4_custody_is_required_and_old_evidence_never_recovers_support() {
+        for credential_custody in [None, Some(false)] {
+            let report = Evidence {
+                credential_custody,
+                ..confirmed()
+            };
+            assert_eq!(report.unavailable_reason(), Some("node_custody_unverified"));
+            assert_eq!(
+                select_new(Choice::Automatic, Some(&report)),
+                Err("node_custody_unverified")
+            );
+            assert_eq!(
+                select_new(Choice::RequireSeparated, Some(&report)),
+                Err("node_custody_unverified")
+            );
+            assert_eq!(
+                select_new(Choice::SharedLegacy, Some(&report)),
+                Ok(Mode::SharedLegacy)
+            );
+        }
+        let mut v3 = serde_json::to_value(confirmed()).unwrap();
+        v3["version"] = serde_json::json!(3);
+        v3.as_object_mut().unwrap().remove("credential_custody");
+        let report: Evidence = serde_json::from_value(v3).unwrap();
+        assert_eq!(report.credential_custody, None);
+        assert_eq!(
+            report.unavailable_reason(),
+            Some("separated_probe_version_unsupported")
+        );
+        assert!(unavailable_message("node_custody_unverified").contains("stored credentials"));
+    }
+
+    #[test]
+    fn every_missing_or_failed_mechanism_prevents_the_new_default() {
+        for (field, failure) in [
+            ("separate_users", "separated_requires_separate_users"),
+            (
+                "managed_browser_configured",
+                "separated_requires_managed_browser",
+            ),
+            ("command_seccomp", "separated_seccomp_probe_failed"),
+            ("landlock_enforced", "separated_landlock_probe_failed"),
+            (
+                "managed_browser_policy",
+                "separated_browser_policy_not_effective",
+            ),
+            (
+                "managed_browser_sandbox",
+                "separated_browser_sandbox_probe_failed",
+            ),
+        ] {
+            for value in [serde_json::Value::Null, serde_json::json!(false)] {
+                let mut report = serde_json::to_value(confirmed()).unwrap();
+                report[field] = value.clone();
+                let report: Evidence = serde_json::from_value(report).unwrap();
+                let reason = if value.is_null() {
+                    "separated_probe_evidence_incomplete"
+                } else {
+                    failure
+                };
+                for choice in [Choice::Automatic, Choice::RequireSeparated] {
+                    assert_eq!(select_new(choice, Some(&report)), Err(reason), "{field}");
+                }
+                assert!(!report.support().available);
+                assert_eq!(report.support().reason.as_deref(), Some(reason));
+            }
+        }
+    }
+
+    #[test]
+    fn platform_abi_and_probe_version_are_required_independently() {
+        for (report, reason) in [
+            (
+                Evidence {
+                    os: "macos".into(),
+                    ..confirmed()
+                },
+                "separated_requires_linux",
+            ),
+            (
+                Evidence {
+                    os: "windows".into(),
+                    ..confirmed()
+                },
+                "separated_requires_linux",
+            ),
+            (
+                Evidence {
+                    landlock_abi: None,
+                    ..confirmed()
+                },
+                "separated_requires_landlock_abi_6",
+            ),
+            (
+                Evidence {
+                    landlock_abi: Some(5),
+                    ..confirmed()
+                },
+                "separated_requires_landlock_abi_6",
+            ),
+            (
+                Evidence {
+                    version: 0,
+                    ..confirmed()
+                },
+                "separated_probe_version_unsupported",
+            ),
+            (
+                Evidence {
+                    version: 1,
+                    ..confirmed()
+                },
+                "separated_probe_version_unsupported",
+            ),
+            (
+                Evidence {
+                    version: EVIDENCE_VERSION + 1,
+                    ..confirmed()
+                },
+                "separated_probe_version_unsupported",
+            ),
+        ] {
+            assert_eq!(select_new(Choice::Automatic, Some(&report)), Err(reason));
+        }
+    }
+
+    #[test]
+    fn old_protocol_or_support_boolean_does_not_prove_new_default_support() {
+        let old: crate::MachineProfile = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "authority_versions": [2, 3],
+            "separated": {"available": true, "landlock_abi": 8}
+        }))
+        .unwrap();
+        assert!(old.separated.unwrap().available);
+        assert_eq!(
+            select_new(Choice::Automatic, old.separation_evidence.as_ref()),
+            Err("separated_capabilities_not_reported")
+        );
+        let v1: Evidence = serde_json::from_value(serde_json::json!({
+            "version": 1, "os": "linux", "landlock_abi": 8,
+            "separate_users": true, "managed_browser_configured": true,
+            "command_seccomp": true, "landlock_enforced": true,
+            "browser_user_namespaces": true
+        }))
+        .unwrap();
+        assert_eq!(v1.managed_browser_sandbox, None);
+        assert_eq!(
+            select_new(Choice::Automatic, Some(&v1)),
+            Err("separated_probe_version_unsupported")
+        );
+    }
+
+    #[test]
+    fn evidence_wire_compatibility_is_additive_but_partial_reports_never_confirm() {
+        let mut report = serde_json::to_value(confirmed()).unwrap();
+        report["future_probe"] = serde_json::json!({"result":true});
+        let profile: crate::MachineProfile = serde_json::from_value(serde_json::json!({
+            "separated": confirmed().support(), "separation_evidence": report
+        }))
+        .unwrap();
+        assert_eq!(profile.separation_evidence.as_ref(), Some(&confirmed()));
+        let encoded = serde_json::to_value(&profile).unwrap();
+        #[derive(Deserialize)]
+        struct OldReader {
+            separated: Support,
+        }
+        let old: OldReader = serde_json::from_value(encoded).unwrap();
+        assert!(old.separated.available);
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"version":1,"os":"linux","landlock_abi":8}),
+        ] {
+            let partial: Evidence = serde_json::from_value(value).unwrap();
+            assert!(select_new(Choice::Automatic, Some(&partial)).is_err());
+        }
+    }
+
     #[test]
     fn advertised_support_accepts_new_fields_and_defaults_missing_authority_to_denied() {
         let profile: crate::MachineProfile = serde_json::from_value(serde_json::json!({

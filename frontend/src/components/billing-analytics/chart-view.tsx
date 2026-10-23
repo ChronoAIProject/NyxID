@@ -21,6 +21,7 @@ import {
   formatAnalyticsValue,
   unitLabel,
   INTERVAL_LABELS,
+  BREAKDOWN_LABELS,
   PANEL_HEIGHTS,
   partialBucket,
   bucketBounds,
@@ -597,7 +598,11 @@ export function ChartView({
                 <thead className="sticky top-0 bg-muted/90">
                   <tr>
                     <th className="px-3 py-2 font-medium">
-                      {temporal ? "Time (UTC)" : "Group"}
+                      {temporal
+                        ? "Time (UTC)"
+                        : panel.top === 0
+                          ? "Group"
+                          : BREAKDOWN_LABELS[panel.breakdown]}
                     </th>
                     <th className="px-3 py-2 text-right font-medium">{unit}</th>
                     {temporal &&

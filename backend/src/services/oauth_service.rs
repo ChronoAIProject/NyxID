@@ -3,6 +3,7 @@ use chrono::{Duration, Utc};
 use mongodb::bson::doc;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use url::Url;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
@@ -23,6 +24,16 @@ pub async fn validate_client(
     client_id: &str,
     redirect_uri: &str,
 ) -> AppResult<OauthClient> {
+    // Always apply the execution-time redirect policy before looking at any
+    // stored registration branch. Legacy rows and public fallback redirects
+    // must receive exactly the same scheme checks as new registrations.
+    validate_redirect_uri_scheme(redirect_uri).inspect_err(|_| {
+        tracing::warn!(
+            client_id,
+            reason = "invalid_redirect",
+            "OAuth redirect rejected"
+        );
+    })?;
     let client = db
         .collection::<OauthClient>(OAUTH_CLIENTS)
         .find_one(doc! { "_id": client_id })
@@ -51,6 +62,51 @@ pub async fn validate_client(
     }
 
     Err(AppError::InvalidRedirectUri)
+}
+
+const REJECTED_REDIRECT_SCHEMES: &[&str] = &[
+    "javascript",
+    "vbscript",
+    "data",
+    "file",
+    "blob",
+    "filesystem",
+    "about",
+    "view-source",
+];
+
+/// Normalize the characters that browsers discard before parsing a URL. Tabs,
+/// newlines and carriage returns are removed anywhere; leading/trailing C0
+/// controls and spaces are trimmed. Execution and registration reject a URI
+/// whenever this browser-normalized spelling differs from the raw OAuth value,
+/// preserving exact redirect matching.
+pub fn normalize_redirect_uri(raw: &str) -> String {
+    raw.chars()
+        .filter(|character| !matches!(character, '\t' | '\n' | '\r'))
+        .collect::<String>()
+        .trim_matches(|character: char| character <= '\u{20}')
+        .to_string()
+}
+
+/// Parse and enforce the one redirect-URI policy used at registration and
+/// execution time. The returned URL is safe for redirect-page rendering.
+pub fn validate_redirect_uri_scheme(raw: &str) -> AppResult<Url> {
+    let normalized = normalize_redirect_uri(raw);
+    if normalized != raw {
+        return Err(AppError::InvalidRedirectUri);
+    }
+    let parsed = Url::parse(&normalized).map_err(|_| AppError::InvalidRedirectUri)?;
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    if REJECTED_REDIRECT_SCHEMES.contains(&scheme.as_str()) {
+        return Err(AppError::InvalidRedirectUri);
+    }
+    if !matches!(scheme.as_str(), "http" | "https") && parsed.cannot_be_a_base() {
+        return Err(AppError::InvalidRedirectUri);
+    }
+    if parsed.fragment().is_some() {
+        return Err(AppError::InvalidRedirectUri);
+    }
+    Ok(parsed)
 }
 
 /// Validate that the requested scopes are a subset of the client's allowed scopes.
@@ -405,6 +461,7 @@ pub async fn exchange_authorization_code(
         ));
     }
 
+    validate_redirect_uri_scheme(redirect_uri)?;
     if stored.redirect_uri != redirect_uri {
         return Err(AppError::InvalidRedirectUri);
     }
@@ -638,7 +695,7 @@ pub async fn revoke_issued_refresh(db: &mongodb::Database, jti: &str) -> AppResu
 /// the client binds an ephemeral port. Only `http` scheme is accepted (loopback
 /// connections never leave the machine, so TLS is unnecessary).
 fn is_loopback_redirect_uri(uri: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(uri) else {
+    let Ok(parsed) = validate_redirect_uri_scheme(uri) else {
         return false;
     };
     parsed.scheme() == "http"
@@ -657,7 +714,7 @@ fn is_loopback_redirect_uri(uri: &str) -> bool {
 /// Only non-standard schemes are accepted (`http` and `https` require explicit
 /// registration to prevent open-redirector vulnerabilities).
 fn is_private_use_uri_scheme(uri: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(uri) else {
+    let Ok(parsed) = validate_redirect_uri_scheme(uri) else {
         return false;
     };
     !matches!(parsed.scheme(), "http" | "https")
@@ -759,6 +816,49 @@ mod tests {
         assert!(!is_private_use_uri_scheme("not a uri"));
     }
 
+    #[test]
+    fn redirect_policy_normalizes_browser_controls_and_rejects_dangerous_schemes() {
+        for value in [
+            " JaVaScRiPt:marker ",
+            "java\tscript:marker",
+            "java\nscript:marker",
+            "vbscript:marker",
+            "data:text/plain,marker",
+            "file:///tmp/marker",
+            "blob:https://example.test/id",
+            "filesystem:https://example.test/temporary/x",
+            "about:blank",
+            "view-source:https://example.test",
+            "custom:",
+            "custom:payload",
+            "\u{0000}https://app.example/callback",
+            "https://app.example/callback\u{001f}",
+            "https://app.exa\tmple/callback",
+        ] {
+            assert!(
+                validate_redirect_uri_scheme(value).is_err(),
+                "unsafe redirect accepted: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_policy_keeps_native_and_loopback_redirects() {
+        for value in [
+            "cursor://oauth/callback",
+            "vscode://nyxid/auth",
+            "com.example.app:/oauth2redirect",
+            "http://127.0.0.1:43123/callback",
+            "http://localhost/callback",
+            "http://[::1]/callback",
+        ] {
+            assert!(
+                validate_redirect_uri_scheme(value).is_ok(),
+                "legitimate redirect rejected: {value}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn validate_client_accepts_exact_and_public_native_redirects() {
         let db = connect_test_database("oauth_val_ok")
@@ -810,6 +910,28 @@ mod tests {
             .await
             .expect_err("missing client rejected");
         assert!(matches!(err, AppError::NotFound(message) if message == "OAuth client not found"));
+    }
+
+    #[tokio::test]
+    async fn validate_client_applies_redirect_policy_to_legacy_and_public_fallbacks() {
+        let db = connect_test_database("oauth_val_policy_branches")
+            .await
+            .expect("local MongoDB required for oauth_service tests");
+
+        let mut legacy = test_client("legacy-unsafe-client", "public", "");
+        legacy.redirect_uris = vec!["javascript:marker".to_string()];
+        insert_client(&db, &legacy).await;
+        let err = validate_client(&db, &legacy.id, "javascript:marker")
+            .await
+            .expect_err("legacy dangerous exact rows must be rejected at execution");
+        assert!(matches!(err, AppError::InvalidRedirectUri));
+
+        let public = test_client("public-opaque-client", "public", "");
+        insert_client(&db, &public).await;
+        let err = validate_client(&db, &public.id, "custom:payload")
+            .await
+            .expect_err("opaque public fallback redirects must be rejected");
+        assert!(matches!(err, AppError::InvalidRedirectUri));
     }
 
     #[tokio::test]

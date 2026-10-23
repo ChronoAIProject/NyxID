@@ -7,6 +7,58 @@ use crate::models::service_approval_config::{
 };
 use crate::services::operation_descriptor::{OperationDescriptor, Protocol};
 
+/// Global preference is distinct from the per-service binary/rule policy.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum GlobalApprovalMode {
+    WritesOnly,
+    All,
+    Off,
+}
+
+impl GlobalApprovalMode {
+    /// Normalize update intent without confusing an omitted update with Writes only.
+    pub fn from_update(
+        legacy: Option<bool>,
+        mode: Option<Self>,
+    ) -> crate::errors::AppResult<Option<Self>> {
+        if let (Some(legacy), Some(mode)) = (legacy, mode)
+            && mode.stored() != Some(legacy)
+        {
+            return Err(crate::errors::AppError::ValidationError(
+                "approval_required conflicts with global_approval_mode".to_string(),
+            ));
+        }
+        Ok(mode.or_else(|| legacy.map(|value| Self::from_stored(Some(value)))))
+    }
+
+    pub fn from_stored(preference: Option<bool>) -> Self {
+        match preference {
+            Some(true) => Self::All,
+            Some(false) => Self::Off,
+            None => Self::WritesOnly,
+        }
+    }
+
+    pub fn stored(self) -> Option<bool> {
+        match self {
+            Self::All => Some(true),
+            Self::Off => Some(false),
+            Self::WritesOnly => None,
+        }
+    }
+
+    pub fn requires(self, verb: &ApprovalVerb) -> bool {
+        match self {
+            Self::All => true,
+            Self::Off => false,
+            Self::WritesOnly => !matches!(verb, ApprovalVerb::Read),
+        }
+    }
+}
+
 pub const MAX_APPROVAL_RULES: usize = 50;
 pub const MAX_RULE_METHODS: usize = 16;
 pub const MAX_RULE_RESOURCE_PATTERN_LEN: usize = 256;

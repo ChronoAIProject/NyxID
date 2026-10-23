@@ -85,6 +85,8 @@ async fn fixture(name: &str) -> Fixture {
         &key.id,
         key.state_version,
         &GrantSelection {
+            separation: Some(nyxid_machine::context::Choice::SharedLegacy),
+            legacy_warning_acknowledged: true,
             assignments: BTreeMap::from([(
                 node.id.clone(),
                 GrantAssignment {
@@ -370,6 +372,8 @@ async fn external_real_oauth_jwt_mcp_auth_preserves_consent_and_client_through_d
     .unwrap()
     .0;
     let selection = GrantSelection {
+        separation: Some(nyxid_machine::context::Choice::SharedLegacy),
+        legacy_warning_acknowledged: true,
         assignments: BTreeMap::from([(
             f.node.id.clone(),
             GrantAssignment {
@@ -1527,6 +1531,8 @@ async fn gateway_oauth_source(f: &Fixture) -> VerifiedExternalSource {
     .await
     .unwrap();
     let selection = GrantSelection {
+        separation: Some(nyxid_machine::context::Choice::SharedLegacy),
+        legacy_warning_acknowledged: true,
         assignments: BTreeMap::from([(
             f.node.id.clone(),
             GrantAssignment {
@@ -2258,6 +2264,8 @@ async fn external_history_retry_during_real_admission() {
 
 fn retry_selection(f: &Fixture) -> GrantSelection {
     GrantSelection {
+        separation: Some(nyxid_machine::context::Choice::SharedLegacy),
+        legacy_warning_acknowledged: true,
         assignments: BTreeMap::from([(
             f.node.id.clone(),
             GrantAssignment {

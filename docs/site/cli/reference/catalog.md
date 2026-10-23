@@ -32,3 +32,13 @@ nyxid catalog endpoints <slug>
 ```
 
 List the API operations parsed from the entry's OpenAPI spec — the operations an AI agent can discover and call through the proxy. (Requires the catalog entry to have an `openapi_spec_url`.)
+
+## catalog resync-identity
+
+```bash
+nyxid catalog resync-identity <service-id-or-slug> [--yes]
+```
+
+Overwrite the identity-forwarding settings (identity propagation mode and included user fields, JWT audience, access-token forwarding, delegation-token injection and scope) on every connection to a catalog service with the service's current settings, including connections that were customized. Connections that already match are left unchanged; the command prints how many were checked and how many were updated. It does not change stored credentials or anyone's sign-in with the service.
+
+Only an Admin or the service's creator can run it, from a human account login (not an Agent Key). Catalog Managers cannot. It asks for confirmation unless you pass `--yes`; `--output json` prints the server response (`matched_count`, `changed_count`).

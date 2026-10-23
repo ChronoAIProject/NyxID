@@ -226,6 +226,37 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
     Some(db)
 }
 
+/// Explicit actor preference for fixtures exercising execution independently
+/// of generic approval. Database/user constructors keep the production default;
+/// callers opt in at the request setup and per-service required policies still
+/// take precedence over this global preference.
+pub(crate) async fn set_test_approval_preference(
+    db: &mongodb::Database,
+    user_id: &str,
+    approval_required: bool,
+) {
+    let channel = crate::services::notification_service::get_or_create_channel(db, user_id)
+        .await
+        .expect("create explicit fixture approval preference");
+    db.collection::<mongodb::bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
+        .update_one(
+            mongodb::bson::doc! { "_id": &channel.id },
+            mongodb::bson::doc! { "$set": { "approval_required": approval_required } },
+        )
+        .await
+        .expect("store fixture approval preference");
+    assert_eq!(
+        crate::services::approval_service::user_requires_approval(
+            db,
+            user_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .expect("read effective fixture approval preference"),
+        approval_required,
+    );
+}
+
 /// Connect to a fresh test database through a client with MongoDB command
 /// monitoring enabled. Tests use this to prove read-only handler boundaries;
 /// setup commands are observable too, so callers should clear their recorder
@@ -312,6 +343,47 @@ pub(crate) async fn connect_transaction_test_database_with_command_handler(
         .expect("MongoDB required");
     assert_transaction_test_topology(&db).await;
     db
+}
+
+/// Wait, within the shared readiness budget, until majority-acknowledged
+/// writes and linearizable reads on this database answer within 100 ms.
+///
+/// Tests that exercise production admission gates (the 250 ms analytics
+/// dispatch transaction, the 200 ms linearizable consent read) assert those
+/// deadlines as written. A CI runner can start such a test while MongoDB is
+/// still stalled on its own journal flushes and the per-test database drop
+/// backlog, which no nextest slot reservation prevents. This establishes the
+/// healthy-server precondition first; the measured call still runs once
+/// against the unchanged production bounds.
+pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
+    const BUDGET: Duration = Duration::from_secs(90);
+    const RESPONSIVE: Duration = Duration::from_millis(100);
+    let started = std::time::Instant::now();
+    let probes = db.collection::<Document>("__readiness");
+    loop {
+        let id = Uuid::new_v4().to_string();
+        let probe = std::time::Instant::now();
+        let write = probes
+            .insert_one(doc! {"_id": &id})
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .await;
+        let read = probes
+            .find_one(doc! {"_id": &id})
+            .read_concern(mongodb::options::ReadConcern::linearizable())
+            .await;
+        let elapsed = probe.elapsed();
+        if write.is_ok() && matches!(read, Ok(Some(_))) && elapsed <= RESPONSIVE {
+            return;
+        }
+        assert!(
+            started.elapsed() < BUDGET,
+            "MongoDB majority write + linearizable read were not responsive within \
+             {RESPONSIVE:?} for {BUDGET:?} (last probe took {elapsed:?}; write ok={}, read ok={})",
+            write.is_ok(),
+            read.is_ok()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 async fn assert_transaction_test_topology(db: &mongodb::Database) {
@@ -1864,6 +1936,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         gcp_kms_key_name: None,
         gcp_kms_key_name_previous: None,
         instance_name: "test-backend".to_string(),
+        security_rollout: Default::default(),
         internal_bind_addr: "127.0.0.1:3002".to_string(),
         internal_advertise_url: "http://127.0.0.1:3002".to_string(),
         internal_dispatch_hmac_key: None,
@@ -2358,9 +2431,11 @@ pub(crate) async fn test_app_state_no_db() -> AppState {
     test_app_state(client.database("nyxid_unit_unused"))
 }
 
-/// Build a permissive session-auth `AuthUser` for handler tests.
+/// Build a session-shaped `AuthUser` without a validated derivation policy.
 pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
     AuthUser {
+        mfa_assured: false,
+        mfa_enabled: None,
         org_agent_access: None,
         assistant_group_id: None,
         assistant_agent_owner_id: None,
@@ -2850,6 +2925,9 @@ pub async fn set_agent_operation_scopes_enabled(
     owner: &str,
     enabled: bool,
 ) {
+    if enabled {
+        crate::services::security_readiness_service::ready_test_replica(db).await;
+    }
     crate::services::feature_flag_service::set_platform_override(
         db,
         crate::services::feature_flag_service::AGENT_OPERATION_SCOPES_FLAG_KEY,

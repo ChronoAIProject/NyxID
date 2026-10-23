@@ -51,8 +51,7 @@ pub use availability::{NodeFailureEvidence, observe_transport};
 pub use http::check_http;
 pub use http::{HttpProjection, check_http_projected, verify_resolved, verify_resolved_projected};
 use request_identity::selection_fingerprint;
-#[cfg(test)]
-use request_identity::stateless_inference;
+pub(crate) use request_identity::stateless_inference;
 pub use request_identity::{bind_headers, http_operation};
 pub use resolution::resolve_implicit_for_request;
 #[cfg(test)]

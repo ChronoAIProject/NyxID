@@ -78,7 +78,9 @@ it separately checks that the owned specialist still exists.
    login control below. An ordinary first-party NyxID sign-in/signup (including
    email verification and MFA when configured) is followed by explicit consent.
    Review the exact provider, bot, external account and private conversation.
-5. Return to that same bot conversation and submit the one-time confirmation.
+5. For Telegram, choose **Open Telegram to finish**, or copy the displayed
+   confirmation command. Return to the same bot conversation to submit the
+   one-time confirmation.
    Browser login and consent alone do not link it. On Discord choose **/nyx
    confirm**, then enter the displayed `P-…` value in its **code** option. Other
    native providers accept `confirm P-…` as a plain private message; Telegram
@@ -112,8 +114,8 @@ reviewed repair uses the existing OAuth refresh producer before admitting work.
 Reading status or Linked channels does not refresh tokens or contact the
 provider. Message admission and delivery still require a live token.
 
-A public request commits metadata-only article IDs, live mode guidance and its
-settled receipt in one transaction. No raw FAQ question/body is retained in that
+A public request commits metadata-only library/revision references, article IDs,
+live mode guidance and its settled receipt in one transaction. No raw FAQ question/body is retained in that
 queue. Sender (20/minute) and profile (200/minute) server-clock windows bound FAQ
 admission before a receipt is recorded. Rejected events can retry after the window
 resets; there is no lifetime visitor cap. Duplicate events retain their original
@@ -126,6 +128,41 @@ and `/bots` use the linked account and existing reviewed setup/provisioning
 contracts. The legacy guide and public child inference retain their own funding,
 model, owner review and independent-customer activation requirements. Those are
 not prerequisites for a shared FAQ entry.
+
+## Editing shared help
+
+**Admin → Platform bots → Shared FAQ and use cases** lets a first-party human platform
+administrator edit articles and informational use cases. Save a draft, preview it,
+and publish it to update every manager assigned to that library. Each profile's
+help-library selector defaults to the shared library. Create a separate library
+when a group of managers needs different public information. The initial shared
+library is seeded once from the shipped FAQ.
+
+Published revisions are immutable. History is paginated; restoring any old
+revision publishes its content as a new revision. Edits and assignments compare
+the reviewed version and profile generation, so concurrent changes require reload
+and review. The editor preserves unsaved work on version drift and offers an
+explicit discard/reload action. Audit records contain IDs and versions, never the
+help body. Only live first-party human administrators can author or assign help.
+
+Each library supports up to 30 articles and 20 use cases, within 16 KiB of JSON.
+Articles have stable lowercase slugs, titles, bodies and search tags. Use cases
+contain a title, description and example prompts. These are public reference
+material, separate from executable provisioning templates. Publishing cannot add
+tools, credentials, consent or provisioning authority. Deterministic FAQ replies,
+the legacy onboarding guide and explicitly enabled public FAQ tools all read the
+assigned publication. Every reply/turn pins the revision it first uses; retries
+and later tool reads in that turn keep it even after another publication.
+Public FAQ tool reads return bounded pages with `next_offset`; subsequent reads
+use that byte offset within the same pinned revision. This preserves complete
+articles and UTF-8 boundaries without increasing the reviewed model-request or
+tool-call budgets. Deterministic chat FAQ replies deliver complete articles via
+the shared multipart sender.
+
+Use **Telegram managers** on the same admin page to connect additional manager
+identities, then assign the same library to their prepared profiles. See
+[Multiple Telegram managers](TELEGRAM_NEW.md#multiple-telegram-managers) for
+credentials, webhook isolation and rollout requirements.
 
 ## Work with specialists from a linked private chat
 

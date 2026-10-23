@@ -406,6 +406,7 @@ export function OAuthIncrementalConsentPage({
                     name="consent_request"
                     value={preparedMachineRequest ?? request.token}
                   />
+                  <input type="hidden" name="browser_form" value="true" />
                   <input
                     type="hidden"
                     name="response_type"

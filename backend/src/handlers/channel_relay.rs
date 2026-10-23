@@ -3700,6 +3700,9 @@ mod tests {
         db.collection::<Session>(crate::models::session::COLLECTION_NAME)
             .insert_one(Session {
                 purpose: Some(crate::models::session::SessionPurpose::Authenticated),
+                mfa_method: None,
+                mfa_assured: Some(false),
+                mfa_exemption: None,
                 id: Uuid::new_v4().to_string(),
                 user_id: fixture.conversation.user_id.clone(),
                 token_hash: crate::crypto::token::hash_token("channel-test-session"),
@@ -3823,6 +3826,8 @@ mod tests {
 
     fn api_key_auth_user(api_key: &ApiKey) -> AuthUser {
         AuthUser {
+            mfa_assured: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -3856,6 +3861,8 @@ mod tests {
 
     fn auth_user_with_method(method: crate::mw::auth::AuthMethod) -> AuthUser {
         AuthUser {
+            mfa_assured: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -4008,6 +4015,7 @@ mod tests {
         };
 
         let bot = ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
@@ -4066,6 +4074,7 @@ mod tests {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
+            original_message: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4098,6 +4107,7 @@ mod tests {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
+            original_message: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4304,6 +4314,7 @@ mod tests {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
+            original_message: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4543,6 +4554,7 @@ mod tests {
         let db = fixture.state.db.clone();
         let now = Utc::now();
         let other_bot = ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
@@ -4917,6 +4929,7 @@ mod tests {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
+            original_message: None,
             id: Uuid::new_v4().to_string(),
             platform_conversation_id: Some("chat_a".into()),
             reply_to_message_id,
@@ -5213,6 +5226,7 @@ mod tests {
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
+            original_message: None,
             id: Uuid::new_v4().to_string(),
             platform: "whatsapp".into(),
             platform_conversation_id: Some("chat_a".into()),

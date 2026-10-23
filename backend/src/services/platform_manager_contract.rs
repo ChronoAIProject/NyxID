@@ -329,7 +329,9 @@ pub enum NyxAgentExecutionContext {
 }
 
 /// Deliberately has no Debug/serde implementation: user text is private.
+#[derive(Default)]
 pub struct TurnInput {
+    pub channel_uploads: Vec<super::assistant_upload_service::PreparedChannelUpload>,
     pub text: String,
 }
 
@@ -811,6 +813,23 @@ pub trait PublicTurnProducer: Send + Sync {
 /// Part 3 supplies this service adapter over the existing metered proxy core.
 #[async_trait]
 pub trait NyxAgentEgress: Send + Sync {
+    async fn preload_skills(
+        &self,
+        _row: &crate::models::assistant_conversation::AssistantConversation,
+        _agent: &crate::models::assistant_agent::AssistantAgent,
+    ) -> AppResult<String> {
+        Ok(String::new())
+    }
+
+    /// Optional progress task, cancelled when execution completes or stops.
+    /// Only the channel adapter implements delivery; other transports return None.
+    fn checking_notice(
+        &self,
+        _row: &crate::models::assistant_conversation::AssistantConversation,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        None
+    }
+
     /// Optional human-channel display note after the durable acknowledgement.
     /// The adapter owns delivery authorization; the runtime cancels this task on acceptance.
     fn admission_acknowledged(

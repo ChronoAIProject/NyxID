@@ -25,6 +25,7 @@ export interface User {
   /// Social login provider ("google", "github", ...) or null for
   /// email/password accounts. Older backends omit the field.
   readonly social_provider?: string | null;
+  readonly has_password?: boolean;
   readonly is_admin: boolean;
   /// Read-only platform admin. Defaults to false. When true (and `is_admin`
   /// is false) the user can hit admin GET endpoints but no writes.
@@ -256,6 +257,7 @@ export interface ApiKeyCreateResponse {
   readonly key_prefix: string;
   readonly scopes: string;
   readonly created_at: string;
+  readonly expires_at: string | null;
 }
 
 export interface ApiKeyUsageService {
@@ -419,6 +421,19 @@ export interface DownstreamService {
    * (UI offers a "manage in AI Services" link).
    */
   readonly your_binding_count?: number;
+  /**
+   * Whether the viewer may resync connection identity for this service.
+   * Sent only by `GET /services/{id}`; absent means not allowed.
+   */
+  readonly can_resync_identity?: boolean;
+}
+
+export interface ResyncIdentityResponse {
+  readonly catalog_service_id: string;
+  /** Connections to this service that were checked. */
+  readonly matched_count: number;
+  /** Connections whose identity settings differed and were rewritten. */
+  readonly changed_count: number;
 }
 
 export interface DefaultRequestHeader {
@@ -754,7 +769,7 @@ export interface MfaRequiredError {
 
 export interface MfaVerifyRequest {
   readonly code: string;
-  readonly mfa_token: string;
+  readonly mfa_token?: string;
 }
 
 export interface PublicConfig {

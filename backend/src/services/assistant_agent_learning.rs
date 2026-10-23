@@ -1524,6 +1524,7 @@ mod tests {
         commands.lock().unwrap().clear();
         let now = Utc::now();
         let agent = AssistantAgent {
+            channel_checking_notice: false,
             id: Uuid::new_v4().to_string(),
             user_id: "learning-test-owner".into(),
             kind: AgentKind::Specialist,

@@ -415,10 +415,28 @@ pub fn source_version(inspect: &Value) -> Result<&str> {
     let image = inspect["Config"]["Image"]
         .as_str()
         .ok_or(CheckFailure::SourceVersionUnknown)?;
-    if let Some(target) = image.strip_prefix(&format!("{}:", update::MACHINE_IMAGE)) {
+    if let Some(reference) = image.strip_prefix(&format!("{}:", update::MACHINE_IMAGE)) {
+        // Docker retains both the release tag and content pin in Config.Image.
+        // Validate the entire suffix before using its tag as a source version.
+        let target = if let Some((tag, digest)) = reference.split_once('@') {
+            ensure!(
+                update::valid_digest(digest),
+                CheckFailure::SourceVersionUnknown
+            );
+            tag
+        } else {
+            reference
+        };
         update::version(target).map_err(|_| CheckFailure::SourceVersionUnknown)?;
         return Ok(target);
     }
+    let digest = image
+        .strip_prefix(&format!("{}@", update::MACHINE_IMAGE))
+        .ok_or(CheckFailure::SourceVersionUnknown)?;
+    ensure!(
+        update::valid_digest(digest),
+        CheckFailure::SourceVersionUnknown
+    );
     let target = inspect["Config"]["Labels"]["dev.nyxid.machine.version"]
         .as_str()
         .ok_or(CheckFailure::SourceVersionUnknown)?;
@@ -565,6 +583,59 @@ pub(super) fn copy_config(inspect: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_versions_require_complete_official_release_references() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        for tag in ["0.41.0", "0.41.1-rc.1", "0.41.1+build.2"] {
+            for suffix in [tag.to_owned(), format!("{tag}@{digest}")] {
+                let inspect =
+                    json!({"Config":{"Image":format!("{}:{suffix}",update::MACHINE_IMAGE)}});
+                assert_eq!(source_version(&inspect).unwrap(), tag);
+            }
+        }
+        let pinned = json!({"Config":{"Image":format!("{}@{digest}",update::MACHINE_IMAGE),"Labels":{"dev.nyxid.machine.version":"0.41.0"}}});
+        assert_eq!(source_version(&pinned).unwrap(), "0.41.0");
+        let mut unknown = pinned.clone();
+        unknown["Config"]["Labels"] = json!({});
+        assert!(source_version(&unknown).is_err());
+        unknown["Config"]["Labels"]["dev.nyxid.machine.version"] = json!("latest");
+        assert!(source_version(&unknown).is_err());
+        for suffix in [
+            "latest".to_owned(),
+            format!("latest@{digest}"),
+            format!("v0.41.0@{digest}"),
+            format!("@{digest}"),
+            "0.41.0@".to_owned(),
+            "0.41.0@sha256:".to_owned(),
+            format!("0.41.0@sha256:{}", "a".repeat(63)),
+            format!("0.41.0@sha256:{}", "a".repeat(65)),
+            format!("0.41.0@sha256:{}", "g".repeat(64)),
+            format!("0.41.0@sha256:{}", "A".repeat(64)),
+            format!("0.41.0@sha512:{}", "a".repeat(64)),
+            format!("0.41.0@{digest}@{digest}"),
+            format!("0.41.0@@{digest}"),
+            format!("0.41.0@{digest} "),
+        ] {
+            let inspect = json!({"Config":{"Image":format!("{}:{suffix}",update::MACHINE_IMAGE),"Labels":{"dev.nyxid.machine.version":"0.41.0"}}});
+            assert!(
+                source_version(&inspect).is_err(),
+                "invalid reference was accepted"
+            );
+        }
+        for image in [
+            format!("{}@sha256:", update::MACHINE_IMAGE),
+            format!("{}@{digest}@{digest}", update::MACHINE_IMAGE),
+            format!("attacker/image:0.41.0@{digest}"),
+            format!("{}.attacker:0.41.0@{digest}", update::MACHINE_IMAGE),
+        ] {
+            let inspect =
+                json!({"Config":{"Image":image,"Labels":{"dev.nyxid.machine.version":"0.41.0"}}});
+            assert!(source_version(&inspect).is_err());
+        }
+        assert!(validate_target("0.41.0", "0.40.0", false).is_err());
+        assert!(validate_target("0.41.0", "0.40.0", true).is_ok());
+    }
+
     #[test]
     fn replacement_preserves_config_and_resolved_anonymous_volumes() {
         let inspect = json!({"Config":{"Image":format!("{}:0.40.0",update::MACHINE_IMAGE),"Env":["PRIVATE=value"],"Cmd":["node","start"],"Labels":{"custom":"keep"},"User":"0"},"HostConfig":{"SecurityOpt":["seccomp=custom"],"ShmSize":268435456,"RestartPolicy":{"Name":"unless-stopped"},"Binds":["identity:/identity"]},"Mounts":[{"Type":"volume","Name":"anonymous-workspace","Destination":"/workspace","RW":true}],"NetworkSettings":{"Networks":{"bridge":{"IPAMConfig":null,"Aliases":["machine"]}}}});

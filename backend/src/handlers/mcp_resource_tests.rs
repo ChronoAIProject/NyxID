@@ -126,7 +126,7 @@ async fn source_fixture(prefix: &str, source_reads: u64, media_reads: u64) -> So
     let server = MockServer::start().await;
     let _origin = resource_adapter::register_test_origin(&server.uri());
     let block_id = Uuid::new_v4().to_string();
-    let payload = json!({"object":"list","results":[{"object":"block","id":block_id,"type":"image","last_edited_time":"2026-10-17T00:00:00Z","image":{"type":"file","file":{"url":format!("{}/image?signature=private",server.uri())}}}],"padding":"x".repeat(12000)});
+    let payload = json!({"object":"list","has_more":false,"next_cursor":null,"results":[{"object":"block","id":block_id,"type":"image","last_edited_time":"2026-10-17T00:00:00Z","image":{"type":"file","caption":[{"plain_text":"Current menu"}],"file":{"url":format!("{}/image?signature=private",server.uri())}}}],"padding":"x".repeat(12000)});
     Mock::given(path(format!("/v1/blocks/{block_id}/children")))
         .and(header("authorization", "Bearer fixture-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&payload))
@@ -250,6 +250,49 @@ async fn source_fixture(prefix: &str, source_reads: u64, media_reads: u64) -> So
 }
 
 #[tokio::test]
+async fn resource_source_query_is_presentation_only_preserves_image_refs_and_checks_live_access() {
+    let SourceFixture {
+        f,
+        server,
+        _origin,
+        block_id,
+        instance_id,
+        ..
+    } = source_fixture("resource_source_query", 1, 0).await;
+    let auth = super::machine_mcp_tests::authenticated_machine_chat(&f).await;
+    let args = json!({"tool_name":"my-notion-2__notion_list_block_children","arguments_json":json!({"block_id":block_id}).to_string(),"result_query":"menu"});
+    let response = call(&f.state, &auth, "nyx__call_tool", args.clone()).await;
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let text = response["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("NyxID image resources"));
+    let evidence: serde_json::Value =
+        serde_json::from_str(text.split_once("\n\n").unwrap().1).unwrap();
+    assert_eq!(evidence["query"], "menu");
+    assert_eq!(evidence["matched_sections"], 1);
+    assert_eq!(evidence["sections"][0]["blocks"][0]["text"], "Current menu");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert!(
+        server.received_requests().await.unwrap()[0]
+            .url
+            .query()
+            .is_none()
+    );
+    let mut non_chat = auth.clone();
+    non_chat.chat = None;
+    let denied = call(&f.state, &non_chat, "nyx__call_tool", args.clone()).await;
+    assert_eq!(denied["result"]["isError"], true);
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(doc! {"_id":instance_id}, doc! {"$set":{"is_active":false}})
+        .await
+        .unwrap();
+    let revoked = call(&f.state, &auth, "nyx__call_tool", args).await;
+    assert_eq!(revoked["result"]["isError"], true, "{revoked}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn resource_source_hook_direct_and_wrapped_calls_retain_one_image_and_recheck_source() {
     let SourceFixture {
         f,
@@ -272,6 +315,11 @@ async fn resource_source_hook_direct_and_wrapped_calls_retain_one_image_and_rech
     assert_eq!(source["result"]["isError"], false, "{source}");
     let text = source["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.starts_with("NyxID image resources"), "{text}");
+    let evidence: serde_json::Value =
+        serde_json::from_str(text.split_once("\n\n").unwrap().1).unwrap();
+    assert_eq!(evidence["scope"], "returned_block_page");
+    assert_eq!(evidence["sections"][0]["blocks"][0]["type"], "image");
+    assert!(text.len() < 6000);
     let row = f
         .state
         .db

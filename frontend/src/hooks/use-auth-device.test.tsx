@@ -435,7 +435,7 @@ describe("useWebAuthDeviceLogin", () => {
     expect(mockPost).toHaveBeenCalledTimes(5);
   });
 
-  it("stops polling on denied and supports explicit regeneration", async () => {
+  it("treats old unverified approval delivery as terminal denial without a step-up prompt and supports regeneration", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
     mockPost.mockResolvedValueOnce(requestResponse);
@@ -458,6 +458,7 @@ describe("useWebAuthDeviceLogin", () => {
       await vi.advanceTimersByTimeAsync(5_000);
     });
     expect(result.current.phase).toBe("denied");
+    expect(result.current.error?.message).toBe("This login request was already denied.");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });

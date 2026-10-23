@@ -2824,6 +2824,8 @@ async fn execute(
         AgentSkillMetadata {
             description: preview.description,
             size_bytes: preview.size_bytes,
+            preload_paths: vec![],
+            preload_bytes: 0,
         },
     );
     let db = state.db.clone();

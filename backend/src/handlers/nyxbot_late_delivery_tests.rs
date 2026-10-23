@@ -736,3 +736,103 @@ async fn late_capacity_failure_preserves_complete_partial_reply_and_wait_copy() 
         )
     );
 }
+
+/// The real progress adapter sends after the threshold while leaving the
+/// event's final-delivery claim available, then the durable answer sends once.
+#[tokio::test]
+async fn checking_notice_arrives_after_five_seconds_without_consuming_final_answer() {
+    use crate::services::assistant_checking_notice as notice;
+    let mut f = fixture("channel_checking_notice_delivery").await;
+    Mock::given(method("POST"))
+        .and(path("/events/cmaeg1.ev.original/replies"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&f.gateway)
+        .await;
+    let request = serde_json::from_value::<engine::TurnRequest>(json!({
+        "text": "Check current availability", "conversation_id": &f.event.conversation_id,
+    }))
+    .unwrap();
+    let mut row = engine::begin_turn(&f.state.db, OWNER, &request, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let origin = f.event.delivery.as_ref().unwrap().origin.clone();
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.origin = crate::models::assistant_conversation::TurnOrigin::Channel;
+    turn.asked_from = Some(origin.clone());
+    turn.channel_event_id = Some(f.event.id.clone());
+    turn.external_check_started = true;
+    let began = std::time::Instant::now();
+    turn.started_at = Utc::now();
+    f.event.turn_id = Some(turn.turn_id.clone());
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"active_turn": bson::to_bson(turn).unwrap()}},
+        )
+        .await
+        .unwrap();
+    patch(&f, doc! {"turn_id": &f.event.turn_id}).await;
+    let reference = f
+        .state
+        .encryption_keys
+        .encrypt(b"cmaeg1.ev.original")
+        .await
+        .unwrap();
+    f.state.db.collection::<bson::Document>(THREADS).update_one(
+        doc! {"channel_id": &f.channel.id, "partition": PARTITION},
+        doc! {"$set": {"event_ref_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: reference}, "event_ref_expires_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::hours(1))}},
+    ).await.unwrap();
+    let egress = crate::handlers::assistant_nyxagent::http_egress(
+        f.state.clone(),
+        crate::test_utils::test_auth_user(OWNER),
+    );
+    let task = tokio_util::task::AbortOnDropHandle::new(egress.checking_notice(&row).unwrap());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(f.gateway.received_requests().await.unwrap().is_empty());
+    tokio::time::timeout(std::time::Duration::from_secs(8), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(began.elapsed() >= std::time::Duration::from_millis(4900));
+    let progress = f.gateway.received_requests().await.unwrap();
+    assert_eq!(progress.len(), 1);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&progress[0].body).unwrap()["text"],
+        notice::TEXT
+    );
+    assert_eq!(status(&f).await, "waiting");
+    assert!(!notice::claim(&f.state.db, &row, Utc::now()).await.unwrap());
+    assert!(
+        Box::pin(engine::finish_turn(
+            &f.state.db,
+            &row,
+            &row.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: "Useful answer".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        ))
+        .await
+        .unwrap()
+        .is_none()
+    );
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    assert_eq!(sends(&f).await.len(), 1);
+    assert_eq!(status(&f).await, "sent");
+    let messages = engine::messages(&f.state.db, OWNER, &row.id, 20, None)
+        .await
+        .unwrap();
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.text.contains(notice::TEXT))
+    );
+}

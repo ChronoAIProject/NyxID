@@ -3,6 +3,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::HeaderName,
     middleware,
+    response::IntoResponse,
     routing::{delete, get, patch, post, put},
 };
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
@@ -530,6 +531,18 @@ fn oauth_public_cors() -> CorsLayer {
         ]))
 }
 
+/// NyxID's built-in oracle relay is permanently retired. Every consumer and
+/// worker route under `/api/v1/oracle` answers 410 `oracle_retired` before any
+/// handler runs, so a caller that still has the old API wired in learns there
+/// is nothing to retry. The routes stay registered: the billing route
+/// inventory, the auth layers and the handler modules are unchanged.
+async fn retire_builtin_oracle(
+    _request: axum::extract::Request,
+    _next: middleware::Next,
+) -> axum::response::Response {
+    crate::errors::AppError::OracleRetired.into_response()
+}
+
 /// Build two routers: (public OAuth / .well-known, private API).
 ///
 /// The caller must attach separate CORS layers to each before merging.
@@ -553,7 +566,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     let mfa_routes = Router::new()
         .route("/setup", post(handlers::mfa::setup))
         .route("/confirm", post(handlers::mfa::confirm))
-        .route("/verify", post(handlers::mfa::verify))
+        .route("/verify", post(handlers::mfa::verify_http))
+        .route("/step-up", post(handlers::mfa::step_up))
+        .route("/cancel", post(handlers::mfa::cancel))
         .route("/disable", post(handlers::mfa::disable));
 
     let auth_routes = Router::new()
@@ -1034,6 +1049,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .post(handlers::admin_feature_flags::create_feature_flag),
         )
         .route(
+            "/security-readiness",
+            get(handlers::health::security_readiness),
+        )
+        .route(
             "/feature-flag-targets",
             get(handlers::admin_feature_flags::list_feature_flag_targets),
         )
@@ -1152,6 +1171,34 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_nodes::admin_disconnect_node),
         )
         .route("/audit-log", get(handlers::admin::list_audit_log))
+        .route(
+            "/telegram-managers/clear",
+            post(handlers::telegram_managers::clear),
+        )
+        .route(
+            "/telegram-managers",
+            get(handlers::telegram_managers::list).post(handlers::telegram_managers::configure),
+        )
+        .route(
+            "/platform-help",
+            get(handlers::platform_help::list).post(handlers::platform_help::create),
+        )
+        .route(
+            "/platform-help/{id}",
+            axum::routing::put(handlers::platform_help::save),
+        )
+        .route(
+            "/platform-help/{id}/publish",
+            post(handlers::platform_help::publish),
+        )
+        .route(
+            "/platform-help/{id}/history",
+            get(handlers::platform_help::history),
+        )
+        .route(
+            "/platform-bots/{id}/help-library",
+            get(handlers::platform_help::assignment).put(handlers::platform_help::assign),
+        )
         .route(
             "/platform-bots",
             get(handlers::platform_bots::list).post(handlers::platform_bots::convert),
@@ -1394,6 +1441,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .patch(handlers::admin::update_broker_settings),
         )
         .route(
+            "/nyxbot-gateway-releases",
+            get(handlers::nyxbot_gateway_releases::list),
+        )
+        .route(
+            "/nyxbot-gateway-releases/{id}/inspect",
+            post(handlers::nyxbot_gateway_releases::inspect),
+        )
+        .route(
+            "/nyxbot-gateway-releases/{id}/resolve",
+            post(handlers::nyxbot_gateway_releases::resolve),
+        )
+        .route(
             "/platform-credentials",
             get(handlers::admin_platform_credentials::list),
         )
@@ -1432,11 +1491,15 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/authorize", get(handlers::oauth::authorize))
         .route(
             "/authorize/decision",
-            post(handlers::oauth::authorize_decision),
+            post(handlers::oauth::authorize_decision).layer(middleware::map_response(
+                handlers::oauth_consent_response::complete_form_post,
+            )),
         )
         .route(
             "/authorize/incremental/decision",
-            post(handlers::oauth::authorize_incremental_decision),
+            post(handlers::oauth::authorize_incremental_decision).layer(middleware::map_response(
+                handlers::oauth_consent_response::complete_form_post,
+            )),
         )
         .route("/par", post(handlers::oauth::pushed_authorization_request))
         .route("/token", post(handlers::oauth::token))
@@ -2375,7 +2438,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .nest("/connections", connection_routes)
         .nest("/providers", provider_routes)
         .nest("/nodes", node_registration_routes)
-        .nest("/oracle", oracle_consumer_routes)
+        .nest(
+            "/oracle",
+            oracle_consumer_routes.layer(middleware::from_fn(retire_builtin_oracle)),
+        )
         .nest("/connect-links", connect_link_routes)
         .nest("/channel-connect-links", channel_connect_link_routes)
         .nest("/triggers", trigger_routes)
@@ -2518,6 +2584,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/agents/{id}/skills/{skill_id}/preview",
             get(handlers::agent_skills::preview_attached),
+        )
+        .route(
+            "/nyxagent/agents/{id}/skills/{skill_id}/preload",
+            put(handlers::agent_skills::set_preload),
         )
         .route(
             "/nyxagent/agents/{id}/skills/{skill_id}/improve",
@@ -3303,6 +3373,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/api/v1/webhooks/call-adapters/{id}/sms-receipts/{send}", post(handlers::call_adapters::sms_receipt))
         .route("/api/v1/webhooks/call-adapters/{id}/socket/{sid}", get(handlers::call_adapters::socket))
         .route("/api/v1/webhooks/call-adapters/{id}/v1/chat/completions", post(handlers::call_adapters::completions))
+        .route("/api/v1/webhooks/channel/telegram-new/manager/{id}", post(handlers::telegram_new::scoped_webhook).layer(axum::extract::DefaultBodyLimit::max(256*1024)))
         .route(
             "/api/v1/webhooks/channel/telegram-new/manager",
             post(handlers::telegram_new::webhook)
@@ -3358,7 +3429,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                     post(handlers::oracle_worker::submit_transcript),
                 )
                 .route("/pin-conv-url", post(handlers::oracle_worker::pin_conv_url))
-                .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+                .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
+                .layer(middleware::from_fn(retire_builtin_oracle)),
         )
         // NyxBot as the Agent Event Gateway's `nyxbot` provider, and NyxID's
         // direct relay receiver for NyxBot channels. Authenticated inside each
@@ -3405,6 +3477,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             crate::services::platform_manager_transport::compose(
                 state.clone(),
                 crate::handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+                crate::handlers::agent_skills::preload_context(state.clone()),
             ),
         ))
     } else {
@@ -3477,6 +3550,47 @@ mod retirement_tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+        }
+        db.drop().await.unwrap();
+    }
+
+    /// Worker routes authenticate inside their handlers, so an anonymous call
+    /// proves the retirement layer answers before any handler runs. The
+    /// consumer routes, which sit behind the JWT layer, are covered by
+    /// `handlers::oracle_pools::retirement_tests` with a signed-in caller.
+    #[tokio::test]
+    async fn builtin_oracle_worker_routes_answer_410_oracle_retired() {
+        let Some(db) = crate::test_utils::connect_test_database("oracle_retired_routes").await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let (_, private) = build_router_with_state(state.clone());
+        let app = private.with_state(state);
+        for (method, path) in [
+            ("GET", "/api/v1/oracle/worker/task?worker=w1"),
+            ("POST", "/api/v1/oracle/worker/heartbeat"),
+            ("GET", "/api/v1/oracle/worker/bundle"),
+            ("POST", "/api/v1/oracle/worker/result"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::GONE, "{method} {path}");
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["error"], "oracle_retired", "{method} {path}");
+            assert_eq!(payload["error_code"], 11099, "{method} {path}");
         }
         db.drop().await.unwrap();
     }

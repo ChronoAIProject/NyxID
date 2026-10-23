@@ -154,6 +154,7 @@ async fn external_source_reviewed_child_issuance_preserves_grant_until_parent_se
             permission_snapshot: Some(reviewed.permission_snapshot),
         },
         Some(Utc::now() + Duration::minutes(5)),
+        Utc::now(),
         &f.parent,
         &child_id,
         &secret,

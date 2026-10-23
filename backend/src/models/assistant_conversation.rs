@@ -293,12 +293,23 @@ pub struct EngineWorkerInstance {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StreamReply {
+    pub message_id: String,
+    pub block_id: String,
+    pub cursor: i64,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     /// Bounded resource handles issued in this turn.
     #[serde(default)]
     pub resource_refs: Vec<String>,
+    /// Safe text already emitted to subscribers; removed with the turn at settlement.
+    #[serde(default)]
+    pub reply: Option<StreamReply>,
     /// Process incarnation that claimed execution; absent on older replicas' turns.
     #[serde(default)]
     pub worker_instance: Option<EngineWorkerInstance>,
@@ -334,6 +345,10 @@ pub struct ActiveTurn {
     pub capacity_accepted_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub capacity_notice_claimed: bool,
+    #[serde(default)]
+    pub external_check_started: bool,
+    #[serde(default)]
+    pub checking_notice_claimed: bool,
     #[serde(default)]
     pub platform_reply: Option<PlatformReplyRouting>,
     /// One platform worker may execute an admitted turn. A lost worker is
@@ -379,6 +394,12 @@ pub struct ActiveTurn {
     pub tool_progress: ToolProgress,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub lease_expires_at: Option<DateTime<Utc>>,
+    /// A turn admitted while its owner's running replies were at their limit:
+    /// when it started waiting and when it gives up. Cleared once it runs.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub queued_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub queue_deadline: Option<DateTime<Utc>>,
     /// Worker liveness marker. Absent on turns written before heartbeat support.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub heartbeat_at: Option<DateTime<Utc>>,

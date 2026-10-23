@@ -380,7 +380,7 @@ pub async fn app_poll(
         &state,
         &row,
         IdentityCompletion {
-            trusted_authentication: true,
+            trusted_authentication: request.mfa_assured,
             method: "app",
             app_request: Some(&request),
             completion: None,
@@ -528,6 +528,10 @@ pub async fn approve(
         return Err(service::invalid());
     }
     let actor = service::user(&state.db, &row).await?;
+    let authority = crate::services::session_authority::DerivedMfaAuthority::new(
+        actor.mfa_enabled,
+        row.mfa_verified,
+    );
     let ip = limit(&state, &headers, addr, Some(&actor.id)).await?;
     let ua = extract_user_agent(&headers);
     let expiry = body
@@ -571,6 +575,7 @@ pub async fn approve(
                     input,
                     selection,
                     expiry,
+                    authority,
                 )
                 .await
             } else {
@@ -581,6 +586,7 @@ pub async fn approve(
                     &state.encryption_keys,
                     state.auth_device_hmac_key.as_slice(),
                     input,
+                    authority,
                 )
                 .await
             }
@@ -666,12 +672,13 @@ pub(super) async fn social_complete(
     let row =
         service::consume_social(&state.db, state.auth_device_hmac_key.as_slice(), id, raw).await?;
     let row = service::identify(&state.db, &row, actor).await?;
-    // Match ordinary social login: the provider owns its authentication challenges.
+    // Social identity proves the external first factor only. NyxID MFA users
+    // still complete the approval MFA step, including request-only approvals.
     let (mut headers, _) = complete_identity(
         state,
         &row,
         IdentityCompletion {
-            trusted_authentication: true,
+            trusted_authentication: false,
             method: "social",
             app_request: None,
             completion: None,

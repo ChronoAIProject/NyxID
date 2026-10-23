@@ -32,6 +32,8 @@ struct Fixture {
 impl Fixture {
     fn selection(&self) -> GrantSelection {
         GrantSelection {
+            separation: Some(nyxid_machine::context::Choice::SharedLegacy),
+            legacy_warning_acknowledged: true,
             assignments: BTreeMap::from([(
                 self.node.id.clone(),
                 GrantAssignment {
@@ -2507,7 +2509,10 @@ async fn source_outbox_actual_incremental_consent_edit_and_revoke_use_original_g
         consent_service::replace_incremental_consent(&f.db, &consent, &consent.scopes, vec![])
             .await
             .unwrap();
-    assert_ne!(changed.revision, consent.revision);
+    // The incremental edit adds no authority, so it is a true no-op and must
+    // preserve the live revision. The later Machine re-approval is the
+    // authority change that rotates the external grant.
+    assert_eq!(changed.revision, consent.revision);
     let (_, replacement, new_source) = approve_oauth(&f, &client).await;
     let new_work = admitted_work(&f, &new_source).await;
     let outbox = source_outbox_rows(&f.db).await;
@@ -2931,4 +2936,42 @@ fn verified_external_source_debug_omits_original_parent_child_and_consent() {
     for debug in [format!("{oauth:?}"), format!("{oauth:#?}")] {
         assert!(!debug.contains("sentinel"));
     }
+}
+
+#[tokio::test]
+async fn external_grants_require_explicit_legacy_warning_consent() {
+    let f = fixture("external_explicit_legacy").await;
+    let mut selection = f.selection();
+    selection.separation = None;
+    selection.legacy_warning_acknowledged = false;
+    let error = validate_selection(&f.db, &f.user, &selection)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, crate::errors::AppError::ValidationError(ref text) if text.contains("node tokens") && text.contains("signing secrets") && text.contains("stored credentials") && text.contains("share the host kernel"))
+    );
+    selection.separation = Some(nyxid_machine::context::Choice::SharedLegacy);
+    assert!(
+        validate_selection(&f.db, &f.user, &selection)
+            .await
+            .is_err()
+    );
+    for choice in [
+        nyxid_machine::context::Choice::Automatic,
+        nyxid_machine::context::Choice::RequireSeparated,
+    ] {
+        selection.separation = Some(choice);
+        selection.legacy_warning_acknowledged = true;
+        let error = validate_selection(&f.db, &f.user, &selection)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::errors::AppError::ValidationError(ref text) if text.contains("does not support separated contexts"))
+        );
+    }
+    selection.separation = Some(nyxid_machine::context::Choice::SharedLegacy);
+    validate_selection(&f.db, &f.user, &selection)
+        .await
+        .unwrap();
+    f.db.drop().await.unwrap();
 }

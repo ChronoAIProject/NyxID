@@ -85,6 +85,7 @@ pub mod node_agent;
 pub mod node_ws;
 pub mod notifications;
 pub mod oauth;
+pub(crate) mod oauth_consent_response;
 pub mod oidc_discovery;
 pub mod openclaw_channel;
 pub mod oracle_login_profiles;
@@ -209,3 +210,9 @@ mod tools_manager_tests;
 
 pub mod assistant_invocations;
 pub mod call_adapters;
+
+pub mod platform_help;
+
+pub mod telegram_managers;
+
+pub mod nyxbot_gateway_releases;

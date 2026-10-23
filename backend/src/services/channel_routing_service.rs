@@ -233,7 +233,7 @@ pub async fn create_conversation(
 /// Write-fence a route's agent key inside the route transaction, so binding a
 /// key conflicts with a concurrent revocation (for example manager conversion)
 /// instead of leaving an active route on a revoked key.
-async fn fence_route_key(
+pub(crate) async fn fence_route_key(
     db: &mongodb::Database,
     key_id: &str,
     session: &mut mongodb::ClientSession,
@@ -592,6 +592,22 @@ pub async fn touch_conversation(db: &mongodb::Database, conversation_id: &str) -
             }},
         )
         .await?;
+    Ok(())
+}
+
+/// Retire rollback routes by the dedicated credential, including routes whose
+/// creation succeeded before the channel stored the returned route id.
+pub(crate) async fn retire_key_routes_in_session(
+    db: &mongodb::Database,
+    owner: &str,
+    bot: &str,
+    key: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    db.collection::<ChannelConversation>(COLLECTION_NAME).update_many(
+        doc! {"user_id":owner,"channel_bot_id":bot,"agent_api_key_id":key},
+        doc! {"$set":{"is_active":false,"default_agent":false,"updated_at":bson::DateTime::now()}},
+    ).session(session).await?;
     Ok(())
 }
 

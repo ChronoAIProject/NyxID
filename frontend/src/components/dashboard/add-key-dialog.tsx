@@ -3740,7 +3740,7 @@ export function AddKeyDialog({
         {step === "verify" && createdKey && (
           <ConnectVerifyStep
             createdKey={createdKey}
-            isNodeRouted={Boolean(form.nodeId.trim())}
+            nodeId={form.nodeId.trim() || null}
             onDone={() => {
               onSuccess?.({ userServiceId: createdKey.id });
               handleOpenChange(false);

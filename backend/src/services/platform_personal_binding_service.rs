@@ -1892,7 +1892,7 @@ pub async fn manager_display(
     else {
         return Ok(None);
     };
-    let Some(credential)=db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).find_one(doc! {"provider":"telegram-new","fields.manager_bot_id":manager_bot_id,"fields.observation_id":&profile.observation_id,"fields.webhook_ready":"true"}).projection(doc! {"_id":0,"fields.manager_username":1}).await? else {return Ok(None);};
+    let Some(credential)=db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).find_one(doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", manager_bot_id)]}, "fields.manager_bot_id": manager_bot_id,"fields.observation_id":&profile.observation_id,"fields.webhook_ready":"true"}).projection(doc! {"_id":0,"fields.manager_username":1}).await? else {return Ok(None);};
     let Some(bot)=db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).find_one(doc! {"_id":&profile.channel_bot_id,"platform_profile_id":profile_id,"platform_bot_id":manager_bot_id,"is_active":true}).projection(doc! {"_id":0,"platform_bot_username":1}).await? else {return Ok(None);};
     let valid = |value: &str| {
         (5..=32).contains(&value.len())

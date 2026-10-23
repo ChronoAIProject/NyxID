@@ -143,19 +143,26 @@ docker build -f backend/Dockerfile -t nyxid-backend .
 docker build -f frontend/Dockerfile -t nyxid-frontend .
 ```
 
-The **backend Dockerfile** (`backend/Dockerfile`) uses a two-stage build:
-1. `rust:1.85-bookworm` builder with dependency caching (copies manifests first, builds deps, then copies source)
-2. `debian:bookworm-slim` runtime with only `ca-certificates` and `curl`, running as non-root user `nyxid`
+The **backend Dockerfile** (`backend/Dockerfile`) builds the Rust binary and a
+separate Node 22.23.2 credential-accept bundle. Its Debian runtime runs as
+non-root `nyxid` and includes the standalone HTML, SRI assets and release
+manifest at `/app/frontend/dist/`; it also needs its private durable TUF volume.
 
 The **frontend Dockerfile** (`frontend/Dockerfile`) uses a two-stage build:
-1. `node:20-alpine` builder with `npm ci` and `npm run build`
-2. `nginx:1.27-alpine` runtime serving the SPA with automatic `envsubst` for `BACKEND_URL`
+1. Node 22.23.2 builder with `npm ci` and `npm run build`
+2. Unprivileged nginx 1.27 runtime with a validating Python origin/policy renderer
 
 The frontend nginx config (`frontend/nginx.conf.template`) handles:
-- SPA fallback (`try_files $uri $uri/ /index.html`)
+- SPA fallback (`try_files $uri /index.html`)
 - Reverse proxy for `/api`, `/oauth`, `/.well-known`, `/health` to the backend
 - Gzip compression and cache headers for hashed assets
-- Security headers
+- Response-specific enforcing CSP and complete security headers on every location
+
+See [Production browser policy](BROWSER_SECURITY_POLICY.md) for the resource
+inventory, validated `NYXID_PUBLIC_ORIGIN`/`NYXID_BROWSER_CONNECT_ORIGINS`, HSTS
+boundary, credential routing, access-log redaction and production browser tests.
+Use its generated frontend configuration for direct static hosting too;
+handwritten static-server snippets below require the same response policies.
 
 The production SPA checks `/health` and `/build-version.json` on startup, then
 every ten minutes. Returning to the tab or reconnecting cannot trigger another
@@ -611,7 +618,9 @@ server {
 
 - TLS 1.2+ (TLS 1.3 preferred)
 - Valid certificate from a trusted CA (Let's Encrypt, etc.)
-- HSTS is enforced by NyxID's security headers middleware
+- HSTS is emitted only for configured HTTPS public origins (`BASE_URL` on the
+  backend, `NYXID_PUBLIC_ORIGIN` on frontend nginx), independent of request
+  Host/forwarded-proto headers. Neither subdomain inclusion nor preload is automatic.
 
 ### Let's Encrypt with Certbot
 

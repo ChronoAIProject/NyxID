@@ -578,6 +578,8 @@ for (const multiple of [true, false]) {
         expected_state_version: sourceKey.state_version,
       });
       expect((writes[0]?.body as { selection: unknown }).selection).toEqual({
+        separation: "shared_legacy",
+        legacy_warning_acknowledged: true,
         assignments: {
           [otherMachineId]: {
             capabilities: grant.assignments[otherMachineId]!.capabilities,

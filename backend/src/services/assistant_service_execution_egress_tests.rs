@@ -22,6 +22,145 @@ async fn grant_service(f: &mut Fixture, id: &str) {
 }
 
 #[tokio::test]
+async fn actual_assistant_proxy_without_settings_waits_for_web_approval_before_dispatch() {
+    use crate::models::{
+        approval_request::ApprovalRequest, notification_channel::NotificationChannel,
+    };
+    use axum::{
+        body::Body,
+        extract::{Path, State},
+        http::Request,
+    };
+    let mut f = orchestrator_fixture("assistant_first_request_web_approval").await;
+    mode(&f, AccessMode::Nyxmode).await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("approved dispatch"))
+        .mount(&server)
+        .await;
+    let id = connected(&f.state.db, &f.owner, "first-approval", &server.uri()).await;
+    grant_service(&mut f, &id).await;
+    // Remove the explicit helper preference: no GET settings or channel exists
+    // when the actual assistant-authenticated proxy handler receives this call.
+    let channels = f
+        .state
+        .db
+        .collection::<NotificationChannel>("notification_channels");
+    channels
+        .delete_many(doc! {"user_id": &f.owner})
+        .await
+        .unwrap();
+    assert_eq!(
+        channels
+            .count_documents(doc! {"user_id": &f.owner})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        crate::services::approval_service::user_requires_approval(
+            &f.state.db,
+            &f.owner,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        channels
+            .count_documents(doc! {"user_id": &f.owner})
+            .await
+            .unwrap(),
+        0
+    );
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/proxy/s/first-approval/perform")
+        .body(Body::from("{}"))
+        .unwrap();
+    request.extensions_mut().insert(
+        crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+            crate::services::billing::BillingIngress::Proxy,
+        ),
+    );
+    let mut auth = f.auth.clone();
+    auth.assistant_chat = Some(Arc::new(f.chat.clone()));
+    let execution = Box::pin(crate::handlers::proxy::proxy_request_by_slug(
+        State(f.state.clone()),
+        auth,
+        Default::default(),
+        Path(("first-approval".into(), "perform".into())),
+        request,
+    ));
+    let web_decision = async {
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(pending) = f
+                    .state
+                    .db
+                    .collection::<ApprovalRequest>("approval_requests")
+                    .find_one(doc! {"user_id": &f.owner, "service_id": &id, "status": "pending"})
+                    .await
+                    .unwrap()
+                {
+                    break pending;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("actual proxy must persist a pending generic approval");
+        assert_eq!((pending.expires_at - pending.created_at).num_seconds(), 300);
+        assert!(pending.notification_channel.is_none());
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let stored = channels
+            .find_one(doc! {"user_id": &f.owner})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.approval_required, None);
+        assert_eq!(stored.approval_timeout_secs, 300);
+        let Json(result) = crate::handlers::approvals::decide_request(
+            State(f.state.clone()),
+            test_utils::test_auth_user(&f.owner),
+            Path(pending.id.clone()),
+            Default::default(),
+            HeaderMap::new(),
+            Json(crate::handlers::approvals::DecideRequest {
+                approved: true,
+                duration_sec: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, "approved");
+        assert_eq!(
+            crate::services::approval_service::get_request(&f.state.db, &pending.id)
+                .await
+                .unwrap()
+                .decision_channel
+                .as_deref(),
+            Some("web")
+        );
+    };
+    let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::join!(execution, web_decision)
+    })
+    .await
+    .expect("web decision must release the actual proxy execution");
+    let response = response.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap(),
+        "approved dispatch"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn actual_http_consent_ignores_correlation_drift_but_binds_account_and_idempotency() {
     let mut f = orchestrator_fixture("http_consent_correlation").await;
     mode(&f, AccessMode::AskEveryTime).await;

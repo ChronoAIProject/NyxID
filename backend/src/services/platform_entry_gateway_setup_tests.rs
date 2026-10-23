@@ -7,6 +7,7 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
     http::HeaderMap,
+    response::IntoResponse,
     routing::get,
 };
 use futures::FutureExt;
@@ -158,14 +159,26 @@ async fn create(
     State(h): State<GatewayHarness>,
     headers: HeaderMap,
     body: Bytes,
-) -> (StatusCode, Json<Value>) {
+) -> axum::response::Response {
+    match h.mode.load(Ordering::SeqCst) {
+        4 => return axum::response::Redirect::temporary("/credential-leak").into_response(),
+        5 => return "x".repeat(64 * 1024 + 1).into_response(),
+        6 => {
+            let chunks = futures::stream::iter([
+                Ok::<_, std::io::Error>(Bytes::from(vec![b'x'; 64 * 1024])),
+                Ok(Bytes::from_static(b"x")),
+            ]);
+            return axum::body::Body::from_stream(chunks).into_response();
+        }
+        _ => {}
+    }
     match std::panic::AssertUnwindSafe(create_checked(State(h.clone()), headers, body))
         .catch_unwind()
         .await
     {
         Ok(response) => {
             h.completed_responses.fetch_add(1, Ordering::SeqCst);
-            response
+            response.into_response()
         }
         Err(_) => {
             h.validation_failures.fetch_add(1, Ordering::SeqCst);
@@ -173,6 +186,7 @@ async fn create(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error":"fixture validation failed"})),
             )
+                .into_response()
         }
     }
 }
@@ -352,6 +366,13 @@ impl SetupFixture {
         };
         let router = Router::new()
             .route("/channels", post(create))
+            .route(
+                "/credential-leak",
+                post(|State(h): State<GatewayHarness>| async move {
+                    h.posts.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::NO_CONTENT
+                }),
+            )
             .route("/channel-records/{id}", get(retained))
             .route("/oauth2/applications/@me", get(application))
             .route("/applications/100/commands", get(commands).post(install))
@@ -1054,6 +1075,35 @@ fn native_gateway_failed_final_activation_retains_provider_ownership_and_separat
             assert!(f.harness.state.db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).find_one(doc! {"_id":&f.bot.id,"platform_entry_pending":{"$exists":true},"platform_profile_id":{"$exists":false}}).await.unwrap().is_some());
             assert_eq!(f.harness.binding_puts.load(Ordering::SeqCst), 1);
             f.close().await;
+        },
+    );
+}
+
+#[test]
+fn gateway_setup_refuses_redirects_and_advertised_or_chunked_oversize() {
+    crate::test_utils::run_native_journey_test(
+        "gateway_setup_refuses_redirects_and_advertised_or_chunked_oversize",
+        || async {
+            for mode in [4, 5, 6] {
+                let f = SetupFixture::new(mode).await;
+                assert!(f.convert(None).await.is_err());
+                assert_eq!(
+                    f.harness.posts.load(Ordering::SeqCst),
+                    0,
+                    "redirect target must receive no credentials"
+                );
+                let row = f
+                    .state()
+                    .db
+                    .collection::<PlatformEntryGateway>(GATEWAYS)
+                    .find_one(doc! {"configured_by":f.actor()})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(row.setup_state, "dispatched");
+                assert_ne!(row.state, "active");
+                f.close().await;
+            }
         },
     );
 }

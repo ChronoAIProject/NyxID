@@ -298,9 +298,10 @@ export function AgentDetailsSheet({
                 }
               />
               <ProfileForm
-                key={[agent.id, agent.name, agent.description, agent.display_name, agent.persona].join(
-                  ":",
-                )}
+                key={[
+                  agent.id, agent.name, agent.description, agent.display_name, agent.persona,
+                  agent.channel_checking_notice,
+                ].join(":")}
                 agent={agent}
               />
               {agent.kind === "specialist" ? (
@@ -364,6 +365,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
       persona: agent.persona ?? "",
       model: agent.model ?? "",
       access_mode_override: agent.access_mode_override ?? null,
+      channel_checking_notice: agent.channel_checking_notice ?? false,
     },
   });
   const [error, setError] = useState<string>();
@@ -381,6 +383,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
         ...(dirty.persona ? { persona: values.persona } : {}),
         ...(dirty.model ? { model: values.model } : {}),
         ...(dirty.access_mode_override ? { access_mode_override: values.access_mode_override } : {}),
+        ...(dirty.channel_checking_notice ? { channel_checking_notice: values.channel_checking_notice } : {}),
       });
       form.reset(values);
     } catch (cause) {
@@ -491,6 +494,25 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                   {ACCESS_MODE_DESCRIPTION[effectiveAccessMode(workspaceMode, field.value)]}
                 </FormDescription>
                 <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="channel_checking_notice"
+            render={({ field }) => (
+              <FormItem>
+                <div className="flex items-center justify-between gap-3">
+                  <FormLabel>Channel progress reply</FormLabel>
+                  <FormControl>
+                    <Switch checked={field.value ?? false} onCheckedChange={field.onChange} disabled={readOnly} />
+                  </FormControl>
+                </div>
+                <FormDescription className="text-11">
+                  After five seconds, send “Got it, let me check and get back to you.”
+                  if an external check is needed. Attached skill reads and tool discovery
+                  do not trigger it. The completed answer follows in the same chat.
+                </FormDescription>
               </FormItem>
             )}
           />

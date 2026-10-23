@@ -30,6 +30,7 @@ export function LoginIdentityCard({
   const [keep, setKeep] = useState(false);
   const [busy, setBusy] = useState(false);
   const [appOpen, setAppOpen] = useState(false);
+  const [recoveryMode, setRecoveryMode] = useState(false);
   const [error, setError] = useState<string | null>(() =>
     window.location.hash === "#identity-error"
       ? "Identity verification was not completed. Please try again."
@@ -129,13 +130,15 @@ export function LoginIdentityCard({
               name="code"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Authenticator or recovery code</FormLabel>
+                  <FormLabel>{recoveryMode ? "Recovery code" : "Authenticator code"}</FormLabel>
                   <FormControl>
                     <Input
                       {...field}
                       inputMode="text"
                       autoComplete="one-time-code"
                       maxLength={32}
+                      placeholder={recoveryMode ? "Paste a recovery code" : "000000"}
+                      aria-label={recoveryMode ? "Recovery code" : "Authenticator code"}
                       className="min-w-0 font-mono text-xs tracking-normal sm:text-sm"
                       disabled={blocked}
                     />
@@ -144,6 +147,14 @@ export function LoginIdentityCard({
                 </FormItem>
               )}
             />
+            <Button
+              type="button"
+              variant="link"
+              className="h-auto p-0 text-12"
+              onClick={() => setRecoveryMode((value) => !value)}
+            >
+              {recoveryMode ? "Use an authenticator code" : "Use a recovery code"}
+            </Button>
             <Button
               type="submit"
               variant="primary"

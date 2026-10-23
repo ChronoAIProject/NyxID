@@ -19,8 +19,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{self, AuthMethod};
 use crate::services::{
     approval_service, audit_service, connect_link_service, mcp_service, notification_service,
-    operation_descriptor, oracle_pool_service, oracle_session_service, oracle_task_service,
-    proxy_service, ssh_service, user_service_service,
+    operation_descriptor, proxy_service, ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -438,6 +437,7 @@ async fn service_tool_content(
     auth: &McpAuthContext,
     tool_name: &str,
     response: mcp_service::ToolResponse,
+    result_query: Option<&str>,
 ) -> (
     Vec<serde_json::Value>,
     bool,
@@ -473,7 +473,20 @@ async fn service_tool_content(
         let text = if is_error {
             format!("Error ({status}): {}", response.text)
         } else {
-            format!("{resource_note}{}", response.text)
+            let evidence = auth.chat.as_ref().and_then(|_| {
+                response.resources.as_ref().and_then(|read| {
+                    crate::services::notion_evidence::present(read, &response.text, result_query)
+                })
+            });
+            let unavailable = if result_query.is_some() && evidence.is_none() {
+                "Compact retrieval is unavailable for this source response; the ordinary source result follows.\n\n"
+            } else {
+                ""
+            };
+            format!(
+                "{resource_note}{unavailable}{}",
+                evidence.as_deref().unwrap_or(&response.text)
+            )
         };
         return (
             vec![serde_json::json!({ "type": "text", "text": text })],
@@ -686,6 +699,7 @@ struct McpAuthContext {
     caller_token: Option<proxy_service::CallerToken>,
     chat: Option<crate::services::assistant_acknowledgement_service::ChatAuthority>,
     account_acknowledged: bool,
+    parent_session_id: Option<String>,
     scope: String,
     resource_uris: Option<Vec<String>>,
     user_id: String,
@@ -727,6 +741,7 @@ impl McpAuthContext {
             caller_token: None,
             chat: None,
             account_acknowledged: false,
+            parent_session_id: None,
             scope: String::new(),
             resource_uris: None,
             user_id,
@@ -992,6 +1007,7 @@ async fn authenticate_mcp_or_public(
                     scope: api_key.scopes.clone(),
                     resource_uris: None,
                     chat,
+                    parent_session_id: None,
                     account_acknowledged: api_key
                         .scopes
                         .split_whitespace()
@@ -1066,12 +1082,18 @@ async fn authenticate_mcp_or_public(
     if let Some(token) = token {
         match jwt::verify_token(&state.jwt_keys, &state.config, token) {
             Ok(claims) if claims.token_type == "access" => {
-                crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims)
+                let authority_user =
+                    crate::services::oauth_token_authority_service::validate_claims_with_user_for_route(
+                        &state.db, &claims,
+                        "mcp",
+                    )
                     .await
                     .map_err(|error| match error {
                         crate::errors::AppError::OAuthAuthorityUnavailable => error.into_response(),
                         _ => mcp_401(&state.config.base_url),
-                    })?;
+                    })?
+                    // Keep only the assurance snapshot across later awaits.
+                    .map(|user| (user.id, user.mfa_enabled));
                 // Manual MCP authentication preserves the same sender-bound
                 // proof checks as the REST extractor. It never turns a bound
                 // token into an ordinary bearer for Machine execution.
@@ -1132,15 +1154,6 @@ async fn authenticate_mcp_or_public(
                     .map_err(|_| mcp_401(&state.config.base_url))?;
                 }
 
-                // Service account tokens have sa=true; verify against
-                // the service_accounts collection instead of users.
-                let (user_id, approval_owner_user_id) = if claims.sa == Some(true) {
-                    let (sa_id, owner_id) = verify_service_account_active(state, &claims).await?;
-                    (sa_id, Some(owner_id))
-                } else {
-                    (verify_user_active(state, claims.sub.clone()).await?, None)
-                };
-
                 let auth_method = if claims.sa == Some(true) {
                     AuthMethod::ServiceAccount
                 } else if claims.act.is_some() {
@@ -1151,7 +1164,35 @@ async fn authenticate_mcp_or_public(
                     AuthMethod::AccessToken
                 };
 
-                let mut ctx = McpAuthContext::user(user_id, auth_method);
+                // Service accounts retain their own authority check. First-party
+                // bearer assurance reuses the active user from OAuth authority
+                // validation so this request loads the user only once.
+                let (user_id, approval_owner_user_id) = if claims.sa == Some(true) {
+                    let (sa_id, owner_id) = verify_service_account_active(state, &claims).await?;
+                    (sa_id, Some(owner_id))
+                } else if auth_method == AuthMethod::AccessToken && claims.client_id.is_none() {
+                    let (user_id, mfa_enabled) = authority_user
+                        .as_ref()
+                        .ok_or_else(|| mcp_401(&state.config.base_url))?;
+                    Box::pin(
+                        crate::services::session_authority::mfa_assurance_for_active_user(
+                            &state.db,
+                            user_id,
+                            *mfa_enabled,
+                            claims.sid.as_deref(),
+                        ),
+                    )
+                    .await
+                    .map_err(|_| mcp_401(&state.config.base_url))?;
+                    (claims.sub.clone(), None)
+                } else {
+                    (verify_user_active(state, claims.sub.clone()).await?, None)
+                };
+
+                let mut ctx = McpAuthContext::user(user_id, auth_method.clone());
+                if auth_method == AuthMethod::AccessToken && claims.client_id.is_none() {
+                    ctx.parent_session_id = claims.sid.clone();
+                }
                 if claims.resources.as_ref().is_none_or(|resources| {
                     // Existing OAuth issuance serializes an omitted RFC 8707
                     // resource as Some([]). Only a nonempty list narrows the
@@ -1272,8 +1313,14 @@ async fn authenticate_mcp_or_public(
         if !session.session_fallback_allowed {
             return Err(mcp_401(&state.config.base_url));
         }
-        let user_id = verify_user_active(state, session.user_id).await?;
+        Box::pin(crate::services::session_authority::mcp_fallback_assurance(
+            &state.db, sid, &session,
+        ))
+        .await
+        .map_err(|_| mcp_401(&state.config.base_url))?;
+        let user_id = session.user_id;
         let mut ctx = McpAuthContext::user(user_id, AuthMethod::Session);
+        ctx.parent_session_id = session.parent_session_id;
         ctx.ip_address = request_ip;
         ctx.user_agent = request_ua;
         return Ok(McpAuthentication::Ordinary(Box::new(ctx)));
@@ -1592,6 +1639,7 @@ pub async fn mcp_post(
                 &request,
                 auth.is_stateless(),
                 auth.allows_session_fallback(),
+                auth.parent_session_id.as_deref(),
                 auth.api_key_id.as_deref(),
                 auth.api_key_name.as_deref(),
                 auth.ip_address.as_deref(),
@@ -1987,6 +2035,7 @@ async fn handle_initialize(
     request: &JsonRpcRequest,
     stateless: bool,
     session_fallback_allowed: bool,
+    parent_session_id: Option<&str>,
     api_key_id: Option<&str>,
     api_key_name: Option<&str>,
     ip_address: Option<&str>,
@@ -2003,7 +2052,7 @@ async fn handle_initialize(
     } else {
         match state
             .mcp_sessions
-            .create_with_proxy_access(user_id, true, session_fallback_allowed)
+            .create_with_parent_session(user_id, true, session_fallback_allowed, parent_session_id)
             .await
         {
             Ok(Some(id)) => {
@@ -2157,9 +2206,6 @@ async fn handle_tools_list(
     if is_scoped_api_key(auth) {
         tool_defs.retain(|t| !SSH_META_TOOL_NAMES.contains(&t.name.as_str()));
     }
-    if !auth.assistant_operation_scopes.is_empty() {
-        tool_defs.retain(|t| !t.name.starts_with("nyx__oracle_"));
-    }
 
     if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
         tool_defs.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
@@ -2263,6 +2309,17 @@ fn chat_activity_label(params: &serde_json::Value) -> String {
         .get("name")
         .and_then(|n| n.as_str())
         .unwrap_or("tool");
+    // A wrapped attached-skill read is still a skill read. Only compiled
+    // native names can escape the downstream-name privacy redaction.
+    let name = if name == "nyx__call_tool" {
+        params
+            .get("arguments")
+            .and_then(|arguments| arguments.get("tool_name"))
+            .and_then(|name| name.as_str())
+            .unwrap_or("tool")
+    } else {
+        name
+    };
     let native = name != "nyx__call_tool" && native_activity_names().contains(name);
     if native {
         name.to_owned()
@@ -2553,12 +2610,6 @@ async fn dispatch_tools_call(
                 | "nyx__call_tool"
                 | "nyx__ssh_exec"
                 | "nyx__ssh_list_services"
-                | "nyx__oracle_pools"
-                | "nyx__oracle_ask"
-                | "nyx__oracle_result"
-                | "nyx__oracle_attach"
-                | "nyx__oracle_extract"
-                | "nyx__oracle_session"
                 | "nyx__resource_get"
         );
         let known_account_tool = tool_name.strip_prefix("nyxid__").is_some_and(|name| {
@@ -2615,10 +2666,7 @@ async fn dispatch_tools_call(
                 | "nyx__call_tool"
                 | "nyx__wait_for_connection"
                 | "nyx__ssh_list_services"
-                | "nyx__oracle_pools"
-                | "nyx__oracle_result"
-                | "nyx__oracle_session"
-                | "nyx__ssh_exec" | "nyx__oracle_ask" | "nyx__oracle_attach" | "nyx__oracle_extract"
+                | "nyx__ssh_exec"
                 | "nyx__resource_get"
                 | "nyx__attachment_read" | "nyx__attachment_list" | "nyx__conversation_history"
                 | "nyx__machine_list"
@@ -2638,13 +2686,10 @@ async fn dispatch_tools_call(
     {
         use crate::services::assistant_acknowledgement_service as acks;
         let class = acks::classify_owner_action(tool_name, &arguments);
-        // Webhook automations keep treating oracle prompts (data leaving for
-        // an external model) as destructive, as before access modes.
         let facts = acks::ActionFacts {
             class,
             read_only: false,
-            destructive: class == acks::OwnerActionClass::Destructive
-                || tool_name == "nyx__oracle_ask",
+            destructive: class == acks::OwnerActionClass::Destructive,
         };
         let gate = async {
             match acks::confirmation_needed(&state.db, chat, facts, false).await? {
@@ -2828,48 +2873,16 @@ fn dispatch_meta_tool<'a>(
             client_accepts_sse,
             billing_egress_permit,
         )),
-        // Oracle pools have no operation identity, so an operation-scoped key
-        // could otherwise spend the owner's pool outside every scope.
-        name if name.starts_with("nyx__oracle_") && !auth.assistant_operation_scopes.is_empty() => {
-            Box::pin(async move {
-                tool_result(
-                    request.id.clone(),
-                    "Oracle tools are not available to operation-scoped keys.",
-                    true,
-                )
-            })
-        }
-        "nyx__oracle_pools" => Box::pin(handle_oracle_pools(state, auth, request.id.clone())),
-        "nyx__oracle_ask" => Box::pin(handle_oracle_ask(
-            state,
-            auth,
-            arguments,
-            request.id.clone(),
-        )),
-        "nyx__oracle_result" => Box::pin(handle_oracle_result(
-            state,
-            auth,
-            arguments,
-            request.id.clone(),
-        )),
-        "nyx__oracle_attach" => Box::pin(handle_oracle_attach(
-            state,
-            auth,
-            arguments,
-            request.id.clone(),
-        )),
-        "nyx__oracle_extract" => Box::pin(handle_oracle_extract(
-            state,
-            auth,
-            arguments,
-            request.id.clone(),
-        )),
-        "nyx__oracle_session" => Box::pin(handle_oracle_session(
-            state,
-            auth,
-            arguments,
-            request.id.clone(),
-        )),
+        // NyxID's built-in oracle is permanently retired. The tools are no
+        // longer listed; a client that still names one is told so, as an
+        // error result it can read, instead of an unknown-tool fault.
+        name if name.starts_with("nyx__oracle_") => Box::pin(async move {
+            tool_result(
+                request.id.clone(),
+                &crate::errors::AppError::OracleRetired.to_string(),
+                true,
+            )
+        }),
         "nyx__ssh_exec" | "nyx__ssh_list_services" => Box::pin(async move {
             if is_scoped_api_key(auth) {
                 return tool_result(
@@ -3224,9 +3237,15 @@ fn dispatch_service_tool<'a>(
         }
 
         let async_watch = if endpoint.async_operation.is_some() {
-            if let Some(chat) = auth.chat.as_ref() {
-                match crate::services::async_service_operation::reserve(
-                    &state.db, chat, service, endpoint,
+            if let Some(chat) = auth.chat.as_ref().filter(|chat| {
+                !chat.guest
+                    || endpoint
+                        .async_operation
+                        .as_ref()
+                        .is_none_or(|contract| contract.presentation.is_none())
+            }) {
+                match crate::services::async_service_operation::reserve_with_arguments(
+                    &state.db, chat, service, endpoint, &arguments,
                 )
                 .await
                 {
@@ -3374,7 +3393,7 @@ fn dispatch_service_tool<'a>(
                 "source_policy": refusal,
             }).to_string();
             }
-            box_tool_future(|| service_tool_content(state, auth, tool_name, response)).await
+            box_tool_future(|| service_tool_content(state, auth, tool_name, response, None)).await
         } else if let Some((row, output)) = &resource {
             let result = box_tool_future(|| {
                 materialize_resource_content(state, auth, row, *output, response)
@@ -3392,7 +3411,7 @@ fn dispatch_service_tool<'a>(
                 ),
             }
         } else {
-            box_tool_future(|| service_tool_content(state, auth, tool_name, response)).await
+            box_tool_future(|| service_tool_content(state, auth, tool_name, response, None)).await
         };
         if !is_error
             && !matches!(
@@ -3867,9 +3886,6 @@ fn webhook_tool_schema(auth: &McpAuthContext, schema: &serde_json::Value) -> ser
 fn meta_action_summary(tool: &str, args: &serde_json::Value) -> String {
     let what = match tool {
         "nyx__ssh_exec" => "Run a command over SSH",
-        "nyx__oracle_ask" => "Send a prompt to an oracle pool",
-        "nyx__oracle_attach" => "Import a ChatGPT conversation into an oracle pool",
-        "nyx__oracle_extract" => "Extract a web page with an oracle pool",
         "nyx__connect_service" => "Connect a service",
         _ => "Run a NyxID tool",
     };
@@ -3995,6 +4011,8 @@ async fn handle_account_tool(
         return tool_result(request_id, "{\"error\":\"unauthorized\"}", true);
     };
     let user = auth::AuthUser {
+        mfa_assured: false,
+        mfa_enabled: None,
         org_agent_access: auth.org_agent_access.clone(),
         assistant_group_id: auth.assistant_group_id.clone(),
         assistant_agent_owner_id: auth.assistant_agent_owner_id.clone(),
@@ -4263,6 +4281,23 @@ async fn handle_meta_call_tool(
         return tool_result(request_id, "tool_name too long (max 200 chars)", true);
     }
 
+    let result_query =
+        match crate::services::notion_evidence::validate_query(arguments.get("result_query")) {
+            Ok(query) => query,
+            Err(message) => return tool_result(request_id, message, true),
+        };
+    if result_query.is_some()
+        && (auth.chat.is_none()
+            || tool_name.starts_with("nyx__")
+            || tool_name.starts_with("nyxid__"))
+    {
+        return tool_result(
+            request_id,
+            "result_query is only supported for connected Notion block reads in chat",
+            true,
+        );
+    }
+
     // Accept arguments in multiple formats (LLMs are unpredictable):
     //   1. { "tool_name": "x", "arguments_json": "{\"foo\":1}" }  -- JSON string (preferred)
     //   2. { "tool_name": "x", "arguments": { "foo": 1 } }       -- nested object (legacy)
@@ -4289,7 +4324,7 @@ async fn handle_meta_call_tool(
             let mut flat = serde_json::Map::new();
             if let Some(obj) = arguments.as_object() {
                 for (k, v) in obj {
-                    if k != "tool_name" && k != "arguments_json" {
+                    if k != "tool_name" && k != "arguments_json" && k != "result_query" {
                         flat.insert(k.clone(), v.clone());
                     }
                 }
@@ -4395,6 +4430,18 @@ async fn handle_meta_call_tool(
         }
     };
 
+    if result_query.is_some()
+        && (endpoint.method != "GET"
+            || endpoint.path != "/v1/blocks/{block_id}/children"
+            || mcp_service::producer_operation_generation(service, endpoint).is_none())
+    {
+        return tool_result(
+            request_id,
+            "result_query requires a published Notion block-children GET",
+            true,
+        );
+    }
+
     if let Some(response) =
         box_tool_future(|| chat_service_gate(state, auth, service, request_id.clone())).await
     {
@@ -4421,6 +4468,15 @@ async fn handle_meta_call_tool(
             return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
         }
     };
+    if result_query.is_some()
+        && (prepared.method() != reqwest::Method::GET || prepared.carries_method_override())
+    {
+        return tool_result(
+            request_id,
+            "result_query requires a GET without a method override",
+            true,
+        );
+    }
     if let Err(error) =
         prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)
     {
@@ -4499,9 +4555,19 @@ async fn handle_meta_call_tool(
     };
 
     let async_watch = if endpoint.async_operation.is_some() {
-        if let Some(chat) = auth.chat.as_ref() {
-            match crate::services::async_service_operation::reserve(
-                &state.db, chat, service, endpoint,
+        if let Some(chat) = auth.chat.as_ref().filter(|chat| {
+            !chat.guest
+                || endpoint
+                    .async_operation
+                    .as_ref()
+                    .is_none_or(|contract| contract.presentation.is_none())
+        }) {
+            match crate::services::async_service_operation::reserve_with_arguments(
+                &state.db,
+                chat,
+                service,
+                endpoint,
+                &inner_args,
             )
             .await
             {
@@ -4611,7 +4677,8 @@ async fn handle_meta_call_tool(
     let concurrency = response.concurrency.take();
     let is_policy_refusal = response.is_policy_refusal();
     let (content, is_error, failure) =
-        box_tool_future(|| service_tool_content(state, auth, tool_name, response)).await;
+        box_tool_future(|| service_tool_content(state, auth, tool_name, response, result_query))
+            .await;
     if !is_error
         && !matches!(
             service.source,
@@ -5326,488 +5393,6 @@ async fn handle_wait_for_connection(
 }
 
 // ---------------------------------------------------------------------------
-// Oracle meta-tool dispatch helpers
-// ---------------------------------------------------------------------------
-
-fn oracle_submitter(auth: &McpAuthContext) -> oracle_task_service::SubmitterIdentity {
-    oracle_task_service::SubmitterIdentity {
-        user_id: auth.user_id.clone(),
-        api_key_id: auth.api_key_id.clone(),
-        api_key_name: auth.api_key_name.clone(),
-    }
-}
-
-fn required_arg<'a>(arguments: &'a serde_json::Value, name: &str) -> Result<&'a str, &'static str> {
-    arguments
-        .get(name)
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .ok_or("required")
-}
-
-fn optional_string_arg(arguments: &serde_json::Value, name: &str) -> Option<String> {
-    arguments
-        .get(name)
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(ToString::to_string)
-}
-
-fn wait_seconds(
-    arguments: &serde_json::Value,
-    default_secs: u64,
-    min_secs: u64,
-    max_secs: u64,
-) -> u64 {
-    arguments
-        .get("wait_seconds")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(default_secs)
-        .clamp(min_secs, max_secs)
-}
-
-async fn poll_oracle_task(
-    db: &mongodb::Database,
-    actor: &str,
-    task_id: &str,
-    wait_secs: u64,
-) -> crate::errors::AppResult<(crate::models::oracle_task::OracleTask, u64)> {
-    let started = tokio::time::Instant::now();
-    loop {
-        let (task, position) =
-            oracle_task_service::get_task_for_consumer(db, actor, task_id).await?;
-        if task.status.is_terminal() || started.elapsed() >= Duration::from_secs(wait_secs) {
-            return Ok((task, position));
-        }
-        tokio::time::sleep(Duration::from_secs(3)).await;
-    }
-}
-
-/// Inventory of generated files and images on a completed task. The MCP text
-/// channel cannot carry bytes, so list name, MIME, and size and point at the
-/// retrieval paths (base64 in `GET /api/v1/oracle/tasks/{id}`, or
-/// `nyxid oracle result <id> --artifacts <dir>`). Never inlines bodies.
-fn render_oracle_artifacts(task: &crate::models::oracle_task::OracleTask) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    for file in task.files.iter().flatten() {
-        lines.push(format!(
-            "- {} ({}, {} bytes)",
-            file.name,
-            file.mime,
-            file.data.len()
-        ));
-    }
-    for (index, image) in task.images.iter().flatten().enumerate() {
-        let name = image
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("image_{}", index + 1));
-        lines.push(format!(
-            "- {} ({}, {} bytes)",
-            name,
-            image.mime,
-            image.data.len()
-        ));
-    }
-    if lines.is_empty() {
-        return String::new();
-    }
-    format!(
-        "Artifacts ({}):\n{}\nRetrieve them with `nyxid oracle result {} --artifacts <dir>` or as base64 `files`/`images` in GET /api/v1/oracle/tasks/{}.",
-        lines.len(),
-        lines.join("\n"),
-        task.id,
-        task.id
-    )
-}
-
-fn render_oracle_task_result(
-    task: &crate::models::oracle_task::OracleTask,
-    queue_position: u64,
-    pending_message: &str,
-) -> (String, bool) {
-    match task.status {
-        crate::models::oracle_task::OracleTaskStatus::Completed => {
-            let mut text = task.response.clone().unwrap_or_default();
-            let artifacts = render_oracle_artifacts(task);
-            if text.is_empty() {
-                text = if artifacts.is_empty() {
-                    format!("Task {} completed with an empty response.", task.id)
-                } else {
-                    format!(
-                        "Task {} completed with no text; see artifacts below.",
-                        task.id
-                    )
-                };
-            }
-            if !artifacts.is_empty() {
-                text.push_str("\n\n");
-                text.push_str(&artifacts);
-            }
-            (text, false)
-        }
-        crate::models::oracle_task::OracleTaskStatus::Failed => (
-            format!(
-                "Task {} failed: {}",
-                task.id,
-                task.failure_reason
-                    .as_deref()
-                    .unwrap_or("worker did not provide a failure reason")
-            ),
-            true,
-        ),
-        crate::models::oracle_task::OracleTaskStatus::Cancelled => {
-            (format!("Task {} was cancelled.", task.id), true)
-        }
-        crate::models::oracle_task::OracleTaskStatus::Queued
-        | crate::models::oracle_task::OracleTaskStatus::Dispatched => {
-            let mut details = format!(
-                "{pending_message} (status {}, queue_position {}).",
-                task.status.as_str(),
-                queue_position
-            );
-            if let Some(phase) = &task.phase {
-                details.push_str(&format!(" Phase: {phase}."));
-            }
-            if let Some(conversation_id) = &task.conversation_id {
-                details.push_str(&format!(" conversation_id: {conversation_id}."));
-            }
-            (details, false)
-        }
-    }
-}
-
-async fn handle_oracle_pools(
-    state: &AppState,
-    auth: &McpAuthContext,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    match oracle_pool_service::list_visible_pools(&state.db, &auth.user_id).await {
-        Ok(pools) => {
-            let mut pool_lines = Vec::new();
-            for pool in pools {
-                if oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool)
-                    .await
-                    .is_err()
-                {
-                    continue;
-                }
-                pool_lines.push(format!(
-                    "- {} ({}) visibility={} id={}",
-                    pool.slug,
-                    pool.name,
-                    pool.visibility.as_str(),
-                    pool.id
-                ));
-            }
-            let mut lines = vec![format!(
-                "{} oracle pool(s) available for submission:",
-                pool_lines.len()
-            )];
-            if pool_lines.is_empty() {
-                lines.push("No active oracle pools are available for submission.".to_string());
-            } else {
-                lines.extend(pool_lines);
-            }
-            tool_result(request_id, &lines.join("\n"), false)
-        }
-        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
-    }
-}
-
-async fn handle_oracle_ask(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    let pool_ref = match required_arg(arguments, "pool") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"pool\" is required", true),
-    };
-    let prompt = match required_arg(arguments, "prompt") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"prompt\" is required", true),
-    };
-    let wait_secs = wait_seconds(arguments, 120, 5, 300);
-
-    let result = async {
-        let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
-        oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
-        let admission = match crate::services::assistant_native_execution::resource(
-            &state.db,
-            auth.chat.as_ref(),
-            crate::services::assistant_native_execution::NativeResource {
-                collection: "oracle_pools",
-                id: &pool.id,
-                owner: &pool.user_id,
-            },
-            "nyx__oracle_ask",
-            arguments,
-            crate::services::assistant_acknowledgement_service::ActionFacts {
-                class: crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
-                read_only: false,
-                destructive: true,
-            },
-            "Use the exact approved Oracle operation",
-        )
-        .await?
-        {
-            Ok(value) => value,
-            Err(refusal) => return Err(crate::errors::AppError::Conflict(refusal.to_string())),
-        };
-        if let Some(admission) = &admission {
-            admission.revalidate(&state.db).await?;
-        }
-        let outcome = oracle_task_service::submit_task(
-            &state.db,
-            &pool,
-            &oracle_submitter(auth),
-            oracle_task_service::SubmitTaskInput {
-                prompt: prompt.to_string(),
-                model_label: optional_string_arg(arguments, "model"),
-                project_url: optional_string_arg(arguments, "project_url"),
-                conversation_id: optional_string_arg(arguments, "conversation_id"),
-                ..Default::default()
-            },
-        )
-        .await?;
-        if let Some(admission) = &admission {
-            admission.receipt(&state.db).await;
-        }
-        poll_oracle_task(&state.db, &auth.user_id, &outcome.task.id, wait_secs).await
-    }
-    .await;
-
-    match result {
-        Ok((task, position)) => {
-            let (text, is_error) = render_oracle_task_result(
-                &task,
-                position,
-                &format!(
-                    "Task {} still processing. Call nyx__oracle_result with this task_id",
-                    task.id
-                ),
-            );
-            tool_result(request_id, &text, is_error)
-        }
-        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
-    }
-}
-
-async fn handle_oracle_result(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    let task_id = match required_arg(arguments, "task_id") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"task_id\" is required", true),
-    };
-    let wait_secs = wait_seconds(arguments, 60, 0, 300);
-
-    match poll_oracle_task(&state.db, &auth.user_id, task_id, wait_secs).await {
-        Ok((task, position)) => {
-            let (text, is_error) = render_oracle_task_result(
-                &task,
-                position,
-                &format!(
-                    "Task {} still processing. Call nyx__oracle_result with this task_id",
-                    task.id
-                ),
-            );
-            tool_result(request_id, &text, is_error)
-        }
-        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
-    }
-}
-
-async fn handle_oracle_attach(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    let pool_ref = match required_arg(arguments, "pool") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"pool\" is required", true),
-    };
-    let chatgpt_url = match required_arg(arguments, "chatgpt_url") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"chatgpt_url\" is required", true),
-    };
-
-    let result = async {
-        let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
-        oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
-        let admission = match crate::services::assistant_native_execution::resource(
-            &state.db,
-            auth.chat.as_ref(),
-            crate::services::assistant_native_execution::NativeResource {
-                collection: "oracle_pools",
-                id: &pool.id,
-                owner: &pool.user_id,
-            },
-            "nyx__oracle_attach",
-            arguments,
-            crate::services::assistant_acknowledgement_service::ActionFacts {
-                class: crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
-                read_only: false,
-                destructive: true,
-            },
-            "Use the exact approved Oracle operation",
-        )
-        .await?
-        {
-            Ok(value) => value,
-            Err(refusal) => return Err(crate::errors::AppError::Conflict(refusal.to_string())),
-        };
-        if let Some(admission) = &admission {
-            admission.revalidate(&state.db).await?;
-        }
-        let outcome = oracle_task_service::attach_conversation(
-            &state.db,
-            &pool,
-            &oracle_submitter(auth),
-            chatgpt_url,
-            None,
-        )
-        .await?;
-        if let Some(admission) = &admission {
-            admission.receipt(&state.db).await;
-        }
-        Ok(outcome)
-    }
-    .await;
-
-    match result {
-        Ok((session, task)) => {
-            let text = format!(
-                "Attached conversation.\nconversation_id: {}\nscrape_task_id: {}\nPoll nyx__oracle_result with the scrape task_id, then call nyx__oracle_session with the conversation_id.",
-                session.id, task.id
-            );
-            tool_result(request_id, &text, false)
-        }
-        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
-    }
-}
-
-async fn handle_oracle_extract(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    let pool_ref = match required_arg(arguments, "pool") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"pool\" is required", true),
-    };
-    let url = match required_arg(arguments, "url") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"url\" is required", true),
-    };
-    let wait_secs = wait_seconds(arguments, 120, 5, 300);
-
-    let result = async {
-        let pool = oracle_pool_service::get_pool(&state.db, pool_ref).await?;
-        oracle_pool_service::ensure_can_submit(&state.db, &auth.user_id, &pool).await?;
-        let admission = match crate::services::assistant_native_execution::resource(
-            &state.db,
-            auth.chat.as_ref(),
-            crate::services::assistant_native_execution::NativeResource {
-                collection: "oracle_pools",
-                id: &pool.id,
-                owner: &pool.user_id,
-            },
-            "nyx__oracle_extract",
-            arguments,
-            crate::services::assistant_acknowledgement_service::ActionFacts {
-                class: crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
-                read_only: false,
-                destructive: true,
-            },
-            "Use the exact approved Oracle operation",
-        )
-        .await?
-        {
-            Ok(value) => value,
-            Err(refusal) => return Err(crate::errors::AppError::Conflict(refusal.to_string())),
-        };
-        if let Some(admission) = &admission {
-            admission.revalidate(&state.db).await?;
-        }
-        let task = oracle_task_service::extract_url(
-            &state.db,
-            &pool,
-            &oracle_submitter(auth),
-            url,
-            optional_string_arg(arguments, "model"),
-        )
-        .await?;
-        if let Some(admission) = &admission {
-            admission.receipt(&state.db).await;
-        }
-        poll_oracle_task(&state.db, &auth.user_id, &task.id, wait_secs).await
-    }
-    .await;
-
-    match result {
-        Ok((task, position)) => {
-            let (text, is_error) = render_oracle_task_result(
-                &task,
-                position,
-                &format!(
-                    "Task {} still processing. Call nyx__oracle_result with this task_id",
-                    task.id
-                ),
-            );
-            tool_result(request_id, &text, is_error)
-        }
-        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
-    }
-}
-
-async fn handle_oracle_session(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    let conversation_id = match required_arg(arguments, "conversation_id") {
-        Ok(v) => v,
-        Err(_) => return tool_result(request_id, "\"conversation_id\" is required", true),
-    };
-
-    match oracle_session_service::list_session_tasks(&state.db, &auth.user_id, conversation_id)
-        .await
-    {
-        Ok((session, tasks)) => {
-            let mut lines = vec![format!(
-                "conversation_id: {}\npool_id: {}\nturn_count: {}",
-                session.id, session.pool_id, session.turn_count
-            )];
-            for task in tasks {
-                if !task.prompt.trim().is_empty() {
-                    lines.push(format!("Q: {}", task.prompt));
-                }
-                if let Some(response) = task.response.as_deref().filter(|r| !r.trim().is_empty()) {
-                    lines.push(format!("A: {response}"));
-                } else if !task.status.is_terminal() {
-                    lines.push(format!("A: [{}]", task.status.as_str()));
-                } else if let Some(reason) = task.failure_reason.as_deref() {
-                    lines.push(format!("A: [{}: {}]", task.status.as_str(), reason));
-                }
-            }
-            tool_result(request_id, &lines.join("\n\n"), false)
-        }
-        Err(e) => tool_result(request_id, &format!("Error: {e}"), true),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // SSH meta-tool dispatch helpers
 // ---------------------------------------------------------------------------
 
@@ -6473,6 +6058,325 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn first_party_bearer_checks_active_user_and_mfa_with_one_user_read() {
+        use axum::http::header;
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let reads = Arc::new(AtomicUsize::new(0));
+        let recorded = reads.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command.get_str("find").ok() == Some(USERS)
+            {
+                recorded.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+            "mcp_bearer_user_read",
+            handler,
+        )
+        .await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let tokens = crate::services::token_service::create_session_and_issue_tokens(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", tokens.access_token).parse().unwrap(),
+        );
+        for (active, mfa_enabled, assured, allowed) in [
+            (true, false, false, true),
+            (false, false, false, false),
+            (true, true, true, true),
+            (false, true, true, false),
+            (true, true, false, false),
+        ] {
+            db.collection::<User>(USERS)
+                .update_one(
+                    doc! {"_id": &id},
+                    doc! {"$set": {"is_active": active, "mfa_enabled": mfa_enabled}},
+                )
+                .await
+                .unwrap();
+            db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id": &tokens.session_id},
+                    doc! {"$set": {"mfa_assured": assured}},
+                )
+                .await
+                .unwrap();
+            reads.store(0, Ordering::SeqCst);
+            let result = authenticate_mcp(&state, &headers, true).await;
+            assert_eq!(result.is_ok(), allowed);
+            if let Err(response) = result {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+            assert_eq!(reads.load(Ordering::SeqCst), 1);
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mfa_fallback_accepts_legacy_and_mobile_exempt_parent_without_rewriting_it() {
+        let db = crate::test_utils::connect_transaction_test_database("existing_mcp_parents").await;
+        let mut state = crate::test_utils::test_app_state(db.clone());
+        state.mcp_sessions = std::sync::Arc::new(
+            crate::models::mcp_session::McpSessionStore::with_db(db.clone()),
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut user = crate::test_utils::test_user(&id, crate::models::user::UserType::Person);
+        user.mfa_enabled = true;
+        db.collection::<User>(USERS).insert_one(user).await.unwrap();
+        for legacy in [true, false] {
+            let tokens = crate::services::token_service::create_mobile_social_tokens(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &id,
+                None,
+                None,
+                !legacy,
+            )
+            .await
+            .unwrap();
+            if legacy {
+                db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id": &tokens.session_id},
+                        doc! {"$unset": {"mfa_assured": ""}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            let sid = state
+                .mcp_sessions
+                .create_with_parent_session(&id, true, true, Some(&tokens.session_id))
+                .await
+                .unwrap()
+                .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert("mcp-session-id", sid.parse().unwrap());
+            for _ in 0..2 {
+                assert!(authenticate_mcp(&state, &headers, true).await.is_ok());
+            }
+            headers.insert(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {}", tokens.access_token).parse().unwrap(),
+            );
+            assert!(authenticate_mcp(&state, &headers, true).await.is_ok());
+            let row = db
+                .collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+                .find_one(doc! {"_id": &tokens.session_id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!row.get_bool("revoked").unwrap());
+            if legacy {
+                assert!(!row.contains_key("mfa_assured"));
+            } else {
+                assert_eq!(row.get_str("mfa_exemption").unwrap(), "mobile_rollout");
+            }
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_mfa_fallback_survives_revoked_or_missing_parent() {
+        let db = crate::test_utils::connect_transaction_test_database("non_mfa_mcp_parent").await;
+        let mut state = crate::test_utils::test_app_state(db.clone());
+        state.mcp_sessions = std::sync::Arc::new(
+            crate::models::mcp_session::McpSessionStore::with_db(db.clone()),
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let parent = crate::services::token_service::create_session(&db, &id, None, None)
+            .await
+            .unwrap();
+        let sid = state
+            .mcp_sessions
+            .create_with_parent_session(&id, true, true, Some(&parent.session_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("mcp-session-id", sid.parse().unwrap());
+        db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &parent.session_id},
+                doc! {"$set": {"revoked": true}},
+            )
+            .await
+            .unwrap();
+        assert!(authenticate_mcp(&state, &headers, true).await.is_ok());
+        db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+            .delete_one(doc! {"_id": &parent.session_id})
+            .await
+            .unwrap();
+        assert!(authenticate_mcp(&state, &headers, true).await.is_ok());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn parentless_mfa_fallback_has_fixed_bound_and_single_atomic_rejection() {
+        use crate::models::mcp_session::{
+            MCP_SESSION_COLLECTION, MCP_SESSION_SLOT_COLLECTION, McpSessionStore,
+        };
+        Box::pin(async {
+            use mongodb::event::{EventHandler, command::CommandEvent};
+            use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+            let reads = Arc::new(AtomicUsize::new(0));
+            let recorded = reads.clone();
+            let handler = EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event
+                    && event.command.get_str("find").ok() == Some(USERS) {
+                    recorded.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            let db = crate::test_utils::connect_transaction_test_database_with_command_handler("mcp_legacy_fixed_bound", handler).await;
+            let mut state = crate::test_utils::test_app_state(db.clone());
+            state.mcp_sessions = std::sync::Arc::new(McpSessionStore::with_db(db.clone()));
+            let id = uuid::Uuid::new_v4().to_string();
+            let mut user = crate::test_utils::test_user(&id, crate::models::user::UserType::Person);
+            user.mfa_enabled = true;
+            db.collection::<User>(USERS).insert_one(user).await.unwrap();
+            for (mfa, age_offset, allowed) in [(true, -60, true), (true, 60, false), (false, 60, true)] {
+                db.collection::<User>(USERS).update_one(doc! {"_id": &id}, doc! {"$set": {"mfa_enabled": mfa}}).await.unwrap();
+                let sid = state.mcp_sessions.create_with_parent_session(&id, true, true, None).await.unwrap().unwrap();
+                let created = chrono::Utc::now() - chrono::Duration::seconds(crate::services::token_service::SESSION_TTL_SECS + age_offset);
+                db.collection::<bson::Document>(MCP_SESSION_COLLECTION).update_one(doc! {"_id": &sid},
+                    doc! {"$set": {"created_at": bson::DateTime::from_chrono(created),
+                        "last_active_at": bson::DateTime::now(),
+                        "expires_at": bson::DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::days(30))}}).await.unwrap();
+                let notifications = db.collection::<bson::Document>(crate::models::mcp_notification::COLLECTION_NAME);
+                notifications.insert_one(doc! {"_id": uuid::Uuid::new_v4().to_string(), "session_id": &sid}).await.unwrap();
+                let snapshot = state.mcp_sessions.get_for_auth(&sid).await.unwrap().unwrap();
+                let mut headers = HeaderMap::new(); headers.insert("mcp-session-id", sid.parse().unwrap());
+                let (first, second) = tokio::join!(authenticate_mcp(&state, &headers, true), authenticate_mcp(&state, &headers, true));
+                assert_eq!(first.is_ok(), allowed); assert_eq!(second.is_ok(), allowed);
+                assert_eq!(authenticate_mcp(&state, &headers, true).await.is_ok(), allowed);
+                assert_eq!(state.mcp_sessions.get_for_auth(&sid).await.unwrap().is_some(), allowed);
+                let audit_count = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                    .count_documents(doc! {"event_type": "mfa_unassured_session_rejected", "event_data.session_id": &sid}).await.unwrap();
+                assert_eq!(audit_count, u64::from(!allowed));
+                if !allowed {
+                    // A second replica may already have loaded the deleted row.
+                    assert!(crate::services::session_authority::mcp_fallback_assurance(&db, &sid, &snapshot).await.is_err());
+                    assert_eq!(db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                        .count_documents(doc! {"event_type": "mfa_unassured_session_rejected", "event_data.session_id": &sid}).await.unwrap(), 1);
+                    assert_eq!(db.collection::<bson::Document>(MCP_SESSION_SLOT_COLLECTION).count_documents(doc! {"session_id": &sid}).await.unwrap(), 0);
+                    assert_eq!(notifications.count_documents(doc! {"session_id": &sid}).await.unwrap(), 0);
+                }
+            }
+            // Adding fallback age enforcement must not add a user read to bearer auth.
+            db.collection::<User>(USERS).update_one(doc! {"_id": &id},
+                doc! {"$set": {"mfa_enabled": true}}).await.unwrap();
+            let tokens = crate::services::token_service::create_session_and_issue_tokens(&db, &state.config, &state.jwt_keys, &id, None, None).await.unwrap();
+            db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+                .update_one(doc! {"_id": &tokens.session_id},
+                    doc! {"$set": {"mfa_assured": true}}).await.unwrap();
+            let mut bearer = HeaderMap::new();
+            bearer.insert(axum::http::header::AUTHORIZATION, format!("Bearer {}", tokens.access_token).parse().unwrap());
+            reads.store(0, Ordering::SeqCst);
+            assert!(authenticate_mcp(&state, &bearer, true).await.is_ok());
+            assert_eq!(reads.load(Ordering::SeqCst), 1);
+            let sid = state.mcp_sessions.create_with_parent_session(&id, true, true, None).await.unwrap().unwrap();
+            let access = state.mcp_sessions.get_for_auth(&sid).await.unwrap().unwrap();
+            // Inactive accounts fail before either fallback or derivation policy.
+            db.collection::<User>(USERS).update_one(doc! {"_id": &id}, doc! {"$set": {"is_active": false}}).await.unwrap();
+            assert!(matches!(crate::services::session_authority::mcp_fallback_assurance(&db, &sid, &access).await,
+                Err(crate::errors::AppError::Unauthorized(message)) if message.contains("inactive")));
+            db.drop().await.unwrap();
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn mfa_fallback_requires_assurance_on_its_exact_live_parent() {
+        use crate::services::token_service;
+        let db = crate::test_utils::connect_transaction_test_database("mfa_mcp_parent").await;
+        let mut state = crate::test_utils::test_app_state(db.clone());
+        state.mcp_sessions = std::sync::Arc::new(
+            crate::models::mcp_session::McpSessionStore::with_db(db.clone()),
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let parent = token_service::create_session(&db, &id, None, None)
+            .await
+            .unwrap();
+        let unrelated = token_service::create_session_with_transaction_and_assurance(
+            &db, &id, None, None, None, true,
+        )
+        .await
+        .unwrap();
+        for parent_id in [
+            None,
+            Some(parent.session_id.as_str()),
+            Some(unrelated.session_id.as_str()),
+        ] {
+            let sid = state
+                .mcp_sessions
+                .create_with_parent_session(&id, true, true, parent_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert("mcp-session-id", sid.parse().unwrap());
+            let auth = authenticate_mcp(&state, &headers, true).await.unwrap();
+            assert_eq!(auth.parent_session_id.as_deref(), parent_id);
+            db.collection::<User>(USERS)
+                .update_one(doc! {"_id": &id}, doc! {"$set": {"mfa_enabled": true}})
+                .await
+                .unwrap();
+            assert_eq!(
+                authenticate_mcp(&state, &headers, true).await.is_ok(),
+                parent_id.is_none() || parent_id == Some(unrelated.session_id.as_str())
+            );
+            if parent_id == Some(unrelated.session_id.as_str()) {
+                db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+                    .update_one(doc! {"_id": parent_id}, doc! {"$set": {"revoked": true}})
+                    .await
+                    .unwrap();
+                assert!(authenticate_mcp(&state, &headers, true).await.is_err());
+            }
+            db.collection::<User>(USERS)
+                .update_one(doc! {"_id": &id}, doc! {"$set": {"mfa_enabled": false}})
+                .await
+                .unwrap();
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn public_credentials_never_resolve_ordinary_inventory_or_session_fallback() {
         use mongodb::event::{EventHandler, command::CommandEvent};
         let commands =
@@ -6647,6 +6551,7 @@ mod tests {
             caller_token: None,
             chat: None,
             account_acknowledged: false,
+            parent_session_id: None,
             scope: String::new(),
             resource_uris: None,
             user_id: "user-1".into(),
@@ -6891,7 +6796,8 @@ mod tests {
             let is_policy_refusal = provider_response.is_policy_refusal();
             assert!(!is_policy_refusal);
             let (content, is_error, failure) =
-                service_tool_content(&state, &auth, "catalog__operation", provider_response).await;
+                service_tool_content(&state, &auth, "catalog__operation", provider_response, None)
+                    .await;
             assert!(is_error);
             assert_eq!(
                 content[0]["text"],
@@ -7076,6 +6982,59 @@ mod tests {
         db.drop().await.unwrap();
     }
 
+    /// A client that still has the retired oracle tool names wired in gets a
+    /// readable error result saying the feature is permanently gone, not an
+    /// unknown-tool fault it might retry.
+    #[tokio::test]
+    async fn retired_oracle_tools_refuse_with_permanent_deprecation() {
+        let Some(db) = crate::test_utils::connect_test_database("mcp_oracle_retired").await else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let auth = McpAuthContext::user("user-1".to_string(), AuthMethod::AccessToken);
+        for name in [
+            "nyx__oracle_pools",
+            "nyx__oracle_ask",
+            "nyx__oracle_result",
+            "nyx__oracle_attach",
+            "nyx__oracle_extract",
+            "nyx__oracle_session",
+        ] {
+            let request = JsonRpcRequest {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: Some(serde_json::json!(1)),
+                method: "tools/call".to_string(),
+                params: Some(serde_json::json!({
+                    "name": name,
+                    "arguments": { "pool": "chatgpt-pro", "prompt": "hi", "task_id": "t1" }
+                })),
+            };
+            let permit =
+                crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                    Some(
+                        crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                            crate::services::billing::BillingIngress::Mcp,
+                        ),
+                    ),
+                    crate::services::billing::BillingIngress::Mcp,
+                )
+                .expect("MCP billing route classification");
+            let response = handle_tools_call(&state, &auth, None, &request, false, permit).await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["result"]["isError"], true, "{name}: {payload}");
+            let text = payload["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(text.contains("permanently deprecated"), "{name}: {text}");
+            assert!(text.contains("Do not retry"), "{name}: {text}");
+        }
+        db.drop().await.unwrap();
+    }
+
     #[test]
     fn activity_labels_use_only_compiled_native_registry() {
         for name in native_activity_names()
@@ -7084,6 +7043,12 @@ mod tests {
         {
             assert_eq!(
                 chat_activity_label(&serde_json::json!({"name":name})),
+                *name
+            );
+            assert_eq!(
+                chat_activity_label(&serde_json::json!({
+                    "name":"nyx__call_tool", "arguments":{"tool_name":name},
+                })),
                 *name
             );
         }
@@ -7102,6 +7067,12 @@ mod tests {
             assert_eq!(
                 chat_activity_label(
                     &serde_json::json!({"name":"nyx__call_tool","arguments":{"name":name}})
+                ),
+                "tool"
+            );
+            assert_eq!(
+                chat_activity_label(
+                    &serde_json::json!({"name":"nyx__call_tool","arguments":{"tool_name":name}})
                 ),
                 "tool"
             );
@@ -7271,6 +7242,8 @@ mod tests {
         };
         let mcp_auth = McpAuthContext::user(actor_id.clone(), AuthMethod::AccessToken);
         let proxy_auth = AuthUser {
+            mfa_assured: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -7404,7 +7377,7 @@ mod tests {
                 telegram_link_code_expires_at: None,
                 approval_timeout_secs: 0,
                 grant_expiry_days: 30,
-                approval_required: false,
+                approval_required: Some(false),
                 push_enabled: false,
                 push_devices: vec![],
                 created_at: now,
@@ -7610,9 +7583,81 @@ mod tests {
                 crate::services::billing::BillingIngress::Mcp,
             )
             .expect("MCP billing route classification");
-        let response =
-            handle_tools_call(&state, &auth, None, &cancellation_request, false, permit).await;
+        let cancellation = Box::pin(handle_tools_call(
+            &state,
+            &auth,
+            None,
+            &cancellation_request,
+            false,
+            permit,
+        ));
+        // The allowlisted operation must persist its required approval. Resolve
+        // it through the web handler so this ordering control does not wait for
+        // the production 300-second expiry or disable the explicit policy.
+        let web_rejection = async {
+            let pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(pending) = state
+                        .db
+                        .collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+                        .find_one(doc! {
+                            "user_id": &actor_id,
+                            "service_id": &service.id,
+                            "status": "pending",
+                        })
+                        .await
+                        .unwrap()
+                    {
+                        break pending;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("allowlisted MCP cancellation must reach required approval");
+            assert_eq!((pending.expires_at - pending.created_at).num_seconds(), 300);
+            assert_eq!(pending.approval_mode, ApprovalMode::PerRequest);
+            let axum::Json(decision) = crate::handlers::approvals::decide_request(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&actor_id),
+                Path(pending.id.clone()),
+                Default::default(),
+                axum::http::HeaderMap::new(),
+                axum::Json(crate::handlers::approvals::DecideRequest {
+                    approved: false,
+                    duration_sec: None,
+                }),
+            )
+            .await
+            .expect("reject allowlisted MCP request through the web handler");
+            assert_eq!(decision.status, "rejected");
+            let persisted = state
+                .db
+                .collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+                .find_one(doc! { "_id": &pending.id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(persisted.decision_channel.as_deref(), Some("web"));
+        };
+        let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(cancellation, web_rejection)
+        })
+        .await
+        .expect("web rejection must release the allowlisted MCP request");
         assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["result"]["isError"], true);
+        assert!(
+            result["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Approval request was rejected"),
+            "the MCP result must honor the web rejection"
+        );
         assert_eq!(
             db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
                 .count_documents(doc! { "service_id": &service.id })
@@ -8630,6 +8675,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &TelemetryContext::default(),
             )
             .await;
@@ -8640,79 +8686,6 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(body["result"]["protocolVersion"], expected);
         }
-    }
-    #[test]
-    fn oracle_result_lists_artifacts_instead_of_claiming_empty_response() {
-        use crate::models::oracle_task::{OracleFile, OracleTask, OracleTaskStatus};
-        let now = chrono::Utc::now();
-        let mut task = OracleTask {
-            failure_detail: None,
-            observed_model_switcher: None,
-            observed_model_effort: None,
-            require_model_match: true,
-            excluded_worker_ids: Vec::new(),
-            reroute_count: 0,
-            id: "task-1".to_string(),
-            pool_id: "pool-1".to_string(),
-            submitter_user_id: "user-1".to_string(),
-            kind: "prompt".to_string(),
-            target_url: None,
-            api_key_id: None,
-            api_key_name: None,
-            prompt: "p".to_string(),
-            model_label: None,
-            project_url: None,
-            tag: None,
-            pdf_base64: None,
-            pdf_name: None,
-            attachment_base64: None,
-            attachment_name: None,
-            conversation_id: None,
-            is_followup: false,
-            required_worker_label: None,
-            client_ref: None,
-            status: OracleTaskStatus::Completed,
-            phase: None,
-            phase_detail: None,
-            phase_at: None,
-            assigned_worker_id: None,
-            dispatched_at: None,
-            lease_expires_at: None,
-            retry_count: 0,
-            max_retries: 0,
-            attempt_count: 0,
-            dispatch_attempt_id: None,
-            response: None,
-            response_chars: None,
-            images: None,
-            files: Some(vec![OracleFile {
-                name: "result.json".to_string(),
-                mime: "application/json".to_string(),
-                data: b"{\"verdict\":\"reject\"}".to_vec(),
-            }]),
-            chatgpt_url: None,
-            failure_reason: None,
-            worker_script_version: None,
-            completed_at: None,
-            expires_at: None,
-            created_at: now,
-            updated_at: now,
-        };
-        let (text, is_error) = render_oracle_task_result(&task, 0, "pending");
-        assert!(!is_error);
-        assert!(!text.contains("empty response"), "{text}");
-        assert!(
-            text.contains("result.json (application/json, 20 bytes)"),
-            "{text}"
-        );
-        assert!(text.contains("--artifacts"), "{text}");
-        // The body itself is never inlined into the MCP text.
-        assert!(!text.contains("verdict"), "{text}");
-
-        task.response = Some("Summary only.".to_string());
-        let (text, _) = render_oracle_task_result(&task, 0, "pending");
-        assert!(text.starts_with("Summary only."));
-        assert!(text.contains("Artifacts (1)"));
     }
 }
 
@@ -10810,6 +10783,10 @@ mod image_handler_tests {
 #[cfg(test)]
 #[path = "mcp_resource_tests.rs"]
 mod resource_tests;
+
+#[cfg(test)]
+#[path = "approval_default_tests.rs"]
+mod approval_default_tests;
 
 #[cfg(test)]
 #[path = "mcp_attachment_upload_tests.rs"]

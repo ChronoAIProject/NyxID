@@ -1747,7 +1747,9 @@ async fn hosted_specialist_assignment_uses_existing_defaults_and_never_regrants_
         assistant_team_service as team, machine_access_service as access,
         remote_machine_configuration as config,
     };
-    for editor_enabled in [false, true] {
+    for (editor_enabled, explicit_legacy) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
         let f = crate::services::assistant_authority_tests::fixture("hosted_specialist").await;
         lifecycle::ensure_indexes(&f.state.db).await.unwrap();
         access::ensure_indexes(&f.state.db).await.unwrap();
@@ -1784,6 +1786,10 @@ async fn hosted_specialist_assignment_uses_existing_defaults_and_never_regrants_
             roots: vec!["/workspace".into()],
             runtime_id: uuid::Uuid::new_v4().to_string(),
             commands_isolated: Some(true),
+            // Readiness alone must never invent a new legacy choice. With an
+            // explicit choice, the existing editor defaults still apply.
+            separation_choice: explicit_legacy
+                .then_some(nyxid_machine::context::Choice::SharedLegacy),
             ..Default::default()
         };
         f.state.db.collection::<Document>(crate::models::node::COLLECTION_NAME).update_one(
@@ -1806,9 +1812,20 @@ async fn hosted_specialist_assignment_uses_existing_defaults_and_never_regrants_
         assert!(assigned.machine_node_ids.contains(&created.machine.node_id));
         let policy = access::policy(&f.state.db, &f.chat.agent_id).await.unwrap();
         let grant = &policy.assignments[&created.machine.node_id];
-        assert_eq!(grant.capabilities.shell, !editor_enabled);
-        assert_eq!(grant.capabilities.browser, !editor_enabled);
-        assert_eq!(grant.capabilities.computer, !editor_enabled);
+        assert_eq!(
+            grant.mode,
+            if explicit_legacy {
+                "shared_legacy"
+            } else {
+                "selection_required"
+            }
+        );
+        let default_enabled = explicit_legacy && !editor_enabled;
+        assert_eq!(grant.capabilities.shell, default_enabled);
+        assert_eq!(grant.capabilities.files, default_enabled);
+        assert_eq!(grant.capabilities.browser, default_enabled);
+        assert_eq!(grant.capabilities.computer, default_enabled);
+        assert_eq!(grant.capabilities.developer_browser, default_enabled);
         let machine = lifecycle::managed_machine_for_node(&f.state.db, &created.machine.node_id)
             .await
             .unwrap()
@@ -1816,7 +1833,7 @@ async fn hosted_specialist_assignment_uses_existing_defaults_and_never_regrants_
         let view = config::safe_view(&f.state.db, &machine).await.unwrap();
         assert_eq!(
             view.specialist_assignment_state,
-            if editor_enabled {
+            if editor_enabled || !explicit_legacy {
                 "permissions_required"
             } else {
                 "assigned"

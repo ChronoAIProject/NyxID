@@ -300,6 +300,147 @@ async fn store_authorized(
 }
 
 /// Called inside the message transaction. Claim each root and all payload chunks.
+/// Encrypted in memory before a turn is claimed; no durable orphan upload.
+#[derive(Clone)]
+pub struct PreparedChannelUpload {
+    row: AssistantUpload,
+    chunks: Vec<(String, Vec<u8>)>,
+}
+
+pub(crate) async fn prepare_channel_upload(
+    keys: &EncryptionKeys,
+    user: &str,
+    name: &str,
+    mime_hint: Option<&str>,
+    bytes: Vec<u8>,
+) -> AppResult<PreparedChannelUpload> {
+    let label = safe_name(name);
+    let extension = label
+        .rsplit_once('.')
+        .map(|(_, s)| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    let size = bytes.len() as i64;
+    if bytes.is_empty() || bytes.len() > attachment_extraction::MAX_BYTES {
+        return Err(AppError::ChannelMediaTooLarge);
+    }
+    let extracted = match attachment_extraction::extract(bytes.clone(), extension).await {
+        Ok(extracted) => extracted,
+        // Preserve the original encrypted file even when this parser cannot
+        // interpret it. Unvalidated images never enter image-model input.
+        Err(AppError::BadRequest(_)) => Extracted {
+            content_type: mime_hint
+                .filter(|m| {
+                    m.len() <= 100
+                        && m.parse::<mime::Mime>().is_ok()
+                        && (m.starts_with("audio/") || m.starts_with("video/"))
+                })
+                .unwrap_or("application/octet-stream")
+                .into(),
+            text: String::new(),
+            sections: Vec::new(),
+        },
+        Err(error) => return Err(error),
+    };
+    use sha2::{Digest, Sha256};
+    let mut row = AssistantUpload {
+        source: None,
+        content_sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
+        secret_context_versions: Default::default(),
+        id: Uuid::new_v4().to_string(),
+        origin: "user_upload".into(),
+        user_id: user.into(),
+        conversation_id: String::new(),
+        group_id: None,
+        message_id: None,
+        label,
+        content_type: extracted.content_type.clone(),
+        size,
+        pages: extracted.sections.len(),
+        extracted_chars: Some(extracted.text.chars().count() as i64),
+        chunks: bytes.len().div_ceil(CHUNK),
+        text_encrypted: Vec::new(),
+        created_at: Utc::now(),
+        expires_at: None,
+        bound_at: None,
+        reads: 0,
+        coverage: Vec::new(),
+    };
+    let encoded =
+        crate::crypto::secret_json::to_secret_string(&extracted).map_err(|_| missing())?;
+    row.text_encrypted = super::record_field_service::encrypt(
+        keys,
+        COLLECTION_NAME,
+        &row.id,
+        user,
+        "text_encrypted",
+        encoded.as_bytes(),
+    )
+    .await?;
+    super::credential_record_service::mark_version(
+        &mut row.secret_context_versions,
+        keys,
+        "text_encrypted",
+    );
+    let mut chunks = Vec::new();
+    for (index, chunk) in bytes.chunks(CHUNK).enumerate() {
+        let chunk_id = Uuid::new_v4().to_string();
+        let encrypted = super::assistant_record_service::encrypt_chunk(
+            keys,
+            &chunk_id,
+            user,
+            &row.id,
+            index as i64,
+            chunk,
+        )
+        .await?;
+        chunks.push((chunk_id, encrypted));
+    }
+    Ok(PreparedChannelUpload { row, chunks })
+}
+
+/// The caller's transaction has already fenced the owner and inserted the
+/// conversation. Binding these uploads shares the message/turn commit.
+pub(crate) async fn bind_channel_uploads(
+    db: &Database,
+    session: &mut ClientSession,
+    user: &str,
+    conversation: &str,
+    message: &str,
+    uploads: &[PreparedChannelUpload],
+) -> AppResult<Vec<TurnAttachment>> {
+    if uploads.len() > engine::MAX_TURN_ATTACHMENTS {
+        return Err(AppError::ChannelMediaTooLarge);
+    }
+    let mut result = Vec::new();
+    for upload in uploads {
+        if upload.row.user_id != user {
+            return Err(missing());
+        }
+        let mut row = upload.row.clone();
+        row.conversation_id = conversation.into();
+        row.message_id = Some(message.into());
+        row.bound_at = Some(Utc::now());
+        let mut documents = vec![bson::to_document(&row).map_err(|_| missing())?];
+        for (index, (chunk_id, chunk)) in upload.chunks.iter().enumerate() {
+            let versions = row
+                .secret_context_versions
+                .get("text_encrypted")
+                .map(|version| doc! {"data_encrypted":i32::from(*version)})
+                .unwrap_or_default();
+            documents.push(doc! {"_id":chunk_id,"secret_context_versions":versions, "parent_attachment_id": &row.id,
+                "chunk_index": index as i64, "user_id":user, "conversation_id":conversation,
+                "group_id":bson::Bson::Null,
+                "data_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:chunk.clone()}});
+        }
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .insert_many(documents)
+            .session(&mut *session)
+            .await?;
+        result.push(metadata(&row));
+    }
+    Ok(result)
+}
+
 pub async fn bind(
     db: &Database,
     user: &str,
@@ -627,6 +768,12 @@ pub async fn read(
     )
     .await?;
     let extracted: Extracted = serde_json::from_slice(&bytes).map_err(|_| missing())?;
+    if extracted.text.is_empty() && extracted.sections.is_empty() {
+        return Ok(
+            json!({"error":"attachment_has_no_extracted_text", "content_type":row.content_type,
+            "instructions":"The complete original file is attached. Use nyx__machine_save_attachment with an authorized machine to inspect it. Do not claim to have read or transcribed its contents."}),
+        );
+    }
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
     let limit = (args["limit"].as_u64().unwrap_or(4000) as usize).clamp(1, 6000);
     let mut filter = scope_filter(
@@ -3145,5 +3292,83 @@ mod integration_tests {
         let mut bad = cap.clone();
         bad["protocol"] = "unknown".into();
         assert!(tool_image_plan(&[item], &bad, "https://test").0.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod channel_upload_tests {
+    use super::*;
+    #[tokio::test]
+    async fn opaque_channel_media_retains_encrypted_bytes_without_fabricated_text() {
+        let mut keys = crate::test_utils::test_encryption_keys();
+        keys.set_allow_legacy_record_reads(false);
+        let bytes = vec![0, 255, 1, 128, 3];
+        let upload = prepare_channel_upload(
+            &keys,
+            "owner",
+            "voice.ogg",
+            Some("audio/ogg"),
+            bytes.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(upload.row.user_id, "owner");
+        assert_eq!(upload.row.content_type, "audio/ogg");
+        let (chunk_id, ciphertext) = &upload.chunks[0];
+        let version = upload
+            .row
+            .secret_context_versions
+            .get("text_encrypted")
+            .copied();
+        assert_eq!(version, Some(3));
+        let decrypted = super::super::assistant_record_service::decrypt_chunk(
+            &keys,
+            chunk_id,
+            "owner",
+            &upload.row.id,
+            0,
+            version,
+            ciphertext,
+        )
+        .await
+        .unwrap();
+        assert_eq!(decrypted.as_slice(), bytes.as_slice());
+        for (owner, root, index) in [
+            ("other", upload.row.id.as_str(), 0),
+            ("owner", "other", 0),
+            ("owner", upload.row.id.as_str(), 1),
+        ] {
+            assert!(
+                super::super::assistant_record_service::decrypt_chunk(
+                    &keys, chunk_id, owner, root, index, version, ciphertext,
+                )
+                .await
+                .is_err()
+            );
+        }
+        let text = super::super::record_field_service::decrypt(
+            &keys,
+            COLLECTION_NAME,
+            &upload.row.id,
+            "owner",
+            "text_encrypted",
+            version,
+            &upload.row.text_encrypted,
+        )
+        .await
+        .unwrap();
+        let extracted: Extracted = serde_json::from_slice(&text).unwrap();
+        assert!(extracted.text.is_empty());
+        assert!(extracted.sections.is_empty());
+        let unvalidated =
+            prepare_channel_upload(&keys, "owner", "invalid.png", Some("image/png"), bytes)
+                .await
+                .unwrap();
+        assert_eq!(unvalidated.row.content_type, "application/octet-stream");
+        assert!(
+            prepare_channel_upload(&keys, "owner", "empty", None, Vec::new())
+                .await
+                .is_err()
+        );
     }
 }

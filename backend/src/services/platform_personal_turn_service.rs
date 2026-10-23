@@ -587,7 +587,11 @@ impl contract::PersonalTurnProducer for PersonalTurns {
         let Some(permit) = self
             .state
             .direct_chat_limiter
-            .try_acquire_pool("assistant_channel", &admitted.authority.user_id, 2)
+            .try_acquire_pool(
+                "assistant_channel",
+                &admitted.authority.user_id,
+                super::assistant_team_service::CHANNEL_TURNS_PER_OWNER,
+            )
             .await?
         else {
             return Ok(contract::PersonalTurnStart::Unavailable(
@@ -598,6 +602,7 @@ impl contract::PersonalTurnProducer for PersonalTurns {
             super::assistant_team_service::ensure_nyxbot(db, &admitted.authority.user_id).await?;
         let mut start = engine::TurnStart::from(&request);
         start.model = Some(agent.model.clone());
+        start.channel_uploads = input.channel_uploads;
         let ids = engine::OwnerTurnIds {
             conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
             turn_id: uuid::Uuid::new_v4().to_string(),
@@ -697,6 +702,7 @@ impl contract::PersonalTurnProducer for PersonalTurns {
                     ),
                     permit,
                     runtime::Events {
+                        checkpoint: None,
                         sender,
                         cursor: 0,
                         reset_notified: false,

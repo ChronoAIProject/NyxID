@@ -87,6 +87,7 @@ vi.mock("@/hooks/use-services", () => ({
   useService: () => hooks.service,
   useDeleteService: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useTestSshConnection: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useResyncServiceIdentity: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
 vi.mock("@/hooks/use-ownership-transfers", () => ({

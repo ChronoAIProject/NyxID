@@ -1,4 +1,6 @@
+import "./lib/zod-csp";
 import "./lib/platform-personal-handoff";
+import "./lib/platform-onboarding-handoff";
 import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
 import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -16,6 +18,9 @@ import { recoverFromAssetError } from "./lib/chunk-recovery";
 import { shouldRetryQuery } from "./lib/query-retry";
 import { BuildUpdateBanner } from "./components/build-update-banner";
 import "./app.css";
+import { installNyxbotErrorFallback } from "./lib/assistant/error-telemetry";
+
+installNyxbotErrorFallback();
 
 // Vite raises this from `__vitePreload` when a chunk (or its CSS) cannot be
 // fetched, *before* the failure becomes a React.lazy rejection — so it catches
@@ -52,14 +57,14 @@ if (import.meta.env.DEV) {
 }
 
 function isLoginApprovalPage() {
-  return ["/login/agent-key", "/login/device", "/login/code"].includes(window.location.pathname);
+  return ["/login/agent-key", "/login/device", "/login/code"].includes(
+    window.location.pathname,
+  );
 }
 
 function Root() {
   const [ready, setReady] = useState(false);
-  const [agentKeyLogin, setAgentKeyLogin] = useState(
-    isLoginApprovalPage,
-  );
+  const [agentKeyLogin, setAgentKeyLogin] = useState(isLoginApprovalPage);
   useEffect(
     () =>
       router.subscribe("onResolved", () => {
@@ -122,13 +127,13 @@ function Root() {
   }, [ready, publicConfig, consentEnabled, isAuthenticated, agentKeyLogin, telemetryAccountId]);
 
   // When auth resolves, redirect as needed:
-  // - Authenticated user on landing → dashboard
+  // - Authenticated user on landing → assistant
   // - Unauthenticated user on protected route → login
   useEffect(() => {
     if (!ready) return;
     const path = window.location.pathname;
     if (isAuthenticated && path === "/") {
-      router.navigate({ to: "/dashboard" });
+      router.navigate({ to: "/assistant" });
     } else if (!isAuthenticated) {
       // Send unauthenticated users on a real protected route to login,
       // but let a genuinely-unmatched path fall through to the router's
@@ -145,7 +150,9 @@ function Root() {
         preserveTelegramClaimForLogin();
         router.navigate({
           to: "/login",
-          search: { return_to: window.location.origin + path + window.location.search },
+          search: {
+            return_to: window.location.origin + path + window.location.search,
+          },
         });
       }
     }

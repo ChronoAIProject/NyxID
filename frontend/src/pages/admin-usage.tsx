@@ -49,7 +49,7 @@ import { cn } from "@/lib/utils";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import type { AdminUsageSearch } from "@/types/admin";
 import { NyxbotUsage } from "@/components/admin/nyxbot-usage";
-import { hasAdminRead } from "@/types/api";
+import { canReadAdminUsage } from "@/types/api";
 
 type UsageTab = "dashboard" | "list" | "nyxbot";
 
@@ -65,7 +65,7 @@ export function AdminUsagePage() {
   const search = useSearch({ from: "/dashboard/admin/usage" });
   const { sample, tab = "dashboard" } = search;
   const navigate = useNavigate();
-  const canReadNyxbot = useAuthStore((state) => hasAdminRead(state.user));
+  const canReadNyxbot = useAuthStore((state) => canReadAdminUsage(state.user));
   const onTabChange = (next: UsageTab) =>
     void navigate({ to: "/admin/usage", search: { ...search, tab: next } });
   if (SamplePage && sample)
@@ -179,7 +179,7 @@ export function AnalyticsWorkspace({
     : { ...config.draft, layout: "operations" as const };
   const [localTab, setLocalTab] = useState<"dashboard" | "list">("dashboard");
   const activeTab = tab ?? localTab;
-  const canReadNyxbot = useAuthStore((state) => hasAdminRead(state.user));
+  const canReadNyxbot = useAuthStore((state) => canReadAdminUsage(state.user));
   const [name, setName] = useState("");
   const [viewsOpen, setViewsOpen] = useState(false);
   const saved = config.saved_views.find((saved) => saved.id === view.id);
@@ -205,6 +205,24 @@ export function AnalyticsWorkspace({
   return (
     <div className="space-y-5 pb-6">
       <UsageHeader />
+      <fieldset
+        disabled={Boolean(workspace.pendingRecovery)}
+        className="min-w-0 space-y-2"
+        aria-label="Usage filters"
+      >
+        <FilterBar
+          filters={view.filters}
+          sample={options}
+          onChange={(filters) =>
+            setConfig({ ...config, draft: { ...view, filters } })
+          }
+        />
+        <p className="text-11 text-muted-foreground">
+          Applies to Dashboard and List totals and charts. Users select who made
+          requests; Users / organizations selects the billing account that paid.
+          NyxBot has its own filters.
+        </p>
+      </fieldset>
       {import.meta.env.DEV &&
         import.meta.env.VITE_USAGE_SEEDED === "true" &&
         !sample && (
@@ -501,15 +519,6 @@ export function AnalyticsWorkspace({
           disabled={Boolean(workspace.pendingRecovery)}
           className="min-w-0"
         >
-          <div className="mt-5">
-            <FilterBar
-              filters={view.filters}
-              sample={options}
-              onChange={(filters) =>
-                setConfig({ ...config, draft: { ...view, filters } })
-              }
-            />
-          </div>
           <TabsContent value="dashboard" className="mt-6">
             <AnalyticsCanvas
               view={view}

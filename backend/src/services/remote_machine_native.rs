@@ -174,7 +174,7 @@ pub async fn finalize_stop(
     db.client().start_session().await?.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
         let result:AppResult<ManagedMachine>=async {
             if deleting && !super::remote_machine_service::deletion_authorized_in_session(&db,session,&machine.node_id).await? {return Err(pending());}
-            if deleting && !super::remote_machine_operation_service::creation_responsibilities_terminal_in_session(&db,session,&machine).await? {return Err(AppError::Conflict("creation_result_unknown".into()));}
+            if deleting && !super::remote_machine_operation_service::delete_creation_responsibilities_terminal_in_session(&db,session,&machine).await? {return Err(AppError::Conflict("creation_result_unknown".into()));}
             super::remote_machine_runtime::require_accounting_final_in_session(&db,session,&machine).await?;
             let now=bson::DateTime::now();
             let updated=db.collection::<ManagedMachine>(MACHINES).find_one_and_update(
@@ -209,7 +209,7 @@ pub(crate) async fn finalize_persisted_delete(
     db.client().start_session().await?.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
         let result:AppResult<ManagedMachine>=async {
             if !super::remote_machine_service::deletion_authorized_in_session(&db,session,&machine.node_id).await?
-                || !super::remote_machine_operation_service::creation_responsibilities_terminal_in_session(&db,session,&machine).await? {return Err(pending());}
+                || !super::remote_machine_operation_service::delete_creation_responsibilities_terminal_in_session(&db,session,&machine).await? {return Err(pending());}
             super::remote_machine_runtime::require_accounting_final_in_session(&db,session,&machine).await?;
             let now=bson::DateTime::now();
             let updated=db.collection::<ManagedMachine>(MACHINES).find_one_and_update(doc!{

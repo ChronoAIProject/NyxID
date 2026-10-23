@@ -39,7 +39,8 @@ pub(crate) fn verified_message(
         "supergroup" => ManagerChatKind::Supergroup,
         _ => return None,
     };
-    let original = super::telegram_new_service::private_sender(message) == Some(sender_id);
+    let original = super::telegram_new_service::private_sender(message) == Some(sender_id)
+        && super::platform_pairing_link::original_message(update);
     Some(VerifiedManagerUpdate {
         profile_id: profile_id.into(),
         manager_bot_id: manager_bot_id.into(),
@@ -255,7 +256,13 @@ mod tests {
             original.command_eligibility,
             ManagerCommandEligibility::OriginalPrivateMessage
         );
-        for field in ["forward_origin", "forward_date", "via_bot"] {
+        for field in [
+            "forward_origin",
+            "forward_date",
+            "via_bot",
+            "quote",
+            "external_reply",
+        ] {
             update["message"][field] = serde_json::json!({"id":999});
             let forwarded = verified_message("profile", "99", 99, "obs", &update).unwrap();
             assert_eq!(
@@ -270,8 +277,14 @@ mod tests {
                 ManagerCommandEligibility::Ineligible
             );
             assert!(
-                OriginalManagerCommand::from_verified(forwarded, TurnInput { text: "yes".into() })
-                    .is_none()
+                OriginalManagerCommand::from_verified(
+                    forwarded,
+                    TurnInput {
+                        channel_uploads: Vec::new(),
+                        text: "yes".into()
+                    }
+                )
+                .is_none()
             );
             update["message"].as_object_mut().unwrap().remove(field);
         }

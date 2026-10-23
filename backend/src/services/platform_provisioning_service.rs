@@ -152,7 +152,7 @@ pub(crate) async fn fence_authority(
     let credentials = db
         .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
         .find_one(
-            doc! {"provider": "telegram-new", "fields.manager_bot_id": &profile.manager_bot_id,
+            doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &profile.manager_bot_id)]}, "fields.manager_bot_id": &profile.manager_bot_id,
             "fields.observation_id": &profile.observation_id, "fields.webhook_ready": "true"},
         )
         .session(&mut *session)
@@ -615,6 +615,7 @@ pub(crate) async fn sweep(state: &crate::AppState) -> AppResult<()> {
 
 pub(crate) async fn execute_step(state: &crate::AppState, job: &SetupStepJob) -> AppResult<()> {
     let service = super::telegram_new_service::TelegramNewService {
+        manager_id: None,
         db: &state.db,
         keys: &state.encryption_keys,
         config: &state.config,
@@ -837,7 +838,7 @@ pub(crate) async fn assess_owned_runtime(
         (crate::models::platform_binding::COLLECTION_NAME, binding),
         (
             crate::models::platform_credential::COLLECTION_NAME,
-            doc! {"provider": "telegram-new", "fields.manager_bot_id": &profile.manager_bot_id, "fields.observation_id": &profile.observation_id, "fields.webhook_ready": "true"},
+            doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &profile.manager_bot_id)]}, "fields.manager_bot_id": &profile.manager_bot_id, "fields.observation_id": &profile.observation_id, "fields.webhook_ready": "true"},
         ),
         (
             crate::models::telegram_bot_request::MANAGED_BOTS,
@@ -914,7 +915,7 @@ pub(crate) async fn fence_owned_runtime(
     if db
         .collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
         .find_one(
-            doc! {"provider": "telegram-new", "fields.manager_bot_id": &profile.manager_bot_id,
+            doc! {"provider": {"$in":["telegram-new".to_owned(), format!("telegram-new/{}", &profile.manager_bot_id)]}, "fields.manager_bot_id": &profile.manager_bot_id,
             "fields.observation_id": &profile.observation_id, "fields.webhook_ready": "true"},
         )
         .session(&mut *session)
@@ -989,7 +990,7 @@ mod tests {
         )
         .await
         .unwrap();
-        super::super::platform_binding_service::decide(
+        let confirmation = super::super::platform_binding_service::decide(
             &f.state.db,
             key,
             &f.owner,
@@ -999,6 +1000,8 @@ mod tests {
             false,
         )
         .await
+        .unwrap()
+        .confirmation_code
         .unwrap();
         let renewed = super::super::platform_binding_service::confirm_from_chat(
             &f.state.db,
@@ -1006,7 +1009,7 @@ mod tests {
             &f.profile,
             "700",
             "700",
-            &code,
+            &confirmation,
         )
         .await
         .unwrap();
@@ -1047,7 +1050,7 @@ mod tests {
             )
             .await
             .unwrap();
-            super::super::platform_binding_service::decide(
+            let confirmation = super::super::platform_binding_service::decide(
                 &f.state.db,
                 key,
                 &other,
@@ -1057,6 +1060,8 @@ mod tests {
                 true,
             )
             .await
+            .unwrap()
+            .confirmation_code
             .unwrap();
             super::super::platform_binding_service::confirm_from_chat(
                 &f.state.db,
@@ -1064,7 +1069,7 @@ mod tests {
                 &f.profile,
                 "700",
                 "700",
-                &code,
+                &confirmation,
             )
             .await
             .unwrap();

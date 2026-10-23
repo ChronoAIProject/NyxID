@@ -216,10 +216,15 @@ pub async fn request_started(
     let turn = row.active_turn.as_ref().expect("claimed turn");
     db.collection::<bson::Document>(COLLECTION_NAME).update_one(
         doc! {"_id": &row.id, "active_turn.turn_id": &turn.turn_id, "active_turn.stop_requested": {"$ne": true}},
-        vec![doc! {"$set": {
-            "active_turn.engine_request_started_at": {"$ifNull": ["$active_turn.engine_request_started_at", bson::DateTime::from_chrono(started)]},
-            "active_turn.capacity_wait_deadline": {"$ifNull": ["$active_turn.capacity_wait_deadline", bson::DateTime::from_chrono(deadline)]},
-        }}],
+        vec![
+            doc! {"$set": {
+                "active_turn.engine_request_started_at": {"$ifNull": ["$active_turn.engine_request_started_at", bson::DateTime::from_chrono(started)]},
+                "active_turn.capacity_wait_deadline": {"$ifNull": ["$active_turn.capacity_wait_deadline", bson::DateTime::from_chrono(deadline)]},
+            }},
+            // A turn that queued has left the queue by now, even if its own
+            // best-effort display update was lost.
+            doc! {"$unset": ["active_turn.queued_at", "active_turn.queue_deadline"]},
+        ],
     ).await?;
     Ok(())
 }
@@ -253,7 +258,8 @@ pub async fn claim_notice(
             "active_turn.capacity_accepted_at": bson::Bson::Null,
             "active_turn.origin": {"$ne": "trigger"}, "active_turn.trigger_run_id": bson::Bson::Null,
             "active_turn.engine_request_started_at": {"$lte": bson::DateTime::from_chrono(now - chrono::Duration::from_std(policy::ACK_DELAY).expect("bounded acknowledgement delay"))},
-            "active_turn.capacity_notice_claimed": {"$ne": true}},
+            "active_turn.capacity_notice_claimed": {"$ne": true},
+            "active_turn.checking_notice_claimed": {"$ne": true}},
         doc! {"$set": {"active_turn.capacity_notice_claimed": true}},
     ).await?.modified_count == 1)
 }

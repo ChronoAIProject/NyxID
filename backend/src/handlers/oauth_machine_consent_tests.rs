@@ -62,7 +62,7 @@ impl MachineConsentFixture {
         }
     }
     fn selection(&self) -> crate::services::machine_external_grant_service::GrantSelection {
-        serde_json::from_value(serde_json::json!({"assignments":{self.node.clone():{
+        serde_json::from_value(serde_json::json!({"separation":"shared_legacy","legacy_warning_acknowledged":true,"assignments":{self.node.clone():{
             "capabilities":{"shell":true,"files":true},"file_roots":["/workspace"],"service_ids":[]
         }}}))
         .unwrap()
@@ -71,10 +71,17 @@ impl MachineConsentFixture {
         self.prepare_params(&self.params).await
     }
     async fn prepare_params(&self, params: &AuthorizeQuery) -> String {
+        // Match the production review URL's signed revocation generation.
+        let mut params = params.clone();
+        params.consent_request_fence = Some(
+            consent_service::consent_request_fence(&self.state.db, &self.user, &self.client)
+                .await
+                .unwrap(),
+        );
         let signed = sign_consent_request(
             &self.state,
             &self.user,
-            params,
+            &params,
             params.scope.as_deref().unwrap(),
         )
         .unwrap();

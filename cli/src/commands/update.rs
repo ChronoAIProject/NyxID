@@ -13,6 +13,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::cli::UpdateArgs;
 use crate::commands::repo::REPO_URL;
+use crate::commands::update_attestation::read_json_bounded;
 
 pub(crate) mod auto;
 
@@ -25,6 +26,7 @@ const INSTALL_ROOT_ENV: &str = "NYXID_INSTALL_ROOT";
 const ACTIVE_SYMLINK_ENV: &str = "NYXID_ACTIVE_SYMLINK";
 const RETAINED_VERSION_COUNT: usize = 3;
 const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
+pub(super) const SOURCE_BUILD_MARKER: &str = ".local-source.json";
 
 pub async fn run(args: UpdateArgs) -> Result<()> {
     if let Some(command) = args.command.clone() {
@@ -34,7 +36,6 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
                 && !args.rollback
                 && !args.list_versions
                 && !args.from_source
-                && !args.insecure_skip_verify
                 && args.version.is_none(),
             "Automatic update policy cannot be combined with manual update flags"
         );
@@ -83,7 +84,7 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
         let skills = exec_skills_update(&new_bin, &args.base_url).await;
         let mut failures = Vec::new();
         if replaced_binary.is_some()
-            && !args.insecure_skip_verify
+            && !args.from_source
             && let Err(error) = auto::install_controller(&install_versions_root()?, &new_bin)
         {
             failures.push(format!(
@@ -159,41 +160,33 @@ async fn check_cli_update(args: &UpdateArgs) -> Result<()> {
 
 fn cli_update_status(installed: &str, release_tag: &str, asset_available: bool) -> &'static str {
     if release_tag == installed && !asset_available {
-        "up to date (no prebuilt asset for this target; future updates will fall back to --from-source)"
+        "up to date (no prebuilt asset for this target; source builds require explicit --from-source)"
     } else if release_tag == installed {
         "up to date"
     } else if asset_available {
         "update available"
     } else {
-        "prebuilt binary unavailable; update will fall back to --from-source"
+        "prebuilt binary unavailable; use explicit --from-source to build this release"
     }
 }
 
 async fn update_cli(args: &UpdateArgs) -> Result<Option<PathBuf>> {
-    if args.from_source {
-        update_cli_from_source().await?;
-        return Ok(None);
-    }
-
     eprintln!("Updating NyxID CLI...");
 
     let client = github_client()?;
-    let Some(release) = resolve_release(&client, args.version.as_deref()).await? else {
-        eprintln!("No NyxID GitHub releases were found yet; falling back to source install.");
-        update_cli_from_source().await?;
-        return Ok(None);
-    };
+    let release = resolve_release(&client, args.version.as_deref())
+        .await?
+        .context("No NyxID release found; refusing to install default-branch source")?;
+    if args.from_source {
+        return update_cli_from_source(&client, &release.tag_name)
+            .await
+            .map(Some);
+    }
 
     let target = current_target();
     let asset_name = asset_name_for_target(target)?;
-    let Some(asset) = release_asset(&release, &asset_name) else {
-        eprintln!(
-            "No prebuilt binary asset named {asset_name} exists on {}; falling back to source install.",
-            release.tag_name
-        );
-        update_cli_from_source().await?;
-        return Ok(None);
-    };
+    let asset = release_asset(&release, &asset_name).with_context(|| format!(
+        "No prebuilt binary {asset_name} on {}; use explicit --from-source to build that release", release.tag_name))?;
 
     let tmp = tempfile::tempdir().context("Failed to create temporary update directory")?;
     let archive_path = tmp.path().join(&asset.name);
@@ -201,21 +194,10 @@ async fn update_cli(args: &UpdateArgs) -> Result<Option<PathBuf>> {
     eprintln!("Downloading {}...", asset.name);
     download_asset(&client, asset, &archive_path).await?;
 
-    match verify_release_attestation(&client, &archive_path, &release.tag_name).await {
-        Ok(()) => eprintln!("Release attestation verified."),
-        Err(err) if args.insecure_skip_verify => {
-            eprintln!();
-            eprintln!("WARNING: release attestation verification failed.");
-            eprintln!("WARNING: continuing because --insecure-skip-verify was provided.");
-            eprintln!("WARNING: provenance error: {err:#}");
-            eprintln!();
-        }
-        Err(err) => {
-            return Err(err).context(
-                "Release attestation verification failed; refusing to install this binary",
-            );
-        }
-    }
+    verify_release_attestation(&client, &archive_path, &release.tag_name)
+        .await
+        .context("Release attestation verification failed; refusing to install this binary")?;
+    eprintln!("Release attestation verified.");
 
     let installed_path = install_release_binary(&archive_path, &release.tag_name)?;
 
@@ -247,18 +229,38 @@ pub(super) fn activate_machine_binary(active: &Path, binary: &Path) -> Result<()
     retarget_active_symlink(active, binary)
 }
 
-async fn update_cli_from_source() -> Result<()> {
-    eprintln!("Updating NyxID CLI from source...");
+async fn update_cli_from_source(client: &reqwest::Client, tag: &str) -> Result<PathBuf> {
+    let commit = resolve_source_commit(client, GITHUB_API_URL, tag).await?;
+    let manifest: serde_json::Value = read_json_bounded(
+        client
+            .get(format!(
+                "{GITHUB_API_URL}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/cli/Cargo.toml"
+            ))
+            .query(&[("ref", &commit)])
+            .send()
+            .await?
+            .error_for_status()?,
+        1024 * 1024,
+    )
+    .await?;
+    use base64::Engine;
+    anyhow::ensure!(
+        manifest["encoding"] == "base64",
+        "Unsupported source manifest encoding"
+    );
+    let content = manifest["content"]
+        .as_str()
+        .context("Source manifest is missing")?
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect::<String>();
+    let bytes = base64::engine::general_purpose::STANDARD.decode(content)?;
+    let expected = normalize_release_tag(tag)?;
+    validate_source_manifest(&bytes, &expected)?;
+    eprintln!("Building {expected} from immutable commit {commit}; this is a local source build.");
+    let staging = tempfile::tempdir().context("Failed to create source build directory")?;
 
-    let mut command = tokio::process::Command::new("cargo");
-    command.args([
-        "install",
-        "--git",
-        REPO_URL,
-        "nyxid-cli",
-        "--force",
-        "--locked",
-    ]);
+    let mut command = source_install_command("cargo", &commit, staging.path())?;
 
     if let Some(cc) = source_build_cc_override()? {
         eprintln!(
@@ -286,8 +288,148 @@ async fn update_cli_from_source() -> Result<()> {
         anyhow::bail!("cargo install failed with exit code {}", output.status);
     }
 
-    eprintln!("CLI updated from source.");
+    let binary = staging.path().join("bin").join(archive_binary_name());
+    let mut version_command = tokio::process::Command::new(&binary);
+    version_command.arg("--version").kill_on_drop(true);
+    let reported = tokio::time::timeout(Duration::from_secs(10), version_command.output())
+        .await
+        .context("Source binary version check timed out")??;
+    validate_source_binary_version(&reported, &expected)?;
+    #[cfg(unix)]
+    {
+        // Keep local source builds distinct from the attested release path and
+        // never install them as the unattended updater's trusted controller.
+        let root = install_versions_root()?;
+        let target = publish_source_binary(&binary, &expected, &commit, &root)?;
+        // Persist a hold before activation so an existing trusted scheduler
+        // cannot silently replace this deliberate local source selection.
+        auto::hold_for_source_build(&source_install_tag(&expected, &commit))?;
+        let active = active_binary_path()?;
+        retarget_active_symlink(&active, &target)?;
+        retarget_secondary_symlinks(&root, &target, &active);
+        Ok(target)
+    }
+    #[cfg(windows)]
+    replace_current_binary(&binary)
+}
+
+fn validate_source_manifest(bytes: &[u8], expected: &str) -> Result<()> {
+    let parsed: toml::Value = toml::from_str(std::str::from_utf8(bytes)?)?;
+    anyhow::ensure!(
+        parsed
+            .get("package")
+            .and_then(|p| p.get("version"))
+            .and_then(toml::Value::as_str)
+            == Some(&expected[1..]),
+        "Requested release does not match source package version"
+    );
     Ok(())
+}
+
+fn source_install_tag(tag: &str, commit: &str) -> String {
+    let separator = if tag.contains('+') { '.' } else { '+' };
+    format!("{tag}{separator}source.{commit}")
+}
+
+#[cfg(unix)]
+fn publish_source_binary(binary: &Path, tag: &str, commit: &str, root: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(root)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".source-staging-")
+        .tempdir_in(root)?;
+    let staged = staging.path().join(archive_binary_name());
+    // Cargo's temporary root can be on a different filesystem. Copy into the
+    // destination filesystem, sync, then atomically replace the directory entry.
+    anyhow::ensure!(
+        fs::symlink_metadata(binary)?.file_type().is_file(),
+        "Source binary must be a regular file"
+    );
+    fs::copy(binary, &staged)?;
+    fs::File::open(&staged)?.sync_all()?;
+    let dir = root.join(source_install_tag(tag, commit));
+    fs::create_dir_all(&dir)?;
+    let mut marker = tempfile::NamedTempFile::new_in(&dir)?;
+    serde_json::to_writer(
+        &mut marker,
+        &serde_json::json!({"release": tag, "commit": commit, "attested": false}),
+    )?;
+    marker.as_file().sync_all()?;
+    marker.persist(dir.join(SOURCE_BUILD_MARKER))?;
+    let target = dir.join(archive_binary_name());
+    fs::rename(staged, &target)?;
+    fs::File::open(&dir)?.sync_all()?;
+    fs::File::open(root)?.sync_all()?;
+    Ok(target)
+}
+
+fn source_install_command(
+    cargo: &str,
+    commit: &str,
+    root: &Path,
+) -> Result<tokio::process::Command> {
+    anyhow::ensure!(
+        commit.len() == 40 && commit.bytes().all(|c| c.is_ascii_hexdigit()),
+        "Source revision must be a full immutable commit"
+    );
+    let mut command = tokio::process::Command::new(cargo);
+    command
+        .args([
+            "install", "--git", REPO_URL, "--rev", commit, "--locked", "--force", "--root",
+        ])
+        .arg(root)
+        .arg("nyxid-cli");
+    Ok(command)
+}
+
+fn validate_source_binary_version(output: &std::process::Output, tag: &str) -> Result<()> {
+    anyhow::ensure!(
+        output.status.success()
+            && std::str::from_utf8(&output.stdout)?.trim() == format!("nyxid {}", &tag[1..]),
+        "Compiled source binary version does not match requested release"
+    );
+    Ok(())
+}
+
+async fn resolve_source_commit(client: &reqwest::Client, api: &str, tag: &str) -> Result<String> {
+    let tag = normalize_release_tag(tag)?;
+    let base = format!("{api}/repos/{GITHUB_OWNER}/{GITHUB_REPO}");
+    let response: serde_json::Value = read_json_bounded(
+        client
+            .get(format!("{base}/git/ref/tags/{tag}"))
+            .send()
+            .await?
+            .error_for_status()?,
+        64 * 1024,
+    )
+    .await?;
+    let mut object = response["object"].clone();
+    for _ in 0..8 {
+        let sha = object["sha"]
+            .as_str()
+            .context("Source ref missing object SHA")?
+            .to_owned();
+        anyhow::ensure!(
+            sha.len() == 40 && sha.bytes().all(|c| c.is_ascii_hexdigit()),
+            "Source ref is not a full immutable object SHA"
+        );
+        match object["type"].as_str() {
+            Some("commit") => return Ok(sha),
+            Some("tag") => {
+                let annotated: serde_json::Value = read_json_bounded(
+                    client
+                        .get(format!("{base}/git/tags/{sha}"))
+                        .send()
+                        .await?
+                        .error_for_status()?,
+                    64 * 1024,
+                )
+                .await?;
+                object = annotated["object"].clone();
+            }
+            _ => anyhow::bail!("Source release ref does not resolve to a commit"),
+        }
+    }
+    anyhow::bail!("Source release has too many nested annotated tags")
 }
 
 fn source_build_cc_override() -> Result<Option<&'static str>> {
@@ -474,11 +616,19 @@ pub(crate) async fn resolve_release(
     client: &reqwest::Client,
     version: Option<&str>,
 ) -> Result<Option<GitHubRelease>> {
+    resolve_release_from(client, GITHUB_API_URL, version).await
+}
+
+async fn resolve_release_from(
+    client: &reqwest::Client,
+    api: &str,
+    version: Option<&str>,
+) -> Result<Option<GitHubRelease>> {
     let url = if let Some(version) = version {
         let tag = normalize_release_tag(version)?;
-        format!("{GITHUB_API_URL}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tags/{tag}")
+        format!("{api}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tags/{tag}")
     } else {
-        format!("{GITHUB_API_URL}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest")
+        format!("{api}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest")
     };
 
     let response = client
@@ -499,11 +649,17 @@ pub(crate) async fn resolve_release(
         .error_for_status()
         .with_context(|| format!("GitHub release API returned an error for {url}"))?;
 
-    response
-        .json::<GitHubRelease>()
+    let release = read_json_bounded::<GitHubRelease>(response, 1024 * 1024)
         .await
-        .context("Failed to parse GitHub release response")
-        .map(Some)
+        .context("Failed to parse GitHub release response")?;
+    normalize_release_tag(&release.tag_name)?;
+    if let Some(requested) = version {
+        anyhow::ensure!(
+            release.tag_name == normalize_release_tag(requested)?,
+            "Unexpected release tag"
+        );
+    }
+    Ok(Some(release))
 }
 
 fn release_asset<'a>(release: &'a GitHubRelease, asset_name: &str) -> Option<&'a GitHubAsset> {
@@ -1399,9 +1555,7 @@ fn archive_binary_name() -> &'static str {
 
 /// Locate the freshly-installed `nyxid` binary.
 ///
-/// For prebuilt updates this prefers the current executable path that was just
-/// replaced in place. For `--from-source`, it falls back to the cargo install
-/// location.
+/// Prefer the explicitly activated prebuilt or local source binary.
 fn find_new_binary(preferred: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = preferred
         && path.exists()
@@ -1456,6 +1610,192 @@ async fn exec_skills_update(new_bin: &Path, base_url: &Option<String>) -> Result
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[tokio::test]
+    async fn source_ref_resolution_peels_annotated_tags_and_rejects_missing_or_mutable_refs() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let prefix = "/repos/ChronoAIProject/NyxID";
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let tag_object = "abcdef0123456789abcdef0123456789abcdef01";
+        for (tag, object) in [
+            (
+                "v1.2.3",
+                serde_json::json!({"sha": commit, "type": "commit"}),
+            ),
+            (
+                "v1.2.4",
+                serde_json::json!({"sha": tag_object, "type": "tag"}),
+            ),
+            (
+                "v1.2.5",
+                serde_json::json!({"sha": "main", "type": "commit"}),
+            ),
+            ("v1.2.6", serde_json::json!({"sha": commit, "type": "tree"})),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("{prefix}/git/ref/tags/{tag}")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"object": object})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(path(format!("{prefix}/git/tags/{tag_object}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"object": {"sha": commit, "type": "commit"}}),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(
+            resolve_source_commit(&client, &server.uri(), "1.2.3")
+                .await
+                .unwrap(),
+            commit
+        );
+        assert_eq!(
+            resolve_source_commit(&client, &server.uri(), "1.2.4")
+                .await
+                .unwrap(),
+            commit
+        );
+        for tag in ["1.2.5", "1.2.6", "1.2.7", "main"] {
+            assert!(
+                resolve_source_commit(&client, &server.uri(), tag)
+                    .await
+                    .is_err()
+            );
+        }
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn release_resolution_fails_closed_without_a_matching_release() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let server = MockServer::start().await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        Mock::given(path("/repos/ChronoAIProject/NyxID/releases/latest"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path("/repos/ChronoAIProject/NyxID/releases/tags/v1.2.3"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"tag_name":"v9.9.9","assets":[]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(
+            resolve_release_from(&client, &server.uri(), None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resolve_release_from(&client, &server.uri(), Some("1.2.3"))
+                .await
+                .is_err()
+        );
+        assert!(
+            resolve_release_from(&client, &server.uri(), Some("1.2.4"))
+                .await
+                .is_err()
+        );
+        // All network requests remain under release endpoints; missing releases
+        // never trigger default-branch/ref/source discovery.
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.url.path().contains("/releases/"))
+        );
+    }
+
+    #[test]
+    fn source_command_requires_full_revision_and_locked_dependencies() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let command = source_install_command("cargo", sha, Path::new("/tmp/source root")).unwrap();
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|s| s.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "install",
+                "--git",
+                REPO_URL,
+                "--rev",
+                sha,
+                "--locked",
+                "--force",
+                "--root",
+                "/tmp/source root",
+                "nyxid-cli"
+            ]
+        );
+        for mutable in ["main", "HEAD", "v1.2.3", "0123456"] {
+            assert!(source_install_command("cargo", mutable, Path::new("/tmp")).is_err());
+        }
+    }
+
+    #[test]
+    fn source_manifest_missing_wrong_shaped_or_mismatched_version_returns_error() {
+        validate_source_manifest(b"[package]\nversion = '1.2.3'", "v1.2.3").unwrap();
+        for invalid in [
+            "",
+            "package = 1",
+            "[package]",
+            "[package]\nversion = 1",
+            "[package]\nversion = '1.2.4'",
+        ] {
+            assert!(validate_source_manifest(invalid.as_bytes(), "v1.2.3").is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn source_activation_is_atomic_and_cannot_replace_trusted_controller() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let build = tempfile::tempdir().unwrap();
+        let binary = build.path().join("nyxid");
+        fs::write(&binary, b"#!/bin/sh\nprintf 'nyxid 1.2.3\\n'\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let output = tokio::process::Command::new(&binary)
+            .arg("--version")
+            .output()
+            .await
+            .unwrap();
+        validate_source_binary_version(&output, "v1.2.3").unwrap();
+        assert!(validate_source_binary_version(&output, "v1.2.4").is_err());
+        let root = tmp.path().join("versions");
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let target = publish_source_binary(&binary, "v1.2.3", sha, &root).unwrap();
+        let mut old_inode = fs::File::open(&target).unwrap();
+        fs::write(&binary, b"new build").unwrap();
+        publish_source_binary(&binary, "v1.2.3", sha, &root).unwrap();
+        let mut previous = String::new();
+        std::io::Read::read_to_string(&mut old_inode, &mut previous).unwrap();
+        assert!(previous.starts_with("#!/bin/sh"));
+        assert_eq!(fs::read(&target).unwrap(), b"new build");
+        assert!(auto::install_controller(&root, &target).is_err());
+        assert!(!root.join(".update-controller").exists());
+        assert!(normalize_release_tag(&source_install_tag("v1.2.3+build.1", sha)).is_ok());
+    }
 
     #[test]
     fn explicit_active_path_recovers_controller_with_corrupt_policy() {
@@ -1708,7 +2048,7 @@ mod tests {
     fn check_status_mentions_missing_asset_when_installed_release_has_no_binary() {
         assert_eq!(
             cli_update_status("v0.4.0", "v0.4.0", false),
-            "up to date (no prebuilt asset for this target; future updates will fall back to --from-source)"
+            "up to date (no prebuilt asset for this target; source builds require explicit --from-source)"
         );
         assert_eq!(cli_update_status("v0.4.0", "v0.4.0", true), "up to date");
         assert_eq!(
@@ -1717,7 +2057,7 @@ mod tests {
         );
         assert_eq!(
             cli_update_status("v0.4.0", "v0.5.0", false),
-            "prebuilt binary unavailable; update will fall back to --from-source"
+            "prebuilt binary unavailable; use explicit --from-source to build this release"
         );
     }
 

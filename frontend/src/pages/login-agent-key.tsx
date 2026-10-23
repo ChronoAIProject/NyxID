@@ -1,3 +1,4 @@
+import { useMfaStepUp } from "@/hooks/use-mfa-step-up";
 import { useCallback, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { DeviceApproval } from "@/components/auth/device-approval";
@@ -32,6 +33,7 @@ function MintLoginCodePage() {
   const { user, isAuthenticated, logout } = useAuthStore();
   const options = useAgentKeyLoginOptions("agent-key", true);
   const mint = useMintLoginCode();
+  const stepUp = useMfaStepUp(user?.id ?? "");
   const [step, setStep] = useState<
     "review" | "options" | "account" | "confirm"
   >("review");
@@ -56,6 +58,7 @@ function MintLoginCodePage() {
     try {
       await work();
     } catch (failure) {
+      if (stepUp.handle(failure, () => run(work))) return;
       setError(agentKeyErrorMessage(failure));
     } finally {
       action.current = false;
@@ -107,6 +110,7 @@ function MintLoginCodePage() {
       mint.reset();
     });
   }
+  if (stepUp.prompt) return <LoginDeviceShell>{stepUp.prompt}</LoginDeviceShell>;
   return (
     <LoginDeviceShell>
       <header className="space-y-3 text-center">
@@ -257,7 +261,7 @@ function MintLoginCodePage() {
                 existing={selection?.kind === "existing"}
               />
               <label className="block space-y-2 text-12">
-                Login credential expiry (optional)
+                Login credential expiry (blank: 90 days, bounded by key expiry)
                 <Input
                   type="datetime-local"
                   value={credentialExpiry}

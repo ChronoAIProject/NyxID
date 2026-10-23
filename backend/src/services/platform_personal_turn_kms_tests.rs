@@ -264,7 +264,11 @@ async fn machine_node(state: &AppState, owner: &str) -> crate::models::node::Nod
 
 fn lifecycle(state: &AppState) -> bindings::LifecycleProducer {
     let identity = Arc::new(bindings::IdentityProducer);
-    let egress = super::super::assistant_nyxagent_egress::producer(state.clone(), identity.clone());
+    let egress = super::super::assistant_nyxagent_egress::producer(
+        state.clone(),
+        identity.clone(),
+        crate::handlers::agent_skills::preload_context(state.clone()),
+    );
     let runtime = super::super::platform_public_credential_service::producer(state.clone());
     let execution =
         super::super::assistant_nyxagent_runtime::producer(state.clone(), egress.clone(), runtime);

@@ -768,6 +768,7 @@ mod tests {
         let wrong_command = OriginalManagerCommand::from_verified(
             wrong_update,
             TurnInput {
+                channel_uploads: Vec::new(),
                 text: "yes 1234".into(),
             },
         )
@@ -783,6 +784,7 @@ mod tests {
         let command = OriginalManagerCommand::from_verified(
             update.clone(),
             TurnInput {
+                channel_uploads: Vec::new(),
                 text: "yes 1234".into(),
             },
         )

@@ -851,6 +851,7 @@ async fn invocation_delayed_cancelled_runtime_does_not_stop_successor_machine_jo
         None,
         permit,
         runtime::Events {
+            checkpoint: None,
             sender,
             cursor: 0,
             reset_notified: false,

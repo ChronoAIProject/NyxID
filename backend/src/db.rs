@@ -1273,6 +1273,9 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     consents
         .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
+    db.collection::<mongodb::bson::Document>(crate::services::consent_service::REVOCATION_FENCES)
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
+        .await?;
 
     // ── service_accounts ──
     let sa = db.collection::<mongodb::bson::Document>("service_accounts");
@@ -2837,6 +2840,7 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         .await?;
 
     crate::services::channel_reply_delivery::ensure_indexes(db).await?;
+    crate::services::channel_text_delivery::ensure_indexes(db).await?;
 
     // ── reply_token_uses ──
     let reply_token_uses = db.collection::<mongodb::bson::Document>("reply_token_uses");

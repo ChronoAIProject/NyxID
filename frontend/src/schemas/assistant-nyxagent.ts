@@ -2,6 +2,7 @@ import { platformThreadSchema, platformTurnOriginSchema } from "./platform-perso
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
 import { machineReceiptSchema } from "./machine-activity";
+import { cmaOperationSchema } from "./cma-operation";
 
 const conversationId = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 
@@ -90,7 +91,14 @@ export const nyxAgentConversationSchema = z.object({
     .object({
       platform_origin: platformTurnOriginSchema.nullish(),
       turn_id: z.string(),
+      reply: z.object({
+        message_id: z.string(),
+        block_id: z.string(),
+        cursor: z.number().int().nonnegative(),
+        text: z.string(),
+      }).nullish(),
       response_id: z.string().nullish(),
+      queued: z.boolean().optional(),
       waiting_for_capacity: z.boolean().optional(),
       capacity_wait_note_origin: z.string().nullish(),
       engine_request_started_at: z.string().nullish(),
@@ -246,6 +254,7 @@ export const nyxAgentWaitingSchema = z.object({
 export type NyxAgentWaiting = z.infer<typeof nyxAgentWaitingSchema>;
 
 export const nyxAgentHistorySchema = z.object({
+  cma_operations: z.array(cmaOperationSchema).default([]),
   conversation: nyxAgentConversationSchema,
   messages: z.array(nyxAgentMessageSchema),
   acknowledgements: z.array(nyxAgentAcknowledgementSchema).default([]),
@@ -264,7 +273,9 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     event: z.literal("turn.status"),
     conversation_id: conversationId,
     turn_id: z.string(),
+    started_at: z.string().optional(),
     status: z.enum(["running", "waiting"]),
+    queued: z.boolean().optional(),
     waiting_for_capacity: z.boolean().optional(),
     engine_accepted: z.boolean().optional(),
     capacity_wait_note_origin: z.string().nullish(),
@@ -431,6 +442,7 @@ export const assistantAgentSchema = z.object({
   description: z.string().default(""),
   model: z.string().optional(),
   access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
+  channel_checking_notice: z.boolean().optional(),
   specialty: z.string().nullable().default(null),
   created_by: z.enum(["user", "nyxbot"]).catch("user"),
   status: assistantAgentStatusSchema,
@@ -562,6 +574,7 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         persona: agentPersona,
         model: z.string().optional(),
         access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
+        channel_checking_notice: z.boolean().optional(),
       })
     : z.object({
         name: agentName,
@@ -570,6 +583,7 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         persona: agentPersona,
         model: z.string().optional(),
         access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
+        channel_checking_notice: z.boolean().optional(),
       });
 }
 /** A PATCH to an agent: only the fields that changed. `null` clears the override. */
@@ -580,6 +594,7 @@ export type AssistantAgentUpdate = {
   persona?: string;
   model?: string;
   access_mode_override?: NyxAgentAccessMode | null;
+  channel_checking_notice?: boolean;
 };
 export type AssistantAgentProfile = {
   name: string;
@@ -588,6 +603,7 @@ export type AssistantAgentProfile = {
   persona: string;
   model?: string;
   access_mode_override?: "autopilot" | "nyxmode" | "ask_every_time" | null;
+  channel_checking_notice?: boolean;
 };
 
 export const assistantAgentGrantsSchema = z.object({

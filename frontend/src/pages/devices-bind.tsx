@@ -161,6 +161,7 @@ export function DevicesBindPage() {
             <CardTitle>Device request</CardTitle>
             <CardDescription>
               Codes are case-insensitive and may include dashes or spaces.
+              The new device key expires in 90 days.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -394,6 +395,8 @@ function ApprovalSuccess({ device }: { readonly device: ApproveDeviceResponse })
           <DetailRow label="HW ID" value={device.hw_id} />
           <DetailRow label="API key" value={maskIdentifier(device.api_key_id)} />
           <DetailRow label="Node" value={maskIdentifier(device.node_id)} />
+          <DetailRow label="Key expires" value={device.api_key_expires_at === undefined
+            ? "Not reported; refresh key details" : device.api_key_expires_at ?? "No expiry"} />
         </dl>
       </CardContent>
     </Card>

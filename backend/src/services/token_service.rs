@@ -169,6 +169,25 @@ pub(crate) async fn create_session_with_transaction(
     user_agent: Option<&str>,
     transaction: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<IssuedSession> {
+    create_session_with_transaction_and_assurance(
+        db,
+        user_id,
+        ip_address,
+        user_agent,
+        transaction,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn create_session_with_transaction_and_assurance(
+    db: &mongodb::Database,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    transaction: Option<&mut mongodb::ClientSession>,
+    mfa_assured: bool,
+) -> AppResult<IssuedSession> {
     Uuid::parse_str(user_id).map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
     let session_token = generate_random_token();
@@ -180,6 +199,9 @@ pub(crate) async fn create_session_with_transaction(
     // Create session record
     let new_session = Session {
         purpose: Some(crate::models::session::SessionPurpose::Authenticated),
+        mfa_method: None,
+        mfa_assured: Some(mfa_assured),
+        mfa_exemption: None,
         id: session_id.clone(),
         user_id: user_id.to_string(),
         token_hash: session_token_hash,
@@ -208,6 +230,7 @@ pub(crate) async fn create_session_with_transaction(
 }
 
 /// Create a new session and issue JWT tokens.
+#[cfg(test)]
 pub async fn create_session_and_issue_tokens(
     db: &mongodb::Database,
     config: &AppConfig,
@@ -219,7 +242,38 @@ pub async fn create_session_and_issue_tokens(
     issue_session_tokens(db, config, jwt_keys, user_id, ip_address, user_agent, None).await
 }
 
+pub async fn create_derived_session_tokens(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    authority: super::session_authority::DerivedMfaAuthority,
+) -> AppResult<IssuedTokens> {
+    super::session_authority::require_derived_mfa(authority)?;
+    let prepared = prepare_session_tokens_with_assurance(
+        db,
+        config,
+        jwt_keys,
+        user_id,
+        ip_address,
+        user_agent,
+        authority.verified,
+    )
+    .await?;
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    insert_prepared_session(db, &prepared, &mut transaction).await?;
+    super::transaction_service::commit(&mut transaction).await?;
+    Ok(prepared.tokens)
+}
+
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn issue_session_tokens(
     db: &mongodb::Database,
     config: &AppConfig,
@@ -250,6 +304,12 @@ pub struct PreparedSessionTokens {
     refresh: RefreshToken,
 }
 
+impl PreparedSessionTokens {
+    pub(crate) fn set_mfa_assured(&mut self, assured: bool) {
+        self.session.mfa_assured = Some(assured);
+    }
+}
+
 pub async fn insert_prepared_session(
     db: &mongodb::Database,
     prepared: &PreparedSessionTokens,
@@ -275,12 +335,30 @@ pub async fn prepare_session_tokens(
     ip_address: Option<&str>,
     user_agent: Option<&str>,
 ) -> AppResult<PreparedSessionTokens> {
+    prepare_session_tokens_with_assurance(
+        db, config, jwt_keys, user_id, ip_address, user_agent, false,
+    )
+    .await
+}
+
+pub async fn prepare_session_tokens_with_assurance(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    mfa_assured: bool,
+) -> AppResult<PreparedSessionTokens> {
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
     let now = Utc::now();
     let session = Session {
         purpose: Some(crate::models::session::SessionPurpose::Authenticated),
+        mfa_method: None,
+        mfa_assured: Some(mfa_assured),
+        mfa_exemption: None,
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_owned(),
         token_hash: hash_token(&generate_random_token()),
@@ -369,23 +447,69 @@ pub async fn create_mfa_pending_session_for_password(
         .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
     super::auth_service::fence_password_proof(db, user, &mut transaction).await?;
-    let id =
-        insert_mfa_pending_session(db, &user.id, temp_token_hash, Some(&mut transaction)).await?;
+    let id = insert_mfa_pending_session_with_method(
+        db,
+        &user.id,
+        temp_token_hash,
+        Some("password"),
+        Some(&mut transaction),
+    )
+    .await?;
     super::transaction_service::commit(&mut transaction).await?;
     Ok(id)
 }
-#[cfg(test)]
-pub async fn create_mfa_pending_session(
+/// Create a first-factor MFA challenge and retain the non-secret method label
+/// used for audit/telemetry after the challenge is redeemed. The raw token is
+/// never persisted; only its hash is stored in the dedicated challenge store.
+pub async fn create_mfa_pending_session_with_method(
     db: &mongodb::Database,
     user_id: &str,
     temp_token_hash: &str,
+    method: Option<&str>,
 ) -> AppResult<String> {
-    insert_mfa_pending_session(db, user_id, temp_token_hash, None).await
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .find_one_and_update(
+            doc! {"_id": user_id, "is_active": true, "mfa_enabled": true,
+            "user_type": {"$ne": "org"}, "platform_personal_deleting": {"$ne": true}},
+            doc! {"$set": {"social_mfa_challenge_fence": uuid::Uuid::new_v4().to_string()}},
+        )
+        .session(&mut transaction)
+        .await?
+        .ok_or_else(|| AppError::AuthenticationFailed("MFA state changed".into()))?;
+    let id = insert_mfa_pending_session_with_method(
+        db,
+        user_id,
+        temp_token_hash,
+        method,
+        Some(&mut transaction),
+    )
+    .await?;
+    super::transaction_service::commit(&mut transaction).await?;
+    Ok(id)
 }
-async fn insert_mfa_pending_session(
+
+/// All social first factors share the same transactionally fenced challenge.
+pub async fn start_social_mfa_challenge(
+    db: &mongodb::Database,
+    user_id: &str,
+    provider: &str,
+) -> AppResult<zeroize::Zeroizing<String>> {
+    let challenge = zeroize::Zeroizing::new(generate_random_token());
+    create_mfa_pending_session_with_method(db, user_id, &hash_token(&challenge), Some(provider))
+        .await?;
+    Ok(challenge)
+}
+
+async fn insert_mfa_pending_session_with_method(
     db: &mongodb::Database,
     user_id: &str,
     temp_token_hash: &str,
+    method: Option<&str>,
     transaction: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<String> {
     let session_id = Uuid::new_v4().to_string();
@@ -394,6 +518,9 @@ async fn insert_mfa_pending_session(
 
     let pending_session = Session {
         purpose: Some(crate::models::session::SessionPurpose::MfaPending),
+        mfa_method: method.map(str::to_owned),
+        mfa_assured: Some(false),
+        mfa_exemption: None,
         id: session_id.clone(),
         user_id: user_id.to_string(),
         token_hash: temp_token_hash.to_string(),
@@ -405,8 +532,10 @@ async fn insert_mfa_pending_session(
         last_active_at: now,
     };
 
-    let collection = db.collection::<Session>(crate::models::session::MFA_CHALLENGES);
-    let insert = collection.insert_one(&pending_session);
+    let document = bson::to_document(&pending_session)
+        .map_err(|_| AppError::Internal("Failed to encode MFA challenge".into()))?;
+    let collection = db.collection::<bson::Document>(crate::models::session::MFA_CHALLENGES);
+    let insert = collection.insert_one(document);
     if let Some(transaction) = transaction {
         insert.session(transaction).await?;
     } else {
@@ -446,19 +575,12 @@ pub async fn refresh_tokens(
         .await?
         .ok_or_else(|| AppError::Unauthorized("Refresh token not found".to_string()))?;
 
-    if stored.client_id == Uuid::nil().to_string()
-        && let Some(id) = stored.session_id.as_deref()
-    {
-        let live = db
-            .collection::<Session>(SESSIONS)
-            .find_one(super::session_authority::authenticated(doc! {
-                "_id": id, "user_id": &stored.user_id, "revoked": false,
-                "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}
-            }))
-            .await?;
-        if live.is_none() {
-            return Err(AppError::Unauthorized("Session expired or revoked".into()));
-        }
+    // A signed-out device is no longer authority, even when its refresh row
+    // was batch-revoked. Reject before reuse detection can cascade again.
+    let bound_first_party =
+        stored.client_id == Uuid::nil().to_string() && stored.session_id.is_some();
+    if bound_first_party {
+        validate_refresh_session(db, &stored).await?;
     }
 
     // Re-validate the issuing OAuth client. First-party login flows
@@ -480,9 +602,10 @@ pub async fn refresh_tokens(
             .is_some();
         if !client_active {
             tracing::warn!(
-                jti = %claims.jti,
                 client_id = %stored.client_id,
-                "Refresh attempt against deactivated OAuth client; revoking"
+                reason = "client_inactive",
+                route_class = "refresh",
+                "Protected OAuth authority rejected"
             );
             // Revoke the token in place so subsequent retries follow
             // the existing reuse-detection path instead of leaking the
@@ -521,6 +644,7 @@ pub async fn refresh_tokens(
                 .await?
                 .ok_or_else(super::consent_service::grant_changed)?;
         if stored.created_at <= consent.granted_at + Duration::seconds(60) {
+            tracing::warn!(client_id = %stored.client_id, route_class = "refresh", reason = "legacy_unbound", "Protected OAuth authority rejected");
             return Err(super::consent_service::grant_changed());
         }
         let scope = stored
@@ -677,14 +801,14 @@ pub async fn refresh_tokens(
         RefreshTokenDisposition::Rotate(stored)
     };
 
-    let (active_token, reuse_existing_refresh_token) = match disposition {
+    let (mut active_token, reuse_existing_refresh_token) = match disposition {
         RefreshTokenDisposition::Rotate(token) => (token, false),
         RefreshTokenDisposition::Reuse(token) => (token, true),
     };
     if active_token.protected_consent != original_protected_consent {
         return Err(super::consent_service::grant_changed());
     }
-    super::consent_service::validate_protected_reference(
+    super::consent_service::validate_protected_reference_for_route(
         db,
         &active_token.user_id,
         &active_token.client_id,
@@ -693,8 +817,17 @@ pub async fn refresh_tokens(
             .as_deref()
             .unwrap_or(FIRST_PARTY_ACCESS_SCOPES),
         active_token.protected_consent.as_ref(),
+        "refresh",
     )
     .await?;
+    if active_token.client_id == Uuid::nil().to_string() {
+        if active_token.session_id.is_none() {
+            active_token.session_id = Some(bind_legacy_refresh_session(db, &active_token).await?);
+        }
+        if !bound_first_party {
+            validate_refresh_session(db, &active_token).await?;
+        }
+    }
     let user_id_str = active_token.user_id.clone();
     let user_id = Uuid::parse_str(&user_id_str)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in refresh token: {e}")))?;
@@ -760,12 +893,13 @@ pub async fn refresh_tokens(
     };
 
     if reuse_existing_refresh_token {
-        super::consent_service::fence_protected_reference(
+        super::consent_service::fence_protected_reference_for_route(
             db,
             &active_token.user_id,
             &active_token.client_id,
             scope,
             active_token.protected_consent.as_ref(),
+            "refresh",
         )
         .await?;
         touch_session_last_active(db, session_id.as_deref(), now).await?;
@@ -830,12 +964,13 @@ pub async fn refresh_tokens(
             if recovered.protected_consent != active_token.protected_consent {
                 return Err(super::consent_service::grant_changed());
             }
-            super::consent_service::fence_protected_reference(
+            super::consent_service::fence_protected_reference_for_route(
                 db,
                 &active_token.user_id,
                 &active_token.client_id,
                 scope,
                 active_token.protected_consent.as_ref(),
+                "refresh",
             )
             .await?;
             touch_session_last_active(db, session_id.as_deref(), now).await?;
@@ -877,12 +1012,13 @@ pub async fn refresh_tokens(
         .insert_one(&new_refresh)
         .await?;
 
-    if let Err(error) = super::consent_service::fence_protected_reference(
+    if let Err(error) = super::consent_service::fence_protected_reference_for_route(
         db,
         &active_token.user_id,
         &active_token.client_id,
         scope,
         active_token.protected_consent.as_ref(),
+        "refresh",
     )
     .await
     {
@@ -901,6 +1037,85 @@ pub async fn refresh_tokens(
         access_expires_in: config.jwt_access_ttl_secs,
         resource_uris: token_resource_scope.resource_uris,
     })
+}
+
+/// Old first-party issuers had no sid. The first refresh creates one fixed
+/// 30-day anchor and binds the active token in the same transaction. Retries
+/// and every successor reuse it, so rolling refresh cannot extend legacy MFA.
+async fn bind_legacy_refresh_session(
+    db: &mongodb::Database,
+    token: &RefreshToken,
+) -> AppResult<String> {
+    let context = (db.clone(), token.id.clone(), token.user_id.clone());
+    super::transaction_service::run_db_only(db, &context, |tx, c| Box::pin(async move {
+        let (db, id, user) = c;
+        let row = db.collection::<RefreshToken>(REFRESH_TOKENS).find_one(doc! {
+            "_id": id, "user_id": user, "revoked": false, "expires_at": {"$gt": bson::DateTime::now()}
+        }).session(&mut *tx).await?.ok_or_else(|| AppError::Unauthorized("Refresh token has expired or been revoked".into()))?;
+        if let Some(sid) = row.session_id { return Ok(sid); }
+        let issued = create_session_with_transaction(db, user, None, None, Some(&mut *tx)).await?;
+        db.collection::<bson::Document>(SESSIONS).update_one(doc! {"_id": &issued.session_id},
+            doc! {"$set": {"mfa_exemption": "legacy_migration"}}).session(&mut *tx).await?;
+        db.collection::<RefreshToken>(REFRESH_TOKENS).update_one(doc! {"_id": id},
+            doc! {"$set": {"session_id": &issued.session_id}}).session(&mut *tx).await?;
+        Ok(issued.session_id)
+    })).await
+}
+
+async fn validate_refresh_session(db: &mongodb::Database, token: &RefreshToken) -> AppResult<()> {
+    let user = db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id": &token.user_id, "is_active": true})
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("User account is inactive".into()))?;
+    // Refresh is always bounded by the session, including non-MFA accounts.
+    let live = db
+        .collection::<Session>(SESSIONS)
+        .find_one(super::session_authority::authenticated(doc! {
+            "_id": &token.session_id, "user_id": &token.user_id, "revoked": false,
+            "expires_at": {"$gt": bson::DateTime::now()}
+        }))
+        .await?;
+    let live = live.ok_or_else(|| AppError::Unauthorized("Session expired or revoked".into()))?;
+    if user.mfa_enabled && !super::session_authority::satisfies_mfa(&live) {
+        super::session_authority::reject_unassured(
+            db,
+            &token.user_id,
+            token.session_id.as_deref(),
+            "refresh",
+            None,
+            None,
+        )
+        .await?;
+        return Err(AppError::Unauthorized(
+            "MFA verification required; sign in again".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Issue a mobile social login with the rollout decision persisted before any
+/// credentials are returned. Other first-factor flows do not use this entry.
+pub async fn create_mobile_social_tokens(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    keys: &JwtKeys,
+    user_id: &str,
+    ip: Option<&str>,
+    ua: Option<&str>,
+    exempt: bool,
+) -> AppResult<IssuedTokens> {
+    let mut prepared = prepare_session_tokens(db, config, keys, user_id, ip, ua).await?;
+    if exempt {
+        prepared.session.mfa_exemption = Some(crate::models::session::MfaExemption::MobileRollout);
+    }
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    insert_prepared_session(db, &prepared, &mut tx).await?;
+    super::transaction_service::commit(&mut tx).await?;
+    Ok(prepared.tokens)
 }
 
 /// Revoke a session and all its associated refresh tokens.
@@ -958,6 +1173,124 @@ mod tests {
             .insert_one(&user)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dead_bound_refresh_rejects_before_reuse_without_cascading_again() {
+        let db = connect_transaction_test_database("refresh_early_gate").await;
+        let state = test_app_state(db.clone());
+        let id = Uuid::new_v4().to_string();
+        seed_user(&db, &id).await;
+        for expired in [false, true] {
+            let tokens = create_session_and_issue_tokens(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &id,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            revoke_session(&db, &tokens.session_id, None).await.unwrap();
+            if expired {
+                db.collection::<Session>(SESSIONS).update_one(doc! {"_id": &tokens.session_id},
+                    doc! {"$set": {"revoked": false, "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
+            }
+            // A repeated reuse cascade would remove this unrelated fallback.
+            let sentinel = state
+                .mcp_sessions
+                .create_with_parent_session(&id, true, true, None)
+                .await
+                .unwrap()
+                .unwrap();
+            let before = db
+                .collection::<RefreshToken>(REFRESH_TOKENS)
+                .find_one(doc! {"session_id": &tokens.session_id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(refresh_tokens(&db, &state.config, &state.jwt_keys, &tokens.refresh_token,
+                Some(&state.mcp_sessions), None).await,
+                Err(AppError::Unauthorized(message)) if message == "Session expired or revoked")
+            );
+            assert!(
+                state
+                    .mcp_sessions
+                    .get_for_auth(&sentinel)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            let after = db
+                .collection::<RefreshToken>(REFRESH_TOKENS)
+                .find_one(doc! {"_id": &before.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                bson::to_document(&before).unwrap(),
+                bson::to_document(&after).unwrap()
+            );
+        }
+        // MFA policy is also checked before reuse disposition. A live explicit
+        // unverified session must take the single policy-rejection path even
+        // if its refresh row has already been revoked.
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .update_one(doc! {"_id": &id}, doc! {"$set": {"mfa_enabled": true}})
+            .await
+            .unwrap();
+        let tokens =
+            create_session_and_issue_tokens(&db, &state.config, &state.jwt_keys, &id, None, None)
+                .await
+                .unwrap();
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .update_one(
+                doc! {"session_id": &tokens.session_id},
+                doc! {"$set": {"revoked": true}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(refresh_tokens(&db, &state.config, &state.jwt_keys, &tokens.refresh_token, None, None).await,
+            Err(AppError::Unauthorized(message)) if message == "MFA verification required; sign in again")
+        );
+        assert!(
+            matches!(refresh_tokens(&db, &state.config, &state.jwt_keys, &tokens.refresh_token, None, None).await,
+            Err(AppError::Unauthorized(message)) if message == "Session expired or revoked")
+        );
+        assert_eq!(db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {"user_id": &id, "event_type": "mfa_unassured_session_rejected", "event_data.session_id": &tokens.session_id}).await.unwrap(), 1);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mobile_social_without_exemption_writes_explicit_unverified_authority() {
+        let db = connect_transaction_test_database("mobile_no_exemption").await;
+        let state = test_app_state(db.clone());
+        let id = Uuid::new_v4().to_string();
+        seed_user(&db, &id).await;
+        let tokens = create_mobile_social_tokens(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &id,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let row = db
+            .collection::<bson::Document>(SESSIONS)
+            .find_one(doc! {"_id": &tokens.session_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.get_bool("mfa_assured"), Ok(false));
+        assert!(!row.contains_key("mfa_exemption"));
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -1530,17 +1863,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_mfa_pending_session() {
+    async fn test_create_mfa_pending_session_with_method() {
         let Some(db) = connect_test_database("token_svc").await else {
             return;
         };
         let user_id = Uuid::new_v4().to_string();
-        seed_user(&db, &user_id).await;
-
-        let temp_hash = "abc123hash";
-        let session_id = create_mfa_pending_session(&db, &user_id, temp_hash)
+        let mut user = test_user(&user_id, crate::models::user::UserType::Person);
+        user.mfa_enabled = true;
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(user)
             .await
             .unwrap();
+
+        let temp_hash = "abc123hash";
+        let session_id =
+            create_mfa_pending_session_with_method(&db, &user_id, temp_hash, Some("password"))
+                .await
+                .unwrap();
 
         let session = db
             .collection::<Session>(crate::models::session::MFA_CHALLENGES)
@@ -1554,6 +1893,7 @@ mod tests {
             session.purpose,
             Some(crate::models::session::SessionPurpose::MfaPending)
         );
+        assert_eq!(session.mfa_method.as_deref(), Some("password"));
         assert!(session.user_agent.is_none());
         assert!(!session.revoked);
     }

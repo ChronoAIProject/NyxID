@@ -124,12 +124,8 @@ pub async fn resolve_bot_token(
     bot: &ChannelBot,
 ) -> AppResult<Zeroizing<String>> {
     if bot.credential_source == "telegram_manager" {
-        let values = super::platform_credential_service::load_decrypted(
-            db,
-            keys,
-            &super::channel_adapters::telegram_new::credential_descriptor(),
-        )
-        .await?;
+        let values =
+            super::telegram_manager_registry::values(db, keys, Some(&bot.platform_bot_id)).await?;
         if bot.platform != "telegram"
             || values.get("manager_bot_id") != Some(bot.platform_bot_id.as_str())
             || values.get("webhook_ready") != Some("true")

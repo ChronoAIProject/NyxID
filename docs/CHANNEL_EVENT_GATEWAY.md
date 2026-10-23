@@ -460,6 +460,65 @@ The initial broken deploy of this feature created a `unique` variant of the `(co
 The [Aurinko email adapter](./AURINKO_INTEGRATION.md) uses the channel callback and reply protocol while owning its bounded inline ingress. Aurinko supplies redelivery; NyxID persists only subscription bindings, batch digest/cursor, stable message receipts, and irreversible send barriers. No message bodies, queue, or periodic worker are added. Active claims produce retryable failures, completed items stay deduplicated across partial batches and log expiration, and callback retries retain their UUID-v4 so runtimes can suppress duplicate work after a lost acknowledgement. Device and legacy chat adapters keep their existing protocols.
 
 
+## NyxBot gateway creator authorization and recovery
+
+Gateway management uses a **creator credential** distinct from the channel's
+provider/event-tool credential. NyxID mints the linking person's delegated
+`account:read` access JWT with reserved actor `nyxid:nyxbot-gateway-creator`
+and a 120-second lifetime. It stays server-only, is never logged or stored, and
+is sent through a redirect-disabled HTTP client. The separate channel agent key
+authenticates provider callbacks and event tools; it is never a creator bearer.
+The dedicated JWT mint owns the reserved actor, which neither catalog nor
+user-service slugs can represent; generic delegation mints reject it. The TTL
+remains a separate defense in depth.
+
+Gateway requests have a five-second connect timeout, a 20-second request timeout,
+and a streamed 2 MiB response limit. Platform-entry setup retains its dispatch
+deadline and streamed 64 KiB limit. Successful calls that require JSON or binding
+identities reject malformed responses rather than treating them as completed setup.
+
+Both gateway validators are supported: legacy gateways resolve the person with
+`GET /api/v1/users/me`; RFC 7662 gateways call `/oauth/introspect` with their own
+confidential OAuth client and require per-method permissions. For the exact
+server-side creator mint, NyxID adds only `cma-eg:channels:read`,
+`cma-eg:channels:create`, `cma-eg:channels:update`, and `cma-eg:channels:delete`
+when the authenticated, active confidential client is registered in the active
+`cmaeg` catalog row's `introspection_client_ids`. These are effective permissions
+for that caller, not stored user roles or assignments; the response's `roles`
+and `groups` and its field set stay as for any other token. Ordinary personal access tokens,
+other delegation mints and unrelated introspecting clients receive no extra grant.
+Missing, inactive, misconfigured or unreadable gateway configuration returns
+`oauth_authority_unavailable` (503), so a provisioning/read outage is not reported
+as an inactive token. A resolved configuration that does not associate the caller
+returns ordinary introspection without the creator grant; an RFC 7662 gateway
+then refuses NyxBot management with HTTP 403, surfaced as
+`gateway_permission_required`. The gateway's confidential OAuth client must be
+listed by its **full client ID**, verified against the actual configured
+introspection caller and matching NyxID client record. A display name, shortened
+ID, catalog slug or resource URI is not a client ID.
+
+The grant covers **owner-scoped CMA channel operations**; it is not bound to one
+channel ID. CMA still checks the creator subject against the profile owner and
+scopes channel reads/updates/deletes to that owner. It includes neither channel
+testing nor gateway administration. This covers connect, transport moves, group
+policy, thread/mention discovery, platform-entry setup/recovery/inspection, and
+platform cleanup without granting the person direct gateway access.
+
+A failed connection displays **Reconnect**, using its selected live agent and
+showing the returned owner-link instructions after success. Changing the agent
+on a failed row also reconnects; live rows retain their existing agent-link flow
+and account-link controls. Reconnect is disabled without a live target or while
+a mutation is pending. Disconnect remains available. Known errors have readable
+explanations and a secondary stable code; a gateway 401 means authentication
+failed and a 403 means gateway permission is missing. Remote response bodies are
+never displayed. There is **no automatic reconnect** of failed rows.
+
+REST and NyxBot tools list one current row per owner/bot. A pending/active row
+wins over failed attempts, even newer ones. Without a live row the latest record
+wins; a newer disconnection suppresses older failures. Creation time and then ID
+break ties, and the newest 50 winning, non-disconnected rows are returned. History
+is retained.
+
 ## NyxBot org bots and transport flags
 
 NyxID's CMAEG `nyxbot` provider supports personal and organization-owned bots.
@@ -652,3 +711,81 @@ CMA responses fixture was not run locally. TypeScript SDK: 2,833 tests passed.
 Gateway/core and Rust SDK all-target/all-feature Clippy on Rust 1.96.1, formatting,
 SDK lint/typecheck/build/docs, OpenAPI/schema coverage and source-size checks
 passed. No media/edit or additional-platform thread capability was added.
+
+## NyxBot gateway retirement and recovery
+
+NyxBot records cleanup responsibility before dispatching a gateway create and
+before removing local references. This is lifecycle cleanup; it adds no message
+or event delivery retries. Creation reserves a UUID record ID and its deterministic
+provider binding in `nyxbot_gateway_releases`, with a fixed 30-minute provisional
+deadline. Each acknowledged channel identity and positive version is persisted
+before the next external operation. Activation consumes the provisional record in
+the same transaction as adoption; it leaves no cleanup obligation for a healthy
+connection.
+
+Disconnect, org access loss, fallback, transport changes and abandoned setup
+commit local retirement, key revocation, route retirement and cleanup responsibility
+together. Local retirement completes even when the gateway is unavailable. The
+existing `gateway_released` response reports confirmed remote release; a queued
+obligation alone does not make it true. Explicit preservation leaves it false.
+CMA deletes in this order: authenticate the creator, check owner/version,
+unbind the provider, delete the remote record. A
+retained primary provider key can acknowledge only DELETE of its exact retired
+binding, without restoring key or provider authority. Other provider operations
+continue to require live authority. Platform-conversion cleanup and native entry
+retirement retain their own exact proofs and remain responsible for their resources.
+
+| Release state | Meaning |
+| --- | --- |
+| `provisional` | Setup owns a reserved identity until adoption or its deadline. |
+| `due` | Local authority is retired; exact remote cleanup is queued or leased. |
+| `review_required` | Automatic effects stopped because authority, identity or outcome needs review. |
+| `settled` | Confirmed release/absence, cancelled undispatched setup, or explicit preservation. Retained for deduplication and unbind acknowledgement. |
+
+An independent worker runs every 30 seconds, handles at most ten obligations per
+pass with two concurrent operations per replica, and uses 120-second database-time
+leases. Retries back off from 30 seconds to one hour. Every completion is fenced
+by claim, revision, state and lease. Recovery reads `/channel-records/{record_id}`
+and validates owner, provider, binding and relay source. It never creates a record
+or replaces the captured deletion version with an observed version. Destination
+drift, version changes, malformed identity and live-reference conflicts require
+review. An uncertain POST that remains unobserved for 24 hours requires review:
+that deadline is not proof that creation never happened.
+
+Administrators use the [release review API](API.md#nyxbot-gateway-release-review)
+to inspect a sanitized observation and resolve its exact revision. `retry_original`
+requeues the original authority for a matching identity, or resumes record-ID
+recovery for an unknown identity observed as missing. `preserve_changed` accepts
+any observation other than `matching` or `missing`, including a changed record,
+live reference, changed destination, unavailable owner or malformed identity.
+It settles as `preserved` without deleting anything, records the observation status
+in audit metadata, and leaves `gateway_released` false. `confirm_missing` settles
+confirmed absence; an uncertain create also requires 24 hours since dispatch and
+explicit attestation that the original dispatch has drained. There is no operation
+to delete an observed replacement version.
+
+Filter audit events by `nyxbot_gateway_release_queued`,
+`nyxbot_gateway_release_settled`, `nyxbot_gateway_release_review_required`,
+`nyxbot_gateway_release_reviewed`, `nyxbot_channel_continuity_restored` and
+`nyxbot_gateway_release_reconcile_pass_completed`. These metadata events commit
+with their transitions. Retries do not add audit events. Review transition logs
+contain only obligation ID, local channel ID and a stable reason.
+
+An hourly, resumable keyset scan processes at most 100 retained-identity retired
+rows per step. It excludes live adoptions and platform-conversion resources;
+settled obligations prevent repeated release. It does not enumerate remote
+inventory or guess identities missing from local history. The creator bearer
+retains its PR1 owner-wide channel management scope; CMA still enforces owner
+identity, and cleanup additionally pins destination, record and acknowledged
+version. It is not a token restricted to one channel.
+
+### Deployment and rollback
+
+Startup creates release and reconciliation indexes before workers start. Deploy
+normally across replicas; no global mutation freeze is needed.
+**Retained-identity orphans converge automatically, including retirements
+during rollout. Complete obligation coverage begins once all old lifecycle writers
+and their in-flight operations have drained**. Old transport-return, fallback,
+uncertain-create and stale pending-move paths can erase or never store remote
+identity. Before rollback to PR1, drain release workers; retain release records
+and continuity lineage fields.

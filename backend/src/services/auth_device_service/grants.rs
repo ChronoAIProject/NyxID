@@ -42,10 +42,24 @@ pub async fn approve_with_agent_key(
     encryption: &EncryptionKeys,
     hmac_key: &[u8],
     input: ApproveInput,
-    selection: agent::Selection,
+    mut selection: agent::Selection,
     credential_expires_at: Option<DateTime<Utc>>,
+    authority: crate::services::session_authority::DerivedMfaAuthority,
 ) -> AppResult<()> {
+    crate::services::session_authority::require_derived_mfa(authority)?;
+    let mfa_assured = authority.verified;
     let (collection, row) = pending_request(db, hmac_key, &input.user_code).await?;
+    let created_at = Utc::now();
+    let credential_expires_at = Some(
+        agent::prepare_issuance(
+            db,
+            &input.user_id,
+            &mut selection,
+            credential_expires_at,
+            created_at,
+        )
+        .await?,
+    );
     let key_id = match &selection {
         agent::Selection::Existing { api_key_id, .. } => {
             agent::eligible_key(db, &input.user_id, api_key_id)
@@ -81,11 +95,12 @@ pub async fn approve_with_agent_key(
             ).session(&mut *session).await?;
             if claimed.is_none() { return Err(current_decision_error(&collection, &row.id).await?); }
             agent::issue_selected(db, &input.user_id, &row.id, &context, row.requested_profile.as_deref(), &selection,
-                credential_expires_at, &key_id, &credential_id, &secret, &mut *session).await?;
+                credential_expires_at, created_at, &key_id, &credential_id, &secret, &mut *session).await?;
             let now = Utc::now();
             if row.expires_at <= now { return Err(AppError::AuthDeviceCodeExpired); }
             collection.update_one(doc! {"_id": &row.id}, doc! {"$set": {
                 "approved_user_id": &input.user_id,
+                "mfa_assured": mfa_assured,
                 "approved_at": bson::DateTime::from_chrono(now),
                 "approver_ip_hmac": input.approver_ip.as_deref().map(|ip| hmac_hex(hmac_key, ip.as_bytes())),
                 "expires_at": bson::DateTime::from_chrono(now + Duration::seconds(60)),
@@ -131,6 +146,7 @@ pub async fn poll_agent_key(
         expire(db, &collection, &row).await?;
         return Err(AppError::AuthDeviceCodeExpired);
     }
+    require_delivery_mfa(db, &row).await?;
     let grant = row
         .agent_key_grant
         .as_ref()
