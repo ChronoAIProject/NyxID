@@ -627,8 +627,8 @@ function NyxAgentThreadPage() {
   });
   const starterEligible = Boolean(search.draft && !search.c && !search.agent && !search.g && user?.id);
   const starterHelp = usePublicUseCases(starterEligible && Boolean(search.starter));
-  const starterDraft = search.starter && starterEligible && starterHelp.isSuccess ? {
-    text: composeBusinessStarter(search.starter, starterHelp.data),
+  const starterDraft = search.starter && starterEligible && (starterHelp.isSuccess || starterHelp.isError) ? {
+    text: starterHelp.isSuccess ? composeBusinessStarter(search.starter, starterHelp.data) : "",
     onConsumed: () => {
       void navigate({
         to: "/assistant",
