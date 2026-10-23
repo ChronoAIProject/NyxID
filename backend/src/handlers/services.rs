@@ -5297,22 +5297,21 @@ mod tests {
         .await;
 
         let refused = [
-            (test_auth_user(&manager), "shared"),
-            (test_auth_user(&manager), "managed"),
-            (test_auth_user(&stranger), "shared"),
-            (test_auth_user(&stranger), "legacy"),
-            (test_auth_user(&creator), "shared"),
-            (test_auth_user(&creator), "owned"),
-            (api_key_auth_user(&creator), "legacy"),
-            (api_key_auth_user(&admin), "shared"),
+            ("manager", test_auth_user(&manager), "shared"),
+            ("manager", test_auth_user(&manager), "managed"),
+            ("stranger", test_auth_user(&stranger), "shared"),
+            ("stranger", test_auth_user(&stranger), "legacy"),
+            ("creator", test_auth_user(&creator), "shared"),
+            ("creator", test_auth_user(&creator), "owned"),
+            ("creator key", api_key_auth_user(&creator), "legacy"),
+            ("admin key", api_key_auth_user(&admin), "shared"),
         ];
-        for (auth, service_id) in refused {
-            let user = auth.user_id;
+        for (role, auth, service_id) in refused {
             let error =
                 resync_service_identity(State(state.clone()), auth, Path(service_id.into()))
                     .await
                     .expect_err("resync should be refused");
-            assert!(error.is_forbidden(), "{user} on {service_id}: {error:?}");
+            assert!(error.is_forbidden(), "{role} on {service_id}: {error:?}");
         }
         let unchanged = db
             .collection::<UserService>(USER_SERVICES)
@@ -5362,26 +5361,25 @@ mod tests {
         assert!(matches!(error, AppError::BadRequest(_)), "{error:?}");
 
         let flags = [
-            (test_auth_user(&admin), "shared", true),
-            (test_auth_user(&admin), "managed", true),
-            (test_auth_user(&admin), "owned", true),
-            (test_auth_user(&admin), "ssh", false),
-            (test_auth_user(&creator), "legacy", true),
-            (test_auth_user(&creator), "shared", false),
-            (test_auth_user(&creator), "owned", false),
-            (test_auth_user(&creator), "ssh", false),
-            (test_auth_user(&manager), "shared", false),
-            (test_auth_user(&manager), "managed", false),
-            (test_auth_user(&stranger), "legacy", false),
-            (api_key_auth_user(&admin), "shared", false),
-            (api_key_auth_user(&creator), "legacy", false),
+            ("admin", test_auth_user(&admin), "shared", true),
+            ("admin", test_auth_user(&admin), "managed", true),
+            ("admin", test_auth_user(&admin), "owned", true),
+            ("admin", test_auth_user(&admin), "ssh", false),
+            ("creator", test_auth_user(&creator), "legacy", true),
+            ("creator", test_auth_user(&creator), "shared", false),
+            ("creator", test_auth_user(&creator), "owned", false),
+            ("creator", test_auth_user(&creator), "ssh", false),
+            ("manager", test_auth_user(&manager), "shared", false),
+            ("manager", test_auth_user(&manager), "managed", false),
+            ("stranger", test_auth_user(&stranger), "legacy", false),
+            ("admin key", api_key_auth_user(&admin), "shared", false),
+            ("creator key", api_key_auth_user(&creator), "legacy", false),
         ];
-        for (auth, service_id, expected) in flags {
-            let user = auth.user_id;
+        for (role, auth, service_id, expected) in flags {
             assert_eq!(
                 resync_flag(&state, auth, service_id).await,
                 Some(expected),
-                "{user} on {service_id}"
+                "{role} on {service_id}"
             );
         }
     }
