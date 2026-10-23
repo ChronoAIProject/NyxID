@@ -26,7 +26,7 @@ nyxid proxy request <service> [path] [flags]
 Send a request to `<service>` (slug or UUID) at `path` (e.g. `models`, `v1/chat/completions`). A `200` carries the upstream's real response body.
 
 - `--method, -m <verb>` — HTTP method (default `GET`).
-- `--data, -d <body>` — request body: a JSON string, `@file` to read from a file, or `-` for stdin.
+- `--data, -d <body>` — request body: a JSON string, `@file` to read from a file, or `-` for stdin. Without a `Content-Type` header, a body that parses as JSON is sent as `application/json`; any other body is sent as `application/octet-stream`.
 - `--header, -H 'Key:Value'` — extra request headers (repeatable).
 - `--stream` — stream the response (SSE, audio/video, large downloads).
 - `--by-id` — treat `<service>` as a service ID rather than a slug.

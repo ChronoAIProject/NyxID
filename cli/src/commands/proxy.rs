@@ -200,7 +200,7 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
 mod tests {
     use super::*;
     use crate::test_support::mock_auth;
-    use wiremock::matchers::{body_string, method, path, query_param};
+    use wiremock::matchers::{body_string, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn req(
@@ -308,11 +308,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_defaults_json_body_to_json_content_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/proxy/s/api-notion/v1/pages"))
+            .and(header("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(req(
+            server.uri(),
+            "api-notion",
+            "/v1/pages",
+            "POST",
+            Some(r#"{"parent":{"page_id":"p"}}"#),
+            false,
+            None,
+        ))
+        .await
+        .expect("json post should succeed");
+    }
+
+    #[tokio::test]
     async fn request_forwards_post_body() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/proxy/s/openai/v1/chat"))
             .and(body_string("hello"))
+            .and(header("content-type", "application/octet-stream"))
             .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
             .expect(1)
             .mount(&server)
