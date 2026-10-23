@@ -1629,19 +1629,36 @@ pub(crate) fn clear_deleted_account_credentials(
 }
 
 pub async fn run_logout(base_url: &str, profile: Option<&str>) -> Result<()> {
-    let (generation, token, restricted) = {
+    let (generation, token, restricted, remote_destination_valid) = {
         let _lock = acquire_refresh_lock(profile)?;
-        validate_profile_destination(profile, base_url)?;
+        let remote_destination_valid = match validate_profile_destination(profile, base_url) {
+            Ok(()) => true,
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<ProfileDestinationError>(),
+                    Some(ProfileDestinationError::Invalid)
+                ) && read_profile_file(profile, BASE_URL_FILE_NAME)?.is_some_and(|saved| {
+                    saved.trim_end_matches('/') == base_url.trim_end_matches('/')
+                }) =>
+            {
+                // Exact saved-destination equality permits local logout even
+                // when transport is invalid. It never authorizes a request.
+                false
+            }
+            Err(error) => return Err(error),
+        };
         (
             login_generation(profile),
             read_saved_token_for(profile).map(zeroize::Zeroizing::new),
             agent_key::is_agent_key_profile(profile),
+            remote_destination_valid,
         )
     };
     let base_url = base_url.trim_end_matches('/');
     // Remote revocation is best effort. An unsafe destination or client setup
     // failure must never send the credential or prevent guarded local cleanup.
-    let revoked = if let Some(token) = &token
+    let revoked = if remote_destination_valid
+        && let Some(token) = &token
         && let Ok(client) = build_credential_http_client_for_url(profile, base_url)
     {
         let request = if restricted {
