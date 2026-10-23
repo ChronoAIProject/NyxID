@@ -421,6 +421,19 @@ export interface DownstreamService {
    * (UI offers a "manage in AI Services" link).
    */
   readonly your_binding_count?: number;
+  /**
+   * Whether the viewer may resync connection identity for this service.
+   * Sent only by `GET /services/{id}`; absent means not allowed.
+   */
+  readonly can_resync_identity?: boolean;
+}
+
+export interface ResyncIdentityResponse {
+  readonly catalog_service_id: string;
+  /** Connections to this service that were checked. */
+  readonly matched_count: number;
+  /** Connections whose identity settings differed and were rewritten. */
+  readonly changed_count: number;
 }
 
 export interface DefaultRequestHeader {
