@@ -57,6 +57,36 @@ current personal account, even if the legacy guide is disabled. Bot creation
 links require the same account in the browser. A selected setup supplies context
 to the next personal turn and grants no approval.
 
+Telegram business starter deep links use `https://t.me/<manager>?start=uc_<id>`.
+An original private `/start uc_<id>` request returns the assigned help library's
+published use-case title, description and first example prompt, followed by the
+existing account sign-in/review instructions. It uses no fuzzy match or model.
+`/usecase <id>` makes the same selection for a linked personal chat. Unknown,
+malformed and prompt-less cases receive a fixed unavailable response.
+
+Selections live separately in `platform_use_case_selections`, keyed by a hash of
+the verified profile, manager entry and platform sender/conversation. The stored
+row contains only IDs, the published library/revision reference, optional current
+binding ID/generation and a 30-day expiry, matching setup-selection retention.
+This keeps every link-intent consent/review digest unchanged: selection conveys
+context only, and browser consent plus original-chat confirmation remain required.
+Forwarded, edited, group and wrong-bot commands cannot set the selection.
+
+After the live personal binding and thread fences, the next owner turn takes the
+selection in its admission transaction and reads the current assigned publication
+again. It injects only that publication's title and first prompt, with a note to
+offer to begin and wait for the owner's go-ahead. Removed cases, changed libraries,
+expired choices, retired manager epochs and replaced personal bindings do not
+inject context. A failed admission rolls back consumption. `/logout` clears the
+choice; no selected content grants tools, approval, consent or execution authority.
+Public selections may be stored before linking and are looked up by the same
+verified sender on the first personal turn, rather than being added to reviewed
+link-intent data. The command uses the existing informational help receipt and
+one-attempt command sender; stored receipts/logs contain no prompt or help body.
+No new persisted enum variants or required fields are added to existing records.
+Old replicas ignore the new collection; a turn handled by an old replica can defer
+consumption until the next turn handled by an upgraded replica.
+
 The client owns the specialist, child and published facts. A platform manager
 operator does not acquire client-resource ownership. Public child inference
 ignores the specialist's private grants, persona, skills, keys and home context;

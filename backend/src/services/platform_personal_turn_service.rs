@@ -422,6 +422,14 @@ pub(crate) async fn claim_personal_turn_in_session(
             None => selected,
         });
     }
+    if let Some(selected) =
+        super::platform_use_case_service::take_context_in_session(db, session, authority).await?
+    {
+        start.note = Some(match start.note.take() {
+            Some(note) => format!("{selected}\n\n{note}"),
+            None => selected,
+        });
+    }
     let origin = contract::PlatformTurnOrigin {
         authority: authority.clone(),
         nyxbot_agent_id: agent.id.clone(),

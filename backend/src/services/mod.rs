@@ -213,6 +213,7 @@ pub mod platform_public_tools;
 pub mod platform_settings_service;
 pub(crate) mod platform_setup_record_service;
 pub(crate) mod platform_setup_service;
+pub mod platform_use_case_service;
 pub mod pool_failover;
 pub mod provider_service;
 pub mod provider_token_exchange_service;

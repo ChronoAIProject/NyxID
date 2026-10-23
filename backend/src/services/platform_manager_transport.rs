@@ -203,6 +203,7 @@ pub(crate) async fn dispatch_update(
                 | "/setup"
                 | "/bots"
                 | "/bot"
+                | "/usecase"
         );
     let mut text = if control {
         raw.to_owned()
@@ -317,7 +318,10 @@ async fn dispatch_verified_impl(
     let kind = super::platform_manager_management::parse(text, username)
         .map(commands::PersonalCommandKind::Management)
         .or_else(|| commands::personal_command(text, username));
-    if let Some(kind) = kind.filter(|_| !(runtime.public_enabled && dispatch::explicit_faq(text))) {
+    if let Some(kind) = kind.filter(|kind| {
+        matches!(kind, commands::PersonalCommandKind::UseCase { .. })
+            || !(runtime.public_enabled && dispatch::explicit_faq(text))
+    }) {
         if let Some(command) = OriginalManagerCommand::from_verified(
             verified.clone(),
             TurnInput {
@@ -403,6 +407,7 @@ async fn dispatch_verified_impl(
             | "/setup"
             | "/bots"
             | "/bot"
+            | "/usecase"
     ) && !(runtime.public_enabled && dispatch::explicit_faq(text))
         || text.contains("nyx_pli_")
         || text.contains("#intent_token=")
