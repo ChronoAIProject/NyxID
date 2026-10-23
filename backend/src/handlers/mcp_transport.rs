@@ -2207,10 +2207,7 @@ async fn handle_tools_list(
     }
 
     if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
-        tool_defs.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
-        tool_defs.push(crate::services::assistant_upload_service::definition());
-        tool_defs.push(crate::services::assistant_upload_service::list_definition());
-        tool_defs.push(crate::services::assistant_nyxagent::conversation_history_definition());
+        tool_defs.extend(Box::pin(chat_native_definitions(state, chat)).await);
     } else if auth.chat.is_none()
         && let Some(source) = auth.machine_source.as_ref()
         && let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
@@ -4708,6 +4705,20 @@ async fn handle_meta_call_tool(
 
 /// A discovery failure must not hide its cause or remove unrelated tools.
 /// Record only fixed error metadata: no query, identifiers, or error contents.
+/// Native tools of an owner chat thread. `tools/list` and `nyx__search_tools`
+/// share this list: NyxAgent discovers tools through search, and the reset
+/// recap points at `nyx__conversation_history`.
+async fn chat_native_definitions(
+    state: &AppState,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+) -> Vec<mcp_service::McpToolDefinition> {
+    let mut tools = Box::pin(machine_discovery_definitions(state, chat)).await;
+    tools.push(crate::services::assistant_upload_service::definition());
+    tools.push(crate::services::assistant_upload_service::list_definition());
+    tools.push(crate::services::assistant_nyxagent::conversation_history_definition());
+    tools
+}
+
 async fn machine_discovery_definitions(
     state: &AppState,
     chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
@@ -4812,8 +4823,7 @@ async fn handle_meta_search(
     let mut candidates = search_result.matches;
     if !exact_service_id_query {
         if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
-            candidates.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
-            candidates.push(crate::services::assistant_upload_service::definition());
+            candidates.extend(Box::pin(chat_native_definitions(state, chat)).await);
         } else if auth.chat.is_none()
             && let Some(source) = auth.machine_source.as_ref()
             && let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
