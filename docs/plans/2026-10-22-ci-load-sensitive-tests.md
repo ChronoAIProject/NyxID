@@ -1,7 +1,7 @@
 # CI stability follow-up: issue #2015
 
 Investigation base: `6f4b94709d4feb7bb4034d8f831384db4fd8902a` (PR #1986).
-Latest main integration base: `3a5e4175d` (includes Oracle retirement and JWT verification inventory).
+Latest main integration base: `1dbf3b32c` (includes the Assistant launch).
 Scope: the four remaining load-sensitive tests, failed-run diagnostics, and
 backend image cache reuse. This builds on the four-shard backend workflow;
 the test inventory verifier, coverage merge, 73% gate, and existing retry
@@ -190,3 +190,18 @@ Main `3a5e4175d` separately split CMA receipt deduplication into its own test.
 Integration preserves that test and explicitly creates the second watch needed
 by this PR's bounded lifecycle observation. The merged source must be validated
 by fresh local tests and a new full hosted run before merge.
+
+
+Run `39873605977` then passed 10,375 ordinary tests with zero retries, including
+telemetry and both CMA tests. The one failure was an added setup probe in the
+repair fixture: successful majority-write plus linearizable-read pairs took
+about 103 ms and missed its synthetic 100 ms threshold. That compound probe
+measures a different workload from the real 250 ms snapshot transaction. The
+two added probe calls were removed; durable fixture writes, exact count and
+generation reads, exclusive scheduling, and real single-shot cap/refill calls
+remain. The shared helper and its unrelated caller are unchanged.
+
+Main `1dbf3b32c` integrated cleanly without touching this PR's implementation
+files. The superseded local test-binary build was stopped after approximately
+44 minutes; it produced no fresh test result. The corrected integrated revision
+requires the full hosted suites and gates before merge.
