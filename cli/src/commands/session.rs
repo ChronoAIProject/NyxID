@@ -306,8 +306,15 @@ async fn check_server(destination: &str, access: &str, profile: Option<&str>) ->
         Err(_) => return serde_json::json!({"server_check": "unavailable"}),
     };
     let status = response.status();
-    let body = response.json::<Value>().await.ok();
     let mut result = serde_json::json!({"http_status": status.as_u16()});
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            result["server_check"] = "unavailable".into();
+            return result;
+        }
+    };
+    let body = serde_json::from_slice::<Value>(&bytes).ok();
     let state = if status.is_success() {
         match body.as_ref().and_then(Value::as_array) {
             Some(items)
