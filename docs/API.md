@@ -10,6 +10,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
 - [Error Format](#error-format)
 - [Error Codes](#error-codes)
 - [Endpoints](#endpoints)
+  - [Public use cases](#public-use-cases)
   - [Health](#health)
   - [Interactive Documentation](#interactive-documentation)
   - [Auth](#auth)
@@ -9135,3 +9136,12 @@ requires the 24-hour dispatch window to have elapsed and `dispatch_drained: true
 absence alone never proves no creation. A stale revision/observation returns
 conflict; an invalid action returns validation failure. Authority/storage
 unavailability is retryable. No action deletes a replacement version.
+
+## Public use cases
+
+`GET /api/v1/public/help/use-cases` requires no authentication and uses the normal
+global rate limit. It returns `{"use_cases":[{"id":"…","title":"…","description":"…","example_prompts":["…"]}]}`.
+Only the default shared BotFather help library's current immutable published
+revision is read. Saved drafts and profile-specific assignments are excluded.
+A missing library/publication returns `{"use_cases":[]}`; this read never seeds
+content. Responses use `Cache-Control: no-store`.

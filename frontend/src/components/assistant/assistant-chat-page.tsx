@@ -27,6 +27,8 @@ import {
   type VoiceView,
 } from "./voice-caption-state";
 import { LazyVoicePanel as VoicePanel } from "./lazy-voice-panel";
+import { usePublicUseCases } from "@/hooks/use-public-help";
+import { composeBusinessStarter } from "@/lib/assistant/business-starters";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { useNyxBotSettings } from "@/hooks/use-nyxbot-agents";
 import { NyxBotHome } from "./nyxbot-home";
@@ -623,6 +625,18 @@ function NyxAgentThreadPage() {
   const search = useRouterState({
     select: (state) => parseAssistantSearch(state.location.search as Record<string, unknown>),
   });
+  const starterEligible = Boolean(search.draft && !search.c && !search.agent && !search.g && user?.id);
+  const starterHelp = usePublicUseCases(starterEligible && Boolean(search.starter));
+  const starterDraft = search.starter && starterEligible && starterHelp.isSuccess ? {
+    text: composeBusinessStarter(search.starter, starterHelp.data),
+    onConsumed: () => {
+      void navigate({
+        to: "/assistant",
+        search: (previous) => ({ ...parseAssistantSearch(previous), starter: undefined }),
+        replace: true,
+      });
+    },
+  } : undefined;
   const selectedId = search.draft ? undefined : search.c;
   const errorScope = `${user?.id}:${selectedId ?? `draft:${search.agent ?? "nyxbot"}`}`;
   const [requestError, setRequestError] = useState<{ scope: string; message: string }>();
@@ -1154,6 +1168,7 @@ function NyxAgentThreadPage() {
         )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <NyxAgentComposer
+            starterDraft={starterDraft}
             voiceControls={
               voiceEnabled &&
               voiceThread &&

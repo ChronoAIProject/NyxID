@@ -108,5 +108,10 @@
   "openChat": "Open {{channel}}",
   "linkNext": "Next: send the code from {{channel}}",
   "linkReason": "Proves you control this channel",
-  "linkThen": "Then Nyxbot helps you set things up"
+  "linkThen": "Then Nyxbot helps you set things up",
+  "starterTitle": "What can NyxBot help with?",
+  "starterDescription": "Choose up to 8 use cases. You can review and edit the starter message before sending it.",
+  "starterContinue": "Continue in NyxBot",
+  "starterEmpty": "No use cases are available yet.",
+  "starterLoadError": "We couldn't load use cases. Please retry."
 }

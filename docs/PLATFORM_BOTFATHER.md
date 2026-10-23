@@ -138,6 +138,18 @@ help-library selector defaults to the shared library. Create a separate library
 when a group of managers needs different public information. The initial shared
 library is seeded once from the shipped FAQ.
 
+The public `GET /api/v1/public/help/use-cases` endpoint exposes the default shared
+library's published use cases without authentication, under the global rate
+limit. It returns only `id`, `title`, `description` and `example_prompts`; missing
+publications return an empty list. It never reads saved drafts or other libraries.
+`/nyxbot/start?usecases=queue-manager,business-faq` offers checkbox selection of
+this content (up to eight unique valid slugs), then opens
+`/assistant?draft=true&starter=queue-manager,business-faq`. The trusted same-origin
+login return URL retains this query. NyxBot uses the first example prompt for one
+selection, or a titled list for several, in the owner's empty composer draft.
+Unknown IDs and entries without a starter prompt are ignored. It never sends the
+message, preserves typed drafts, and consumes `starter` with history replace.
+
 Published revisions are immutable. History is paginated; restoring any old
 revision publishes its content as a new revision. Edits and assignments compare
 the reviewed version and profile generation, so concurrent changes require reload

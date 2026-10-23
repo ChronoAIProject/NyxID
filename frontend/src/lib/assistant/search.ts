@@ -18,6 +18,9 @@ import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel
  *   state, so a server link (`AssistantPage::AgentDetails`) survives reload
  *   and Back closes it; an inaccessible or destroyed agent shows an explicit
  *   no-access state instead of falling back to NyxBot.
+ * - `starter` is up to eight deduplicated comma-separated use-case ids matching
+ *   ^[a-z0-9]+(-[a-z0-9]+)*$. Invalid entries are dropped. It prefills an
+ *   empty new NyxBot draft once, then is removed with history replace.
  * - `mock` preserves the dev-only HTTP fixture boundary across router writes.
  *
  * `draft` is accepted as a boolean and as the string "true": the router's
@@ -32,10 +35,17 @@ export interface AssistantSearch extends AccountPanelSearch {
   readonly card?: string;
   readonly proposal?: string;
   readonly draft?: boolean;
+  readonly starter?: string;
   readonly agent?: string;
   readonly details?: AgentDetailsTab;
   readonly g?: string;
   readonly mock?: 1;
+}
+
+export function parseUseCaseIds(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const ids = [...new Set(value.split(",").filter((id) => /^[a-z0-9]+(-[a-z0-9]+)*$/.test(id)))].slice(0, 8);
+  return ids.length ? ids.join(",") : undefined;
 }
 
 function agentDetailsTab(value: unknown): AgentDetailsTab | undefined {
@@ -45,7 +55,9 @@ function agentDetailsTab(value: unknown): AgentDetailsTab | undefined {
 function parseChatSearch(
   search: Record<string, unknown>,
 ): Omit<AssistantSearch, keyof AccountPanelSearch> {
+  const starter = parseUseCaseIds(search.starter);
   return {
+    ...(starter ? { starter } : {}),
     ...(typeof search.c === "string" ? { c: search.c } : {}),
     ...(typeof search.card === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.card)
       ? { card: search.card }

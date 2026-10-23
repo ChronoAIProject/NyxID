@@ -996,3 +996,45 @@ it("replaces voice with Send for a draft and retains the active call control bes
     screen.getByRole("button", { name: "Open voice call" }),
   ).toHaveAttribute("aria-pressed", "true");
 });
+
+describe("business starter draft", () => {
+  beforeEach(() => { useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} }); });
+  it("prefills an owned empty draft once without sending", () => {
+    const onConsumed = vi.fn();
+    const onSend = vi.fn();
+    render(<ChatComposer {...baseProps} draftKey="starter" onSend={onSend} starterDraft={{ text: "Set up queue", onConsumed }} />);
+    expect(screen.getByRole("textbox")).toHaveValue("Set up queue");
+    expect(useAssistantDraftStore.getState().getDraft("starter")).toBe("Set up queue");
+    expect(onConsumed).toHaveBeenCalledTimes(1);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+  it("preserves stored drafts when a starter arrives", () => {
+    useAssistantDraftStore.getState().saveDraft("user-1", "starter", "My draft");
+    const onConsumed = vi.fn();
+    render(<ChatComposer {...baseProps} draftKey="starter" starterDraft={{ text: "Set up queue", onConsumed }} />);
+    expect(screen.getByRole("textbox")).toHaveValue("My draft");
+    expect(onConsumed).toHaveBeenCalledOnce();
+  });
+  it("preserves typing before a delayed help response and clears the token", () => {
+    const onConsumed = vi.fn();
+    const { rerender } = render(<ChatComposer {...baseProps} draftKey="starter" />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Already typing" } });
+    rerender(<ChatComposer {...baseProps} draftKey="starter" starterDraft={{ text: "Set up queue", onConsumed }} />);
+    expect(screen.getByRole("textbox")).toHaveValue("Already typing");
+    expect(onConsumed).toHaveBeenCalledOnce();
+  });
+  it("consumes unmatched selections without filling or sending", () => {
+    const onConsumed = vi.fn();
+    const onSend = vi.fn();
+    render(<ChatComposer {...baseProps} draftKey="starter" onSend={onSend} starterDraft={{ text: "", onConsumed }} />);
+    expect(screen.getByRole("textbox")).toHaveValue("");
+    expect(onConsumed).toHaveBeenCalledOnce();
+    expect(onSend).not.toHaveBeenCalled();
+  });
+  it("does not read another owner's draft", () => {
+    useAssistantDraftStore.getState().saveDraft("other-user", "starter", "Private");
+    render(<ChatComposer {...baseProps} draftKey="starter" starterDraft={{ text: "Set up queue", onConsumed: vi.fn() }} />);
+    expect(screen.getByRole("textbox")).toHaveValue("Set up queue");
+    expect(useAssistantDraftStore.getState().ownerUserId).toBe("user-1");
+  });
+});

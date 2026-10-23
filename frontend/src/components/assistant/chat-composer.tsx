@@ -164,6 +164,7 @@ export interface ComposerMention {
 }
 
 interface ChatComposerProps {
+  readonly starterDraft?: { readonly text: string; readonly onConsumed: () => void };
   readonly active: boolean;
   /** Keep the composer writable while a typed actor task accepts steering. */
   readonly allowActiveInput?: boolean;
@@ -229,6 +230,7 @@ interface PendingDraftTransition {
 }
 
 function DraftedChatComposer({
+  starterDraft,
   active,
   allowActiveInput = false,
   sending,
@@ -821,6 +823,20 @@ function DraftedChatComposer({
     setContent(nextContent);
     onContentChange?.(nextContent);
   }
+
+  const consumedStarter = useRef(false);
+  useEffect(() => {
+    if (!starterDraft) { consumedStarter.current = false; return; }
+    if (!ownerUserId || !draftKey || consumedStarter.current) return;
+    consumedStarter.current = true;
+    if (!contentRef.current && !readOwnedDraft(ownerUserId, draftKey) && starterDraft.text) {
+      updateContent(starterDraft.text);
+      useAssistantDraftStore.getState().saveDraft(ownerUserId, draftKey, starterDraft.text);
+    }
+    starterDraft.onConsumed();
+    // updateContent reads the live composer; never replace text typed while help loaded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [starterDraft, ownerUserId, draftKey]);
 
   /** Re-read the mention under the caret after typing or moving the caret. */
   function syncMention(element: ComposerSelection) {

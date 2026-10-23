@@ -1,3 +1,5 @@
+import { NyxbotStartPage } from "./pages/nyxbot-start";
+import { parseNyxbotStartSearch } from "./lib/assistant/business-starters";
 import "@/lib/platform-personal-handoff";
 import { PersonalLinkPage } from "@/pages/platform-personal-link";
 import { onboardingSearch } from "@/schemas/platform-onboarding";
@@ -205,6 +207,13 @@ const loginRoute = createRoute({
       : {}),
   }),
   component: LoginPage,
+});
+
+const nyxbotStartRoute = createRoute({
+  path: "/nyxbot/start",
+  getParentRoute: () => rootRoute,
+  validateSearch: parseNyxbotStartSearch,
+  component: NyxbotStartPage,
 });
 
 const nyxbotOnboardingRoute = createRoute({
@@ -1239,6 +1248,7 @@ const routeTree = rootRoute.addChildren([
   platformPersonalLinkRoute,
   landingRoute,
   nyxbotOnboardingRoute,
+  nyxbotStartRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
   ...(oauthConsentPreviewRoute ? [oauthConsentPreviewRoute] : []),
