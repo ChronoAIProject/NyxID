@@ -171,6 +171,13 @@ impl Cluster {
             return Self::list("VolumeAttachmentList", "storage.k8s.io/v1", None);
         } else if path == "/api/v1/persistentvolumes/native-pv" {
             self.pv.clone()
+        } else if path
+            == "/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/native-node"
+        {
+            Some(json!({"apiVersion":"coordination.k8s.io/v1","kind":"Lease",
+                "metadata":{"name":"native-node","namespace":"kube-node-lease","uid":"native-lease","resourceVersion":"1",
+                    "ownerReferences":[{"apiVersion":"v1","kind":"Node","name":"native-node","uid":self.node_uid}]},
+                "spec":{"holderIdentity":"native-node","renewTime":Utc::now().to_rfc3339(),"leaseDurationSeconds":40}}))
         } else if path == "/api/v1/nodes/native-node" {
             Some(
                 json!({"apiVersion":"v1","kind":"Node", "metadata":{"name":"native-node","uid":self.node_uid,"resourceVersion":"1"},
@@ -841,7 +848,7 @@ async fn native_force_delete_then_notfound_never_unlocks_old_workspace() {
 async fn native_node_uncertainty_and_replacement_are_latched_before_new_bootstrap() {
     for (label, change, reason) in [
         ("unhealthy", 0, "predecessor_node_unhealthy_or_stale"),
-        ("stale", 1, "predecessor_node_unhealthy_or_stale"),
+        ("node_identity", 1, "predecessor_node_identity_conflict"),
         ("replacement", 2, "unexpected_pod_replacement"),
         ("ownership", 3, "resource_ownership_conflict"),
     ] {
@@ -851,7 +858,7 @@ async fn native_node_uncertainty_and_replacement_are_latched_before_new_bootstra
             let mut c = f.cluster.lock().unwrap();
             match change {
                 0 => c.node_ready = false,
-                1 => c.node_stale = true,
+                1 => c.node_uid = Uuid::new_v4().to_string(),
                 2 => c.pod.as_mut().unwrap()["metadata"]["uid"] = json!(Uuid::new_v4().to_string()),
                 _ => {
                     c.pod.as_mut().unwrap()["metadata"]["labels"]["nyxid.dev/owner-id"] =

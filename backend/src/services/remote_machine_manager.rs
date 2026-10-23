@@ -153,6 +153,38 @@ fn api_error(_: anyhow::Error) -> AppError {
     unavailable()
 }
 
+/// Lease freshness is separate from Node/owner identity and native stop facts.
+fn node_lease_fresh(
+    lease: &nyxid_machine_updater::sandbox::NodeLeaseObservation,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    if lease.uid.as_deref().is_none_or(str::is_empty)
+        || lease.resource_version.as_deref().is_none_or(str::is_empty)
+        || lease.deletion_timestamp.is_some()
+    {
+        return false;
+    }
+    let Some(renewed) = lease
+        .renew_time
+        .as_deref()
+        .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+        .map(|v| v.with_timezone(&Utc))
+    else {
+        return false;
+    };
+    let Some(duration) = lease
+        .lease_duration_seconds
+        .filter(|v| *v > 0)
+        .and_then(chrono::Duration::try_seconds)
+    else {
+        return false;
+    };
+    renewed <= now + chrono::Duration::seconds(5)
+        && renewed
+            .checked_add_signed(duration)
+            .is_some_and(|end| end > now)
+}
+
 impl Manager {
     /// One bounded pass. Claims are durable and reclaimable after process loss;
     /// API results are observations, never a lifecycle success by themselves.
@@ -624,6 +656,13 @@ impl Manager {
         effect: &str,
         dispatch: &str,
     ) -> AppResult<bool> {
+        // Recheck after the durable dispatch journal and immediately before
+        // Running I/O. A failed read proves only that this attempt did not send;
+        // it never resolves earlier dispatch responsibilities.
+        if let Err(error) = self.require_resume_node_health(machine).await {
+            operations::finish_submission(&self.db, effect, dispatch, None).await?;
+            return Err(error);
+        }
         let live = lifecycle::managed_machine_for_node(&self.db, &machine.node_id)
             .await?
             .ok_or_else(unavailable)?;
@@ -716,11 +755,98 @@ impl Manager {
         .await
     }
 
+    /// Retained Node identity is a health target across generation initialization,
+    /// not a running/stop proof. A successor Pod binds its own Node through the
+    /// existing owned-Pod observation CAS.
+    async fn require_node_health(
+        &self,
+        machine: &ManagedMachine,
+        name: &str,
+        expected_uid: Option<&str>,
+    ) -> AppResult<nyxid_machine_updater::sandbox::NodeObservation> {
+        let n = self
+            .api
+            .node(name)
+            .await
+            .map_err(api_error)?
+            .ok_or_else(unavailable)?;
+        if n.name != name
+            || n.uid
+                .as_ref()
+                .is_some_and(|uid| expected_uid.is_some_and(|bound| bound != uid.as_str()))
+        {
+            self.uncertain(machine, "predecessor_node_identity_conflict")
+                .await?;
+        }
+        if !n.ready || n.deletion_timestamp.is_some() {
+            self.uncertain(machine, "predecessor_node_unhealthy_or_stale")
+                .await?;
+        }
+        let node_uid = n
+            .uid
+            .as_deref()
+            .filter(|uid| !uid.is_empty())
+            .ok_or_else(unavailable)?;
+        let lease = self
+            .api
+            .node_lease(name)
+            .await
+            .map_err(api_error)?
+            .ok_or_else(unavailable)?;
+        if lease.owner_identity_conflict
+            || lease
+                .owner_node_uid
+                .as_deref()
+                .is_some_and(|uid| uid != node_uid)
+            || lease
+                .holder_identity
+                .as_deref()
+                .is_some_and(|holder| holder != name)
+            || lease.name != name
+            || lease.namespace != "kube-node-lease"
+        {
+            self.uncertain(machine, "predecessor_node_lease_identity_conflict")
+                .await?;
+        }
+        // A failed/expired health read does not prove an identity conflict or
+        // a stop. Leave the durable predecessor and execution cutoff intact.
+        if lease.owner_node_uid.as_deref().is_none_or(str::is_empty)
+            || lease.holder_identity.as_deref().is_none_or(str::is_empty)
+            || !node_lease_fresh(&lease, Utc::now())
+        {
+            return Err(unavailable());
+        }
+        Ok(n)
+    }
+
+    async fn require_resume_node_health(&self, machine: &ManagedMachine) -> AppResult<()> {
+        let operation_id = machine
+            .active_operation_id
+            .as_deref()
+            .ok_or_else(unavailable)?;
+        let operation = operations::get_operation(&self.db, &machine.owner_id, operation_id)
+            .await?
+            .ok_or_else(unavailable)?;
+        if operation.action != LifecycleAction::Resume {
+            return Ok(());
+        }
+        if let Some(name) = machine.native_node_name.as_deref() {
+            self.require_node_health(machine, name, machine.native_node_uid.as_deref())
+                .await?;
+        } else if machine.runtime_generation > 1 {
+            // An older initialized row without its predecessor binding cannot
+            // turn missing health evidence into permission to dispatch Running.
+            return Err(unavailable());
+        }
+        Ok(())
+    }
+
     /// Missing retained PVC must never be repaired by creating an empty disk.
     async fn require_workspace(&self, machine: &ManagedMachine) -> AppResult<()> {
         if machine.native_uncertainty.is_some() {
             return Err(unavailable());
         }
+        self.require_resume_node_health(machine).await?;
         if let Some(uid) = &machine.pvc_uid {
             let name = machine.pvc_name.as_deref().ok_or_else(unavailable)?;
             let pvc = self
@@ -926,32 +1052,21 @@ impl Manager {
             .and_then(|p| p.node_name.as_deref())
             .or(machine.native_node_name.as_deref());
         let node = if let Some(name) = node_name {
-            self.api.node(name).await.map_err(api_error)?
+            // Before a successor Pod has been bound, the retained Node belongs
+            // to the stopped predecessor. A newly observed owned Pod may have
+            // been scheduled elsewhere; thereafter its Node UID stays fenced.
+            let expected_uid = if pod.is_none() || machine.pod_uid.is_some() {
+                machine.native_node_uid.as_deref()
+            } else {
+                None
+            };
+            Some(
+                self.require_node_health(&machine, name, expected_uid)
+                    .await?,
+            )
         } else {
             None
         };
-        if node_name.is_some()
-            && !node.as_ref().is_some_and(|n| {
-                n.ready
-                    && n.deletion_timestamp.is_none()
-                    && n.uid.is_some()
-                    && machine
-                        .native_node_uid
-                        .as_ref()
-                        .is_none_or(|id| n.uid.as_ref() == Some(id))
-                    && n.ready_last_heartbeat_time
-                        .as_deref()
-                        .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
-                        .is_some_and(|t| {
-                            t.with_timezone(&Utc) >= now - chrono::Duration::minutes(6)
-                                && t.with_timezone(&Utc) <= now + chrono::Duration::seconds(5)
-                        })
-            })
-        {
-            return self
-                .uncertain(&machine, "predecessor_node_unhealthy_or_stale")
-                .await;
-        }
         // Capture the selected CSI's PV identity before deleting its PVC. Retain
         // policy never becomes complete merely because the claim disappeared.
         let mut bindings = Document::new();

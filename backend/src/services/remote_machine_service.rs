@@ -1114,6 +1114,11 @@ async fn request_action_inner(
         .await?
         .ok_or_else(|| AppError::NotFound("managed machine not found".into()))?;
     validate_current_contract(&prior)?;
+    if input.action == LifecycleAction::Resume && prior.native_uncertainty.is_some() {
+        return Err(AppError::Conflict(
+            "native_runtime_investigation_required".into(),
+        ));
+    }
     let prepared = if input.action == LifecycleAction::Resume {
         super::remote_machine_runtime::prepare_start(
             billing.as_deref(),
@@ -1168,6 +1173,9 @@ async fn request_action_inner(
                     && machine.resource_state != ResourceState::Paused
                 {
                     return Err(AppError::Conflict("managed_machine_is_not_paused".into()));
+                }
+                if input_owned.action == LifecycleAction::Resume && machine.native_uncertainty.is_some() {
+                    return Err(AppError::Conflict("native_runtime_investigation_required".into()));
                 }
                 if input_owned.action == LifecycleAction::Rekey && (machine.runtime_generation == 0 || machine.resource_state == ResourceState::Deleting) {
                     return Err(AppError::Conflict("managed_machine_cannot_rekey_before_runtime_or_during_delete".into()));
@@ -1542,10 +1550,13 @@ pub async fn advance_runtime_generation(
             ));
         }
     }
+    // Retain the predecessor Node as the current health target until an owned
+    // successor Pod binds its Node. Clearing runtime proof and Pod identity
+    // below still prevents that health target from granting execution authority.
     db.collection::<ManagedMachine>(MACHINES)
         .find_one_and_update(
             doc! {"_id": machine_id, "revision": expected_revision, "runtime_generation": expected_generation, "resource_state": {"$in": ["provisioning", "resuming", "reconciling", "stopping", "ready", "degraded"]}},
-            doc! {"$set": {"pod_uid": pod_uid, "native_observation": bson::Bson::Null, "native_pod_name": bson::Bson::Null, "native_node_name": bson::Bson::Null, "native_node_uid": bson::Bson::Null, "native_run_not_after": bson::Bson::Null, "writer_fence": Uuid::new_v4().to_string(), "writer_admitted": false, "runtime_submission_started_at": bson::Bson::Null, "bootstrap_delivery_id": bson::Bson::Null, "bootstrap_digest": bson::Bson::Null, "updated_at": bson::DateTime::from_chrono(now), "resource_state": ResourceState::Resuming.as_str()}, "$inc": {"revision": 1, "runtime_generation": 1, "credential_epoch": 1}},
+            doc! {"$set": {"pod_uid": pod_uid, "native_observation": bson::Bson::Null, "native_pod_name": bson::Bson::Null, "native_run_not_after": bson::Bson::Null, "writer_fence": Uuid::new_v4().to_string(), "writer_admitted": false, "runtime_submission_started_at": bson::Bson::Null, "bootstrap_delivery_id": bson::Bson::Null, "bootstrap_digest": bson::Bson::Null, "updated_at": bson::DateTime::from_chrono(now), "resource_state": ResourceState::Resuming.as_str()}, "$inc": {"revision": 1, "runtime_generation": 1, "credential_epoch": 1}},
         )
         .return_document(ReturnDocument::After)
         .await?
