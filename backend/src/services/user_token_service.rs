@@ -5165,13 +5165,12 @@ mod tests {
                 .find(|entry| entry.service_slug == "my-notion")
                 .expect("Notion must be published in MCP");
             assert!(!notion.is_generic_proxy);
-            assert_eq!(notion.endpoints.len(), 14);
+            assert_eq!(notion.endpoints.len(), 13);
             let expected = [
                 "notion_search",
                 "notion_retrieve_page",
                 "notion_create_page",
                 "notion_update_page",
-                "notion_create_database",
                 "notion_retrieve_database",
                 "notion_query_database",
                 "notion_list_block_children",

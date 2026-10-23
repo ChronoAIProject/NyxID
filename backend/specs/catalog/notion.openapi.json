@@ -71,31 +71,6 @@
         "responses": { "200": { "description": "Created page.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
       }
     },
-    "/v1/databases": {
-      "post": {
-        "operationId": "notion_create_database",
-        "summary": "Create a database with its property schema under a shared page (API 2022-06-28).",
-        "x-aevatar-tool": { "name": "notion_create_database", "readOnly": false, "destructive": false, "requiresApproval": true },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["parent", "title", "properties"],
-                "properties": {
-                  "parent": { "type": "object", "description": "Set page_id to the shared parent page ID.", "required": ["page_id"], "properties": { "page_id": { "type": "string" } } },
-                  "title": { "type": "array", "description": "Rich text title, e.g. [{\"type\":\"text\",\"text\":{\"content\":\"Queue\"}}].", "items": { "type": "object", "additionalProperties": true } },
-                  "properties": { "type": "object", "additionalProperties": true, "description": "Property schema keyed by name; exactly one property is {\"title\":{}}. Other types include rich_text, number, select (with options), date, checkbox and phone_number." },
-                  "is_inline": { "type": "boolean" }
-                }
-              }
-            }
-          }
-        },
-        "responses": { "200": { "description": "Created database.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
-      }
-    },
     "/v1/databases/{database_id}": {
       "get": {
         "operationId": "notion_retrieve_database",
