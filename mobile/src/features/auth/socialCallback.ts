@@ -73,4 +73,3 @@ export function parseSocialCallback(url: string): SocialCallback | null {
     };
   }
 }
-

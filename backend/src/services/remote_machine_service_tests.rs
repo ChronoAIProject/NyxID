@@ -2190,3 +2190,223 @@ fn deletion_diagnostic_projection_is_allowlisted_and_redacted() {
     assert_eq!(view.error_code, None);
     assert_eq!(view.error_message, None);
 }
+
+#[tokio::test]
+async fn pause_resume_health_resume_rejects_uncertainty_without_side_effects() {
+    let (db, owner) = lifecycle_fixture("health_resume_reject").await;
+    let created = lifecycle::create_machine(&db, creation(&owner, "health-create"))
+        .await
+        .unwrap();
+    db.collection::<Document>(MACHINES)
+        .update_one(
+            doc! {"_id":&created.machine.node_id},
+            doc! {"$set":{"resource_state":"paused","native_uncertainty":"identity_conflict"}},
+        )
+        .await
+        .unwrap();
+    let machine = lifecycle::get_machine(&db, &owner, &created.machine.node_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let before = db
+        .collection::<Document>(MACHINES)
+        .find_one(doc! {"_id":&machine.node_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let operations = db
+        .collection::<Document>(OPERATIONS)
+        .count_documents(doc! {})
+        .await
+        .unwrap();
+    let outbox = db
+        .collection::<Document>(crate::models::remote_machine_outbox::COLLECTION_NAME)
+        .count_documents(doc! {})
+        .await
+        .unwrap();
+    let result = lifecycle::request_action(
+        &db,
+        action(&machine, LifecycleAction::Resume, "health-resume"),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(crate::errors::AppError::Conflict(ref reason)) if reason == "native_runtime_investigation_required")
+    );
+    assert_eq!(
+        db.collection::<Document>(MACHINES)
+            .find_one(doc! {"_id":&machine.node_id})
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        db.collection::<Document>(OPERATIONS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        operations
+    );
+    assert_eq!(
+        db.collection::<Document>(crate::models::remote_machine_outbox::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        outbox
+    );
+    // Known quarantine also precedes paid quote/provider preparation.
+    db.collection::<Document>(MACHINES)
+        .update_one(
+            doc! {"_id":&machine.node_id},
+            doc! {"$set":{"free_slot":false}},
+        )
+        .await
+        .unwrap();
+    let paid = lifecycle::get_machine(&db, &owner, &machine.node_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let result = lifecycle::request_action(
+        &db,
+        action(&paid, LifecycleAction::Resume, "health-paid-resume"),
+    )
+    .await;
+    assert!(
+        matches!(result,Err(crate::errors::AppError::Conflict(ref reason)) if reason == "native_runtime_investigation_required")
+    );
+    assert_eq!(
+        db.collection::<Document>(OPERATIONS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        operations
+    );
+    assert_eq!(
+        db.collection::<Document>(OUTBOX)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        outbox
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn pause_resume_health_accepted_resume_replays_after_uncertainty() {
+    let (db, owner) = lifecycle_fixture("health_resume_replay").await;
+    let created = lifecycle::create_machine(&db, creation(&owner, "health-replay-create"))
+        .await
+        .unwrap();
+    db.collection::<Document>(MACHINES)
+        .update_one(
+            doc! {"_id":&created.machine.node_id},
+            doc! {"$set":{"resource_state":"paused"}},
+        )
+        .await
+        .unwrap();
+    let machine = lifecycle::get_machine(&db, &owner, &created.machine.node_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = action(&machine, LifecycleAction::Resume, "health-replay");
+    let accepted = lifecycle::request_action(&db, request.clone())
+        .await
+        .unwrap();
+    native::quarantine(&db, &accepted.machine, "fixture_identity_conflict")
+        .await
+        .unwrap();
+    let before = db
+        .collection::<Document>(MACHINES)
+        .find_one(doc! {"_id":&machine.node_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let replay = lifecycle::request_action(&db, request).await.unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.operation.id, accepted.operation.id);
+    assert_eq!(
+        db.collection::<Document>(MACHINES)
+            .find_one(doc! {"_id":&machine.node_id})
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn pause_resume_health_quarantine_conflicts_with_acceptance_snapshot_cas() {
+    let (db, owner) = lifecycle_fixture("health_resume_snapshot_cas").await;
+    let created = lifecycle::create_machine(&db, creation(&owner, "health-cas-create"))
+        .await
+        .unwrap();
+    db.collection::<Document>(MACHINES)
+        .update_one(
+            doc! {"_id":&created.machine.node_id},
+            doc! {"$set":{"resource_state":"paused"}},
+        )
+        .await
+        .unwrap();
+    let machine = lifecycle::get_machine(&db, &owner, &created.machine.node_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = action(&machine, LifecycleAction::Resume, "health-cas-resume");
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    // Same session snapshot read and machine predicate as request_action_inner.
+    // Force quarantine strictly between that read and its first machine write.
+    let snapshot = db
+        .collection::<ManagedMachine>(MACHINES)
+        .find_one(doc! {"_id":&machine.node_id,"owner_id":&owner})
+        .session(&mut session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(snapshot.native_uncertainty.is_none());
+    native::quarantine(&db, &machine, "fixture_concurrent_identity_conflict")
+        .await
+        .unwrap();
+    let before = db
+        .collection::<Document>(MACHINES)
+        .find_one(doc! {"_id":&machine.node_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let result = db.collection::<ManagedMachine>(MACHINES).find_one_and_update(
+        doc! {"_id":&machine.node_id,"owner_id":&owner,"revision":snapshot.revision},
+        doc! {"$set":{"resource_state":"resuming","writer_admitted":false},"$inc":{"revision":1_i64}})
+        .session(&mut session).await;
+    let error = result.expect_err("a stale acceptance snapshot must not commit across quarantine");
+    assert!(error.contains_label("TransientTransactionError"), "{error}");
+    let _ = session.abort_transaction().await;
+    // The real admission path rejects both the original revision and a fresh
+    // revision; no operation/outbox or machine mutation is admitted on retry.
+    assert!(lifecycle::request_action(&db, request).await.is_err());
+    let live = lifecycle::get_machine(&db, &owner, &machine.node_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(lifecycle::request_action(&db,
+        action(&live, LifecycleAction::Resume, "health-cas-fresh")).await,
+        Err(crate::errors::AppError::Conflict(ref reason)) if reason == "native_runtime_investigation_required"));
+    assert_eq!(
+        db.collection::<Document>(MACHINES)
+            .find_one(doc! {"_id":&machine.node_id})
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    for collection in [OPERATIONS, OUTBOX] {
+        assert_eq!(
+            db.collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+    }
+    db.drop().await.unwrap();
+}

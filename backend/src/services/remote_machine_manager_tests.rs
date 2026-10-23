@@ -1689,6 +1689,13 @@ async fn mount_owned_resources(f: &Fixture, machine: &ManagedMachine, suspended:
             "status":{"conditions":[{"type":"Ready","status":"True","lastHeartbeatTime":Utc::now().to_rfc3339()}],
                 "nodeInfo":{"containerRuntimeVersion":"containerd://2.0-fixture"}}
         }))).mount(&f.server).await;
+    Mock::given(method("GET")).and(path(format!("/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/{node_name}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind":"Lease","apiVersion":"coordination.k8s.io/v1",
+            "metadata":{"name":node_name,"namespace":"kube-node-lease","uid":"lease-uid","resourceVersion":"10",
+                "ownerReferences":[{"apiVersion":"v1","kind":"Node","name":node_name,"uid":machine.native_node_uid.as_deref().unwrap_or(&machine.node_id)}]},
+            "spec":{"holderIdentity":node_name,"renewTime":Utc::now().to_rfc3339(),"leaseDurationSeconds":40}
+        }))).mount(&f.server).await;
     Mock::given(method("GET")).and(path("/api/v1/persistentvolumes"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "kind":"PersistentVolumeList","apiVersion":"v1","metadata":{"resourceVersion":"17"},"items":[{
@@ -3383,4 +3390,669 @@ async fn resume_remediation_account_safety_cannot_seal_uncertain_history() {
         assert!(f.server.received_requests().await.unwrap().is_empty());
         f.db.drop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn pause_resume_health_old_condition_uses_fresh_lease() {
+    let f = fixture("health_old_condition").await;
+    let bound = bind_runtime(&f).await;
+    mount_bound_resources(&f, &bound, false).await;
+    let name = bound.native_node_name.as_deref().unwrap_or("fixture-node");
+    let now = Utc::now();
+    Mock::given(method("GET")).and(path(format!("/api/v1/nodes/{name}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "metadata":{"name":name,"uid":bound.native_node_uid.as_deref().unwrap_or(&bound.node_id),"resourceVersion":"9"},
+            "status":{"conditions":[{"type":"Ready","status":"True","lastHeartbeatTime":(now-chrono::Duration::minutes(20)).to_rfc3339()}]}
+        }))).with_priority(1).mount(&f.server).await;
+    f.manager.observe(&bound).await.unwrap();
+    let saved = current(&f).await;
+    assert!(saved.native_uncertainty.is_none());
+    assert!(saved.native_observation.unwrap().running);
+    f.db.drop().await.unwrap();
+}
+
+#[test]
+fn pause_resume_health_lease_time_boundaries() {
+    use nyxid_machine_updater::sandbox::NodeLeaseObservation;
+    let now = chrono::DateTime::parse_from_rfc3339("2026-10-23T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let good = NodeLeaseObservation {
+        uid: Some("lease".into()),
+        resource_version: Some("1".into()),
+        renew_time: Some((now - chrono::Duration::seconds(39)).to_rfc3339()),
+        lease_duration_seconds: Some(40),
+        ..Default::default()
+    };
+    assert!(super::node_lease_fresh(&good, now));
+    for (renew, duration) in [
+        ((now - chrono::Duration::seconds(40)).to_rfc3339(), 40),
+        ((now + chrono::Duration::seconds(6)).to_rfc3339(), 40),
+        (now.to_rfc3339(), 0),
+        (now.to_rfc3339(), -1),
+        (now.to_rfc3339(), i64::MAX),
+        (now.to_rfc3339(), 9_000_000_000_000),
+        ("invalid".into(), 40),
+        (chrono::DateTime::<Utc>::MAX_UTC.to_rfc3339(), 40),
+    ] {
+        let mut lease = good.clone();
+        lease.renew_time = Some(renew);
+        lease.lease_duration_seconds = Some(duration);
+        assert!(!super::node_lease_fresh(&lease, now));
+    }
+    let mut lease = good.clone();
+    lease.uid = None;
+    assert!(!super::node_lease_fresh(&lease, now));
+    let mut lease = good.clone();
+    lease.resource_version = None;
+    assert!(!super::node_lease_fresh(&lease, now));
+    let mut lease = good;
+    lease.deletion_timestamp = Some(now.to_rfc3339());
+    assert!(!super::node_lease_fresh(&lease, now));
+}
+
+#[tokio::test]
+async fn pause_resume_health_pending_preserves_completed_stop() {
+    for (case, status) in [
+        ("missing", 404),
+        ("forbidden", 403),
+        ("unavailable", 500),
+        ("owner_uid_missing", 200),
+        ("holder_missing", 200),
+        ("owner_missing", 200),
+        ("owner_malformed", 200),
+        ("owner_uid_malformed", 200),
+        ("owner_name_missing", 200),
+        ("holder_malformed", 200),
+    ] {
+        let f = fixture("health_stopped_pending").await;
+        let bound = bind_runtime(&f).await;
+        mount_bound_resources(&f, &bound, false).await;
+        f.manager.observe(&bound).await.unwrap();
+        let bound = current(&f).await;
+        f.server.reset().await;
+        f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&bound.node_id},
+                doc! {"$set":{"resource_state":"stopping"}},
+            )
+            .await
+            .unwrap();
+        let stopping = current(&f).await;
+        mount_bound_resources(&f, &stopping, true).await;
+        f.manager.observe(&stopping).await.unwrap();
+        let paused = current(&f).await;
+        assert_eq!(paused.resource_state, ResourceState::Paused);
+        assert!(crate::services::remote_machine_native::predecessor_stopped(
+            &paused
+        ));
+        let name = paused.native_node_name.as_deref().unwrap_or("fixture-node");
+        let mut lease = json!({"kind":"Lease","apiVersion":"coordination.k8s.io/v1",
+            "metadata":{"name":name,"namespace":"kube-node-lease","uid":"lease","resourceVersion":"1",
+                "ownerReferences":[{"apiVersion":"v1","kind":"Node","name":name,"uid":paused.native_node_uid}]},
+            "spec":{"holderIdentity":name,"renewTime":Utc::now().to_rfc3339(),"leaseDurationSeconds":40}});
+        incomplete_or_conflicting_lease_identity(&mut lease, case);
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/{}",
+                paused.native_node_name.as_deref().unwrap_or("fixture-node")
+            )))
+            .respond_with(if status == 200 {
+                ResponseTemplate::new(200).set_body_json(lease)
+            } else {
+                ResponseTemplate::new(status)
+            })
+            .with_priority(1)
+            .mount(&f.server)
+            .await;
+        for _ in 0..2 {
+            assert!(f.manager.observe(&paused).await.is_err());
+            let saved = current(&f).await;
+            assert!(saved.native_uncertainty.is_none());
+            assert!(!saved.writer_admitted);
+            assert_eq!(saved.native_observation, paused.native_observation);
+            assert_eq!(saved.pvc_uid, paused.pvc_uid);
+            assert!(crate::services::remote_machine_native::predecessor_stopped(
+                &saved
+            ));
+        }
+        f.db.drop().await.unwrap();
+    }
+}
+
+// Exercise information loss at the real Lease parser/manager boundary.
+fn incomplete_or_conflicting_lease_identity(lease: &mut Value, case: &str) {
+    match case {
+        "owner_missing" => lease["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("ownerReferences"),
+        "owner_malformed" => lease["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .insert("ownerReferences".into(), json!({})),
+        "owner_uid_missing" => lease["metadata"]["ownerReferences"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("uid"),
+        "owner_uid_malformed" => lease["metadata"]["ownerReferences"][0]
+            .as_object_mut()
+            .unwrap()
+            .insert("uid".into(), json!(7)),
+        "owner_name_missing" => lease["metadata"]["ownerReferences"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("name"),
+        "owner_kind" => lease["metadata"]["ownerReferences"][0]
+            .as_object_mut()
+            .unwrap()
+            .insert("kind".into(), json!("Pod")),
+        "owner_version" => lease["metadata"]["ownerReferences"][0]
+            .as_object_mut()
+            .unwrap()
+            .insert("apiVersion".into(), json!("other/v1")),
+        "owner_name" => lease["metadata"]["ownerReferences"][0]
+            .as_object_mut()
+            .unwrap()
+            .insert("name".into(), json!("replacement")),
+        "holder_missing" => lease["spec"]
+            .as_object_mut()
+            .unwrap()
+            .remove("holderIdentity"),
+        "holder_malformed" => lease["spec"]
+            .as_object_mut()
+            .unwrap()
+            .insert("holderIdentity".into(), json!(7)),
+        "owner_missing_holder_conflict" => {
+            lease["metadata"]
+                .as_object_mut()
+                .unwrap()
+                .remove("ownerReferences");
+            lease["spec"]["holderIdentity"] = json!("replacement");
+            None
+        }
+        "holder_missing_owner_conflict" => {
+            lease["spec"]
+                .as_object_mut()
+                .unwrap()
+                .remove("holderIdentity");
+            lease["metadata"]["ownerReferences"][0]["uid"] = json!("replacement");
+            None
+        }
+        "duplicate_owner" => {
+            let owner = lease["metadata"]["ownerReferences"][0].clone();
+            lease["metadata"]["ownerReferences"]
+                .as_array_mut()
+                .unwrap()
+                .push(owner);
+            None
+        }
+        _ => None,
+    };
+}
+
+#[tokio::test]
+async fn pause_resume_health_negative_leases_never_refresh_running_proof() {
+    for case in [
+        "owner_uid_missing",
+        "holder_missing",
+        "owner_missing",
+        "owner_malformed",
+        "owner_uid_malformed",
+        "owner_name_missing",
+        "holder_malformed",
+        "owner_name",
+        "owner_kind",
+        "owner_version",
+        "duplicate_owner",
+        "owner_missing_holder_conflict",
+        "holder_missing_owner_conflict",
+        "expired",
+        "future",
+        "duration",
+        "overflow",
+        "owner",
+        "holder",
+        "namespace",
+        "name",
+        "missing",
+        "forbidden",
+        "malformed",
+        "not_ready",
+        "unreachable",
+        "deleting",
+        "node_uid",
+    ] {
+        let f = fixture("health_negative").await;
+        let bound = bind_runtime(&f).await;
+        mount_bound_resources(&f, &bound, false).await;
+        f.manager.observe(&bound).await.unwrap();
+        let bound = current(&f).await;
+        let name = bound.native_node_name.as_deref().unwrap_or("fixture-node");
+        let uid = bound.native_node_uid.as_deref().unwrap_or(&bound.node_id);
+        let now = Utc::now();
+        let mut lease = json!({"kind":"Lease","apiVersion":"coordination.k8s.io/v1",
+            "metadata":{"name":name,"namespace":"kube-node-lease","uid":"lease","resourceVersion":"1",
+                "ownerReferences":[{"apiVersion":"v1","kind":"Node","name":name,"uid":uid}]},
+            "spec":{"holderIdentity":name,"renewTime":now.to_rfc3339(),"leaseDurationSeconds":40}});
+        match case {
+            "expired" => {
+                lease["spec"]["renewTime"] =
+                    json!((now - chrono::Duration::seconds(40)).to_rfc3339())
+            }
+            "future" => {
+                lease["spec"]["renewTime"] =
+                    json!((now + chrono::Duration::seconds(6)).to_rfc3339())
+            }
+            "duration" => lease["spec"]["leaseDurationSeconds"] = json!(0),
+            "overflow" => lease["spec"]["leaseDurationSeconds"] = json!(i64::MAX),
+            "owner" => lease["metadata"]["ownerReferences"][0]["uid"] = json!("replacement"),
+            "holder" => lease["spec"]["holderIdentity"] = json!("replacement"),
+            "namespace" => lease["metadata"]["namespace"] = json!("wrong"),
+            "name" => lease["metadata"]["name"] = json!("wrong"),
+            _ => (),
+        }
+        incomplete_or_conflicting_lease_identity(&mut lease, case);
+        let response = match case {
+            "missing" => ResponseTemplate::new(404),
+            "forbidden" => ResponseTemplate::new(403),
+            "malformed" => ResponseTemplate::new(200).set_body_string("{"),
+            _ => ResponseTemplate::new(200).set_body_json(lease),
+        };
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/{name}"
+            )))
+            .respond_with(response)
+            .with_priority(1)
+            .mount(&f.server)
+            .await;
+        if matches!(case, "not_ready" | "unreachable" | "deleting" | "node_uid") {
+            let mut node = json!({"metadata":{"name":name,"uid":uid,"resourceVersion":"9"},
+                "status":{"conditions":[{"type":"Ready","status":"True"}]}});
+            match case {
+                "not_ready" => node["status"]["conditions"][0]["status"] = json!("False"),
+                "unreachable" => {
+                    node["spec"] = json!({"taints":[{"key":"node.kubernetes.io/unreachable"}]})
+                }
+                "deleting" => node["metadata"]["deletionTimestamp"] = json!(now.to_rfc3339()),
+                "node_uid" => node["metadata"]["uid"] = json!("replacement"),
+                _ => (),
+            }
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/nodes/{name}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(node))
+                .with_priority(1)
+                .mount(&f.server)
+                .await;
+        }
+        let before = current(&f).await;
+        assert!(f.manager.observe(&bound).await.is_err(), "{case}");
+        let saved = current(&f).await;
+        assert_eq!(
+            saved.native_observation, before.native_observation,
+            "{case}"
+        );
+        let conflict = matches!(
+            case,
+            "owner"
+                | "owner_name"
+                | "owner_kind"
+                | "owner_version"
+                | "duplicate_owner"
+                | "owner_missing_holder_conflict"
+                | "holder_missing_owner_conflict"
+                | "holder"
+                | "not_ready"
+                | "unreachable"
+                | "deleting"
+                | "node_uid"
+        );
+        assert_eq!(saved.native_uncertainty.is_some(), conflict, "{case}");
+        if conflict {
+            assert!(!saved.writer_admitted);
+        }
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn pause_resume_health_old_condition_preserves_pause_then_accepts_resume() {
+    let f = fixture("health_pause_resume").await;
+    let bound = bind_runtime(&f).await;
+    mount_bound_resources(&f, &bound, false).await;
+    f.manager.observe(&bound).await.unwrap();
+    let bound = current(&f).await;
+    f.server.reset().await;
+    f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&bound.node_id},
+            doc! {"$set":{"resource_state":"stopping"}},
+        )
+        .await
+        .unwrap();
+    let stopping = current(&f).await;
+    mount_bound_resources(&f, &stopping, true).await;
+    let name = stopping
+        .native_node_name
+        .as_deref()
+        .unwrap_or("fixture-node");
+    Mock::given(method("GET")).and(path(format!("/api/v1/nodes/{name}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "metadata":{"name":name,"uid":stopping.native_node_uid.as_deref().unwrap_or(&stopping.node_id),"resourceVersion":"9"},
+            "status":{"conditions":[{"type":"Ready","status":"True","lastHeartbeatTime":"2026-01-01T00:00:00Z"}]}
+        }))).with_priority(1).mount(&f.server).await;
+    f.manager.observe(&stopping).await.unwrap();
+    let paused = current(&f).await;
+    assert_eq!(paused.resource_state, ResourceState::Paused);
+    for _ in 0..2 {
+        f.manager.observe(&current(&f).await).await.unwrap();
+    }
+    let saved = current(&f).await;
+    assert!(saved.native_uncertainty.is_none());
+    assert!(crate::services::remote_machine_native::predecessor_stopped(
+        &saved
+    ));
+    assert!(!saved.writer_admitted);
+    assert_eq!(saved.pvc_uid, paused.pvc_uid);
+    assert_eq!(
+        saved.native_observation.as_ref().unwrap().operation_id,
+        paused.native_observation.as_ref().unwrap().operation_id
+    );
+    let resume = Box::pin(action_request(&f, &saved, LifecycleAction::Resume)).await;
+    assert_eq!(resume.resource_state, ResourceState::Resuming);
+    assert_eq!(resume.runtime_generation, saved.runtime_generation);
+    assert_eq!(resume.credential_epoch, saved.credential_epoch);
+    assert!(!resume.writer_admitted);
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn pause_resume_health_dispatch_retry_requires_current_lease() {
+    for case in [
+        "owner_uid_missing",
+        "holder_missing",
+        "owner_missing",
+        "owner_malformed",
+        "owner_uid_malformed",
+        "owner_name_missing",
+        "holder_malformed",
+        "owner_name",
+        "owner_kind",
+        "owner_version",
+        "duplicate_owner",
+        "owner_missing_holder_conflict",
+        "holder_missing_owner_conflict",
+        "expired",
+        "missing",
+        "forbidden",
+        "unavailable",
+        "owner",
+        "node_uid",
+    ] {
+        let f = fixture("health_resume_dispatch").await;
+        let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+        let effect = resume_effect(&f, &resuming).await;
+        // Initialize through the real worker with valid predecessor/workspace
+        // reads. A lost Running response leaves its original responsibility
+        // unresolved, independently of the health failure on later retries.
+        mount_bound_resources(&f, &resuming, true).await;
+        Mock::given(method("PATCH"))
+            .and(path(sandbox_path(&resuming)))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&f.server)
+            .await;
+        assert!(f.manager.apply_effect(&effect).await.is_err());
+        let initialized = current(&f).await;
+        assert!(initialized.native_uncertainty.is_none());
+        assert_eq!(
+            f.server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.method.as_str() == "PATCH")
+                .count(),
+            1
+        );
+        let original = resume_effect(&f, &initialized).await.submission.unwrap();
+        assert_eq!(original.dispatches.len(), 1);
+        assert!(original.dispatches[0].completed_at.is_none());
+        assert!(!original.dispatches[0].cancelled_before_dispatch);
+        assert_eq!(
+            initialized.runtime_generation,
+            resuming.runtime_generation + 1
+        );
+        assert_eq!(initialized.credential_epoch, resuming.credential_epoch + 1);
+        f.server.reset().await;
+        mount_bound_resources(&f, &initialized, true).await;
+        let name = resuming.native_node_name.as_deref().unwrap();
+        let uid = resuming
+            .native_node_uid
+            .as_deref()
+            .unwrap_or(&resuming.node_id);
+        let now = Utc::now();
+        let mut lease = json!({"kind":"Lease","apiVersion":"coordination.k8s.io/v1",
+            "metadata":{"name":name,"namespace":"kube-node-lease","uid":"lease","resourceVersion":"1",
+                "ownerReferences":[{"apiVersion":"v1","kind":"Node","name":name,
+                    "uid":if case == "owner" {"replacement"} else {uid}}]},
+            "spec":{"holderIdentity":name,"renewTime":if case == "expired" {
+                (now-chrono::Duration::seconds(41)).to_rfc3339()
+            } else {now.to_rfc3339()},"leaseDurationSeconds":40}});
+        incomplete_or_conflicting_lease_identity(&mut lease, case);
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/{name}"
+            )))
+            .respond_with(match case {
+                "missing" => ResponseTemplate::new(404),
+                "forbidden" => ResponseTemplate::new(403),
+                "unavailable" => ResponseTemplate::new(503),
+                _ => ResponseTemplate::new(200).set_body_json(lease),
+            })
+            .with_priority(1)
+            .mount(&f.server)
+            .await;
+        if case == "node_uid" {
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/nodes/{name}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "metadata":{"name":name,"uid":"replacement","resourceVersion":"1"},
+                    "status":{"conditions":[{"type":"Ready","status":"True"}]}
+                })))
+                .with_priority(1)
+                .mount(&f.server)
+                .await;
+        }
+        // A rejected initial or repeated attempt must never reach Running I/O.
+        for _ in 0..2 {
+            assert!(f.manager.apply_effect(&effect).await.is_err(), "{case}");
+            let saved = current(&f).await;
+            assert_eq!(
+                saved.runtime_generation, initialized.runtime_generation,
+                "{case}"
+            );
+            assert_eq!(
+                saved.credential_epoch, initialized.credential_epoch,
+                "{case}"
+            );
+            assert_eq!(
+                saved.native_observation, initialized.native_observation,
+                "{case}"
+            );
+            assert!(!saved.writer_admitted, "{case}");
+            assert_eq!(
+                saved.native_uncertainty.is_some(),
+                matches!(
+                    case,
+                    "owner"
+                        | "owner_name"
+                        | "owner_kind"
+                        | "owner_version"
+                        | "duplicate_owner"
+                        | "owner_missing_holder_conflict"
+                        | "holder_missing_owner_conflict"
+                        | "node_uid"
+                ),
+                "{case}"
+            );
+            let journal = resume_effect(&f, &saved).await.submission.unwrap();
+            assert_eq!(journal.dispatches.len(), 1, "{case}");
+            assert_eq!(journal.dispatches[0].id, original.dispatches[0].id);
+            assert!(journal.dispatches[0].completed_at.is_none(), "{case}");
+            assert!(
+                f.server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|r| r.method.as_str() == "GET"),
+                "{case}"
+            );
+        }
+        // Observation-driven repair is another Running retry consumer and
+        // must pass the same health gate before any external repair request.
+        assert!(
+            f.manager
+                .observe_resource(&current(&f).await)
+                .await
+                .is_err()
+        );
+        assert!(
+            f.server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.method.as_str() == "GET"),
+            "{case}"
+        );
+        if !matches!(
+            case,
+            "owner"
+                | "owner_name"
+                | "owner_kind"
+                | "owner_version"
+                | "duplicate_owner"
+                | "owner_missing_holder_conflict"
+                | "holder_missing_owner_conflict"
+                | "node_uid"
+        ) {
+            f.server.reset().await;
+            let saved = current(&f).await;
+            mount_bound_resources(&f, &saved, true).await;
+            // A 503 after PATCH proves recovery reaches dispatch; it does not
+            // manufacture a successful controller observation or writer.
+            Mock::given(method("PATCH"))
+                .and(path(sandbox_path(&saved)))
+                .respond_with(ResponseTemplate::new(503))
+                .expect(1)
+                .mount(&f.server)
+                .await;
+            assert!(f.manager.apply_effect(&effect).await.is_err());
+            assert_eq!(
+                current(&f).await.runtime_generation,
+                initialized.runtime_generation
+            );
+            assert_eq!(
+                current(&f).await.credential_epoch,
+                initialized.credential_epoch
+            );
+            assert!(!current(&f).await.writer_admitted);
+        }
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn pause_resume_health_initial_dispatch_and_journal_recheck_fail_closed() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    for fail_on_read in [0, 1] {
+        let f = fixture("health_initial_dispatch").await;
+        let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+        let effect = resume_effect(&f, &resuming).await;
+        mount_bound_resources(&f, &resuming, true).await;
+        let name = resuming.native_node_name.as_deref().unwrap();
+        let uid = resuming
+            .native_node_uid
+            .as_deref()
+            .unwrap_or(&resuming.node_id);
+        let lease = json!({"kind":"Lease","apiVersion":"coordination.k8s.io/v1",
+            "metadata":{"name":name,"namespace":"kube-node-lease","uid":"lease","resourceVersion":"1",
+                "ownerReferences":[{"apiVersion":"v1","kind":"Node","name":name,"uid":uid}]},
+            "spec":{"holderIdentity":name,"renewTime":Utc::now().to_rfc3339(),"leaseDurationSeconds":40}});
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = reads.clone();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/{name}"
+            )))
+            .respond_with(move |_: &wiremock::Request| {
+                if counter.fetch_add(1, Ordering::SeqCst) >= fail_on_read {
+                    ResponseTemplate::new(503)
+                } else {
+                    ResponseTemplate::new(200).set_body_json(lease.clone())
+                }
+            })
+            .with_priority(1)
+            .mount(&f.server)
+            .await;
+        assert!(f.manager.apply_effect(&effect).await.is_err());
+        let saved = current(&f).await;
+        assert_eq!(saved.runtime_generation, resuming.runtime_generation + 1);
+        assert_eq!(saved.credential_epoch, resuming.credential_epoch + 1);
+        assert_eq!(saved.native_node_name, resuming.native_node_name);
+        assert_eq!(saved.native_node_uid, resuming.native_node_uid);
+        assert!(saved.native_uncertainty.is_none());
+        assert!(saved.native_observation.is_none());
+        assert!(!saved.writer_admitted);
+        assert_eq!(reads.load(Ordering::SeqCst), fail_on_read + 1);
+        assert!(
+            f.server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.method.as_str() == "GET")
+        );
+        let saved_effect = resume_effect(&f, &saved).await;
+        if fail_on_read == 0 {
+            assert!(saved_effect.submission.is_none());
+        } else {
+            let submission = saved_effect.submission.unwrap();
+            assert_eq!(submission.dispatches.len(), 1);
+            assert!(submission.dispatches[0].cancelled_before_dispatch);
+            assert!(submission.dispatches[0].completed_at.is_some());
+        }
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn pause_resume_health_successor_pod_binds_its_own_node() {
+    let f = fixture("health_successor_binding").await;
+    let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+    let effect = resume_effect(&f, &resuming).await;
+    assert!(f.manager.apply_effect(&effect).await.is_err());
+    let initialized = current(&f).await;
+    assert!(initialized.pod_uid.is_none());
+    let mut successor = initialized.clone();
+    successor.pod_uid = Some(uuid::Uuid::new_v4().to_string());
+    successor.native_pod_name = Some("successor-pod".into());
+    successor.native_node_name = Some("successor-node".into());
+    successor.native_node_uid = Some("successor-node-uid".into());
+    mount_bound_resources(&f, &successor, false).await;
+    f.manager.observe_resource(&initialized).await.unwrap();
+    let saved = current(&f).await;
+    assert_eq!(saved.pod_uid, successor.pod_uid);
+    assert_eq!(saved.native_node_name, successor.native_node_name);
+    assert_eq!(saved.native_node_uid, successor.native_node_uid);
+    assert!(saved.native_uncertainty.is_none());
+    assert!(!saved.writer_admitted);
+    assert!(saved.native_observation.unwrap().running);
+    f.db.drop().await.unwrap();
 }
