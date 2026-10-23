@@ -1162,6 +1162,17 @@ pub enum CatalogCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Overwrite identity-forwarding settings on every connection to a service with the
+    /// service's current settings, including customized ones (Admin or the service creator)
+    ResyncIdentity {
+        /// Catalog service UUID or slug
+        service: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// List the controlled topic vocabulary
     Topics {
         #[command(flatten)]
