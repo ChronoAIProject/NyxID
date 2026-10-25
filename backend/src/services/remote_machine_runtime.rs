@@ -596,6 +596,32 @@ pub fn fence_execution_in_session<'a>(
             .await?
             .ok_or(AppError::MachineNotAllowed)?;
         let fence = execution_fence(&machine)?;
+        let live_node = db
+            .collection::<Node>(crate::models::node::COLLECTION_NAME)
+            .find_one(doc! {"_id":&node.id,"user_id":&node.user_id,"is_active":true})
+            .session(&mut *session)
+            .await?
+            .ok_or(AppError::MachineNotAllowed)?;
+        if super::remote_machine_configuration::configuration_view(&machine, Some(&live_node)).state
+            != "applied"
+        {
+            return Err(AppError::MachineNotAllowed);
+        }
+        let profile = live_node
+            .machine
+            .as_ref()
+            .ok_or(AppError::MachineNotAllowed)?;
+        let node_fence = db
+            .collection::<Document>(crate::models::node::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&node.id,"machine.runtime_id":&profile.runtime_id},
+                doc! {"$inc":{"machine_configuration_execution_fence":1_i64}},
+            )
+            .session(&mut *session)
+            .await?;
+        if node_fence.matched_count != 1 {
+            return Err(AppError::MachineNotAllowed);
+        }
         lifecycle::ensure_owner_eligible_in_session(db, session, &machine.owner_id).await?;
         if !machine.free_slot {
             let run = db.collection::<MachineRuntimeRun>(RUN_COLLECTION).find_one(doc! {"_id": &machine.runtime_run_id, "node_id": &machine.node_id, "owner_id": &machine.owner_id, "runtime_generation": machine.runtime_generation, "state":"running"}).session(&mut *session).await?.ok_or(AppError::MachineNotAllowed)?;

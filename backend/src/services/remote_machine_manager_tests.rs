@@ -1467,6 +1467,12 @@ async fn manager_ready_requires_native_running_and_current_wss_with_fixed_capabi
             .is_err()
     );
     let profile = nyxid_machine::MachineProfile {
+        managed_configuration: Some(nyxid_machine::managed::ConfigurationReport {
+            configuration: bound.configuration.clone(),
+            digest: bound.configuration.digest().unwrap(),
+            runtime_generation: bound.runtime_generation as u64,
+        }),
+        separation_choice: Some(bound.configuration.separation_choice),
         version: nyxid_machine::PROTOCOL_VERSION,
         runtime_id: uuid::Uuid::new_v4().to_string(),
         shell: true,
@@ -2142,7 +2148,25 @@ fn hosted_profile_accepts_only_the_selected_capability_ceiling() {
         browser: Some(false),
         ..Default::default()
     };
+    machine.runtime_generation = 1;
+    profile.separation_choice = Some(machine.configuration.separation_choice);
+    machine.configuration.capabilities = machine.capabilities.clone();
+    profile.managed_configuration = Some(nyxid_machine::managed::ConfigurationReport {
+        configuration: machine.configuration.clone(),
+        digest: machine.configuration.digest().unwrap(),
+        runtime_generation: machine.runtime_generation as u64,
+    });
     assert!(super::accepts_selected_profile(&machine, &profile));
+    profile.browser_tools = true;
+    profile.saved_login_ready = true;
+    profile.computer_ready = true;
+    profile.computer_tools = vec!["screenshot".into()];
+    assert!(
+        super::accepts_selected_profile(&machine, &profile),
+        "Shell/File-only allows complete separated infrastructure"
+    );
+    assert!(!nyxid_machine::Operation::Browser.allowed(&profile));
+    assert!(!nyxid_machine::Operation::Computer.allowed(&profile));
     profile.browser = Some(true);
     assert!(!super::accepts_selected_profile(&machine, &profile));
     machine.capabilities = vec!["browser".into(), "computer".into()];
@@ -2150,11 +2174,25 @@ fn hosted_profile_accepts_only_the_selected_capability_ceiling() {
     profile.files = false;
     profile.computer = true;
     profile.browser_tools = true;
+    machine.runtime_generation = 1;
+    profile.separation_choice = Some(machine.configuration.separation_choice);
+    machine.configuration.capabilities = machine.capabilities.clone();
+    profile.managed_configuration = Some(nyxid_machine::managed::ConfigurationReport {
+        configuration: machine.configuration.clone(),
+        digest: machine.configuration.digest().unwrap(),
+        runtime_generation: machine.runtime_generation as u64,
+    });
     assert!(super::accepts_selected_profile(&machine, &profile));
     machine.capabilities = vec!["browser".into()];
     profile.computer = false;
     profile.computer_ready = true;
     profile.computer_tools = vec!["screenshot".into()];
+    machine.configuration.capabilities = machine.capabilities.clone();
+    profile.managed_configuration = Some(nyxid_machine::managed::ConfigurationReport {
+        configuration: machine.configuration.clone(),
+        digest: machine.configuration.digest().unwrap(),
+        runtime_generation: machine.runtime_generation as u64,
+    });
     assert!(
         super::accepts_selected_profile(&machine, &profile),
         "browser-only uses cua without granting Computer"

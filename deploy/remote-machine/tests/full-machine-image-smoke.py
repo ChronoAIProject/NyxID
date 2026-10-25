@@ -63,6 +63,16 @@ def compact(value):
     return json.dumps(value, separators=(",", ":")).encode()
 
 
+configuration = dict(version=2, revision=1, separation_choice="shared_legacy", capabilities=selected)
+configuration_digest = hashlib.sha256(b"nyxid-managed-configuration-v2\0" + compact(configuration)).hexdigest()
+configuration_report = dict(configuration=configuration, digest=configuration_digest, runtime_generation=generation)
+# Synthetic fixture authority, stable across the fixture's retained generations.
+# Production derives both identities from accepted creation/controller evidence.
+hosted_storage = dict(original_pvc_uid=str(uuid.uuid5(uuid.NAMESPACE_URL, node_id + ":pvc")),
+                      allocation_id=str(uuid.uuid5(uuid.NAMESPACE_URL, node_id + ":allocation")))
+initializer_runtime_id = None
+
+
 def seal(public):
     # Independent implementation of nyxid_machine::bootstrap's managed v1
     # envelope. Test-only cryptography wheels are mounted read-only.
@@ -75,7 +85,8 @@ def seal(public):
     nonce = secrets.token_bytes(12)
     domain = b"nyxid-machine-bootstrap-v1"
     aad = domain + b"\0" + struct.pack("!I", 1) + compact(binding)
-    plaintext = compact(dict(auth_token=auth, signing_secret=signing, capabilities=selected))
+    plaintext = compact(dict(payload_version=2, auth_token=auth, signing_secret=signing,
+                             configuration=configuration, configuration_digest=configuration_digest, hosted_storage=hosted_storage))
     assert len(plaintext) <= 16 * 1024
     cipher = AESGCM(key).encrypt(nonce, plaintext, aad)
     wrapped_key = recipient.encrypt(key, padding.OAEP(
@@ -134,6 +145,7 @@ class LocalNodeServer(http.server.BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             assert 0 < length <= 65536
             value = json.loads(self.rfile.read(length))
+            assert value["payload_version"] == 2
             assert value["ticket"]["token"] == workload_token
             public = value["recipient_public_key"]
             decoded = base64.urlsafe_b64decode(public + "=" * (-len(public) % 4))
@@ -165,7 +177,7 @@ class LocalNodeServer(http.server.BaseHTTPRequestHandler):
             self.json_response(500, {})
 
     def do_GET(self):
-        global auth_count, connection
+        global auth_count, connection, initializer_runtime_id
         if self.path == "/fixture":
             body=b"<!doctype html><title>Remote Machine smoke</title><h1>Remote Machine smoke</h1><input aria-label='Test input'><button>Smoke button</button>"
             self.send_response(200)
@@ -228,6 +240,12 @@ class LocalNodeServer(http.server.BaseHTTPRequestHandler):
                                              b"nyxid-managed-node-window-v1\n" + compact(window),
                                              hashlib.sha256).hexdigest()
                         response["managed_runtime_window"] = dict(window=window, signature=signature)
+                        daemon_id=value["managed_daemon_id"]
+                        uuid.UUID(daemon_id)
+                        if initializer_runtime_id is None and os.environ["NYXID_SMOKE_STORAGE_INITIALIZE"] == "1":
+                            initializer_runtime_id=daemon_id
+                        response["hosted_storage"]=dict(binding=binding,storage=hosted_storage,
+                            runtime_id=daemon_id,initialize=initializer_runtime_id == daemon_id)
                     connection = self
                     self.send_frame(response)
                 elif message_type == "managed_machine_usage":
@@ -352,6 +370,31 @@ def filesystem_usage(path):
             'available_bytes':value.f_bavail*value.f_frsize}
 
 
+def assert_separation_report(machine, config, granted_storage):
+    # Choice is owner intent; support is an independent live observation. The
+    # authenticated WSS fixture supplies the exact retained-store grant, even
+    # when the selected execution mode for this smoke remains shared_legacy.
+    assert config.get('hosted_storage') == granted_storage, 'installed retained-store authority differs from authenticated grant'
+    evidence = machine['separation_evidence']
+    support = machine['separated']
+    abi = evidence.get('landlock_abi')
+    complete = (evidence.get('version') == 4 and evidence.get('os') == 'linux'
+                and isinstance(abi, int) and abi >= 6
+                and not evidence.get('probe_timed_out', False)
+                and not evidence.get('browser_sandbox_unobservable_in_container', False)
+                and all(evidence.get(field) is True for field in (
+                    'separate_users', 'credential_custody', 'managed_browser_configured',
+                    'command_seccomp', 'landlock_enforced', 'managed_browser_sandbox',
+                    'managed_browser_policy')))
+    assert support.get('available') is complete, 'separated support disagrees with complete v4 evidence'
+    assert support.get('landlock_abi') == abi, 'separated support ABI differs from observed evidence'
+    if complete:
+        assert support.get('reason') is None, 'available separated support retains an unavailable reason'
+    else:
+        assert isinstance(support.get('reason'), str) and support['reason'], 'unavailable support lacks its observed probe reason'
+        assert support['reason'] != 'hosted_context_binding_required', 'authenticated retained-store grant was not installed'
+
+
 def run_cases():
     global context, authority_revision
     checks=run_checks
@@ -365,7 +408,12 @@ def run_cases():
     config_path=pathlib.Path('/var/lib/nyxid-machine/node/config.toml')
     config=tomllib.loads(config_path.read_text())
     assert config['managed_runtime']==binding
-    assert config['managed_capabilities']==selected
+    assert config['managed_configuration']==configuration_report
+    assert config['machine']['separation_choice']=='shared_legacy'
+    assert observed['managed_configuration']==configuration_report
+    assert observed['separation_choice']=='shared_legacy'
+    assert_separation_report(observed, config, hosted_storage)
+    checks.extend(['authenticated_retained_store_installed', 'separated_support_matches_v4_evidence'])
     assert auth not in config_path.read_text() and signing not in config_path.read_text()
     assert config['machine']['max_jobs']==2 and config['machine']['max_timeout_secs']==3600
     assert config['machine']['roots']==['/workspace'] and not config['machine']['allow_root']
@@ -564,6 +612,7 @@ def run_cases():
         assert resources['filesystems'][path]['capacity_bytes']==capacity, 'temporary filesystem capacity differs from declared limit'
     checks.append('actual_temporary_filesystem_capacities')
     payload={'case':case,'ok':True,'checks':checks,'selected_capabilities':selected,'runtime_generation':generation,'versions':versions,
+        'separated_support':observed['separated'],'separation_evidence':observed['separation_evidence'],
         'started_process_counts':counts,'resources':resources,'revocation':run_revocation,'cutoff_ms':cutoff,
         'component_state':{
             'nyxid_cli_node':{'installed':True,'runtime_started':True,'bundled_executable':True},

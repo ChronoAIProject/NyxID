@@ -84,8 +84,7 @@ vi.mock("@/hooks/use-machines", () => ({
           },
           profile: remoteMachineFixture.profile,
           policy: {
-            policy_version: "remote-machine-mvp",
-            data_policy_version: "remote-machine-data",
+            ...remoteMachinePaidQuoteFixture.policy,
           },
         },
   }),
@@ -128,6 +127,53 @@ beforeEach(() => {
     replayed: false,
   });
 });
+
+it("reviews three hosted defaults and requires fresh explicit separation consent after a choice change", async () => {
+  show();
+  const choice = screen.getByRole("combobox", { name: "Agent separation default" });
+  expect(screen.getByText(/Automatic.*waits for confirmed separation support/)).toBeVisible();
+  await userEvent.click(screen.getByRole("checkbox", { name: /I accept the shared environment/ }));
+  expect(screen.getByRole("button", { name: "Create free remote machine" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("checkbox", { name: /I accept the selected Agent separation/ }));
+  await userEvent.click(choice);
+  await userEvent.click(screen.getByRole("option", { name: "Shared legacy" }));
+  expect(screen.getByRole("checkbox", { name: /I accept the selected Agent separation/ })).not.toBeChecked();
+  expect(screen.getByText(/shared OS/i)).toBeVisible();
+  await userEvent.click(screen.getByRole("checkbox", { name: /I accept the selected Agent separation/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Create free remote machine" }));
+  await waitFor(() => expect(state.create).toHaveBeenCalledOnce());
+  expect(state.create.mock.calls[0]![0].body).toMatchObject({ separation_choice: "shared_legacy", separation_policy_version: "remote-machine-separation-v1", acknowledge_separation: true, capabilities: ["files", "shell"] });
+});
+
+it("clears capability-triggered consent errors as each explicit acknowledgement is checked", async () => {
+  show();
+  await userEvent.click(screen.getByRole("checkbox", { name: /^Browser/ }));
+  await screen.findByText("Review and accept the selected Agent separation policy.");
+  await userEvent.click(screen.getByRole("checkbox", { name: /I accept the selected Agent separation/ }));
+  await waitFor(() => expect(screen.queryByText("Review and accept the selected Agent separation policy.")).not.toBeInTheDocument());
+  await userEvent.click(screen.getByRole("checkbox", { name: /I accept the shared environment/ }));
+  await waitFor(() => expect(screen.queryByText("Review and accept the displayed profile, billing and data policies.")).not.toBeInTheDocument());
+  expect(screen.getByRole("button", { name: "Create free remote machine" })).toBeEnabled();
+  expect(state.create).not.toHaveBeenCalled();
+});
+
+it.each([false, true])("Require separated checks account context permission %s before creating, without granting tools", async contexts => {
+  useAuthStore.setState({ user: { ...useAuthStore.getState().user!, capabilities: { enabled_features: ["experimental:remote-machines", ...(contexts ? ["assistant:machine-contexts"] : [])] } } });
+  show();
+  await userEvent.click(screen.getByRole("combobox", { name: "Agent separation default" }));
+  await userEvent.click(screen.getByRole("option", { name: "Require separated" }));
+  await accept();
+  const submit = screen.getByRole("button", { name: "Create free remote machine" });
+  if (contexts) {
+    expect(submit).toBeEnabled();
+    await userEvent.click(submit);
+    await waitFor(() => expect(state.create).toHaveBeenCalledOnce());
+    expect(state.create.mock.calls[0]![0].body).toMatchObject({ separation_choice: "require_separated", acknowledge_separation: true });
+  } else {
+    expect(submit).toBeDisabled();
+    expect(state.create).not.toHaveBeenCalled();
+  }
+});
 afterEach(() => {
   cleanup();
   useAuthStore.setState(auth);
@@ -135,10 +181,11 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 const show = () => render(<RemoteMachineCreate onCreated={state.created} />);
-const accept = () =>
-  userEvent.click(
-    screen.getByRole("checkbox", { name: /I accept the shared environment/ }),
-  );
+const accept = async () => {
+  const separation = screen.getByRole("checkbox", { name: /I accept the selected Agent separation/ });
+  if (separation.getAttribute("data-state") !== "checked") await userEvent.click(separation);
+  await userEvent.click(screen.getByRole("checkbox", { name: /I accept the shared environment/ }));
+};
 
 it("requires policy acceptance and sends only explicit free-slot creation with durable intent", async () => {
   show();
@@ -170,17 +217,20 @@ it("requires policy acceptance and sends only explicit free-slot creation with d
   expect(state.create.mock.calls[0]![0]).toEqual({
     body: {
       name: "my-remote-machine",
-      capabilities: ["shell", "files"],
+      capabilities: ["files", "shell"],
       specialist_id: null,
       free_slot: true,
       profile_version: "remote-machine",
       policy_version: "remote-machine-mvp",
       data_policy_version: "remote-machine-data",
       acknowledge_shared_environment: true,
+    separation_choice: "automatic",
+    separation_policy_version: "remote-machine-separation-v1",
+    acknowledge_separation: true,
     },
     idempotencyKey: expect.any(String),
   });
-  expect(state.created).toHaveBeenCalledWith("machine-1", "operation-1");
+  expect(state.created).toHaveBeenCalledWith("machine-1", "operation-1", null);
   expect(sessionStorage.length).toBe(0);
 });
 
@@ -208,6 +258,9 @@ it("can recover an existing intent after reload even if a slot is now occupied a
     policy_version: "remote-machine-mvp",
     data_policy_version: "remote-machine-data",
     acknowledge_shared_environment: true,
+    separation_choice: "automatic",
+    separation_policy_version: "remote-machine-separation-v1",
+    acknowledge_separation: true,
   });
   state.available = false;
   state.validUntil = "2020-01-01T00:00:00Z";
@@ -222,7 +275,7 @@ it("can recover an existing intent after reload even if a slot is now occupied a
         ...saved.body,
         profile_version: "remote-machine",
         name: "my-remote-machine",
-        capabilities: ["shell", "files"],
+        capabilities: ["files", "shell"],
         specialist_id: null,
       },
       idempotencyKey: saved.idempotencyKey,
@@ -349,7 +402,7 @@ it("sends selected name, capabilities and specialist and freezes them for lost-r
   await screen.findByText("Response lost");
   expect(state.create.mock.calls[0]![0].body).toMatchObject({
     name: "research",
-    capabilities: ["shell", "files", "browser", "computer"],
+    capabilities: ["browser", "computer", "files", "shell"],
     specialist_id: "specialist-1",
   });
   expect(screen.getByLabelText("Machine name")).toBeDisabled();
@@ -399,6 +452,7 @@ it("preserves configuration through free and paid quote review and replays a pai
   await userEvent.click(
     screen.getByRole("button", { name: "Review paid creation" }),
   );
+  if (screen.getByRole("checkbox", { name: /I accept the selected Agent separation/ }).getAttribute("data-state") !== "checked") await userEvent.click(screen.getByRole("checkbox", { name: /I accept the selected Agent separation/ }));
   await userEvent.click(
     screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
   );
@@ -409,7 +463,7 @@ it("preserves configuration through free and paid quote review and replays a pai
   const submitted = state.create.mock.calls[0]![0];
   expect(submitted.body).toMatchObject({
     name: "paid-research",
-    capabilities: ["shell", "files", "browser"],
+    capabilities: ["browser", "files", "shell"],
     specialist_id: "specialist-1",
     free_slot: false,
     quote_id: "quote-one",
@@ -420,6 +474,7 @@ it("preserves configuration through free and paid quote review and replays a pai
   show();
   expect(screen.getByLabelText("Machine name")).toHaveValue("paid-research");
   expect(screen.getByLabelText("Machine name")).toBeDisabled();
+  if (screen.getByRole("checkbox", { name: /I accept the selected Agent separation/ }).getAttribute("data-state") !== "checked") await userEvent.click(screen.getByRole("checkbox", { name: /I accept the selected Agent separation/ }));
   await userEvent.click(
     screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
   );

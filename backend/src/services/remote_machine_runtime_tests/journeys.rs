@@ -425,7 +425,7 @@ async fn create(j: &Journey, free: bool, key: &str) -> Value {
             "0.000040".parse::<Credits>().unwrap()
         );
     }
-    let body = json!({"free_slot":free,"policy_version":"remote-machine-mvp","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true,"quote_id":quote["quote_id"],"accept_account_balance":!free});
+    let body = json!({"separation_choice":"shared_legacy","separation_policy_version":"remote-machine-separation-v1","acknowledge_separation":true,"free_slot":free,"policy_version":"remote-machine-mvp","data_policy_version":"remote-machine-data","acknowledge_shared_environment":true,"quote_id":quote["quote_id"],"accept_account_balance":!free});
     let (created, replay_key) = if free {
         let (status, created) = http(
             j,
@@ -477,6 +477,10 @@ async fn create(j: &Journey, free: bool, key: &str) -> Value {
     );
     assert_eq!(created["machine"]["profile"]["ephemeral_gib"], Value::Null);
     assert_eq!(created["machine"]["policy_version"], "remote-machine-mvp");
+    assert_eq!(
+        created["machine"]["machine_configuration"]["state"], "pending",
+        "creation and owner consent are not authenticated configuration application"
+    );
     let held = wallet(&j.f).await.reserved_credits;
     let (status, replay) = http(
         j,
@@ -533,7 +537,7 @@ async fn activate(j: &Journey, id: &str) -> ManagedSocket {
         j,
         "POST",
         "/api/v1/machines/managed/prepare",
-        json!({"node_id":id,"pod_uid":bound.pod_uid,"ticket":ticket,"recipient_public_key":public}),
+        json!({"payload_version":nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION,"node_id":id,"pod_uid":bound.pod_uid,"ticket":ticket,"recipient_public_key":public}),
         None,
         false,
     )
@@ -545,7 +549,7 @@ async fn activate(j: &Journey, id: &str) -> ManagedSocket {
         j,
         "POST",
         "/api/v1/machines/managed/bootstrap",
-        json!({"binding":managed,"ticket":ticket,"recipient_public_key":public}),
+        json!({"payload_version":nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION,"binding":managed,"ticket":ticket,"recipient_public_key":public}),
         None,
         false,
     )
@@ -553,7 +557,11 @@ async fn activate(j: &Journey, id: &str) -> ManagedSocket {
     assert_eq!(status, StatusCode::OK, "public sealed bootstrap");
     let envelope = serde_json::from_value(delivery["sealed"].clone()).unwrap();
     let plaintext = nyxid_machine::bootstrap::open(&envelope, &j.recipient, &managed).unwrap();
-    let secrets: Value = serde_json::from_slice(&plaintext).unwrap();
+    let secrets: nyxid_machine::managed::BootstrapPayload =
+        serde_json::from_slice(&plaintext).unwrap();
+    secrets
+        .validate()
+        .expect("sealed bootstrap installs the exact required current configuration");
     let (mut ws, _) = tokio_tungstenite::connect_async_with_config(
         format!("ws://{}/api/v1/nodes/ws", j.address),
         None,
@@ -561,8 +569,13 @@ async fn activate(j: &Journey, id: &str) -> ManagedSocket {
     )
     .await
     .unwrap();
+    let had_initializer = current(&j.f, id)
+        .await
+        .hosted_storage_initializer_runtime_id
+        .is_some();
+    let daemon_id = Uuid::new_v4().to_string();
     ws.send(tokio_tungstenite::tungstenite::Message::Text(
-        json!({"type":"auth","node_id":id,"token":secrets["auth_token"],"managed_runtime":managed})
+        json!({"type":"auth","node_id":id,"token":secrets.auth_token.as_str(),"managed_runtime":managed,"managed_daemon_id":daemon_id})
             .to_string()
             .into(),
     ))
@@ -575,8 +588,23 @@ async fn activate(j: &Journey, id: &str) -> ManagedSocket {
         .unwrap();
     let reply: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
     assert_eq!(reply["type"], "auth_ok", "managed WSS authentication");
-    let signing_key =
-        Zeroizing::new(hex::decode(secrets["signing_secret"].as_str().unwrap()).unwrap());
+    assert_eq!(
+        reply["hosted_storage"]["runtime_id"], daemon_id,
+        "authenticated daemon must receive retained-volume authority"
+    );
+    assert_eq!(
+        reply["hosted_storage"]["storage"]["original_pvc_uid"],
+        bound.pvc_uid.as_deref().unwrap()
+    );
+    assert_eq!(
+        reply["hosted_storage"]["initialize"], !had_initializer,
+        "only the first authenticated daemon receives initialization authority"
+    );
+    assert_eq!(
+        reply["hosted_storage"]["storage"],
+        serde_json::to_value(&secrets.hosted_storage).unwrap()
+    );
+    let signing_key = Zeroizing::new(hex::decode(secrets.signing_secret.as_str()).unwrap());
     let window: nyxid_machine::managed::SignedRuntimeWindow =
         serde_json::from_value(reply["managed_runtime_window"].clone()).unwrap();
     window
@@ -584,13 +612,19 @@ async fn activate(j: &Journey, id: &str) -> ManagedSocket {
         .expect("public auth response carries exact installed signed cutoff");
     let profile = nyxid_machine::MachineProfile {
         version: nyxid_machine::PROTOCOL_VERSION,
-        runtime_id: Uuid::new_v4().to_string(),
+        runtime_id: daemon_id,
         shell: true,
         files: true,
         browser: Some(false),
         roots: vec!["/workspace".into()],
         authority_versions: vec![2, 3],
         commands_isolated: Some(true),
+        separation_choice: Some(secrets.configuration.separation_choice),
+        managed_configuration: Some(nyxid_machine::managed::ConfigurationReport {
+            configuration: secrets.configuration.clone(),
+            digest: secrets.configuration_digest.clone(),
+            runtime_generation: managed.runtime_generation,
+        }),
         os: "linux".into(),
         arch: "aarch64".into(),
         ..Default::default()
@@ -612,6 +646,24 @@ async fn activate(j: &Journey, id: &str) -> ManagedSocket {
     })
     .await
     .expect("current authenticated WSS promotes Ready");
+    let (status, applied) = http(
+        j,
+        "GET",
+        &format!("/api/v1/remote-machines/{id}"),
+        Value::Null,
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    assert_eq!(
+        applied["machine"]["machine_configuration"]["state"],
+        "applied"
+    );
+    assert_eq!(
+        applied["machine"]["machine_configuration"]["digest"],
+        secrets.configuration_digest
+    );
     Box::pin(j.manager.tick()).await.unwrap();
     let (shutdown, mut stopped) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
@@ -1115,7 +1167,7 @@ async fn current_saved_image_and_runtime_resume_rekey_survive_new_deployment() {
         quote.terms,
         terms(&old.profile, &old.policy_version).unwrap()
     );
-    let new_create = json!({"free_slot":false,"policy_version":POLICY_VERSION,"data_policy_version":"remote-machine-data","acknowledge_shared_environment":true,"quote_id":quoted["quote_id"],"accept_account_balance":true});
+    let new_create = json!({"separation_choice":"shared_legacy","separation_policy_version":"remote-machine-separation-v1","acknowledge_separation":true,"free_slot":false,"policy_version":POLICY_VERSION,"data_policy_version":"remote-machine-data","acknowledge_shared_environment":true,"quote_id":quoted["quote_id"],"accept_account_balance":true});
     let (status, rejected) = http(
         &j,
         "POST",

@@ -25,6 +25,17 @@ import {
 const fixture = vi.hoisted(() => ({
   machine: {
     node_id: "11111111-1111-4111-8111-111111111111",
+    name: "machine-one",
+    capabilities: ["files", "shell"],
+    separation_choice: "automatic",
+    separation_policy_version: "remote-machine-separation-v1",
+    machine_configuration: { version: 2, revision: 1, digest: "a".repeat(64), runtime_generation: 2, state: "pending", reason: "current_runtime_configuration_evidence_required" },
+    specialist_id: null,
+    specialist_assignment_state: "none",
+    specialist_assignment_error: null,
+    free_slot: true,
+    runtime_run_id: null,
+    funded_until: null,
     policy_version: "remote-machine-mvp" as const,
     data_policy_version: "remote-machine-data" as const,
     profile: {
@@ -598,7 +609,7 @@ it("explains native pause completion and fresh runtime resume without promising 
 it.each([
   ["pending", "Specialist assignment is pending"],
   ["assigned", "Specialist assigned"],
-  ["permissions_required", "Specialist permissions need configuration"],
+  ["not_assigned", "Specialist is no longer assigned"],
   ["failed", "Specialist assignment could not be completed"],
 ])(
   "shows hosted name and %s assignment with the existing permission controls",
@@ -852,15 +863,15 @@ it.each([
     ).toBeInTheDocument();
     expect(
       policy.getByText(
-        /All authorized clients share the Machine and workspace/,
+        /Sharing is set per Agent.*Shared legacy Agents and external clients share/,
       ),
     ).toBeInTheDocument();
     expect(
-      policy.getByText(/Authorized agents also share browser sessions/),
+      policy.getByText(/Shared legacy Agents also share browser sessions/),
     ).toBeInTheDocument();
     expect(
       policy.getByText(
-        /Only \/workspace persists.*browser profiles and downloads are temporary/,
+        /legacy \/workspace and separated workspaces are retained.*browser profiles and downloads are temporary/,
       ),
     ).toBeInTheDocument();
     expect(

@@ -17,6 +17,27 @@ if [ "${NYXID_MACHINE_MANAGED:-${NYXID_MANAGED_KUBERNETES:-0}}" = "1" ]; then
     [ -n "${NYXID_MANAGED_BOOTSTRAP_URL:-}" ] || { echo 'Managed Machine requires a bootstrap endpoint.' >&2; exit 2; }
     unset NYXID_NODE_TOKEN
     if [ "${NYXID_MANAGED_KUBERNETES:-0}" = "1" ]; then
+        # The same retained PVC is mounted at its protected root and at only
+        # its legacy subdirectory. Never place node secrets below this root.
+        mountpoint -q /var/lib/nyxid-contexts || { echo 'Managed Machine requires its retained context volume.' >&2; exit 2; }
+        python3 - <<'STORAGE'
+import os, stat
+root='/var/lib/nyxid-contexts'
+volume=os.lstat(root)
+legacy=os.lstat(root+'/legacy')
+workspace=os.lstat('/workspace')
+assert stat.S_ISDIR(volume.st_mode) and volume.st_uid == 0 and not volume.st_mode & 0o022, 'Invalid retained volume root'
+assert stat.S_ISDIR(legacy.st_mode) and (legacy.st_dev,legacy.st_ino)==(workspace.st_dev,workspace.st_ino), 'Workspace must be the retained legacy subdirectory'
+STORAGE
+        # Kubernetes' EmptyDir hides the image's /home permissions. Establish
+        # the supervisor-owned parent before starting any worker or desktop.
+        chown root:root /home
+        chmod 0755 /home
+        chown root:agent /workspace
+        chmod 0770 /workspace
+        chown root:root /home/agent
+        chmod 0700 /home/agent
+        chown agent:agent /home/agent
         exec nyxid node managed-start --kubernetes --bootstrap-url "$NYXID_MANAGED_BOOTSTRAP_URL" --config "$MACHINE_STATE/node"
     fi
     [ -n "${NYXID_MANAGED_TICKET_FILE:-}" ] || { echo 'Managed Machine requires a protected bootstrap ticket.' >&2; exit 2; }

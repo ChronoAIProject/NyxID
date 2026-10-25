@@ -60,6 +60,9 @@ pub struct Context {
     pub actor_id: String,
     pub group_id: Option<String>,
     pub generation: i64,
+    /// Authenticated daemon for which this profile generation was authorized.
+    /// A replacement must advance before ephemeral profile reconstruction.
+    pub runtime_id: String,
     pub mode: String,
 }
 #[derive(Clone, Deserialize, Serialize)]
@@ -93,6 +96,53 @@ pub struct HumanContextAction {
     pub agent_id: String,
     pub node_id: String,
     pub selection: Selection,
+    pub snapshot: ContextActionSnapshot,
+}
+
+pub const CONTEXT_POLICY_VERSION: &str = "machine-context-mode-v1";
+pub const CONTEXT_REVIEW_FENCE: &str = "machine-context-review-dependencies";
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ContextActionSnapshot {
+    pub actor_id: String,
+    pub agent_owner_id: String,
+    pub owner_id: String,
+    pub previous_assignment: Assignment,
+    pub policy_version: String,
+    pub profile_digest: String,
+    pub capability_edit_enabled: bool,
+    pub context_setup_enabled: bool,
+    pub flag_epoch: i64,
+    pub memberships_digest: String,
+    pub machine_configuration: Option<ContextMachineConfiguration>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ContextMachineConfiguration {
+    pub revision: u64,
+    pub digest: String,
+    pub runtime_generation: i64,
+    pub credential_epoch: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ContextReview {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub actor_id: String,
+    pub action: HumanContextAction,
+    pub status: String,
+    pub committed_revision: Option<i64>,
+    pub error_code: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub expires_at: DateTime<Utc>,
+}
+impl ContextReview {
+    pub const COLLECTION_NAME: &str = "machine_context_reviews";
 }
 
 #[cfg(test)]

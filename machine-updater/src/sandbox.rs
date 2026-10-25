@@ -112,6 +112,8 @@ pub struct SandboxIntent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_class: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seccomp_localhost_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_storage_class: Option<String>,
     pub workspace_size: String,
     pub cpu_request: String,
@@ -165,6 +167,10 @@ impl SandboxIntent {
         }
         if let Some(storage_class) = &self.workspace_storage_class {
             validate_storage_class_name(storage_class)?;
+        }
+        if let Some(reference) = &self.seccomp_localhost_profile {
+            nyxid_machine::managed::validate_seccomp_localhost_profile(reference)
+                .map_err(|reason| anyhow!(reason))?;
         }
         if let Some(runtime_class) = &self.runtime_class {
             ensure!(
@@ -280,18 +286,22 @@ impl SandboxIntent {
                             "runAsNonRoot": false,
                             "runAsUser": 0,
                             "runAsGroup": 0,
-                            "seccompProfile": {"type": "RuntimeDefault"},
+                            "seccompProfile": match &self.seccomp_localhost_profile {
+                                Some(reference) => json!({"type": "Localhost", "localhostProfile": reference}),
+                                None => json!({"type": "RuntimeDefault"}),
+                            },
                             // Required only by the supervisor to initialize
                             // the workspace and drop every command to agent.
                             // setuid clears these from command descendants.
                             "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "SETUID", "SETGID", "KILL"]}
                         },
                         "volumeMounts": [
-                            {"name": "workspace", "mountPath": "/workspace"},
+                            {"name": "workspace", "mountPath": "/workspace", "subPath": "legacy"},
                             {"name": "identity", "mountPath": "/var/lib/nyxid-machine"},
                             {"name": "workload-identity", "mountPath": "/var/run/nyxid-workload", "readOnly": true},
                             {"name": "tmp", "mountPath": "/tmp"},
-                            {"name": "home", "mountPath": "/home"}
+                            {"name": "home", "mountPath": "/home"},
+                            {"name": "workspace", "mountPath": "/var/lib/nyxid-contexts"}
                         ],
                         "startupProbe": {
                             "exec": {"command": ["/bin/sh", "-ec", "test -s /var/lib/nyxid-machine/node/config.toml && test -s /var/lib/nyxid-machine/node/node.pid && kill -0 \"$(cat /var/lib/nyxid-machine/node/node.pid)\""]},
@@ -1602,6 +1612,13 @@ impl SandboxApi {
             "Sandbox UID precondition failed"
         );
         let mut body = intent.apply_object();
+        ensure!(
+            current_object
+                .pointer("/spec/podTemplate/spec/containers/0/securityContext/seccompProfile")
+                == body
+                    .pointer("/spec/podTemplate/spec/containers/0/securityContext/seccompProfile"),
+            "Sandbox retained seccomp profile differs from the saved Machine profile"
+        );
         // A retained template is the storage authority, including an omitted
         // class. Today's deployment setting/default must not migrate a disk.
         // Validate the complete fixed template after substituting only its
@@ -2503,6 +2520,47 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{body_json, header, method, path, query_param},
     };
+
+    #[tokio::test]
+    async fn hosted_retained_contexts_share_original_pvc_without_exposing_its_root() {
+        let server = MockServer::start().await;
+        let rendered = intent(&server).apply_object();
+        let pod = &rendered["spec"]["podTemplate"]["spec"];
+        let mounts = pod["containers"][0]["volumeMounts"].as_array().unwrap();
+        let workspace = mounts
+            .iter()
+            .find(|v| v["mountPath"] == "/workspace")
+            .unwrap();
+        assert_eq!(workspace["subPath"], "legacy");
+        let retained = mounts
+            .iter()
+            .find(|v| v["mountPath"] == "/var/lib/nyxid-contexts")
+            .expect("retained context root");
+        assert_eq!(retained["name"], workspace["name"]);
+        assert!(retained.get("subPath").is_none());
+        assert_eq!(
+            rendered["spec"]["volumeClaimTemplates"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"],
+            true
+        );
+        assert_eq!(
+            pod["containers"][0]["securityContext"]["capabilities"]["add"],
+            json!(["CHOWN", "SETUID", "SETGID", "KILL"])
+        );
+        assert!(
+            pod["volumes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["name"] == "identity" && v["emptyDir"]["medium"] == "Memory")
+        );
+    }
 
     fn observation_error(error: &anyhow::Error) -> &SandboxObservationError {
         let safe = error
@@ -3932,6 +3990,26 @@ mod tests {
         assert!(SandboxApi::new("http://[::1]:8000".parse().unwrap(), None).is_ok());
     }
 
+    #[tokio::test]
+    async fn localhost_seccomp_is_rendered_and_unsafe_references_are_rejected() {
+        let server = MockServer::start().await;
+        let reference = format!("nyxid/remote-machine-v1-{}.json", "a".repeat(64));
+        let mut encoded = serde_json::to_value(intent(&server)).unwrap();
+        encoded["seccomp_localhost_profile"] = json!(reference);
+        let selected: SandboxIntent = serde_json::from_value(encoded.clone()).unwrap();
+        selected.validate().unwrap();
+        assert_eq!(
+            selected.apply_object()["spec"]["podTemplate"]["spec"]["containers"][0]["securityContext"]
+                ["seccompProfile"],
+            json!({"type":"Localhost", "localhostProfile":reference})
+        );
+        for invalid in ["", "../escape.json", "/absolute.json", "arbitrary.json"] {
+            encoded["seccomp_localhost_profile"] = json!(invalid);
+            let invalid: SandboxIntent = serde_json::from_value(encoded.clone()).unwrap();
+            assert!(invalid.validate().is_err());
+        }
+    }
+
     fn intent(_server: &MockServer) -> SandboxIntent {
         SandboxIntent {
             bootstrap_base_url: "https://nyxid.test".into(),
@@ -3947,6 +4025,7 @@ mod tests {
             image: "ghcr.io/chronoaiproject/nyxid/nyxid-node-remote-machine@sha256:".to_string()
                 + &"ab".repeat(32),
             runtime_class: Some("kata".into()),
+            seccomp_localhost_profile: None,
             workspace_storage_class: Some("managed-csi".into()),
             workspace_size: "20Gi".into(),
             cpu_request: "2".into(),
@@ -3978,7 +4057,7 @@ mod tests {
                     ,"nyxid.dev/writer-fence": intent.writer_fence
                 }
             },
-            "spec": {"operatingMode": "Running", "volumeClaimTemplates": intent.apply_object()["spec"]["volumeClaimTemplates"]},
+            "spec": {"operatingMode": "Running", "podTemplate": intent.apply_object()["spec"]["podTemplate"], "volumeClaimTemplates": intent.apply_object()["spec"]["volumeClaimTemplates"]},
             "status": {
                 "phase": "Ready",
                 "conditions": [{"type":"Ready","status":"True","observedGeneration":3}]
@@ -4385,6 +4464,73 @@ mod tests {
                 .pointer("/spec/volumeClaimTemplates/0/spec/storageClassName")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn resume_keeps_the_saved_localhost_seccomp_profile() {
+        let server = MockServer::start().await;
+        let mut desired = intent(&server);
+        let reference = format!("nyxid/remote-machine-v1-{}.json", "a".repeat(64));
+        desired.seccomp_localhost_profile = Some(reference.clone());
+        let mut live = object(&desired, "sandbox-uid");
+        live["spec"]["operatingMode"] = json!("Suspended");
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(live.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(live))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+        api.apply_if_uid(&desired, "sandbox-uid").await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let patched: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(patched["spec"]["operatingMode"], "Running");
+        assert_eq!(
+            patched["spec"]["podTemplate"]["spec"]["containers"][0]["securityContext"]["seccompProfile"],
+            json!({"type":"Localhost", "localhostProfile":reference})
+        );
+    }
+
+    #[tokio::test]
+    async fn uid_apply_refuses_seccomp_type_reference_or_shape_changes_before_patch() {
+        let first = format!("nyxid/remote-machine-v1-{}.json", "a".repeat(64));
+        let second = format!("nyxid/remote-machine-v1-{}.json", "b".repeat(64));
+        for (selected, observed) in [
+            (None, json!({"type":"Localhost", "localhostProfile":first})),
+            (Some(first.clone()), json!({"type":"RuntimeDefault"})),
+            (
+                Some(first),
+                json!({"type":"Localhost", "localhostProfile":second}),
+            ),
+            (None, Value::Null),
+            (
+                None,
+                json!({"type":"RuntimeDefault", "localhostProfile":"ignored.json"}),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let mut desired = intent(&server);
+            desired.seccomp_localhost_profile = selected;
+            let mut live = object(&desired, "sandbox-uid");
+            live["spec"]["podTemplate"]["spec"]["containers"][0]["securityContext"]["seccompProfile"] =
+                observed;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(live))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            let error = api.apply_if_uid(&desired, "sandbox-uid").await.unwrap_err();
+            assert!(
+                error.to_string().contains("retained seccomp profile"),
+                "{error}"
+            );
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
     }
 
     #[tokio::test]

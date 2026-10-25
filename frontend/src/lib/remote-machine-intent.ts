@@ -5,6 +5,9 @@ import {
   REMOTE_MACHINE_DATA_POLICY,
   remoteMachineNameSchema,
   remoteMachineCapabilitiesSchema,
+  remoteMachineCreateRequestSchema,
+  machineSeparationChoiceSchema,
+  REMOTE_MACHINE_SEPARATION_POLICY,
 } from "@/schemas/machines";
 
 // Only safe owner lifecycle fields belong here. Never persist bootstrap material,
@@ -21,6 +24,9 @@ const bodySchema = z
     name: remoteMachineNameSchema.optional(),
     capabilities: remoteMachineCapabilitiesSchema.optional(),
     specialist_id: z.string().min(1).nullable().optional(),
+    separation_choice: machineSeparationChoiceSchema.optional(),
+    separation_policy_version: z.literal(REMOTE_MACHINE_SEPARATION_POLICY).optional(),
+    acknowledge_separation: z.boolean().optional(),
     action: z.enum(["pause", "resume", "rekey", "delete"]).optional(),
     expected_revision: z.number().int().nonnegative().optional(),
     expected_retry_count: z.number().int().nonnegative().optional(),
@@ -38,7 +44,10 @@ const bodySchema = z
       body.action &&
       (body.name !== undefined ||
         body.capabilities !== undefined ||
-        body.specialist_id !== undefined)
+        body.specialist_id !== undefined ||
+        body.separation_choice !== undefined ||
+        body.separation_policy_version !== undefined ||
+        body.acknowledge_separation !== undefined)
     ) {
       context.addIssue({
         code: "custom",
@@ -63,6 +72,15 @@ const bodySchema = z
           "Paid lifecycle intent requires a quote and explicit account-balance acceptance",
       });
     }
+  })
+  .transform((body, context) => {
+    if (body.free_slot === undefined) return body;
+    const create = remoteMachineCreateRequestSchema.safeParse(body);
+    if (!create.success) {
+      context.addIssue({ code: "custom", message: "A complete reviewed hosted creation request is required" });
+      return z.NEVER;
+    }
+    return { ...body, ...create.data };
   });
 export type RemoteMachineIntentBody = z.infer<typeof bodySchema>;
 const intentSchema = z
@@ -86,7 +104,7 @@ export function readRemoteMachineIntent(
   const raw = sessionStorage.getItem(storageKey(ownerId, scope));
   if (!raw) return null;
   const parsed = intentSchema.safeParse(JSON.parse(raw));
-  if (!parsed.success)
+  if (!parsed.success || (scope === "create" && parsed.data.body.free_slot === undefined))
     throw new Error(
       "The saved machine request cannot be read. Review and reset the request before continuing.",
     );
@@ -100,6 +118,8 @@ export function getRemoteMachineIntent(
   body: RemoteMachineIntentBody,
 ): RemoteMachineIntent {
   const safeBody = bodySchema.parse(body);
+  if (scope === "create" && safeBody.free_slot === undefined)
+    throw new Error("A complete reviewed hosted creation request is required before dispatch.");
   const existing = readRemoteMachineIntent(ownerId, scope);
   if (existing) return existing;
   const intent = { idempotencyKey: crypto.randomUUID(), body: safeBody };

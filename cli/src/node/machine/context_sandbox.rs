@@ -60,7 +60,7 @@ fn stat(fd: &OwnedFd) -> Result<libc::stat> {
 }
 
 /// Pin every ancestor. Refuse symlinks, writable supervisor parents and wrong owners.
-pub fn context_directories(root: &Path, uid: u32) -> Result<Vec<OwnedFd>> {
+fn supervisor_directory(root: &Path) -> Result<OwnedFd> {
     ensure!(root.is_absolute(), "context_root_not_absolute");
     let mut parent = open_path(Path::new("/"))?;
     for component in root.components() {
@@ -87,23 +87,32 @@ pub fn context_directories(root: &Path, uid: u32) -> Result<Vec<OwnedFd>> {
             "context_parent_not_private"
         );
     }
+    Ok(parent)
+}
+
+fn private_directory(parent: &OwnedFd, name: &std::ffi::CStr, uid: u32) -> Result<OwnedFd> {
+    let fd = check(unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+        .into()
+    })?;
+    let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    let info = stat(&fd)?;
+    ensure!(
+        info.st_uid == uid && info.st_mode & 0o777 == 0o700,
+        "context_directory_not_private"
+    );
+    Ok(fd)
+}
+
+pub fn context_directories(root: &Path, uid: u32) -> Result<Vec<OwnedFd>> {
+    let parent = supervisor_directory(root)?;
     let mut result = Vec::new();
     for name in [c"workspace", c"home", c"tmp"] {
-        let fd = check(unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-            .into()
-        })?;
-        let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-        let info = stat(&fd)?;
-        ensure!(
-            info.st_uid == uid && info.st_mode & 0o777 == 0o700,
-            "context_directory_not_private"
-        );
-        result.push(fd);
+        result.push(private_directory(&parent, name, uid)?);
     }
     Ok(result)
 }
@@ -219,7 +228,21 @@ pub struct Sandbox {
 }
 impl Sandbox {
     pub fn open(root: &Path, uid: u32) -> Result<Self> {
-        let directories = context_directories(root, uid)?;
+        Self::open_with_workspace(root, uid, &root.join("workspace"))
+    }
+    pub fn open_with_workspace(root: &Path, uid: u32, workspace: &Path) -> Result<Self> {
+        let mut directories = context_directories(root, uid)?;
+        if workspace != root.join("workspace") {
+            let parent =
+                supervisor_directory(workspace.parent().context("context_root_not_absolute")?)?;
+            let name = CString::new(
+                workspace
+                    .file_name()
+                    .context("context_root_not_absolute")?
+                    .as_bytes(),
+            )?;
+            directories[0] = private_directory(&parent, &name, uid)?;
+        }
         let ruleset = ruleset(&directories)?;
         Ok(Self {
             root: root.to_owned(),

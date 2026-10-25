@@ -10,6 +10,10 @@ pub struct ManagedBootstrapDelivery {
     #[serde(rename = "_id")]
     pub id: String,
     pub binding: nyxid_machine::managed::Binding,
+    pub payload_version: u32,
+    pub configuration_revision: u64,
+    pub configuration_digest: String,
+    pub hosted_storage: nyxid_machine::managed::HostedStorage,
     pub recipient_key_digest: String,
     pub sealed_digest: String,
     pub sealed: nyxid_machine::bootstrap::Envelope,

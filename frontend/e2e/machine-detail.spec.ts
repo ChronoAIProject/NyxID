@@ -1,4 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { machineAccessFixture, machineContextReviewFixture } from "../src/test/machine-access-fixture";
+import type { MachineContextReview } from "../src/schemas/machine-access";
 import {
   agent,
   deleteOperation,
@@ -670,6 +672,159 @@ test("assignment survives capability save failure and preserves unrelated grants
   expect(mock.reads.some((path) => /\/agents\/[^/]+\/grants/.test(path))).toBe(
     false,
   );
+});
+
+for (const width of [1440, 320]) {
+  test(`context opt-in stays independent from capability editing and authority delivery at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 1000 });
+    const mock = await installMachineMock(page, {
+      agents: true,
+      assigned: true,
+      capabilityEditing: false,
+      contextSetup: true,
+    });
+    const capabilities = { ...emptyCapabilities, files: true };
+    await page.route(`**/api/v1/assistant/nyxagent/agents/${agent.id}/machines`, async route => {
+      await route.fulfill({ json: [{
+        ...machineAccessFixture,
+        node_id: machineId,
+        name: mock.machine.name,
+        revision: 8,
+        assignment_revision: 8,
+        capability_edit_enabled: false,
+        context_setup_enabled: true,
+        machine_configuration: { ...mock.machine.machine_configuration, state: "applied", reason: null },
+        protocol_v2: true,
+        can_edit: true,
+        legacy: false,
+        mode: "shared_legacy",
+        capabilities,
+        ceiling: { shell: true, files: true, browser: true, computer: true, developer_browser: true },
+        saved_login_ids: ["saved-login-preserve"],
+        separated: { available: true, reason: null, landlock_abi: 6 },
+        revocation_pending: true,
+        execution_revocation_pending: false,
+        delivery_pending: true,
+        quarantine_pending: true,
+      }] });
+    });
+    const requests: ApiWrite[] = [];
+    const review = { ...machineContextReviewFixture, agent_id: agent.id, node_id: machineId, expected_revision: 8, capabilities, saved_login_ids: ["saved-login-preserve"] };
+    await page.route(`**/api/v1/assistant/nyxagent/agents/${agent.id}/machines/${machineId}/context-prepare`, async route => {
+      record(route, requests);
+      await route.fulfill({ json: review });
+    });
+    await page.route(`**/api/v1/assistant/nyxagent/agents/${agent.id}/machines/${machineId}/context-reviews/review-1`, route => route.fulfill({ json: review }));
+    const panel = await show(page);
+    await selectTab(panel, "access");
+    await panel.getByRole("combobox", { name: "Agent for machine access" }).click();
+    await page.getByRole("option", { name: agent.display_name }).click();
+    const form = panel.getByRole("form", { name: /capabilities$/i });
+    await expect(form.getByText("Assigned", { exact: true })).toBeVisible();
+    await expect(form.getByText("Saved tools: File tools", { exact: true })).toBeVisible();
+    await expect(form.getByRole("checkbox", { name: "File tools", exact: true })).toBeChecked();
+    await expect(form.getByRole("checkbox", { name: "File tools", exact: true })).toBeDisabled();
+    await expect(form.getByRole("button", { name: "Save capabilities", exact: true })).toBeDisabled();
+    await expect(form.getByText(/Earlier execution authority has expired/)).toBeVisible();
+    await expect(form.getByText(/Waiting for machine acknowledgement/)).toBeVisible();
+    await expect(form.getByText(/Browser cleanup is pending/)).toBeVisible();
+    await expect(form.getByText(/Earlier commands have stopped/)).toHaveCount(0);
+    await form.getByRole("button", { name: "Separate workspace and browser for this agent", exact: true }).click();
+    await expect(form.getByText("Stored review review-1", { exact: true })).toBeVisible();
+    await expect(form.getByText("Reviewed tools: File tools", { exact: true })).toBeVisible();
+    await expect(form.getByRole("button", { name: "Approve and apply reviewed mode", exact: true })).toBeDisabled();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.body).toEqual({ mode: "separated", policy_version: "machine-context-mode-v1", acknowledge_separation: true });
+    expect(mock.writes).toEqual([]);
+    await noOverflow(page);
+    await page.screenshot({ path: info.outputPath(`agent-access-${width}.png`), fullPage: true });
+  });
+}
+
+for (const width of [1440, 320]) {
+  test(`owner stored review rejects stale confirmation and commits exact rereview at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 1000 });
+    const mock = await installMachineMock(page, { agents: true, assigned: true, contextSetup: true });
+    const config = { ...machineContextReviewFixture.machine_configuration!, state: "applied", reason: null };
+    let revision = 8;
+    let prepared = 0;
+    let committed = false;
+    let current: MachineContextReview = { ...machineContextReviewFixture, agent_id: agent.id, node_id: machineId, expected_revision: revision, machine_configuration: config };
+    const writes: ApiWrite[] = [];
+    const base = `/api/v1/assistant/nyxagent/agents/${agent.id}/machines/${machineId}`;
+    await page.route(`**/api/v1/assistant/nyxagent/agents/${agent.id}/machines`, route => route.fulfill({ json: [{
+      ...machineAccessFixture, node_id: machineId, name: mock.machine.name, revision,
+      assignment_revision: committed ? 10 : revision, context_setup_enabled: true, capabilities: prepared > 1 ? emptyCapabilities : { ...emptyCapabilities, files: true },
+      machine_configuration: committed ? { ...config, state: "pending", reason: "current_runtime_configuration_evidence_required" } : config,
+      authorization_applied: committed, environment_applied: false,
+    }] }));
+    await page.route(`**${base}/context-prepare`, async route => {
+      record(route, writes);
+      prepared += 1;
+      current = { ...current, review_id: `review-${prepared}`, expected_revision: revision, capabilities: prepared > 1 ? emptyCapabilities : { ...emptyCapabilities, files: true }, saved_login_ids: [], machine_configuration: config };
+      await route.fulfill({ json: current });
+    });
+    await page.route(`**${base}/context-reviews/*`, route => route.fulfill({ json: current }));
+    await page.route(`**${base}/context-reviews/*/commit`, async route => {
+      record(route, writes);
+      if (prepared === 1) {
+        revision = 9;
+        return fixtureError(route, 409, "machine_context_review_stale");
+      }
+      committed = true;
+      revision = 10;
+      current = { ...current, status: "committed", committed_revision: 10, applicable: false, authorization_applied: true, environment_applied: false,
+        machine_configuration: { ...config, state: "pending", reason: "current_runtime_configuration_evidence_required" } };
+      await route.fulfill({ json: current });
+    });
+    await page.goto(`/assistant/machines?machine=${machineId}&agent=${agent.id}`);
+    const panel = detail(page);
+    await expect(panel.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(panel.getByRole("combobox", { name: "Agent for machine access" })).toHaveText(agent.display_name);
+    await panel.getByRole("button", { name: "Separate workspace and browser for this agent", exact: true }).click();
+    await expect(panel.getByText("Reviewed tools: File tools", { exact: true })).toBeVisible();
+    await panel.getByRole("checkbox", { name: /I approve this exact/ }).check();
+    await panel.getByRole("button", { name: "Approve and apply reviewed mode", exact: true }).click();
+    await expect(panel.getByText(/Review is stale or no longer authorized/)).toBeVisible();
+    await expect(panel.getByRole("button", { name: "Approve and apply reviewed mode", exact: true })).toBeDisabled();
+    await panel.getByRole("button", { name: "Prepare and review again", exact: true }).click();
+    await expect(panel.getByText("Stored review review-2", { exact: true })).toBeVisible();
+    await expect(panel.getByText("Reviewed tools: None — all tools remain off", { exact: true })).toBeVisible();
+    await expect(panel.getByRole("checkbox", { name: /I approve this exact/ })).not.toBeChecked();
+    await panel.getByRole("checkbox", { name: /I approve this exact/ }).check();
+    await panel.getByRole("button", { name: "Approve and apply reviewed mode", exact: true }).click();
+    await expect(panel.getByText(/Authorization committed at revision 10/)).toBeVisible();
+    await expect(panel.getByText("Hosted configuration pending", { exact: true }).first()).toBeVisible();
+    await expect(panel.getByText("Environment mode applied", { exact: true })).toHaveCount(0);
+    expect(writes.filter(write => write.path.endsWith("/commit")).map(write => write.body)).toEqual([{}, {}]);
+    expect(writes.filter(write => write.path.endsWith("context-prepare")).map(write => write.body)).toEqual([
+      { mode: "separated", policy_version: "machine-context-mode-v1", acknowledge_separation: true },
+      { mode: "separated", policy_version: "machine-context-mode-v1", acknowledge_separation: true },
+    ]);
+    expect(mock.writes).toEqual([]);
+    await noOverflow(page);
+    await page.screenshot({ path: info.outputPath(`owner-review-${width}.png`), fullPage: true });
+  });
+}
+
+test("Machine Ready with Agent support unavailable keeps fees and pause/delete distinct", async ({ page }) => {
+  const mock = await installMachineMock(page, { agents: true, assigned: true });
+  await page.route(`**/api/v1/assistant/nyxagent/agents/${agent.id}/machines`, route => route.fulfill({ json: [{
+    ...machineAccessFixture, node_id: machineId, name: mock.machine.name,
+    mode: "separated", availability_reason: "separated_context_unavailable", separated: { available: false, landlock_abi: 6, reason: "separated_probe_failed" },
+  }] }));
+  const panel = await show(page);
+  await expect(panel.getByText("Machine Ready", { exact: true })).toBeVisible();
+  await expect(panel.getByText(/An unavailable Agent does not pause this machine or stop runtime charges/)).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Pause machine", exact: true })).toBeVisible();
+  await selectTab(panel, "settings");
+  await expect(panel.getByRole("button", { name: "Delete machine", exact: true })).toBeVisible();
+  await selectTab(panel, "access");
+  await panel.getByRole("combobox", { name: "Agent for machine access" }).click();
+  await page.getByRole("option", { name: agent.display_name }).click();
+  await expect(panel.getByText(/Agent tools unavailable: separated support is unavailable/)).toBeVisible();
+  await expect(panel.getByText("Environment mode applied", { exact: true })).toHaveCount(0);
+  expect(mock.writes).toEqual([]);
 });
 
 for (const status of [403, 503]) {

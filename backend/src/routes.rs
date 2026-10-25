@@ -2640,6 +2640,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             axum::routing::put(handlers::machine_access::put),
         )
         .route(
+            "/nyxagent/agents/{id}/machines/{node_id}/context-prepare",
+            post(handlers::machine_access::prepare_context),
+        )
+        .route(
+            "/nyxagent/agents/{id}/machines/{node_id}/context-reviews/{review_id}",
+            get(handlers::machine_access::review_context),
+        )
+        .route(
+            "/nyxagent/agents/{id}/machines/{node_id}/context-reviews/{review_id}/commit",
+            post(handlers::machine_access::commit_context),
+        )
+        .route(
             "/nyxagent/agents/{id}/machines/{node_id}/context-request",
             post(handlers::machine_access::request_context),
         )

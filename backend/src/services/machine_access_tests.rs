@@ -3002,7 +3002,7 @@ async fn issue_1844_concurrent_renewals_retry_live_fences_without_replaying_cont
     f.state.db.drop().await.unwrap();
 }
 
-fn supported_evidence() -> nyxid_machine::context::Evidence {
+pub(crate) fn supported_evidence() -> nyxid_machine::context::Evidence {
     nyxid_machine::context::Evidence {
         version: nyxid_machine::context::EVIDENCE_VERSION,
         os: "linux".into(),
@@ -3544,95 +3544,31 @@ async fn machine_access_cutover_does_not_infer_machine_enablement_or_org_promoti
 }
 
 #[tokio::test]
-async fn machine_access_old_node_requires_human_legacy_card_and_full_warning() {
-    use super::assistant_acknowledgement_service as acks;
-    use crate::handlers::machine_access::{
-        ContextRequestBody, apply_human_context_action, request_context,
-    };
-    let f = orchestrator_fixture("machine_selection_legacy_card").await;
+async fn machine_context_current_contract_rejects_nodes_without_durable_authority() {
+    use crate::handlers::machine_access::{ContextRequestBody, request_context};
+    let f = orchestrator_fixture("machine_review_authority_required").await;
     access::ensure_indexes(&f.state.db).await.unwrap();
-    let mut node = node(&f, &f.owner).await;
-    node.machine.as_mut().unwrap().separation_choice = None;
-    f.state
-        .db
-        .collection::<Document>(crate::models::node::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":&node.id},
-            doc! {"$set":{"machine":bson::to_bson(&node.machine).unwrap()}},
-        )
-        .await
-        .unwrap();
-    let response = request_context(
+    let node = node(&f, &f.owner).await;
+    let result = request_context(
         axum::extract::State(f.state.clone()),
         crate::test_utils::test_auth_user(&f.owner),
-        axum::extract::Path((f.chat.agent_id.clone(), node.id.clone())),
+        axum::extract::Path((f.chat.agent_id.clone(), node.id)),
         axum::Json(ContextRequestBody {
-            selection: Selection {
-                mode: Some("shared_legacy".into()),
-                expected_revision: 1,
-                capabilities: Capabilities::default(),
-                saved_login_ids: None,
-            },
+            mode: nyxid_machine::context::Mode::SharedLegacy,
+            policy_version: model::CONTEXT_POLICY_VERSION.into(),
+            acknowledge_separation: true,
         }),
     )
-    .await
-    .unwrap()
-    .0;
-    let response = serde_json::to_value(response).unwrap();
-    assert_eq!(response["status"], "pending");
-    let id = response["acknowledgement_id"].as_str().unwrap();
-    let conversation = response["conversation_id"].as_str().unwrap();
-    let card = f
-        .state
-        .db
-        .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
-            crate::models::assistant_acknowledgement::COLLECTION_NAME,
-        )
-        .find_one(doc! {"_id":id})
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        card.summary
-            .contains(nyxid_machine::context::SHARED_LEGACY_WARNING)
-    );
-    assert!(
-        !Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
-            .await
-            .unwrap()
-            .assignments
-            .contains_key(&node.id)
-    );
-    let allowed = acks::decide(&f.state.db, &f.owner, conversation, id, true)
-        .await
-        .unwrap();
-    apply_human_context_action(
-        &f.state,
-        &f.owner,
-        allowed.machine_context.as_ref().unwrap(),
-    )
-    .await
-    .unwrap();
-    let policy = Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
-        .await
-        .unwrap();
-    let assignment = &policy.assignments[&node.id];
-    assert_eq!(assignment.mode, "shared_legacy");
-    assert!(assignment.legacy);
+    .await;
+    assert!(matches!(result, Err(AppError::MachineAuthorityUnsupported)));
     assert_eq!(
-        assignment.capabilities,
-        Capabilities::legacy(node.machine.as_ref().unwrap())
-    );
-    assert!(
-        Box::pin(access::authorize(
-            &f.state.db,
-            &f.chat,
-            &node,
-            Operation::Exec,
-            &json!({})
-        ))
-        .await
-        .is_ok()
+        f.state
+            .db
+            .collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .count_documents(doc! {"machine_context":{"$ne":bson::Bson::Null}})
+            .await
+            .unwrap(),
+        0
     );
     f.state.db.drop().await.unwrap();
 }
@@ -3686,6 +3622,7 @@ async fn machine_access_legacy_opt_out_requires_human_card_and_preserves_limits(
             actor_id: f.owner.clone(),
             group_id: None,
             generation: 3,
+            runtime_id: machine.machine.as_ref().unwrap().runtime_id.clone(),
             mode: "separated".into(),
         })
         .await
@@ -3709,7 +3646,11 @@ async fn machine_access_legacy_opt_out_requires_human_card_and_preserves_limits(
         axum::extract::State(f.state.clone()),
         crate::test_utils::test_auth_user(&f.owner),
         axum::extract::Path((f.chat.agent_id.clone(), machine.id.clone())),
-        axum::Json(ContextRequestBody { selection: forged }),
+        axum::Json(ContextRequestBody {
+            mode: nyxid_machine::context::Mode::SharedLegacy,
+            policy_version: model::CONTEXT_POLICY_VERSION.into(),
+            acknowledge_separation: true,
+        }),
     )
     .await
     .unwrap()
@@ -3940,5 +3881,170 @@ async fn machine_access_retained_denials_bound_new_assignment_history() {
             .unwrap(),
         policy
     );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn separated_runtime_recovery_advances_once_without_widening_grants() {
+    let f = fixture("separated_runtime_recovery").await;
+    enable(&f).await;
+    let mut n = v2(&f).await;
+    n.machine.as_mut().unwrap().separation_evidence = Some(supported_evidence());
+    n.machine.as_mut().unwrap().separated = Some(nyxid_machine::context::Support {
+        available: true,
+        landlock_abi: Some(6),
+        reason: None,
+    });
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&n.id},
+            doc! {"$set":{"machine":bson::to_bson(&n.machine).unwrap()}},
+        )
+        .await
+        .unwrap();
+    super::feature_flag_service::set_platform_override(
+        &f.state.db,
+        access::CONTEXT_FLAG,
+        &super::feature_flag_service::FlagTarget::Global,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let mut selected = selection(
+        1,
+        Capabilities {
+            files: true,
+            ..Default::default()
+        },
+    );
+    selected.mode = Some("separated".into());
+    selected.saved_login_ids = Some(vec![]);
+    let policy = access::configure(&f.state.db, &f.owner, &f.chat.agent_id, &n.id, selected)
+        .await
+        .unwrap();
+    let first = access::admit(
+        &f.state.db,
+        &f.chat,
+        &n,
+        Operation::ReadFile,
+        &json!({}),
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let lease = f
+        .state
+        .db
+        .collection::<model::Lease>(model::LEASES)
+        .find_one(doc! {"_id":&first.lease_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let old = n.clone();
+    n.machine.as_mut().unwrap().runtime_id = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&n.id},
+            doc! {"$set":{"machine":bson::to_bson(&n.machine).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let args = json!({});
+    let (a, b) = tokio::join!(
+        access::admit(&f.state.db, &f.chat, &n, Operation::ReadFile, &args, None),
+        access::admit(&f.state.db, &f.chat, &n, Operation::ReadFile, &args, None)
+    );
+    let a = a.unwrap().unwrap();
+    let b = b.unwrap().unwrap();
+    assert_eq!(
+        a.generation,
+        first.generation + 1,
+        "replacement must authorize a newer ephemeral profile generation"
+    );
+    assert_eq!(
+        b.generation, a.generation,
+        "concurrent recovery must advance exactly once"
+    );
+    assert_eq!(a.context_id, first.context_id);
+    assert_eq!(a.revision, first.revision);
+    assert_eq!(a.capabilities, first.capabilities);
+    let repeated = access::admit(&f.state.db, &f.chat, &n, Operation::ReadFile, &args, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(repeated.generation, a.generation);
+    assert!(
+        access::admit(&f.state.db, &f.chat, &old, Operation::ReadFile, &args, None)
+            .await
+            .is_err()
+    );
+    assert!(access::renew_one(&f.state, lease).await.is_err());
+    assert!(
+        access::admit(&f.state.db, &f.chat, &n, Operation::Exec, &args, None)
+            .await
+            .is_err()
+    );
+    assert!(
+        access::admit(&f.state.db, &f.chat, &n, Operation::Browser, &args, None)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        access::policy(&f.state.db, &f.chat.agent_id).await.unwrap(),
+        policy
+    );
+    let recovered = f
+        .state
+        .db
+        .collection::<model::Context>(model::CONTEXTS)
+        .find_one(doc! {"_id":&a.context_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.runtime_id, a.runtime_id);
+    assert_eq!(recovered.generation as u64, a.generation);
+
+    // Recovery is execution authority, never a tool grant. With every tool
+    // revoked, a later daemon cannot reconstruct this context by admission.
+    let mut off = selection(policy.revision, Capabilities::default());
+    off.saved_login_ids = Some(vec![]);
+    let off_policy = access::configure(&f.state.db, &f.owner, &f.chat.agent_id, &n.id, off)
+        .await
+        .unwrap();
+    n.machine.as_mut().unwrap().runtime_id = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&n.id},
+            doc! {"$set":{"machine":bson::to_bson(&n.machine).unwrap()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        access::admit(&f.state.db, &f.chat, &n, Operation::ReadFile, &args, None)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        access::policy(&f.state.db, &f.chat.agent_id).await.unwrap(),
+        off_policy
+    );
+    let still = f
+        .state
+        .db
+        .collection::<model::Context>(model::CONTEXTS)
+        .find_one(doc! {"_id":&a.context_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still.runtime_id, recovered.runtime_id);
+    assert_eq!(still.generation, recovered.generation);
     f.state.db.drop().await.unwrap();
 }

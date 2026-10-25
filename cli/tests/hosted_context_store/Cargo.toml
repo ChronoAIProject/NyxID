@@ -1,0 +1,19 @@
+[package]
+name = "nyxid-hosted-context-store-tests"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[workspace]
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["process", "rt", "macros", "io-util", "time"] }
+nyxid-machine = { path = "../../../machine" }
+[profile.dev]
+debug = 0
+incremental = true

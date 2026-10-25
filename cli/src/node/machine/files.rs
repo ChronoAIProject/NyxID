@@ -174,10 +174,16 @@ impl Roots {
         let resolved = self.resolve(&supplied, false)?;
         // Keep every ancestor for the child to check after dropping privileges.
         // A root supervisor must not bypass a protected parent's permissions.
+        // Linux O_PATH also pins a worker-owned 0700 cwd without requiring the
+        // supervisor to read it. The child still checks X_OK on every ancestor.
+        #[cfg(target_os = "linux")]
+        const TRAVERSE: i32 = libc::O_PATH;
+        #[cfg(not(target_os = "linux"))]
+        const TRAVERSE: i32 = libc::O_RDONLY;
         let mut directories = vec![File::from(open_at(
             libc::AT_FDCWD,
             std::ffi::OsStr::new("/"),
-            libc::O_RDONLY | libc::O_DIRECTORY,
+            TRAVERSE | libc::O_DIRECTORY,
             0,
         )?)];
         for component in resolved.components() {
@@ -188,7 +194,7 @@ impl Roots {
                 directories.push(File::from(open_at(
                     parent.as_raw_fd(),
                     name,
-                    libc::O_RDONLY | libc::O_DIRECTORY,
+                    TRAVERSE | libc::O_DIRECTORY,
                     0,
                 )?));
             }
@@ -605,6 +611,91 @@ fn digest(file: &mut File) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires a disposable hosted image, umask 077 and the fixed four capabilities"]
+    async fn hosted_worker_paths_support_private_umask_without_dac_override() {
+        use std::os::unix::fs::MetadataExt;
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        for field in ["CapEff", "CapPrm", "CapBnd"] {
+            let actual = status
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{field}:")))
+                .unwrap();
+            assert_eq!(u64::from_str_radix(actual.trim(), 16).unwrap(), 0xe1);
+        }
+        assert!(status.lines().any(|line| line == "NoNewPrivs:\t1"));
+        assert!(status.lines().any(|line| line == "Umask:\t0077"));
+        let root = tempfile::tempdir_in("/var/lib/nyxid-hosted-tests").unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o711)).unwrap();
+        let data = root.path().join("contexts");
+        super::super::hosted_context::directory(&data, true).unwrap();
+        for uid in [20000, 20003] {
+            let gate = data.join(uid.to_string());
+            std::fs::create_dir(&gate).unwrap();
+            std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o710)).unwrap();
+            std::os::unix::fs::chown(&gate, Some(0), Some(uid)).unwrap();
+            let workspace = gate.join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            std::fs::write(workspace.join("private"), uid.to_string()).unwrap();
+            std::os::unix::fs::chown(&workspace.join("private"), Some(uid), Some(uid)).unwrap();
+            std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::os::unix::fs::chown(&workspace, Some(uid), Some(uid)).unwrap();
+        }
+        let workspace = data.join("20000/workspace");
+        assert_eq!(
+            File::open(&workspace).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let identity = super::super::process::Identity::resolve(Some("nyxc20000")).unwrap();
+        let mut command = tokio::process::Command::new("/bin/sh");
+        identity.prepare_agent(&mut command).unwrap();
+        let access = command
+            .args(["-ec", "printf own > \"$1/marker\"; test \"$(cat \"$1/private\")\" = 20000; test ! -r \"$2/private\"; test ! -w \"$2\"; test ! -r \"$3\"; test ! -w \"$3\"", "sh"])
+            .arg(&workspace)
+            .arg(data.join("20003/workspace"))
+            .arg(&data)
+            .output()
+            .await
+            .unwrap();
+        let roots = Roots::new(&[workspace.clone()], &[]).unwrap();
+        let pinned = roots.cwd(None);
+        println!(
+            "contexts_mode={:o} worker_path_success={} supervisor_pin_success={} worker_stderr={}",
+            std::fs::metadata(&data).unwrap().mode() & 0o777,
+            access.status.success(),
+            pinned.is_ok(),
+            String::from_utf8_lossy(&access.stderr)
+        );
+        assert!(
+            access.status.success(),
+            "worker must access its own retained path while sibling access stays denied"
+        );
+        let mut command = tokio::process::Command::new("/bin/cat");
+        identity.prepare_agent(&mut command).unwrap();
+        super::super::process::pin_cwd(&mut command, pinned.unwrap());
+        let output = command.arg("marker").output().await.unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"own");
+        assert_eq!(std::fs::metadata(&workspace).unwrap().mode() & 0o777, 0o700);
+        let pinned = roots.cwd(None).unwrap();
+        std::fs::set_permissions(data.join("20000"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let mut command = tokio::process::Command::new("/bin/true");
+        identity.prepare_agent(&mut command).unwrap();
+        super::super::process::pin_cwd(&mut command, pinned);
+        assert_eq!(
+            command.status().await.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        // Existing private metadata directories must never be broadened.
+        let private = root.path().join("metadata");
+        std::fs::create_dir(&private).unwrap();
+        super::super::hosted_context::directory(&private, true).unwrap();
+        assert_eq!(std::fs::metadata(private).unwrap().mode() & 0o777, 0o700);
+    }
+
     #[tokio::test]
     async fn command_directory_stays_pinned_after_parent_symlink_swap() {
         let root = tempfile::tempdir().unwrap();

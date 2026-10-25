@@ -1241,6 +1241,7 @@ async fn create_specialist_inner(
                     return Ok(Err(TeamRefusal::NameTaken));
                 }
                 collection.insert_one(&agent).session(&mut *session).await?;
+                super::machine_access_service::enqueue_hosted_assignments(db,&agent.id,&agent.machine_node_ids,1,session).await?;
                 if let Some(a) = &authority {
                     db.collection::<bson::Document>(AGENTS).update_one(doc! {"_id": &agent.id}, doc! {"$set": {"platform_setup_id": &a.setup_id}}).session(&mut *session).await?;
                 }

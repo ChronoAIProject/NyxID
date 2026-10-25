@@ -42,7 +42,10 @@ const offer = {
     job_history_days: 30,
     operation_history_days: 90,
     terminal_output_max_retention_seconds: 3600,
-    shared_environment_mode: "shared_legacy",
+    separation_policy_version: "remote-machine-separation-v1",
+    separation_choices: ["automatic", "require_separated", "shared_legacy"],
+    separation_warning: "Shared OS access can expose files through the execution identity.",
+    shared_environment_mode: "per_agent",
     cross_client_secret_isolation: false,
     inbound_network_service: false,
     persistent_environment_variables: false,
@@ -147,10 +150,13 @@ const show = (machine?: RemoteMachine) =>
       <RemoteMachineCreate initialFreeSlot={false} onCreated={state.accepted} />
     ),
   );
-const accept = () =>
-  userEvent.click(
+const accept = async () => {
+  const separation = screen.queryByRole("checkbox", { name: /I accept the selected Agent separation/ });
+  if (separation && separation.getAttribute("data-state") !== "checked") await userEvent.click(separation);
+  await userEvent.click(
     screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
   );
+};
 const submit = () =>
   userEvent.click(
     screen.getByRole("button", { name: "Accept quote and create" }),
@@ -182,8 +188,11 @@ it("shows the exact offered rate and requires explicit paid terms before real ac
   expect(state.create.mock.calls[0]![0]).toEqual({
     body: {
       name: "my-remote-machine",
-      capabilities: ["shell", "files"],
+      capabilities: ["files", "shell"],
       specialist_id: null,
+      separation_choice: "automatic",
+      separation_policy_version: "remote-machine-separation-v1",
+      acknowledge_separation: true,
       free_slot: false,
       profile_version: "remote-machine",
       quote_id: "quote-one",
@@ -194,7 +203,7 @@ it("shows the exact offered rate and requires explicit paid terms before real ac
     },
     idempotencyKey: expect.any(String),
   });
-  expect(state.accepted).toHaveBeenCalledWith("machine-1", "operation-1");
+  expect(state.accepted).toHaveBeenCalledWith("machine-1", "operation-1", null);
   expect(sessionStorage.length).toBe(0);
 });
 
@@ -245,7 +254,14 @@ it("replays exactly the original paid body and key after an unknown response", a
 });
 
 it("recovers a saved paid request after quote expiry without accepting the replacement", async () => {
-  const saved = getRemoteMachineIntent("owner", "create-paid", {
+  const saved = getRemoteMachineIntent("owner", "create", {
+    name: "my-remote-machine",
+    capabilities: ["files", "shell"],
+    specialist_id: null,
+    profile_version: "remote-machine",
+    separation_choice: "automatic",
+    separation_policy_version: "remote-machine-separation-v1",
+    acknowledge_separation: true,
     free_slot: false,
     quote_id: "original-quote",
     accept_account_balance: true,
@@ -265,7 +281,7 @@ it("recovers a saved paid request after quote expiry without accepting the repla
         ...saved.body,
         profile_version: "remote-machine",
         name: "my-remote-machine",
-        capabilities: ["shell", "files"],
+        capabilities: ["files", "shell"],
         specialist_id: null,
       },
       idempotencyKey: saved.idempotencyKey,
@@ -435,11 +451,11 @@ it.each(["create", "resume"])(
     const resume = operation === "resume";
     getRemoteMachineIntent(
       "owner",
-      resume ? "machine-1:resume" : "create-paid",
+      resume ? "machine-1:resume" : "create",
       {
         ...(resume
           ? { action: "resume" as const, expected_revision: 9 }
-          : { free_slot: false }),
+          : { free_slot: false, name: "my-remote-machine", capabilities: ["files", "shell"], specialist_id: null, separation_choice: "automatic", separation_policy_version: "remote-machine-separation-v1", acknowledge_separation: true }),
         profile_version: "remote-machine",
         quote_id: "original-quote",
         accept_account_balance: true,

@@ -1836,11 +1836,16 @@ pub async fn request_machine_context(
     action: crate::models::machine_access::HumanContextAction,
     summary: &str,
 ) -> AppResult<AssistantAcknowledgement> {
+    let snapshot_digest = hex::encode(Sha256::digest(
+        serde_json::to_vec(&action.snapshot)
+            .map_err(|_| AppError::Internal("Machine context snapshot encoding failed".into()))?,
+    ));
     let args = serde_json::json!({
         "agent": action.agent_id,
         "machine": action.node_id,
         "selection": action.selection,
-        "source": "human_machine_settings"
+        "source": "human_machine_settings",
+        "review_snapshot_digest": snapshot_digest
     });
     let encoded = bson::to_bson(&action).map_err(|_| not_found())?;
     let (row, _) = request_tracked_with_machine_context(

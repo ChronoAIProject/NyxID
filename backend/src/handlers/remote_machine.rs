@@ -85,6 +85,9 @@ async fn request_platform(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateRequest {
+    pub separation_choice: nyxid_machine::context::Choice,
+    pub separation_policy_version: String,
+    pub acknowledge_separation: bool,
     #[serde(default = "default_profile_version")]
     pub profile_version: String,
     #[serde(default = "crate::models::remote_machine::default_name")]
@@ -132,6 +135,9 @@ pub struct PolicyView {
     pub job_history_days: u32,
     pub operation_history_days: u32,
     pub terminal_output_max_retention_seconds: u32,
+    pub separation_policy_version: &'static str,
+    pub separation_choices: [&'static str; 3],
+    pub separation_warning: &'static str,
     pub shared_environment_mode: &'static str,
     pub cross_client_secret_isolation: bool,
     pub inbound_network_service: bool,
@@ -159,7 +165,10 @@ fn policy_view() -> PolicyView {
         job_history_days: 30,
         operation_history_days: 90,
         terminal_output_max_retention_seconds: 3600,
-        shared_environment_mode: "shared_legacy",
+        separation_policy_version: crate::models::remote_machine::SEPARATION_POLICY_VERSION,
+        separation_choices: ["automatic", "require_separated", "shared_legacy"],
+        separation_warning: nyxid_machine::context::SHARED_LEGACY_WARNING,
+        shared_environment_mode: "per_agent",
         cross_client_secret_isolation: false,
         inbound_network_service: false,
         persistent_environment_variables: false,
@@ -512,7 +521,7 @@ pub async fn create(
     machine::require_remote_machines_enabled(&state.db, &owner_id).await?;
     let idempotency_key = require_idempotency_key(&headers)?;
     let profile = request_profile(&state, &body.profile_version)?;
-    let mut request_body = json!({"profile_version":body.profile_version,"name":body.name,"capabilities":body.capabilities,"specialist_id":body.specialist_id,"free_slot": body.free_slot, "policy_version": body.policy_version,
+    let mut request_body = json!({"separation_choice":body.separation_choice,"separation_policy_version":body.separation_policy_version,"acknowledge_separation":body.acknowledge_separation,"profile_version":body.profile_version,"name":body.name,"capabilities":body.capabilities,"specialist_id":body.specialist_id,"free_slot": body.free_slot, "policy_version": body.policy_version,
         "data_policy_version": body.data_policy_version, "acknowledge_shared_environment": body.acknowledge_shared_environment, "quote_id": body.quote_id, "accept_account_balance":body.accept_account_balance});
     crate::services::remote_machine_configuration::normalize_request(&mut request_body)?;
     require_policy_acceptance(&body)?;
@@ -830,6 +839,10 @@ mod tests {
     #[test]
     fn create_requires_explicit_current_policies_and_shared_environment_acknowledgement() {
         let mut body = CreateRequest {
+            separation_choice: nyxid_machine::context::Choice::SharedLegacy,
+            separation_policy_version: crate::models::remote_machine::SEPARATION_POLICY_VERSION
+                .into(),
+            acknowledge_separation: true,
             profile_version: default_profile_version(),
             name: crate::models::remote_machine::default_name(),
             capabilities: crate::models::remote_machine::default_capabilities(),

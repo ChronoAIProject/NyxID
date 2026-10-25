@@ -34,6 +34,8 @@ import {
 } from "@/hooks/use-machines";
 import { useBillingWallet } from "@/hooks/use-billing";
 import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
 import { exactCredits, formatExactCredits } from "@/lib/credits";
@@ -44,6 +46,7 @@ import {
 } from "@/lib/remote-machine-intent";
 import {
   REMOTE_MACHINE_PROFILE,
+  SHARED_LEGACY_WARNING,
   remoteMachineCreateRequestSchema,
   remoteMachineHostedConfigurationSchema,
   remoteMachinePaidQuoteSchema,
@@ -56,6 +59,7 @@ import {
 } from "./remote-machine-preflight";
 
 const formSchema = remoteMachineHostedConfigurationSchema.extend({
+  separationAcknowledged: z.boolean().refine(Boolean, "Review and accept the selected Agent separation policy."),
   acknowledged: z
     .boolean()
     .refine(
@@ -70,7 +74,7 @@ const labels = {
   computer: "Computer — operate the desktop and browser",
 };
 type Props = {
-  readonly onCreated: (machineId: string, operationId: string) => void;
+  readonly onCreated: (machineId: string, operationId: string, specialistId: string | null) => void;
   readonly initialFreeSlot?: boolean;
 };
 
@@ -93,16 +97,12 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
   const create = useCreateRemoteMachine();
   const wallet = useBillingWallet();
   const agents = useNyxBotAgents();
+  const contextsEnabled = useFeature(FEATURE_FLAG.MACHINE_CONTEXTS);
   const [stored] = useState(() => {
     try {
-      const free = ownerId ? readRemoteMachineIntent(ownerId, "create") : null;
-      const paid =
-        !free && ownerId
-          ? readRemoteMachineIntent(ownerId, "create-paid")
-          : null;
       return {
-        intent: free ?? paid,
-        scope: paid ? "create-paid" : "create",
+        intent: ownerId ? readRemoteMachineIntent(ownerId, "create") : null,
+        scope: "create",
         unreadable: false,
       };
     } catch {
@@ -125,9 +125,10 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
     resolver: zodResolver(formSchema),
     defaultValues: {
       ...remoteMachineHostedConfigurationSchema.parse(
-        stored.intent?.body ?? {},
+        stored.intent?.body ?? { separation_choice: "automatic" },
       ),
       acknowledged: false,
+      separationAcknowledged: false,
     },
   });
   const requestQuote = quote.mutate;
@@ -187,6 +188,12 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
         (!agent.owner_id || agent.owner_id === ownerId),
     ) ?? [];
   const selectedSpecialist = form.watch("specialist_id");
+  const separationChoice = form.watch("separation_choice");
+  const requiredBlocked = !saved && separationChoice === "require_separated" && !contextsEnabled;
+  const separationPolicy = saved?.body.separation_policy_version ?? policy?.separation_policy_version;
+  useEffect(() => {
+    form.setValue("separationAcknowledged", false, { shouldDirty: false, shouldTouch: false });
+  }, [separationPolicy, form]);
   const available =
     !wallet.error && wallet.data && wallet.data.owner_id === ownerId
       ? exactCredits(
@@ -197,7 +204,7 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
       : null;
 
   async function submit(values: z.output<typeof formSchema>) {
-    if (!canCreate || !ownerId || useAuthStore.getState().user?.id !== ownerId)
+    if (!canCreate || requiredBlocked || !ownerId || useAuthStore.getState().user?.id !== ownerId)
       return;
     setError(undefined);
     try {
@@ -206,6 +213,8 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
         saved ??
         getRemoteMachineIntent(ownerId, stored.scope, {
           ...remoteMachineHostedConfigurationSchema.parse(values),
+          separation_policy_version: policy!.separation_policy_version,
+          acknowledge_separation: values.separationAcknowledged,
           free_slot: freeSlot,
           profile_version: preflight!.profile.profile_version,
           policy_version: policy!.policy_version,
@@ -222,7 +231,7 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
       });
       if (useAuthStore.getState().user?.id !== ownerId) return;
       clearRemoteMachineIntent(ownerId, stored.scope, intent.idempotencyKey);
-      onCreated(response.machine.node_id, response.operation.id);
+      onCreated(response.machine.node_id, response.operation.id, intent.body.specialist_id ?? null);
     } catch (cause) {
       if (useAuthStore.getState().user?.id !== ownerId) return;
       setConflict(
@@ -238,6 +247,7 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
   }
   function refresh() {
     form.setValue("acknowledged", false);
+    form.setValue("separationAcknowledged", false);
     void entitlement.refetch();
     requestQuote({
       free_slot: freeSlot,
@@ -248,8 +258,6 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
     if (!ownerId || create.isPending) return;
     try {
       clearRemoteMachineIntent(ownerId, stored.scope);
-      // A malformed legacy paid-create intent must not be left behind on reset.
-      if (unreadable) clearRemoteMachineIntent(ownerId, "create-paid");
       setSaved(null);
       setUnreadable(false);
       setConflict(false);
@@ -287,6 +295,41 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
             </FormItem>
           )}
         />
+        <FormField control={form.control} name="separation_choice" render={({ field }) => (
+          <FormItem>
+            <FormLabel>Agent separation default</FormLabel>
+            <Select value={field.value} disabled={locked} onValueChange={(value) => {
+              field.onChange(value);
+              form.setValue("separationAcknowledged", false);
+            }}>
+              <FormControl><SelectTrigger aria-label="Agent separation default"><SelectValue /></SelectTrigger></FormControl>
+              <SelectContent>
+                <SelectItem value="automatic">Automatic</SelectItem>
+                <SelectItem value="require_separated">Require separated</SelectItem>
+                <SelectItem value="shared_legacy">Shared legacy</SelectItem>
+              </SelectContent>
+            </Select>
+            <FormMessage />
+          </FormItem>
+        )} />
+        <section aria-label="Agent separation policy" className="space-y-2 rounded-lg border border-border p-3 text-12">
+          <p>{separationChoice === "automatic"
+            ? "Automatic waits for confirmed separation support and account permission. If unavailable, the owner must resolve the choice; it never silently selects shared access."
+            : separationChoice === "require_separated"
+              ? "Require separated refuses Agent execution until complete separation support is confirmed. It never falls back to shared access."
+              : "Shared legacy records your explicit shared environment choice for new Agent assignments."}</p>
+          {separationChoice === "shared_legacy" ? <p>{policy?.separation_warning ?? SHARED_LEGACY_WARNING}</p> : null}
+          <p>Separate workspaces and browser profiles share the host kernel. The machine default applies to new Agent assignments and does not grant tools or change existing permissions. External clients retain their explicit shared Commands/Files grants.</p>
+          <p>Actual hosted support is verified after startup. Machine Ready does not mean an Agent is available. A failed Agent probe does not pause the machine, stop runtime charges, refund fees or delete data. Use Access to resolve authorization, or the existing Pause machine and Delete machine actions.</p>
+          {!contextsEnabled ? <p role="status">Context setup is not enabled for this account. Automatic remains pending owner resolution when separation cannot be authorized; Require separated cannot be submitted.</p> : null}
+          <p>Separation policy: {separationPolicy ?? "Unavailable — refresh preflight"}</p>
+          <FormField control={form.control} name="separationAcknowledged" render={({ field }) => (
+            <FormItem className="flex items-start gap-2">
+              <FormControl><Checkbox checked={field.value} onCheckedChange={(value) => form.setValue("separationAcknowledged", value === true)} disabled={create.isPending || (!saved && !separationPolicy)} /></FormControl>
+              <div><FormLabel>I accept the selected Agent separation default and its displayed policy, including the full warning when choosing Shared legacy.</FormLabel><FormMessage /></div>
+            </FormItem>
+          )} />
+        </section>
         <fieldset disabled={locked} className="space-y-3">
           <legend className="mb-2 text-12 font-medium">
             Enable on this machine
@@ -374,8 +417,9 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
         ) : null}
         <p className="text-12 text-muted-foreground">
           Enabling a capability does not grant access to a client. Specialist
-          assignment and permissions are separate; review any pending
-          permissions in agent settings after creation. External OAuth and Agent
+          assignment creates membership only, with all tools and saved logins off
+          regardless of editing flags. After creation, Access opens for the selected
+          Specialist so you can review its mode and grant specific tools. External OAuth and Agent
           Key tools remain limited to authorized Commands and Files.
         </p>
         <section
@@ -560,11 +604,16 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
             paused Machine automatically.
           </p>
           <p>
-            All clients share the OS and workspace. File roots do not isolate
-            shell commands. No inbound ports, public IP, persistent environment
-            variables, snapshots or restore. Only /workspace persists; HOME,
-            /tmp, browser profiles and downloads are temporary unless safely
-            saved in the workspace. Job environment variables are temporary.
+            Sharing is set per Agent. Shared legacy Agents and external clients
+            share their configured OS user and workspace; file roots do not
+            isolate shell commands. No inbound ports, public IP, persistent
+            environment variables, snapshots or restore. The legacy /workspace
+            and separated workspaces are retained on the protected persistent
+            volume, together with supervisor-owned identity, generation and
+            tombstone metadata. HOME, browser profiles, downloads and tmp remain
+            temporary; mode changes do not move shared files or copy cookies.
+            Recovery must verify the original volume and retained metadata;
+            failure keeps execution unavailable. Job environment variables are temporary.
           </p>
           <p>
             At most two jobs run concurrently. Default command timeout is 120
@@ -597,7 +646,7 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
               <FormControl>
                 <Checkbox
                   checked={field.value}
-                  onCheckedChange={(value) => field.onChange(value === true)}
+                  onCheckedChange={(value) => form.setValue("acknowledged", value === true)}
                   disabled={
                     create.isPending ||
                     (!saved &&
@@ -642,6 +691,8 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
             isLoading={create.isPending}
             disabled={
               !canCreate ||
+              requiredBlocked ||
+              !form.watch("separationAcknowledged") ||
               !form.watch("acknowledged") ||
               !capabilities.length ||
               !form.watch("name")

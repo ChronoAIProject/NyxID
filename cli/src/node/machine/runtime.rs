@@ -22,7 +22,10 @@ mod external_authority;
 mod external_dispatch;
 mod files;
 mod gateway;
+#[cfg(target_os = "linux")]
+mod hosted_context;
 mod jobs;
+mod managed_configuration;
 #[cfg(target_os = "macos")]
 mod memory_capture;
 mod native_desktop;
@@ -690,6 +693,7 @@ pub struct Runtime {
     authority: authority::Fences,
     external_authority: external_authority::Fences,
     managed_binding: std::sync::OnceLock<nyxid_machine::managed::Binding>,
+    managed_configuration: std::sync::OnceLock<nyxid_machine::managed::ConfigurationReport>,
     managed_window: std::sync::Mutex<Option<ManagedWindowState>>,
     managed_deadline_closed: std::sync::atomic::AtomicBool,
     managed_deadline_watch: std::sync::atomic::AtomicBool,
@@ -707,6 +711,23 @@ struct ManagedWindowState {
 
 impl Runtime {
     pub fn new(config: &Config, node_id: &str, config_dir: &Path) -> Result<Arc<Self>> {
+        Self::new_for_daemon(
+            config,
+            node_id,
+            config_dir,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+    }
+
+    /// Select the process identity before authentication without touching its
+    /// workspace. Construction still occurs only after the exact live WSS ACK.
+    pub(crate) fn new_for_daemon(
+        config: &Config,
+        node_id: &str,
+        config_dir: &Path,
+        runtime_id: &str,
+    ) -> Result<Arc<Self>> {
+        uuid::Uuid::parse_str(runtime_id).context("invalid daemon runtime identity")?;
         config.validate().map_err(anyhow::Error::msg)?;
         let identity = process::Identity::resolve(config.agent_user.as_deref())?;
         let browser = process::Identity::resolve(config.browser_user.as_deref())?;
@@ -743,7 +764,7 @@ impl Runtime {
             operation_admission: Arc::new(tokio::sync::RwLock::new(())),
             config: config.clone(),
             node_id: node_id.into(),
-            runtime_id: uuid::Uuid::new_v4().to_string(),
+            runtime_id: runtime_id.into(),
             excluded,
             custody: Arc::new(crate::node::custody::Custody::new(config_dir)),
             roots,
@@ -776,12 +797,17 @@ impl Runtime {
             external_authority: external_authority::Fences::open(config_dir)?,
             owner_job_deadlines: std::sync::Mutex::new(Default::default()),
             managed_binding: std::sync::OnceLock::new(),
+            managed_configuration: std::sync::OnceLock::new(),
             managed_window: std::sync::Mutex::new(None),
             managed_deadline_closed: std::sync::atomic::AtomicBool::new(false),
             managed_deadline_watch: std::sync::atomic::AtomicBool::new(false),
             authority_watch: std::sync::atomic::AtomicBool::new(false),
         });
         Ok(runtime)
+    }
+
+    pub(crate) fn daemon_id(&self) -> &str {
+        &self.runtime_id
     }
 
     pub async fn connect(
@@ -895,6 +921,24 @@ impl Runtime {
                 false
             };
         let separation_evidence = self.separation_evidence().await;
+        let separated = separation_evidence.support();
+        #[cfg(target_os = "linux")]
+        let separated = {
+            let mut separated = separated;
+            if self.managed_binding.get().is_some()
+                && !self
+                    .contexts
+                    .lock()
+                    .await
+                    .store
+                    .as_ref()
+                    .is_some_and(context_runtime::Store::is_hosted)
+            {
+                separated.available = false;
+                separated.reason = Some("hosted_context_binding_required".into());
+            }
+            separated
+        };
         let profile = MachineProfile {
             authority_timing_v1: true,
             installation: Some(update::installation(&self.config)),
@@ -908,9 +952,10 @@ impl Runtime {
             browser: self.config.browser,
             authority_versions: vec![2, 3],
             exact_cancel: true,
-            separated: Some(separation_evidence.support()),
+            separated: Some(separated),
             separation_evidence: Some(separation_evidence),
             separation_choice: self.config.separation_choice,
+            managed_configuration: self.managed_configuration_report(),
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
             roots: self

@@ -39,8 +39,27 @@ pub async fn ensure(identity: &Identity) -> Result<()> {
 
 impl Server {
     pub async fn launch(identity: &Identity) -> Result<Self> {
-        let directory = identity.home.join(".nyxid-dev-display");
-        browser::runtime_directory(&directory, identity.uid, identity.gid, 0o700)?;
+        // A separated HOME is 0700 and its owner is a worker. The hosted
+        // supervisor has CHOWN but no DAC override: keep display authority in
+        // a supervisor-owned sibling behind the protected role gate instead.
+        let separated = identity.sandbox.is_some();
+        let (directory, owner, directory_mode, authority_mode) = if separated {
+            let directory = identity
+                .home
+                .parent()
+                .context("context_role_missing")?
+                .join("display");
+            browser::protected_runtime_parent(&directory)?;
+            (directory, unsafe { libc::geteuid() }, 0o750, 0o640)
+        } else {
+            (
+                identity.home.join(".nyxid-dev-display"),
+                identity.uid,
+                0o700,
+                0o600,
+            )
+        };
+        browser::runtime_directory(&directory, owner, identity.gid, directory_mode)?;
         let authority = directory.join("Xauthority");
         // A wildcard record lets Xvfb choose an unused display atomically through
         // -displayfd. Neither the cookie nor the display is an agent environment.
@@ -60,12 +79,15 @@ impl Server {
             .create(true)
             .truncate(true)
             .write(true)
-            .mode(0o600)
+            .mode(authority_mode)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&authority)?;
-        std::fs::File::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        std::fs::File::set_permissions(
+            &file,
+            std::os::unix::fs::PermissionsExt::from_mode(authority_mode),
+        )?;
         std::io::Write::write_all(&mut file, &record)?;
-        browser::chown(&authority, identity.uid, identity.gid)?;
+        browser::chown(&authority, owner, identity.gid)?;
         let mut command = Command::new("Xvfb");
         identity.prepare(&mut command)?;
         parent_bound(&mut command);
@@ -137,5 +159,97 @@ fn parent_bound(command: &mut Command) {
             }
             Ok(())
         });
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::{
+        fs,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        sync::Arc,
+    };
+
+    #[tokio::test]
+    #[ignore = "requires a complete disposable hosted image with the fixed four capabilities and Localhost profile"]
+    async fn separated_display_does_not_require_supervisor_access_to_worker_home() {
+        assert_eq!(unsafe { libc::geteuid() }, 0);
+        let status = fs::read_to_string("/proc/self/status").unwrap();
+        for field in ["CapEff", "CapPrm", "CapBnd"] {
+            let actual = status
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{field}:")))
+                .unwrap();
+            assert_eq!(u64::from_str_radix(actual.trim(), 16).unwrap(), 0xe1);
+        }
+        assert!(status.lines().any(|line| line == "NoNewPrivs:\t1"));
+        let parent = tempfile::tempdir_in("/var/lib/nyxid-hosted-tests").unwrap();
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o711)).unwrap();
+        let mut displays = Vec::new();
+        for uid in [20001, 20004] {
+            let root = parent.path().join(uid.to_string());
+            fs::create_dir(&root).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o710)).unwrap();
+            std::os::unix::fs::chown(&root, Some(0), Some(uid)).unwrap();
+            for name in ["workspace", "home", "tmp"] {
+                let path = root.join(name);
+                fs::create_dir(&path).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+                std::os::unix::fs::chown(&path, Some(uid), Some(uid)).unwrap();
+            }
+            let mut identity = Identity::resolve(Some(&format!("nyxc{uid}"))).unwrap();
+            identity.home = root.join("home");
+            identity.sandbox = Some(Arc::new(
+                super::super::process::context_sandbox::Sandbox::browser(&root, uid).unwrap(),
+            ));
+            assert_eq!(
+                fs::File::open(&identity.home).unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+            let display = Server::launch(&identity).await.unwrap();
+            assert!(!display.authority.starts_with(&identity.home));
+            let authority = fs::metadata(&display.authority).unwrap();
+            assert_eq!(
+                (authority.uid(), authority.gid(), authority.mode() & 0o777),
+                (0, uid, 0o640)
+            );
+            let mut check = Command::new("xdpyinfo");
+            identity.prepare(&mut check).unwrap();
+            let result = check
+                .env("DISPLAY", &display.name)
+                .env("XAUTHORITY", &display.authority)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "private X server is not usable: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let other = if uid == 20001 { 20004 } else { 20001 };
+            let denied = std::process::Command::new("setpriv")
+                .args([
+                    "--reuid",
+                    &other.to_string(),
+                    "--regid",
+                    &other.to_string(),
+                    "--clear-groups",
+                    "test",
+                    "-r",
+                ])
+                .arg(&display.authority)
+                .status()
+                .unwrap();
+            assert!(
+                !denied.success(),
+                "sibling browser may not read display authority"
+            );
+            assert_eq!(fs::metadata(&identity.home).unwrap().uid(), uid);
+            assert_eq!(fs::metadata(&identity.home).unwrap().mode() & 0o777, 0o700);
+            displays.push(display);
+        }
+        assert_ne!(displays[0].name, displays[1].name);
+        assert_ne!(displays[0].authority, displays[1].authority);
     }
 }

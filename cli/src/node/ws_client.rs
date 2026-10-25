@@ -854,6 +854,8 @@ async fn run_connection_loop(
         None
     };
 
+    let managed_daemon_id = uuid::Uuid::new_v4().to_string();
+
     loop {
         if shutdown_requested(&shutdown) {
             break;
@@ -871,6 +873,7 @@ async fn run_connection_loop(
             in_flight.clone(),
             shutdown.clone(),
             &mut machine,
+            &managed_daemon_id,
             proxy_uploads.clone(),
             replay_guard.clone(),
         )
@@ -916,6 +919,7 @@ async fn connect_and_serve(
     in_flight: Arc<AtomicUsize>,
     mut shutdown: watch::Receiver<bool>,
     machine_state: &mut Option<Arc<super::machine::Runtime>>,
+    managed_daemon_id: &str,
     proxy_uploads: Arc<super::proxy_upload::Uploads>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
 ) -> Result<Option<Duration>> {
@@ -951,6 +955,11 @@ async fn connect_and_serve(
             .validate()
             .map_err(|reason| Error::Config(reason.into()))?;
         auth_msg["managed_runtime"] = serde_json::to_value(binding)?;
+        auth_msg["managed_daemon_id"] = serde_json::json!(
+            machine_state
+                .as_ref()
+                .map_or(managed_daemon_id, |runtime| runtime.daemon_id())
+        );
     }
     tokio::select! {
         result = ws_sink.send(Message::Text(auth_msg.to_string().into())) => {
@@ -1037,7 +1046,7 @@ async fn connect_and_serve(
     // constructing them, including a restart with a persisted config. Keep
     // the admitted runtime across reconnects so existing bounded jobs retain
     // the ordinary signed-lease behavior.
-    let managed_window = if let Some(binding) = &config.managed_runtime {
+    let (managed_window, hosted_storage_grant) = if let Some(binding) = &config.managed_runtime {
         let window: nyxid_machine::managed::SignedRuntimeWindow = serde_json::from_value(
             parsed
                 .get("managed_runtime_window")
@@ -1055,26 +1064,57 @@ async fn connect_and_serve(
         window
             .verify(binding, &bytes, chrono::Utc::now().timestamp_millis())
             .map_err(|_| Error::AuthFailed("Managed runtime deadline invalid".into()))?;
+        let storage = config
+            .hosted_storage
+            .as_ref()
+            .ok_or_else(|| Error::Config("Managed retained storage authority missing".into()))?;
+        let grant: nyxid_machine::managed::HostedStorageGrant = serde_json::from_value(
+            parsed
+                .get("hosted_storage")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )
+        .map_err(|_| Error::AuthFailed("Managed retained storage grant missing".into()))?;
+        let daemon_id = machine_state
+            .as_ref()
+            .map_or(managed_daemon_id, |runtime| runtime.daemon_id());
+        grant
+            .validate(binding, storage, daemon_id)
+            .map_err(|_| Error::AuthFailed("Managed retained storage grant mismatch".into()))?;
         super::managed_deadline::install_deadline_marker(config_dir, &window.window)
             .map_err(|_| Error::AuthFailed("Managed runtime deadline is terminal".into()))?;
-        Some(window)
+        (Some(window), Some(grant))
     } else {
-        None
+        (None, None)
     };
     if config.managed_runtime.is_some() && machine_state.is_none() {
         super::managed_runtime::admit_workspace()
             .map_err(|_| Error::Config("Managed workspace admission setup refused".into()))?;
         *machine_state = Some(
-            super::machine::Runtime::new(&config.machine, &config.node.id, config_dir)
-                .map_err(|_| Error::Config("Managed machine runtime refused startup".into()))?,
+            super::machine::Runtime::new_for_daemon(
+                &config.machine,
+                &config.node.id,
+                config_dir,
+                managed_daemon_id,
+            )
+            .map_err(|_| Error::Config("Managed machine runtime refused startup".into()))?,
         );
     }
     let machine = machine_state.clone();
     if let Some(machine) = &machine {
         if let Some(binding) = &config.managed_runtime {
+            let report = config
+                .managed_configuration
+                .as_ref()
+                .ok_or_else(|| Error::Config("Managed semantic configuration missing".into()))?;
             machine
-                .bind_managed_runtime(binding)
-                .map_err(|_| Error::Config("Managed runtime fence mismatch".into()))?;
+                .bind_managed_configuration(binding, report)
+                .map_err(|_| {
+                    Error::Config("Managed runtime configuration or fence mismatch".into())
+                })?;
+            let _grant = hosted_storage_grant
+                .as_ref()
+                .expect("managed storage checked before runtime construction");
             let bytes = zeroize::Zeroizing::new(
                 hex::decode(
                     signing_secret
@@ -1090,6 +1130,15 @@ async fn connect_and_serve(
                     &bytes,
                 )
                 .map_err(|_| Error::AuthFailed("Managed runtime deadline fenced".into()))?;
+            #[cfg(target_os = "linux")]
+            machine
+                .install_hosted_context_store(&_grant.storage.original_pvc_uid, _grant.initialize)
+                .await
+                .map_err(|_| Error::Config("Managed retained context recovery refused".into()))?;
+            #[cfg(not(target_os = "linux"))]
+            return Err(Error::Config(
+                "Managed retained contexts require Linux".into(),
+            ));
         }
         machine.report_connected();
     }
@@ -4923,6 +4972,7 @@ mod tests {
                     Arc::new(AtomicUsize::new(0)),
                     receiver,
                     &mut machine,
+                    &uuid::Uuid::new_v4().to_string(),
                     Arc::new(super::super::proxy_upload::Uploads::default()),
                     replay_guard(),
                 ),
@@ -4936,6 +4986,252 @@ mod tests {
             );
             server.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn managed_socket_rejects_storage_grant_before_runtime_start() {
+        use nyxid_machine::managed::*;
+        for invalid in ["missing", "pvc", "allocation", "runtime", "binding"] {
+            let id = || uuid::Uuid::new_v4().to_string();
+            let binding = Binding {
+                node_id: id(),
+                sandbox_uid: id(),
+                pod_uid: id(),
+                runtime_generation: 2,
+                credential_epoch: 3,
+                writer_fence: id(),
+                operation_id: id(),
+                delivery_id: id(),
+            };
+            let storage = HostedStorage {
+                original_pvc_uid: id(),
+                allocation_id: id(),
+            };
+            let configuration = RequiredConfiguration {
+                version: CONFIG_VERSION,
+                revision: 1,
+                separation_choice: nyxid_machine::context::Choice::Automatic,
+                capabilities: vec!["files".into(), "shell".into()],
+            };
+            let report = ConfigurationReport {
+                digest: configuration.digest().unwrap(),
+                configuration,
+                runtime_generation: 2,
+            };
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut config = NodeConfig::new(
+                format!("ws://{}/api/v1/nodes/ws", listener.local_addr().unwrap()),
+                binding.node_id.clone(),
+                "file".into(),
+            );
+            config.machine =
+                super::super::managed_config::configuration_machine(&report.configuration).unwrap();
+            config.managed_runtime = Some(binding.clone());
+            config.managed_configuration = Some(report);
+            config.hosted_storage = Some(storage.clone());
+            let daemon_id = id();
+            let daemon = daemon_id.clone();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let request = socket.next().await.unwrap().unwrap();
+                let auth: serde_json::Value =
+                    serde_json::from_str(request.to_text().unwrap()).unwrap();
+                assert_eq!(auth["managed_daemon_id"], daemon);
+                let now = chrono::Utc::now().timestamp_millis();
+                let window = SignedRuntimeWindow::sign(
+                    RuntimeWindow {
+                        binding: binding.clone(),
+                        control_revision: 1,
+                        run_not_after_ms: now + 60_000,
+                        issued_at_ms: now,
+                    },
+                    &[0xaa; 32],
+                )
+                .unwrap();
+                let mut grant = serde_json::to_value(HostedStorageGrant {
+                    binding: binding.clone(),
+                    storage,
+                    runtime_id: daemon,
+                    initialize: true,
+                })
+                .unwrap();
+                match invalid {
+                    "missing" => grant = serde_json::Value::Null,
+                    "pvc" => grant["storage"]["original_pvc_uid"] = serde_json::json!(id()),
+                    "allocation" => grant["storage"]["allocation_id"] = serde_json::json!(id()),
+                    "runtime" => grant["runtime_id"] = serde_json::json!(id()),
+                    "binding" => grant["binding"]["credential_epoch"] = serde_json::json!(4),
+                    _ => unreachable!(),
+                }
+                socket.send(Message::Text(serde_json::json!({"type":"auth_ok","managed_runtime":binding,"managed_runtime_window":window,"hosted_storage":grant}).to_string().into())).await.unwrap();
+            });
+            let directory = tempfile::tempdir().unwrap();
+            let encryption = LocalEncryption::load_or_generate(directory.path()).unwrap();
+            let (sender, credentials) =
+                SharedCredentials::new(CredentialStore::from_config(&config, &encryption).unwrap());
+            let (_shutdown, receiver) = watch::channel(false);
+            let mut machine = None;
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                connect_and_serve(
+                    &config,
+                    &directory.path().join("config.toml"),
+                    directory.path(),
+                    "file",
+                    "fixture-auth",
+                    Some(shared_signing_secret(&"aa".repeat(32))),
+                    &credentials,
+                    &Arc::new(sender),
+                    Arc::new(AtomicUsize::new(0)),
+                    receiver,
+                    &mut machine,
+                    &daemon_id,
+                    Arc::new(super::super::proxy_upload::Uploads::default()),
+                    replay_guard(),
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(result, Err(Error::AuthFailed(_))),
+                "{invalid}: {result:?}"
+            );
+            assert!(
+                machine.is_none(),
+                "{invalid}: invalid storage authority cannot construct the parent"
+            );
+            assert!(!directory.path().join("machine-contexts.json").exists());
+            server.await.unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires disposable hosted Linux accounts, protected mounts and root supervisor"]
+    async fn managed_socket_reports_installed_configuration_on_authenticated_current_runtime() {
+        use std::os::unix::fs::PermissionsExt;
+        let id = || uuid::Uuid::new_v4().to_string();
+        let binding = nyxid_machine::managed::Binding {
+            node_id: id(),
+            sandbox_uid: id(),
+            pod_uid: id(),
+            runtime_generation: 2,
+            credential_epoch: 3,
+            writer_fence: id(),
+            operation_id: id(),
+            delivery_id: id(),
+        };
+        let configuration = nyxid_machine::managed::RequiredConfiguration {
+            version: nyxid_machine::managed::CONFIG_VERSION,
+            revision: 4,
+            separation_choice: nyxid_machine::context::Choice::Automatic,
+            capabilities: vec!["files".into(), "shell".into()],
+        };
+        let report = nyxid_machine::managed::ConfigurationReport {
+            digest: configuration.digest().unwrap(),
+            configuration,
+            runtime_generation: binding.runtime_generation,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = NodeConfig::new(
+            format!("ws://{}/api/v1/nodes/ws", listener.local_addr().unwrap()),
+            binding.node_id.clone(),
+            "file".into(),
+        );
+        config.machine =
+            super::super::managed_config::configuration_machine(&report.configuration).unwrap();
+        config.managed_runtime = Some(binding.clone());
+        config.managed_configuration = Some(report.clone());
+        let storage = serde_json::json!({"original_pvc_uid":id(),"allocation_id":id()});
+        let mut config_json = serde_json::to_value(&config).unwrap();
+        config_json["hosted_storage"] = storage.clone();
+        config = serde_json::from_value(config_json).unwrap();
+        let expected = report.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let auth = socket.next().await.unwrap().unwrap();
+            let auth: serde_json::Value = serde_json::from_str(auth.to_text().unwrap()).unwrap();
+            assert_eq!(
+                auth["managed_runtime"],
+                serde_json::to_value(&binding).unwrap()
+            );
+            let now = chrono::Utc::now().timestamp_millis();
+            let window = nyxid_machine::managed::SignedRuntimeWindow::sign(
+                nyxid_machine::managed::RuntimeWindow {
+                    binding: binding.clone(),
+                    control_revision: 1,
+                    run_not_after_ms: now + 60_000,
+                    issued_at_ms: now,
+                },
+                &[0xaa; 32],
+            )
+            .unwrap();
+            socket.send(Message::Text(serde_json::json!({"type":"auth_ok", "managed_runtime":binding, "managed_runtime_window":window,"hosted_storage":{"binding":binding,"runtime_id":auth["managed_daemon_id"],"storage":storage,"initialize":true}}).to_string().into())).await.unwrap();
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                if let Ok(text) = message.to_text() {
+                    let message: serde_json::Value = serde_json::from_str(text).unwrap();
+                    if message["type"] == "status_update" {
+                        let profile: nyxid_machine::MachineProfile =
+                            serde_json::from_value(message["capabilities"]["machine"].clone())
+                                .unwrap();
+                        assert_eq!(profile.managed_configuration, Some(expected));
+                        assert_eq!(
+                            profile.separation_choice,
+                            Some(nyxid_machine::context::Choice::Automatic)
+                        );
+                        assert!(uuid::Uuid::parse_str(&profile.runtime_id).is_ok());
+                        assert!(!profile.browser_enabled() && !profile.computer);
+                        assert_eq!(profile.separation_evidence.unwrap().version, 4);
+                        assert_ne!(
+                            profile.separated.unwrap().reason.as_deref(),
+                            Some("hosted_context_binding_required"),
+                            "the authenticated socket must install the actual parent retained store before reporting"
+                        );
+                        socket.close(None).await.unwrap();
+                        break;
+                    }
+                }
+            }
+        });
+        let parent = tempfile::tempdir_in("/var/lib/nyxid-hosted-tests").unwrap();
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o711)).unwrap();
+        let directory = parent.path().join("node");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        config.save(&directory.join("config.toml")).unwrap();
+        let encryption = LocalEncryption::load_or_generate(&directory).unwrap();
+        let (sender, credentials) =
+            SharedCredentials::new(CredentialStore::from_config(&config, &encryption).unwrap());
+        let (_shutdown, receiver) = watch::channel(false);
+        let mut machine = None;
+        let result = tokio::time::timeout(
+            Duration::from_secs(40),
+            connect_and_serve(
+                &config,
+                &directory.join("config.toml"),
+                &directory,
+                "file",
+                "fixture-auth",
+                Some(shared_signing_secret(&"aa".repeat(32))),
+                &credentials,
+                &Arc::new(sender),
+                Arc::new(AtomicUsize::new(0)),
+                receiver,
+                &mut machine,
+                &uuid::Uuid::new_v4().to_string(),
+                Arc::new(super::super::proxy_upload::Uploads::default()),
+                replay_guard(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(machine.is_some());
+        server.await.unwrap();
+        machine.unwrap().shutdown().await;
     }
 
     fn rci_metadata(pending_id: &str) -> rci_crypto::PendingCredentialCryptoMetadata {

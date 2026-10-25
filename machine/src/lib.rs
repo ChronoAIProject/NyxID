@@ -72,6 +72,8 @@ pub struct MachineProfile {
     pub separation_evidence: Option<context::Evidence>,
     /// Recorded setup intent for new assignments; absent on older profiles.
     pub separation_choice: Option<context::Choice>,
+    /// Installed hosted configuration; never inferred from capability booleans.
+    pub managed_configuration: Option<managed::ConfigurationReport>,
     pub os: String,
     pub arch: String,
     pub roots: Vec<String>,

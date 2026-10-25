@@ -22,7 +22,10 @@ const policy = {
   job_history_days: 30,
   operation_history_days: 90,
   terminal_output_max_retention_seconds: 3600,
-  shared_environment_mode: "shared_legacy",
+  separation_policy_version: "remote-machine-separation-v1",
+  separation_choices: ["automatic", "require_separated", "shared_legacy"],
+  separation_warning: "Shared OS access can expose files through the execution identity.",
+  shared_environment_mode: "per_agent",
   cross_client_secret_isolation: false,
   inbound_network_service: false,
   persistent_environment_variables: false,
@@ -153,6 +156,8 @@ async function machineApi(
         ...machine,
         name: configuration.name,
         capabilities: configuration.capabilities,
+        separation_choice: configuration.separation_choice,
+        separation_policy_version: configuration.separation_policy_version,
         specialist_id: configuration.specialist_id,
         resource_state: "provisioning",
         active_operation_id: currentOperation.id,
@@ -205,7 +210,7 @@ async function machineApi(
   await page.route("**/api/v1/public/config", (route) =>
     route.fulfill({ json: { mcp_url: "https://fixture.example.test/mcp" } }),
   );
-  await page.route("**/api/v1/assistant/agents**", (route) =>
+  await page.route("**/api/v1/assistant/nyxagent/agents**", (route) =>
     route.fulfill({ json: { agents: [] } }),
   );
   return writes;
@@ -439,6 +444,12 @@ for (const width of [1440, 390]) {
     await create
       .getByRole("checkbox", { name: /I accept the shared environment/ })
       .check();
+    await expect(submit).toBeDisabled();
+    await create
+      .getByRole("checkbox", { name: /I accept the selected Agent separation default/ })
+      .check();
+    await expect(create.getByText("Review and accept the selected Agent separation policy.", { exact: true })).toHaveCount(0);
+    await expect(create.getByText("Review and accept the displayed profile, billing and data policies.", { exact: true })).toHaveCount(0);
     await page.screenshot({
       path: testInfo.outputPath("machine-create-reviewed.png"),
       fullPage: true,
@@ -448,8 +459,11 @@ for (const width of [1440, 390]) {
     await expect.poll(() => writes.length).toBe(1);
     expect(writes[0]?.body).toEqual({
       name: "remote-research",
-      capabilities: ["shell", "files", "browser"],
+      capabilities: ["browser", "files", "shell"],
       specialist_id: null,
+      separation_choice: "automatic",
+      separation_policy_version: policy.separation_policy_version,
+      acknowledge_separation: true,
       free_slot: true,
       profile_version: "remote-machine",
       policy_version: policy.policy_version,

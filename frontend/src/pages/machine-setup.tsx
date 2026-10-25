@@ -230,10 +230,10 @@ export function MachineSetupPage() {
       </Tabs>
       {hosted ? (
         <RemoteMachineCreate
-          onCreated={(machineId, operationId) =>
+          onCreated={(machineId, operationId, specialistId) =>
             void navigate({
               to: "/assistant/machines",
-              search: { machine: machineId, operation: operationId },
+              search: { machine: machineId, operation: operationId, agent: specialistId ?? undefined },
             })
           }
         />

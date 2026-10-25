@@ -5,6 +5,11 @@ import {
   readRemoteMachineIntent,
 } from "./remote-machine-intent";
 
+const creation = {
+  name: "my-remote-machine", capabilities: ["files", "shell"] as ("files" | "shell" | "browser" | "computer")[], specialist_id: null,
+  profile_version: "remote-machine" as const, policy_version: "remote-machine-mvp" as const, data_policy_version: "remote-machine-data" as const,
+  acknowledge_shared_environment: true, separation_choice: "automatic" as const, separation_policy_version: "remote-machine-separation-v1" as const, acknowledge_separation: true,
+};
 beforeEach(() => sessionStorage.clear());
 const body = { action: "pause" as const, expected_revision: 4 };
 it("retains the original owner action and revision across retries and reload reads", () => {
@@ -53,6 +58,7 @@ it("does not dispatch a replacement intent when stored data is corrupt", () => {
 });
 it("retains the accepted quote and balance terms after an unknown paid-create result", () => {
   const paid = {
+    ...creation,
     free_slot: false,
     policy_version: "remote-machine-mvp" as const,
     data_policy_version: "remote-machine-data" as const,
@@ -114,6 +120,7 @@ it("rejects partial paid acceptance, accidental free conversion and secret field
 
 it("persists hosted configuration and retries its original body and key", () => {
   const body = {
+    ...creation,
     free_slot: true,
     name: "research",
     capabilities: ["browser" as const, "computer" as const],
@@ -148,6 +155,14 @@ it("rejects invalid hosted persisted configuration without changing action inten
   );
 });
 
+it("does not persist an incomplete create scope before dispatch", () => {
+  expect(() => getRemoteMachineIntent("owner", "create", {
+    name: "research", separation_choice: "automatic",
+    separation_policy_version: "remote-machine-separation-v1", acknowledge_separation: true,
+  })).toThrow(/complete/i);
+  expect(sessionStorage.length).toBe(0);
+});
+
 it.each(["create", "machine:resume", "machine:delete"])("rejects obsolete stored %s consent without migration", (scope) => {
   const key = `nyxid:remote-machine-intent:owner:${encodeURIComponent(scope)}`;
   for (const patch of [{ policy_version: "remote-machine-mvp-v1" }, { policy_version: "remote-machine-mvp-v2" }, { data_policy_version: "remote-machine-data-v1" }]) {
@@ -163,6 +178,7 @@ it.each(["create", "machine:resume", "machine:delete"])("rejects obsolete stored
 
 it("retains the accepted profile with the original quote and rejects replacement profile identities", () => {
   const paid = {
+    ...creation,
     free_slot: false,
     profile_version: "remote-machine" as const,
     quote_id: "quote-one",

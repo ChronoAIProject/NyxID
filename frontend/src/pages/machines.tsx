@@ -299,9 +299,10 @@ export function MachinesPage() {
           </SheetHeader>
           {remoteDetailId ? (
             <RemoteMachineDetail
-              key={`${userId}:${remoteDetailId}:${search.operation ?? ""}:${search.confirmation ?? ""}`}
+              key={`${userId}:${remoteDetailId}:${search.operation ?? ""}:${search.confirmation ?? ""}:${search.agent ?? ""}`}
               operationId={search.operation}
               confirmationId={search.confirmation}
+              initialAgentId={search.agent}
               machineId={remoteDetailId}
               onClose={() => {
                 setSelectedId(undefined);

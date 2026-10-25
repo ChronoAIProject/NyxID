@@ -69,6 +69,8 @@ enum Observation {
     RendererChanged,
     #[error("browser_parent_live_recheck_failed")]
     BrowserChanged,
+    #[error("browser_process_exited")]
+    BrowserExited,
     #[error("browser_renderer_not_observed")]
     NoRenderer,
     #[error("browser_policy_refusal_not_observed")]
@@ -109,6 +111,14 @@ fn failure_diagnostic(error: &anyhow::Error) -> String {
         "browser_probe_failure reason={} errno={errno}",
         failure_reason(error)
     )
+}
+fn observation_failure(error: anyhow::Error, last: Observation) -> anyhow::Error {
+    let reason = if error.is::<process::ProbeExited>() {
+        Observation::BrowserExited
+    } else {
+        error.downcast_ref::<Observation>().copied().unwrap_or(last)
+    };
+    error.context(reason)
 }
 
 struct PinnedProcess(OwnedFd);
@@ -653,10 +663,7 @@ async fn observe_browser(
         Ok(true)
     })
     .await;
-    result.map_err(|error| {
-        let reason = error.downcast_ref::<Observation>().copied().unwrap_or(last);
-        error.context(reason)
-    })
+    result.map_err(|error| observation_failure(error, last))
 }
 
 #[cfg(test)]
@@ -957,6 +964,37 @@ mod tests {
         let timeout = anyhow::Error::new(process::ProbeTimeout).context(Observation::NoRenderer);
         assert!(timeout.is::<process::ProbeTimeout>());
         assert_eq!(failure_reason(&timeout), "browser_renderer_not_observed");
+    }
+    #[test]
+    fn exited_browser_does_not_claim_container_observations_are_hidden() {
+        let error = observation_failure(
+            anyhow::Error::new(process::ProbeExited).context(Observation::NetworkRead),
+            Observation::NoRenderer,
+        );
+        assert!(error.is::<process::ProbeExited>());
+        assert_eq!(failure_reason(&error), "browser_process_exited");
+        assert!(!error.downcast_ref::<Observation>().unwrap().unobservable());
+        for errno in [libc::EACCES, libc::ENOENT] {
+            let error = observation_failure(
+                anyhow::Error::new(std::io::Error::from_raw_os_error(errno))
+                    .context(Observation::NetworkRead),
+                Observation::NoRenderer,
+            );
+            assert_eq!(
+                failure_reason(&error),
+                "browser_proc_network_identity_unreadable"
+            );
+            assert!(error.downcast_ref::<Observation>().unwrap().unobservable());
+        }
+        let timeout = observation_failure(process::ProbeTimeout.into(), Observation::NoRenderer);
+        assert!(timeout.is::<process::ProbeTimeout>());
+        assert_eq!(failure_reason(&timeout), "browser_renderer_not_observed");
+        assert!(
+            !timeout
+                .downcast_ref::<Observation>()
+                .unwrap()
+                .unobservable()
+        );
     }
     #[test]
     fn inaccessible_candidates_retain_the_reason_but_exiting_children_do_not() {

@@ -13,6 +13,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import {
   remoteMachineFixture,
   remoteMachinePlatformFixture,
+  remoteMachinePaidQuoteFixture,
 } from "@/test/remote-machine-fixture";
 import { machineSetupCommand, SHARED_LEGACY_WARNING } from "@/schemas/machines";
 const mock = vi.hoisted(() => ({
@@ -25,6 +26,7 @@ const mock = vi.hoisted(() => ({
   createRemote: vi.fn(),
   setup: undefined as unknown,
   search: {} as Record<string, string>,
+  agents: [] as Array<{ id: string; name: string; kind: "specialist"; status: "idle"; owner_id: string; owner_kind: "person" }>,
 }));
 vi.mock("@tanstack/react-router", () => ({
   useSearch: () => mock.search,
@@ -43,7 +45,7 @@ vi.mock("@/hooks/use-public-config", () => ({
   }),
 }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
-  useNyxBotAgents: () => ({ data: { agents: [] } }),
+  useNyxBotAgents: () => ({ data: { agents: mock.agents } }),
 }));
 vi.mock("@/hooks/use-billing", () => ({
   useBillingWallet: () => ({
@@ -66,10 +68,7 @@ vi.mock("@/hooks/use-machines", () => ({
       profile: remoteMachineFixture.profile,
       platform: remoteMachinePlatformFixture,
       valid_until: "2099-01-01T00:00:00Z",
-      policy: {
-        policy_version: "remote-machine-mvp",
-        data_policy_version: "remote-machine-data",
-      },
+      policy: remoteMachinePaidQuoteFixture.policy,
     },
   }),
   useCreateRemoteMachine: () => ({ mutateAsync: mock.createRemote }),
@@ -92,6 +91,7 @@ afterEach(() => {
   vi.clearAllMocks();
   mock.setup = undefined;
   mock.search = {};
+  mock.agents = [];
   sessionStorage.clear();
 });
 const choices = {
@@ -212,7 +212,7 @@ it("renders a browser-only setup without broad computer access", () => {
   expect(command).not.toContain("--shell");
 });
 
-it("renders the actual fourth hosted option with its creation form and no installation command", async () => {
+it.each([null, "specialist-1"])("creates from the fourth hosted option and focuses the selected membership-only Specialist %s", async specialist => {
   useAuthStore.setState({
     user: {
       ...useAuthStore.getState().user!,
@@ -223,6 +223,7 @@ it("renders the actual fourth hosted option with its creation form and no instal
     isLoading: false,
   });
   mock.search = { where: "hosted" };
+  mock.agents = [{ id: "specialist-1", name: "Researcher", kind: "specialist", status: "idle", owner_id: "owner", owner_kind: "person" }];
   mock.createRemote.mockResolvedValue({
     machine: { ...remoteMachineFixture, name: "my-remote-machine" },
     operation: { id: "operation-1" },
@@ -243,6 +244,13 @@ it("renders the actual fourth hosted option with its creation form and no instal
   expect(
     screen.queryByText(/Docker command downloads/),
   ).not.toBeInTheDocument();
+  if (specialist) {
+    await userEvent.click(screen.getByRole("combobox", { name: "Select a specialist for this machine" }));
+    await userEvent.click(screen.getByRole("option", { name: "Researcher" }));
+  }
+  await userEvent.click(
+    screen.getByRole("checkbox", { name: /I accept the selected Agent separation/ }),
+  );
   await userEvent.click(
     screen.getByRole("checkbox", { name: /I accept the shared environment/ }),
   );
@@ -252,12 +260,15 @@ it("renders the actual fourth hosted option with its creation form and no instal
   await waitFor(() => expect(mock.createRemote).toHaveBeenCalledTimes(1));
   expect(mock.createRemote.mock.calls[0]![0].body).toMatchObject({
     name: "my-remote-machine",
-    capabilities: ["shell", "files"],
-    specialist_id: null,
+    capabilities: ["files", "shell"],
+    specialist_id: specialist,
+    separation_choice: "automatic",
+    separation_policy_version: "remote-machine-separation-v1",
+    acknowledge_separation: true,
   });
   expect(mock.navigate).toHaveBeenCalledWith({
     to: "/assistant/machines",
-    search: { machine: "machine-1", operation: "operation-1" },
+    search: { machine: "machine-1", operation: "operation-1", agent: specialist ?? undefined },
   });
   expect(mock.issue).not.toHaveBeenCalled();
 });

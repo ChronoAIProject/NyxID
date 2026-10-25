@@ -386,6 +386,7 @@ pub mod assistant_voice;
 mod org_group_tests;
 
 pub mod machine_access_service;
+pub mod machine_context_review_service;
 pub mod remote_machine_configuration;
 pub mod remote_machine_operation_service;
 #[cfg(test)]

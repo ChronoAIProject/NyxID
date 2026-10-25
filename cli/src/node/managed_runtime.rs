@@ -1,7 +1,8 @@
 //! Hosted Remote Nyx Machine bootstrap.
 //!
 //! Kubernetes issues a Pod-bound audience token through a protected projected
-//! mount; the optional legacy provider-ticket transport remains supported. NyxID returns credentials sealed to an ephemeral node key and
+//! mount; provider tickets can also authenticate the same current contract.
+//! NyxID returns credentials sealed to an ephemeral node key and
 //! bound to the ticket's Sandbox/Pod/runtime/epoch tuple. The node persists a
 //! pending delivery before the request so a lost response can be retried with
 //! the same key and delivery id. Plain credentials are written only to the
@@ -21,7 +22,7 @@ use std::{
 use zeroize::Zeroizing;
 
 pub(super) use super::managed_config::validate_existing_config;
-use super::managed_config::{default_capabilities, machine_config, validate_endpoint};
+use super::managed_config::{configuration_machine, validate_endpoint};
 
 use super::{
     config::{self, NodeConfig},
@@ -81,14 +82,6 @@ struct Response {
     writer_admitted: bool,
 }
 
-#[derive(Deserialize)]
-struct Secrets {
-    auth_token: Zeroizing<String>,
-    signing_secret: Zeroizing<String>,
-    #[serde(default = "default_capabilities")]
-    capabilities: Vec<String>,
-}
-
 const MAX_BOOTSTRAP_BYTES: usize = 64 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -107,6 +100,7 @@ struct KubernetesTicket<'a> {
 
 #[derive(Serialize)]
 struct KubernetesPrepareRequest<'a> {
+    payload_version: u32,
     node_id: &'a str,
     pod_uid: &'a str,
     ticket: &'a KubernetesTicket<'a>,
@@ -115,6 +109,7 @@ struct KubernetesPrepareRequest<'a> {
 
 #[derive(Serialize)]
 struct KubernetesBootstrapRequest<'a> {
+    payload_version: u32,
     binding: &'a nyxid_machine::managed::Binding,
     ticket: &'a KubernetesTicket<'a>,
     recipient_public_key: &'a str,
@@ -249,6 +244,7 @@ async fn bootstrap_kubernetes_with_setup(
             let prepare = client
                 .post(setup.prepare_url.clone())
                 .json(&KubernetesPrepareRequest {
+                    payload_version: nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION,
                     node_id: &setup.node_id,
                     pod_uid: &setup.pod_uid,
                     ticket: &ticket,
@@ -299,6 +295,7 @@ async fn bootstrap_kubernetes_with_setup(
             let response = client
                 .post(setup.bootstrap_url.clone())
                 .json(&KubernetesBootstrapRequest {
+                    payload_version: nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION,
                     binding: &binding,
                     ticket: &ticket,
                     recipient_public_key: &recipient.public_key,
@@ -376,7 +373,7 @@ pub async fn prepare(args: Prepare) -> Result<()> {
 pub async fn run(args: Start) -> Result<()> {
     let config_dir = bootstrap_config(&args).await?;
     let config = NodeConfig::load(&config_dir.join("config.toml"))?;
-    if config.machine.browser_enabled() || config.machine.computer {
+    if config.machine.managed_browser.is_some() {
         // The full image and self-hosted setup share exactly one desktop
         // implementation. No user-controlled command or capability flags are
         // accepted here: these choices came from the sealed bootstrap.
@@ -436,6 +433,7 @@ async fn bootstrap_config(args: &Start) -> Result<PathBuf> {
     let mut response = client
         .post(bootstrap_url)
         .json(&serde_json::json!({
+            "payload_version": nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION,
             "ticket": serde_json::from_slice::<Value>(&ticket_bytes)?,
             "binding": pending.binding.clone(),
             "recipient_public_key": pending.public_key,
@@ -487,8 +485,10 @@ fn install_delivery(
         .context("managed bootstrap recipient is incompatible; controlled rekey required")?;
     let plaintext = sealed_bootstrap::open(&response.sealed, &private_key, &pending.binding)
         .context("managed bootstrap decryption failed")?;
-    let secrets: Secrets =
-        serde_json::from_slice(&plaintext).context("decode managed bootstrap secrets")?;
+    let secrets: nyxid_machine::managed::BootstrapPayload =
+        serde_json::from_slice(&plaintext).context("decode managed bootstrap payload")?;
+    secrets.validate().map_err(anyhow::Error::msg)?;
+    let machine = configuration_machine(&secrets.configuration)?;
     ensure!(
         !secrets.auth_token.is_empty() && !secrets.signing_secret.is_empty(),
         "managed bootstrap returned empty credentials"
@@ -501,10 +501,14 @@ fn install_delivery(
         "file".into(),
     );
     config.managed_runtime = Some(pending.binding.clone());
-    config.machine = machine_config(&secrets.capabilities)?;
-    let mut capabilities = secrets.capabilities;
-    capabilities.sort();
-    config.managed_capabilities = Some(capabilities);
+    config.hosted_storage = Some(secrets.hosted_storage);
+    config.machine = machine;
+    config.managed_configuration = Some(nyxid_machine::managed::ConfigurationReport {
+        configuration: secrets.configuration,
+        digest: secrets.configuration_digest,
+        runtime_generation: pending.binding.runtime_generation,
+    });
+    validate_existing_config(&config, &pending.binding)?;
     backend.store_auth_token(&mut config, &secrets.auth_token)?;
     backend.store_signing_secret(&mut config, &secrets.signing_secret)?;
     config.save(&config_dir.join("config.toml"))?;
@@ -656,6 +660,7 @@ fn validate_recipient(private_key: &str, public_key: &str) -> Result<()> {
 fn recipient_request(pending: &PendingDelivery) -> Result<Value> {
     let digest = sealed_bootstrap::recipient_key_digest(&pending.public_key)?;
     Ok(serde_json::json!({
+        "payload_version": nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION,
         "binding": pending.binding,
         "recipient_public_key": pending.public_key,
         "recipient_key_digest": hex::encode(digest),
@@ -710,6 +715,7 @@ fn atomic_private_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::managed_config::machine_config;
     use super::*;
     fn binding() -> nyxid_machine::managed::Binding {
         nyxid_machine::managed::Binding {
@@ -721,6 +727,129 @@ mod tests {
             writer_fence: uuid::Uuid::new_v4().to_string(),
             operation_id: uuid::Uuid::new_v4().to_string(),
             delivery_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+
+    fn payload(choice: nyxid_machine::context::Choice) -> Value {
+        let configuration = nyxid_machine::managed::RequiredConfiguration {
+            version: nyxid_machine::managed::CONFIG_VERSION,
+            revision: 7,
+            separation_choice: choice,
+            capabilities: vec!["files".into(), "shell".into()],
+        };
+        serde_json::to_value(nyxid_machine::managed::BootstrapPayload {
+            payload_version: nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION,
+            auth_token: Zeroizing::new("nyx_nauth_fixture_only".into()),
+            signing_secret: Zeroizing::new("a".repeat(64)),
+            configuration_digest: configuration.digest().unwrap(),
+            hosted_storage: nyxid_machine::managed::HostedStorage {
+                original_pvc_uid: uuid::Uuid::new_v4().to_string(),
+                allocation_id: uuid::Uuid::new_v4().to_string(),
+            },
+            configuration,
+        })
+        .unwrap()
+    }
+
+    fn install_fixture(directory: &Path, value: &Value) -> Result<PathBuf> {
+        prepare_directory(directory)?;
+        let binding = binding();
+        let pending = prepare_delivery(directory, &binding)?;
+        let sealed =
+            sealed_bootstrap::seal(&serde_json::to_vec(value)?, &pending.public_key, &binding)?;
+        install_delivery(
+            directory.to_owned(),
+            &pending,
+            Response {
+                binding,
+                sealed,
+                server_url: "wss://example.test/api/v1/nodes/ws".into(),
+                writer_admitted: true,
+            },
+        )
+    }
+
+    #[test]
+    fn semantic_payload_installs_each_choice_and_exact_revision_digest() {
+        use nyxid_machine::context::Choice;
+        for choice in [
+            Choice::Automatic,
+            Choice::RequireSeparated,
+            Choice::SharedLegacy,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let value = payload(choice);
+            install_fixture(directory.path(), &value).unwrap();
+            let mut config = NodeConfig::load(&directory.path().join("config.toml")).unwrap();
+            assert_eq!(config.machine.separation_choice, Some(choice));
+            let installed = serde_json::to_value(&config).unwrap();
+            assert_eq!(
+                installed["managed_configuration"]["configuration"],
+                value["configuration"]
+            );
+            assert_eq!(
+                installed["managed_configuration"]["digest"],
+                value["configuration_digest"]
+            );
+            assert_eq!(installed["managed_configuration"]["runtime_generation"], 1);
+            assert_eq!(installed["hosted_storage"], value["hosted_storage"]);
+            assert!(!config.machine.browser_enabled() && !config.machine.computer);
+            assert!(config.machine.managed_browser.is_some());
+            config.machine.separation_choice = Some(match choice {
+                Choice::Automatic => Choice::SharedLegacy,
+                _ => Choice::Automatic,
+            });
+            config.save(&directory.path().join("config.toml")).unwrap();
+            assert!(NodeConfig::load(&directory.path().join("config.toml")).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_semantic_payload_never_persists_identity_or_config() {
+        let original = payload(nyxid_machine::context::Choice::Automatic);
+        let mut invalid = Vec::new();
+        for field in [
+            "payload_version",
+            "configuration",
+            "configuration_digest",
+            "hosted_storage",
+        ] {
+            let mut value = original.clone();
+            value.as_object_mut().unwrap().remove(field);
+            invalid.push(value);
+        }
+        for version in [0, nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION + 1] {
+            let mut value = original.clone();
+            value["payload_version"] = serde_json::json!(version);
+            invalid.push(value);
+        }
+        for version in [0, nyxid_machine::managed::CONFIG_VERSION + 1] {
+            let mut value = original.clone();
+            value["configuration"]["version"] = serde_json::json!(version);
+            invalid.push(value);
+        }
+        for field in ["original_pvc_uid", "allocation_id"] {
+            let mut value = original.clone();
+            value["hosted_storage"][field] = serde_json::json!("untrusted-path-or-id");
+            invalid.push(value);
+        }
+        let mut changed = original.clone();
+        changed["configuration"]["separation_choice"] = serde_json::json!("shared_legacy");
+        invalid.push(changed);
+        let mut changed = original.clone();
+        changed["configuration"]["capabilities"] = serde_json::json!(["shell", "files"]);
+        invalid.push(changed);
+        let mut changed = original.clone();
+        changed["extra_required_config"] = serde_json::json!(true);
+        invalid.push(changed);
+        for value in invalid {
+            let directory = tempfile::tempdir().unwrap();
+            assert!(
+                install_fixture(directory.path(), &value).is_err(),
+                "accepted malformed semantic payload"
+            );
+            assert!(!directory.path().join("config.toml").exists());
+            assert!(!directory.path().join(".keyfile").exists());
         }
     }
 
@@ -770,6 +899,10 @@ mod tests {
             .and(path("/prepare"))
             .respond_with(move |request: &wiremock::Request| {
                 let body: Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(
+                    body["payload_version"],
+                    nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION
+                );
                 assert_eq!(body["node_id"], expected.node_id);
                 assert_eq!(body["pod_uid"], expected.pod_uid);
                 let digest = sealed_bootstrap::recipient_key_digest(
@@ -782,6 +915,10 @@ mod tests {
                     protected_token(&token_for_prepare, "projected-fixture-token-two");
                     ResponseTemplate::new(503)
                 } else {
+                    assert_eq!(
+                        body["payload_version"],
+                        nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION
+                    );
                     assert_eq!(body["ticket"]["token"], "projected-fixture-token-two");
                     ResponseTemplate::new(200)
                         .set_body_json(serde_json::json!({"binding":expected}))
@@ -793,9 +930,10 @@ mod tests {
         let expected = binding.clone();
         Mock::given(method("POST")).and(path("/bootstrap")).respond_with(move |request: &wiremock::Request| {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["payload_version"], nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION);
             assert_eq!(body["ticket"]["token"], "projected-fixture-token-two");
             let public_key = body["recipient_public_key"].as_str().unwrap();
-            let payload = serde_json::to_vec(&serde_json::json!({"auth_token":"nyx_nauth_kubernetes_fixture","signing_secret":"b".repeat(64)})).unwrap();
+            let payload = serde_json::to_vec(&payload(nyxid_machine::context::Choice::Automatic)).unwrap();
             let sealed = sealed_bootstrap::seal(&payload, public_key, &expected).unwrap();
             ResponseTemplate::new(200).set_body_json(serde_json::json!({"binding":expected,"sealed":sealed,"server_url":"wss://example.test/api/v1/nodes/ws","writer_admitted":true}))
         }).expect(1).mount(&server).await;
@@ -901,13 +1039,15 @@ mod tests {
             "file".into(),
         );
         config.managed_runtime = Some(binding.clone());
-        config.machine.shell = true;
-        config.machine.files = true;
-        config.machine.browser = Some(false);
-        config.machine.roots = vec![PathBuf::from("/workspace")];
-        config.machine.max_jobs = 2;
-        config.machine.agent_user = Some("agent".into());
-        config.machine.browser_user = Some("browser".into());
+        let payload: nyxid_machine::managed::BootstrapPayload =
+            serde_json::from_value(payload(nyxid_machine::context::Choice::Automatic)).unwrap();
+        config.machine = configuration_machine(&payload.configuration).unwrap();
+        config.hosted_storage = Some(payload.hosted_storage);
+        config.managed_configuration = Some(nyxid_machine::managed::ConfigurationReport {
+            configuration: payload.configuration,
+            digest: payload.configuration_digest,
+            runtime_generation: binding.runtime_generation,
+        });
         config
     }
 
@@ -924,6 +1064,44 @@ mod tests {
         config.managed_runtime = Some(binding.clone());
         config.node.id = uuid::Uuid::new_v4().to_string();
         assert!(validate_existing_config(&config, &binding).is_err());
+    }
+
+    #[test]
+    fn restart_requires_current_configuration_identity_and_generation() {
+        let binding = binding();
+        let config = managed_config(&binding);
+        let value = serde_json::to_value(&config).unwrap();
+        for defect in ["missing", "digest", "revision", "version", "generation"] {
+            let mut invalid = value.clone();
+            match defect {
+                "missing" => {
+                    invalid
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("managed_configuration");
+                }
+                "digest" => {
+                    invalid["managed_configuration"]["digest"] = serde_json::json!("0".repeat(64))
+                }
+                "revision" => {
+                    invalid["managed_configuration"]["configuration"]["revision"] =
+                        serde_json::json!(8)
+                }
+                "version" => {
+                    invalid["managed_configuration"]["configuration"]["version"] =
+                        serde_json::json!(nyxid_machine::managed::CONFIG_VERSION + 1)
+                }
+                _ => {
+                    invalid["managed_configuration"]["runtime_generation"] =
+                        serde_json::json!(binding.runtime_generation + 1)
+                }
+            }
+            let invalid: NodeConfig = serde_json::from_value(invalid).unwrap();
+            assert!(
+                validate_existing_config(&invalid, &binding).is_err(),
+                "accepted {defect}"
+            );
+        }
     }
 
     #[test]
@@ -948,8 +1126,10 @@ mod tests {
         let binding = binding();
         let mut config = managed_config(&binding);
         let capabilities = vec!["browser".into(), "computer".into(), "files".into()];
-        config.machine = machine_config(&capabilities).unwrap();
-        config.managed_capabilities = Some(capabilities);
+        let report = config.managed_configuration.as_mut().unwrap();
+        report.configuration.capabilities = capabilities;
+        report.digest = report.configuration.digest().unwrap();
+        config.machine = configuration_machine(&report.configuration).unwrap();
         assert!(!config.machine.shell);
         assert!(
             config.machine.files && config.machine.browser_enabled() && config.machine.computer
@@ -971,8 +1151,8 @@ mod tests {
         let path = directory.path().join("config.toml");
         config.save(&path).unwrap();
         assert_eq!(
-            NodeConfig::load(&path).unwrap().managed_capabilities,
-            config.managed_capabilities
+            NodeConfig::load(&path).unwrap().managed_configuration,
+            config.managed_configuration
         );
         config.machine.shell = true;
         config.save(&path).unwrap();
@@ -999,11 +1179,6 @@ mod tests {
                 .browser_enabled()
         );
         assert!(machine_config(&["files".into()]).unwrap().files);
-        let legacy: Secrets = serde_json::from_value(
-            serde_json::json!({"auth_token":"fixture", "signing_secret":"fixture"}),
-        )
-        .unwrap();
-        assert_eq!(legacy.capabilities, default_capabilities());
     }
 
     #[tokio::test]
@@ -1365,9 +1540,10 @@ mod tests {
         Mock::given(method("POST")).and(path("/bootstrap"))
             .respond_with(move |request: &wiremock::Request| {
                 let request: Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(request["payload_version"], nyxid_machine::managed::BOOTSTRAP_PAYLOAD_VERSION);
                 assert_eq!(request["binding"], serde_json::to_value(&expected_binding).unwrap());
                 let public_key = request["recipient_public_key"].as_str().unwrap();
-                let plaintext = serde_json::to_vec(&serde_json::json!({"auth_token":"nyx_nauth_fixture_only", "signing_secret":"a".repeat(64)})).unwrap();
+                let plaintext = serde_json::to_vec(&payload(nyxid_machine::context::Choice::Automatic)).unwrap();
                 let sealed = sealed_bootstrap::seal(&plaintext, public_key, &expected_binding).unwrap();
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "binding":expected_binding, "sealed":sealed, "server_url":"wss://example.test/api/v1/nodes/ws", "writer_admitted":true,

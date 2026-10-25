@@ -53,6 +53,14 @@ pub fn platform_readiness(base_url: &str) -> PlatformReadiness {
     if configured_storage_class().is_err() {
         blockers.push("storage_class_configuration_invalid");
     }
+    if lifecycle::configured_seccomp_localhost_profile()
+        .as_deref()
+        .is_some_and(|reference| {
+            nyxid_machine::managed::validate_seccomp_localhost_profile(reference).is_err()
+        })
+    {
+        blockers.push("seccomp_profile_configuration_invalid");
+    }
     match super::remote_machine_kubernetes_auth::KubernetesConnection::from_environment(
         Duration::from_secs(15),
     ) {
@@ -1997,6 +2005,11 @@ pub async fn require_execution(db: &Database, node: &crate::models::node::Node) 
     let machine = lifecycle::managed_machine_for_node(db, &node.id)
         .await?
         .ok_or(AppError::MachineNotAllowed)?;
+    if super::remote_machine_configuration::configuration_view(&machine, Some(node)).state
+        != "applied"
+    {
+        return Err(AppError::MachineNotAllowed);
+    }
     if !lifecycle::runtime_fence_allows_writer(
         db,
         &node.id,
@@ -2038,11 +2051,9 @@ pub fn accepts_profile(profile: &nyxid_machine::MachineProfile) -> bool {
         && (!profile.computer || profile.browser_enabled())
         && profile.authority_v2()
         && profile.roots == ["/workspace"]
-        && (profile.browser_enabled() || (!profile.browser_tools && !profile.saved_login_ready))
-        // Browser-only Machines also use the existing cua driver internally.
-        // Installed driver tools/readiness do not grant the Computer capability.
-        && (profile.browser_enabled()
-            || (!profile.computer_ready && profile.computer_tools.is_empty()))
+        // Full separated infrastructure may advertise browser/driver readiness
+        // even for Shell/File-only ceilings. Operations still enforce the
+        // four owner-selected capability booleans and per-client authority.
         && profile.commands_isolated == Some(true)
 }
 
@@ -2052,6 +2063,7 @@ pub fn accepts_selected_profile(
 ) -> bool {
     let selected = |name: &str| machine.capabilities.iter().any(|cap| cap == name);
     accepts_profile(profile)
+        && super::remote_machine_configuration::report_matches(machine, profile)
         && profile.shell == selected("shell")
         && profile.files == selected("files")
         && profile.browser_enabled() == selected("browser")
@@ -2116,6 +2128,7 @@ async fn mark_runtime_online_inner(
     {
         return Err(unavailable());
     }
+    record_configuration_evidence(db, &machine, &node, binding, connection_id).await?;
     if machine.resource_state == ResourceState::Ready {
         if machine.specialist_assignment_state == "pending" {
             // Assignment is separately durable/retryable. An optional agent
@@ -2155,6 +2168,51 @@ async fn mark_runtime_online_inner(
         let _ = super::remote_machine_configuration::assign_specialist(db, node_id).await;
     }
     Ok(())
+}
+
+/// Only the authenticated current connection may satisfy the configuration
+/// chain. A stale generation, old daemon or Agent authority ACK has no effect.
+async fn record_configuration_evidence(
+    db: &Database,
+    machine: &ManagedMachine,
+    node: &crate::models::node::Node,
+    binding: &nyxid_machine::managed::Binding,
+    connection_id: &str,
+) -> AppResult<()> {
+    let profile = node.machine.as_ref().ok_or_else(unavailable)?;
+    let evidence = crate::models::remote_machine::MachineConfigurationEvidence {
+        configuration_revision: machine.configuration.revision,
+        configuration_digest: machine.configuration.digest().map_err(|_| unavailable())?,
+        runtime_generation: machine.runtime_generation,
+        credential_epoch: machine.credential_epoch,
+        runtime_id: profile.runtime_id.clone(),
+        connection_id: connection_id.into(),
+        observed_at: Utc::now(),
+    };
+    let machine = machine.clone();
+    let profile = profile.clone();
+    let connection_id = connection_id.to_owned();
+    let binding = binding.clone();
+    let db = db.clone();
+    db.client().start_session().await?.start_transaction().and_run2(async move |session| {
+        let result:AppResult<()> = async {
+            let current = db.collection::<ManagedMachine>(MACHINES).find_one(doc!{"_id":&machine.node_id})
+                .session(&mut *session).await?.ok_or_else(unavailable)?;
+            if !accepts_binding(&current, &binding) || !accepts_selected_profile(&current,&profile) {return Err(unavailable());}
+            let node_fence = db.collection::<Document>(crate::models::node::COLLECTION_NAME).update_one(
+                doc!{"_id":&machine.node_id,"user_id":&machine.owner_id,"is_active":true,"status":"online",
+                    "machine.runtime_id":&profile.runtime_id,"machine.managed_configuration":bson::to_bson(&profile.managed_configuration).map_err(|_|unavailable())?,
+                    "connection_owner.connection_id":&connection_id,"connection_owner.capabilities_resolved":true,"connection_owner.expires_at":{"$gt":bson::DateTime::now()}},
+                doc!{"$inc":{"machine_configuration_fence":1_i64}}).session(&mut *session).await?;
+            if node_fence.matched_count != 1 {return Err(unavailable());}
+            let written = db.collection::<Document>(MACHINES).update_one(doc!{"_id":&machine.node_id,"revision":current.revision},
+                doc!{"$set":{"configuration_evidence":bson::to_bson(&evidence).map_err(|_|unavailable())?}})
+                .session(&mut *session).await?;
+            if written.matched_count != 1 {return Err(unavailable());}
+            Ok(())
+        }.await;
+        super::api_key_mutation_service::transaction_result(result)
+    }).await.map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 #[cfg(test)]

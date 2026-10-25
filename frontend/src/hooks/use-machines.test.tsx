@@ -32,8 +32,11 @@ import {
 
 const transport = vi.fn<typeof fetch>();
 const createBody = {
+  separation_choice: "automatic" as const,
+  separation_policy_version: "remote-machine-separation-v1" as const,
+  acknowledge_separation: true,
   name: "research-machine",
-  capabilities: ["shell", "files", "browser", "computer"] as (
+  capabilities: ["browser", "computer", "files", "shell"] as (
     | "shell"
     | "files"
     | "browser"

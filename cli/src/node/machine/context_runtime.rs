@@ -1,6 +1,8 @@
 //! Supervisor-owned separated context provisioning. No caller paths or UIDs.
 //! The allocation journal is fsynced before creating users; old UID/generation
 //! mappings are retained forever. This module is not a UID-only fallback.
+pub use super::hosted_context::VolumeBinding;
+use super::hosted_context::{AccountPool, HostedStore, RETAINED_ROOT};
 use super::process::{Identity, context_sandbox::Sandbox};
 use anyhow::{Context as _, Result, ensure};
 use nyxid_machine::{
@@ -26,8 +28,9 @@ pub struct Store {
     path: PathBuf,
     root: PathBuf,
     node: String,
-    _lock: File,
+    _lock: Option<File>,
     registry: Registry,
+    hosted: Option<HostedStore>,
 }
 pub struct Context {
     pub allocation: Allocation,
@@ -86,15 +89,99 @@ fn protected(path: &Path) -> Result<OwnedFd> {
     Ok(parent)
 }
 fn own(fd: &OwnedFd, uid: u32, gid: u32, mode: u32) -> Result<()> {
+    // Minimal hosted supervisors have CHOWN, never FOWNER. Take ownership
+    // before chmod and relinquish it last; changing an already worker-owned
+    // directory's mode directly would fail under the formal Pod capabilities.
     ensure!(
-        unsafe { libc::fchown(fd.as_raw_fd(), uid, gid) } == 0,
+        unsafe { libc::fchown(fd.as_raw_fd(), 0, 0) } == 0,
         "context_ownership_failed"
     );
     ensure!(
         unsafe { libc::fchmod(fd.as_raw_fd(), mode) } == 0,
         "context_permissions_failed"
     );
+    ensure!(
+        unsafe { libc::fchown(fd.as_raw_fd(), uid, gid) } == 0,
+        "context_ownership_failed"
+    );
     Ok(())
+}
+
+/// The hosted supervisor has CHOWN, not DAC_OVERRIDE/DAC_READ_SEARCH or
+/// FOWNER. After validating an O_PATH-pinned private directory, take ownership
+/// through that descriptor before requesting read access. Reopen the pinned
+/// inode itself, never its pathname: the no-follow and protected-parent checks
+/// made by the caller must continue to cover the ownership/mode transition.
+fn readable_as_supervisor(pinned: &OwnedFd) -> Result<OwnedFd> {
+    ensure!(
+        unsafe { libc::fchownat(pinned.as_raw_fd(), c"".as_ptr(), 0, 0, libc::AT_EMPTY_PATH) } == 0,
+        "context_ownership_failed"
+    );
+    let fd = unsafe {
+        libc::openat(
+            pinned.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_DIRECTORY | libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    ensure!(fd >= 0, "context_directory_unavailable");
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(test)]
+mod legacy_pinning_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires disposable hardened Linux supervisor"]
+    fn private_home_transition_uses_the_pinned_inode_after_name_replacement() {
+        let root = tempfile::tempdir_in("/var/lib/nyxid-hosted-tests").unwrap();
+        let home = root.path().join("home");
+        let retired = root.path().join("retired");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::chown(&home, Some(1000), Some(1000)).unwrap();
+        let pinned = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&home)
+            .unwrap();
+        let original = pinned.metadata().unwrap();
+        assert_eq!(original.uid(), 1000);
+        assert!(File::open(&home).is_err(), "no DAC override may be used");
+        // A trusted test actor changes the pathname after pinning. Production's
+        // protected parent denies this to workers; even this swap must never
+        // redirect the subsequent ownership/read-open to the replacement.
+        std::fs::rename(&home, &retired).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::chown(&home, Some(1002), Some(1002)).unwrap();
+        let fd: OwnedFd = pinned.into();
+        let readable = readable_as_supervisor(&fd).unwrap();
+        own(&readable, 0, 1000, 0o770).unwrap();
+        let transitioned = File::from(readable).metadata().unwrap();
+        assert_eq!(
+            (transitioned.dev(), transitioned.ino()),
+            (original.dev(), original.ino())
+        );
+        assert_eq!(
+            (
+                transitioned.uid(),
+                transitioned.gid(),
+                transitioned.mode() & 0o777
+            ),
+            (0, 1000, 0o770)
+        );
+        let replacement = std::fs::metadata(&home).unwrap();
+        assert_eq!(
+            (
+                replacement.uid(),
+                replacement.gid(),
+                replacement.mode() & 0o777
+            ),
+            (1002, 1002, 0o700)
+        );
+    }
 }
 
 /// Registration keeps its state private, including newly created ancestors.
@@ -126,7 +213,7 @@ fn child(parent: &OwnedFd, name: &str, uid: u32, gid: u32, mode: u32) -> Result<
         libc::openat(
             parent.as_raw_fd(),
             name.as_ptr(),
-            libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            libc::O_DIRECTORY | libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
         )
     };
     ensure!(fd >= 0, "context_directory_unavailable");
@@ -138,6 +225,23 @@ fn child(parent: &OwnedFd, name: &str, uid: u32, gid: u32, mode: u32) -> Result<
         meta.uid() == uid || (meta.uid() == 0 && meta.mode() & 0o077 == 0),
         "context_directory_owner_changed"
     );
+    // On restart an existing HOME/tmp belongs to the command UID with 0700.
+    // The hosted parent has CHOWN, not DAC_OVERRIDE/FOWNER: pin it without
+    // reading, verify ownership, then take ownership through that descriptor.
+    // Its supervisor-owned parent prevents the role from replacing this inode.
+    ensure!(
+        unsafe { libc::fchownat(fd.as_raw_fd(), c"".as_ptr(), 0, 0, libc::AT_EMPTY_PATH) } == 0,
+        "context_ownership_failed"
+    );
+    let readable = unsafe {
+        libc::openat(
+            fd.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    ensure!(readable >= 0, "context_directory_unavailable");
+    let fd = unsafe { OwnedFd::from_raw_fd(readable) };
     own(&fd, uid, gid, mode)
 }
 fn role(root: &Path, uid: u32) -> Result<()> {
@@ -238,6 +342,11 @@ fn account(uid: u32, home: &Path, node: &str) -> Result<Identity> {
 impl Store {
     pub fn open(directory: &Path, node: &str) -> Result<Self> {
         ensure!(
+            std::env::var("NYXID_MANAGED_KUBERNETES").as_deref() != Ok("1")
+                && std::env::var("NYXID_MACHINE_MANAGED").as_deref() != Ok("1"),
+            "hosted_context_binding_required"
+        );
+        ensure!(
             unsafe { libc::geteuid() } == 0 && uuid::Uuid::parse_str(node).is_ok(),
             "context_supervisor_required"
         );
@@ -291,9 +400,48 @@ impl Store {
             path,
             root,
             node: node.into(),
-            _lock: lock,
+            _lock: Some(lock),
             registry,
+            hosted: None,
         })
+    }
+    /// Only the managed bootstrap integration may call this with authenticated
+    /// original PVC/current runtime identities. Native storage is never a fallback.
+    pub fn open_hosted(
+        directory: &Path,
+        binding: VolumeBinding,
+        runtime_id: &str,
+        initialize: bool,
+    ) -> Result<Self> {
+        protected(directory)?;
+        let root = directory
+            .parent()
+            .context("context_state_parent_required")?
+            .join("contexts");
+        own(&protected(&root)?, 0, 0, 0o711)?;
+        let hosted = HostedStore::open(
+            Path::new(RETAINED_ROOT),
+            binding.clone(),
+            runtime_id,
+            initialize,
+            AccountPool::system()?,
+        )?;
+        Ok(Self {
+            path: directory.join("machine-contexts.json"),
+            root,
+            node: binding.node_id,
+            _lock: None,
+            registry: Registry::default(),
+            hosted: Some(hosted),
+        })
+    }
+    pub(super) fn is_hosted(&self) -> bool {
+        self.hosted.is_some()
+    }
+    pub(super) fn hosted_volume_matches(&self, binding: &VolumeBinding) -> bool {
+        self.hosted
+            .as_ref()
+            .is_some_and(|hosted| hosted.volume_binding() == binding)
     }
     fn persist(&self, registry: &Registry) -> Result<()> {
         registry.validate().map_err(anyhow::Error::msg)?;
@@ -313,6 +461,9 @@ impl Store {
         Ok(())
     }
     pub fn quarantine(&mut self, agent: &str, before_revision: i64) -> Result<Vec<u32>> {
+        if let Some(hosted) = &mut self.hosted {
+            return hosted.quarantine(agent, before_revision);
+        }
         let mut next = self.registry.clone();
         let users = next.quarantine(agent, before_revision);
         self.persist(&next)?;
@@ -321,12 +472,18 @@ impl Store {
     }
     /// Caller authenticates v2 and obtains owner consent before this mutation.
     pub fn provision(&mut self, authority: &Authority) -> Result<Context> {
-        let mut next = self.registry.clone();
-        let allocation = next
-            .allocate(authority, occupied)
-            .map_err(anyhow::Error::msg)?;
-        self.persist(&next)?;
-        self.registry = next;
+        let (allocation, retained) = if let Some(hosted) = &mut self.hosted {
+            let (allocation, workspace) = hosted.provision(authority)?;
+            (allocation, Some(workspace))
+        } else {
+            let mut next = self.registry.clone();
+            let allocation = next
+                .allocate(authority, occupied)
+                .map_err(anyhow::Error::msg)?;
+            self.persist(&next)?;
+            self.registry = next;
+            (allocation, None)
+        };
         // Chromium puts SingletonSocket below TMPDIR. Using the journaled UID
         // keeps those Unix socket paths short; caller IDs never select a path.
         let root = self.root.join(allocation.command_uid.to_string());
@@ -342,20 +499,36 @@ impl Store {
         role(&command_root, allocation.command_uid)?;
         role(&secure_root, users.secure_uid)?;
         role(&dev_root, users.dev_uid)?;
-        let mut command = account(
-            allocation.command_uid,
-            &command_root.join("home"),
-            &self.node,
-        )?;
-        let secure = account(users.secure_uid, &secure_root.join("home"), &self.node)?;
-        let dev = account(users.dev_uid, &dev_root.join("home"), &self.node)?;
-        command.sandbox = Some(Arc::new(Sandbox::open(&command_root, command.uid)?));
+        let account = |uid, home: &Path| -> Result<Identity> {
+            if self.hosted.is_some() {
+                let mut identity = Identity::resolve(Some(&format!("nyxc{uid}")))?;
+                ensure!(
+                    identity.uid == uid
+                        && identity.gid == uid
+                        && identity.home == Path::new("/nonexistent"),
+                    "context_account_collision"
+                );
+                identity.home = home.to_owned();
+                Ok(identity)
+            } else {
+                account(uid, home, &self.node)
+            }
+        };
+        let mut command = account(allocation.command_uid, &command_root.join("home"))?;
+        let secure = account(users.secure_uid, &secure_root.join("home"))?;
+        let dev = account(users.dev_uid, &dev_root.join("home"))?;
+        let workspace = retained.unwrap_or_else(|| command_root.join("workspace"));
+        command.sandbox = Some(Arc::new(Sandbox::open_with_workspace(
+            &command_root,
+            command.uid,
+            &workspace,
+        )?));
         Ok(Context {
             allocation,
             command,
             secure,
             dev,
-            workspace: command_root.join("workspace"),
+            workspace,
             browser_root,
         })
     }
@@ -387,7 +560,7 @@ pub fn protect_legacy_roots(roots: &[PathBuf], legacy: &Identity) -> Result<()> 
             libc::openat(
                 parent.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_DIRECTORY | libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::O_DIRECTORY | libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
         };
         ensure!(fd >= 0, "context_legacy_root_unsafe");
@@ -400,7 +573,7 @@ pub fn protect_legacy_roots(roots: &[PathBuf], legacy: &Identity) -> Result<()> 
         pinned.push(fd);
     }
     for fd in pinned {
-        own(&fd, 0, legacy.gid, 0o770)?;
+        own(&readable_as_supervisor(&fd)?, 0, legacy.gid, 0o770)?;
     }
     Ok(())
 }
@@ -422,19 +595,19 @@ pub fn protect_legacy_browser_home(legacy: &Identity) -> Result<()> {
         libc::openat(
             parent.as_raw_fd(),
             name.as_ptr(),
-            libc::O_DIRECTORY | libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            libc::O_DIRECTORY | libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
     ensure!(fd >= 0, "context_legacy_home_unsafe");
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let file = File::from(fd.try_clone()?);
-    let meta = file.metadata()?;
+    let meta = File::from(fd.try_clone()?).metadata()?;
     ensure!(
         meta.uid() == legacy.uid || (meta.uid() == 0 && meta.gid() == 0),
         "context_legacy_home_unsafe"
     );
+    let fd = readable_as_supervisor(&fd)?;
     own(&fd, 0, 0, 0o700)?;
-    super::context_policy::legacy_home(&file, legacy.uid)
+    super::context_policy::legacy_home(&File::from(fd), legacy.uid)
 }
 
 pub struct BrowserResources {

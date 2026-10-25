@@ -8,6 +8,15 @@ fn fixture() -> (ManagedMachine, DeleteRecoveryProgress) {
     let mut machine: ManagedMachine = bson::from_document(bson::doc! {
         "_id":"machine","owner_id":"owner","policy_version":crate::models::remote_machine::POLICY_VERSION,
         "data_policy_version":crate::models::remote_machine::DATA_POLICY_VERSION,
+        "configuration":bson::to_bson(&nyxid_machine::managed::RequiredConfiguration {
+            version:nyxid_machine::managed::CONFIG_VERSION,revision:1,
+            separation_choice:nyxid_machine::context::Choice::SharedLegacy,
+            capabilities:vec!["files".into(),"shell".into()],
+        }).unwrap(),
+        "separation_policy_version":crate::models::remote_machine::SEPARATION_POLICY_VERSION,
+        "separation_accepted_at":bson::DateTime::now(),
+        "hosted_storage_allocation_id":Uuid::new_v4().to_string(),
+        "hosted_storage_initializer_runtime_id":bson::Bson::Null,
         "profile":bson::to_bson(&crate::models::remote_machine::MachineProfileSpec::fixed("registry.test/node@sha256:abc")).unwrap(),
         "sandbox_namespace":"nyxid-machine","sandbox_name":"machine-fixture","resource_state":"deleting",
         "billing_state":"free","authorization_state":"revoked","revision":1_i64,"runtime_generation":0_i64,

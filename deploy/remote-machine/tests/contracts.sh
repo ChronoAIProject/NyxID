@@ -58,6 +58,8 @@ grep -F 'podTemplate.spec.automountServiceAccountToken == false' "$root/admissio
 grep -F 'parameterNotFoundAction: Deny' "$root/admission.yaml" >/dev/null
 grep -F "['CHOWN', 'SETUID', 'SETGID', 'KILL']" "$root/admission.yaml" >/dev/null
 grep -F 'pod-security.kubernetes.io/enforce: baseline' "$root/namespace.yaml" >/dev/null
+PYTHONDONTWRITEBYTECODE=1 python3 "$root/seccomp/export.py" --check
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s "$root/tests" -p seccomp_profile_test.py
 kubectl kustomize "$root" >/dev/null
 # Evaluate the actual admission expressions against SandboxIntent::apply_object
 # output for the single current profile and hostile variants. An optional first argument
@@ -70,7 +72,7 @@ if command -v go >/dev/null 2>&1; then
   fixtures=${1:-}
   if [ -z "$fixtures" ]; then
     fixtures="$test_dir/sandbox-fixtures.json"
-    cargo run --quiet --manifest-path "$root/../../Cargo.toml" -p nyxid-machine-updater --example sandbox_contracts >"$fixtures"
+    CARGO_INCREMENTAL=1 cargo run --locked --quiet --manifest-path "$root/../../Cargo.toml" -p nyxid-machine-updater --example sandbox_contracts >"$fixtures"
   fi
   test -s "$fixtures"
   # go run executes in its own directory, so make caller-supplied paths absolute.
@@ -99,6 +101,8 @@ type object = map[string]any
 func clone(value object) object { b,_:=json.Marshal(value); var out object; if err:=json.Unmarshal(b,&out);err!=nil{panic(err)};return out }
 func pod(v object) object{return v["spec"].(object)["podTemplate"].(object)["spec"].(object)}
 func node(v object) object{return pod(v)["containers"].([]any)[0].(object)}
+func security(v object) object{return node(v)["securityContext"].(object)}
+func seccomp(v object) object{return security(v)["seccompProfile"].(object)}
 func envs(v object) []any{return node(v)["env"].([]any)}
 func mounts(v object) []any{return node(v)["volumeMounts"].([]any)}
 func volumes(v object) []any{return pod(v)["volumes"].([]any)}
@@ -116,12 +120,12 @@ func main(){
   program,err:=environment.Program(ast);if err!=nil{panic(err)}
   programs=append(programs,program)
  }
- if len(programs)<17 {panic("admission validators missing")}
+ if len(programs)<19 {panic("admission validators missing")}
  fixtureBytes,err:=os.ReadFile(os.Args[2]);if err!=nil{panic(err)}
  var fixtures map[string]object
  if err:=json.Unmarshal(fixtureBytes,&fixtures);err!=nil{panic(err)}
- fixture,retainedCurrent,defaultStorage:=fixtures["current"],fixtures["retained_current"],fixtures["current_default_storage"]
- if len(fixtures)!=3||fixture==nil||retainedCurrent==nil||defaultStorage==nil{panic("actual renderer must provide current, retained image, and default-storage fixtures")}
+ fixture,retainedCurrent,defaultStorage,localhost:=fixtures["current"],fixtures["retained_current"],fixtures["current_default_storage"],fixtures["localhost"]
+ if len(fixtures)!=4||fixture==nil||retainedCurrent==nil||defaultStorage==nil||localhost==nil{panic("actual renderer must provide current, retained image, default-storage, and Localhost fixtures")}
  if _,present:=workspace(defaultStorage)["storageClassName"];present{panic("actual default renderer must omit storageClassName entirely")}
  probe:=node(fixture)["startupProbe"].(object)
  parameters:=object{"data":object{"image":node(fixture)["image"],"runtime-class":"sandboxed","storage-class":"verified","bootstrap-base-url":"https://nyxid.example"}}
@@ -138,6 +142,49 @@ func main(){
  check:=func(name string,v object,want bool){checkWithOld(name,v,nil,want)}
  check("current actual renderer",fixture,true)
  checkWithOld("current retained update",fixture,fixture,true)
+ seccompCases:=0
+ seccompCheck:=func(name string,v object,old any,want bool){checkWithOld(name,v,old,want);seccompCases++}
+ reference:=seccomp(localhost)["localhostProfile"].(string)
+ replacementReference:="nyxid/remote-machine-v1-"+strings.Repeat("d",64)+".json"
+ seccompCheck("Localhost requires explicit platform approval",localhost,nil,false)
+ parameters["data"].(object)["seccomp-localhost-profile"]=reference
+ seccompCheck("approved Localhost actual renderer",localhost,nil,true)
+ seccompCheck("Localhost approval cannot silently select RuntimeDefault",fixture,nil,false)
+ for _,base:=range []object{fixture,localhost}{
+  previous:=clone(base);previous["spec"].(object)["operatingMode"]="Suspended"
+  seccompCheck("saved seccomp survives resume under current approval",base,previous,true)
+  for _,configured:=range []any{replacementReference,"",nil}{
+   parameters["data"].(object)["seccomp-localhost-profile"]=configured
+   seccompCheck("saved seccomp survives deployment drift",base,previous,true)
+  }
+  delete(parameters["data"].(object),"seccomp-localhost-profile")
+  seccompCheck("saved seccomp survives removed approval",base,previous,true)
+ }
+ parameters["data"].(object)["seccomp-localhost-profile"]=replacementReference
+ replaced:=clone(localhost);seccomp(replaced)["localhostProfile"]=replacementReference
+ seccompCheck("newly approved reference cannot rewrite saved Localhost",replaced,localhost,false)
+ seccompCheck("newly approved Localhost cannot replace saved RuntimeDefault",replaced,fixture,false)
+ seccompCheck("saved Localhost cannot switch to RuntimeDefault",fixture,localhost,false)
+ for _,invalid:=range []any{"",nil,"../escape.json","/absolute.json","arbitrary.json","nyxid/remote-machine-v1-"+strings.Repeat("A",64)+".json","nyxid/remote-machine-v1-"+strings.Repeat("a",63)+".json"}{
+  malformed:=clone(localhost);seccomp(malformed)["localhostProfile"]=invalid
+  parameters["data"].(object)["seccomp-localhost-profile"]=invalid
+  seccompCheck("malformed selection cannot authorize Localhost",malformed,nil,false)
+  seccompCheck("malformed approval cannot fall back to RuntimeDefault",fixture,nil,false)
+  seccompCheck("malformed old profile cannot legitimize update",malformed,malformed,false)
+ }
+ parameters["data"].(object)["seccomp-localhost-profile"]=reference
+ for _,profile:=range []any{nil,object{},object{"type":"Localhost"},object{"type":"Localhost","localhostProfile":replacementReference},object{"type":"Unconfined"},object{"type":"RuntimeDefault","localhostProfile":reference},object{"type":"RuntimeDefault","localhostProfile":nil}}{
+  malformed:=clone(localhost);security(malformed)["seccompProfile"]=profile
+  seccompCheck("missing or mismatched profile cannot create",malformed,nil,false)
+  if p,ok:=profile.(object);ok&&p["type"]=="Localhost"&&p["localhostProfile"]==replacementReference{continue}
+  seccompCheck("malformed prior profile cannot authorize update",malformed,malformed,false)
+ }
+ missing:=clone(localhost);delete(security(missing),"seccompProfile")
+ seccompCheck("missing seccomp profile cannot create",missing,nil,false)
+ seccompCheck("missing seccomp profile cannot update",missing,missing,false)
+ missingReference:=clone(localhost);delete(seccomp(missingReference),"localhostProfile")
+ seccompCheck("Localhost reference required",missingReference,nil,false)
+ delete(parameters["data"].(object),"seccomp-localhost-profile")
  obsoleteCases:=0
  for _,profile:=range []string{"remote-shell-files-v1","remote-shell-files-v2"}{
   obsolete:=clone(fixture);obsolete["metadata"].(object)["labels"].(object)["nyxid.dev/profile"]=profile
@@ -242,6 +289,11 @@ func main(){
  "missing mount":func(v object){node(v)["volumeMounts"]=mounts(v)[:4]},
  "duplicate mount":func(v object){node(v)["volumeMounts"]=append(mounts(v),clone(mounts(v)[0].(object)))},
  "replaced mount":func(v object){mounts(v)[4]=clone(mounts(v)[0].(object))},
+ "workspace PVC root exposed":func(v object){delete(mounts(v)[0].(object),"subPath")},
+ "workspace wrong subpath":func(v object){mounts(v)[0].(object)["subPath"]="contexts"},
+ "retained context subpath":func(v object){mounts(v)[5].(object)["subPath"]="legacy"},
+ "retained context alternate volume":func(v object){mounts(v)[5].(object)["name"]="identity"},
+ "retained context read only":func(v object){mounts(v)[5].(object)["readOnly"]=true},
  "identity subpath":func(v object){mounts(v)[1].(object)["subPath"]="public"},
  "subpath expression":func(v object){mounts(v)[1].(object)["subPathExpr"]="$(PUBLIC)"},
  "propagating mount":func(v object){mounts(v)[1].(object)["mountPropagation"]="Bidirectional"},
@@ -305,7 +357,7 @@ func main(){
    temporaryCases++
   }
  }
- fmt.Printf("admission CEL: %d actual validators, 3 Rust-rendered objects, 1 current profile, %d obsolete-profile rejections, %d image-retention cases, 10 runtime-selection cases, %d storage-selection/retention cases, %d temporary-field cases and %d hostile variants passed (%d total admission cases)\n",len(programs),obsoleteCases,imageCases,storageCases,temporaryCases,len(mutations)*4,totalCases)
+ fmt.Printf("admission CEL: %d actual validators, 4 Rust-rendered objects, 1 current profile, %d obsolete-profile rejections, %d image-retention cases, 10 runtime-selection cases, %d seccomp-selection/retention cases, %d storage-selection/retention cases, %d temporary-field cases and %d hostile variants passed (%d total admission cases)\n",len(programs),obsoleteCases,imageCases,seccompCases,storageCases,temporaryCases,len(mutations)*4,totalCases)
 }
 GO
   (cd "$test_dir" && GOWORK=off go mod tidy && GOWORK=off go run . "$root/admission.yaml" "$fixtures")

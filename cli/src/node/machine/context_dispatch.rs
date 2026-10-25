@@ -22,9 +22,17 @@ pub(super) fn failure_stage(error: &anyhow::Error) -> &'static str {
 
 #[derive(Default)]
 pub(super) struct Contexts {
-    store: Option<Store>,
+    pub(super) store: Option<Store>,
     pub runtimes: HashMap<String, Arc<Runtime>>,
+    // A prerequisite fixture for dispatch-gate tests without Chromium. Never
+    // compiled into a daemon or used as real hosted/browser acceptance evidence.
+    #[cfg(test)]
+    pub(super) test_evidence: Option<nyxid_machine::context::Evidence>,
 }
+
+#[cfg(test)]
+#[path = "context_dispatch_tests.rs"]
+mod tests;
 impl Runtime {
     pub(super) async fn context_children(&self) -> Vec<Arc<Runtime>> {
         self.contexts
@@ -68,6 +76,14 @@ impl Runtime {
         before_revision: i64,
     ) -> Result<()> {
         let mut contexts = self.contexts.lock().await;
+        // A missing ephemeral native journal cannot prove a managed context
+        // never existed. Only the original protected store can acknowledge its
+        // persisted quarantine, including after a Pod/daemon replacement.
+        ensure!(
+            self.managed_binding.get().is_none()
+                || contexts.store.as_ref().is_some_and(Store::is_hosted),
+            "hosted_context_binding_required"
+        );
         if contexts.store.is_none() && self.status_directory.join("machine-contexts.json").exists()
         {
             contexts.store = Some(Store::open(&self.status_directory, &self.node_id)?);
@@ -145,6 +161,11 @@ impl Runtime {
             "context_authority_invalid"
         );
         let mut contexts = self.contexts.lock().await;
+        ensure!(
+            self.managed_binding.get().is_none()
+                || contexts.store.as_ref().is_some_and(Store::is_hosted),
+            "hosted_context_binding_required"
+        );
         if let Some(runtime) = contexts.runtimes.get(&authority.context_id) {
             let binding = runtime
                 .context_binding
@@ -181,10 +202,14 @@ impl Runtime {
             }
             contexts.runtimes.remove(&authority.context_id);
         }
-        ensure!(
-            self.context_support().await.available,
-            "context_backend_unavailable"
-        );
+        #[cfg(test)]
+        let support = match &contexts.test_evidence {
+            Some(evidence) => evidence.support(),
+            None => self.context_support().await,
+        };
+        #[cfg(not(test))]
+        let support = self.context_support().await;
+        ensure!(support.available, "context_backend_unavailable");
         let directory = self.status_directory.clone();
         let node = self.node_id.clone();
         let mut roots = self.config.roots.clone();

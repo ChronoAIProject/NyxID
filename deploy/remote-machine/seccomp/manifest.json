@@ -1,0 +1,17 @@
+{
+  "architectures": [
+    "amd64",
+    "arm64"
+  ],
+  "capabilities": [
+    "CAP_CHOWN",
+    "CAP_KILL",
+    "CAP_SETGID",
+    "CAP_SETUID"
+  ],
+  "localhost_profile": "nyxid/remote-machine-v1-6acea1f600d901e9056e85581c3e8be63f61ad8a14357e477cf9cff51519a451.json",
+  "minimum_kernel": "4.8",
+  "profile_sha256": "6acea1f600d901e9056e85581c3e8be63f61ad8a14357e477cf9cff51519a451",
+  "source_sha256": "732d6b259877370181e05e2648963b61fb765303fc221f9621d2ef71e0270795",
+  "version": 1
+}

@@ -4,6 +4,20 @@ import { creditsSchema } from "./credits.ts";
 export const REMOTE_MACHINE_PROFILE = "remote-machine";
 export const REMOTE_MACHINE_POLICY = "remote-machine-mvp";
 export const REMOTE_MACHINE_DATA_POLICY = "remote-machine-data";
+export const REMOTE_MACHINE_SEPARATION_POLICY = "remote-machine-separation-v1";
+export const machineSeparationChoiceSchema = z.enum(["automatic", "require_separated", "shared_legacy"]);
+
+// This is the server's current authenticated-runtime projection. Its revision
+// is independent of Agent assignments and Machine lifecycle revisions.
+export const machineConfigurationSchema = z.object({
+  version: z.literal(2),
+  revision: z.number().int().positive(),
+  digest: z.string().regex(/^[a-f0-9]{64}$/),
+  runtime_generation: z.number().int().nonnegative(),
+  state: z.string().min(1),
+  reason: z.string().nullable(),
+});
+export type MachineConfiguration = z.infer<typeof machineConfigurationSchema>;
 
 // Safe HTTP projections only. Unknown server fields are stripped before a
 // response enters Query; never cache bootstrap material or raw job output.
@@ -23,11 +37,13 @@ export const remoteMachineCapabilitiesSchema = z
     (capabilities) =>
       !capabilities.includes("computer") || capabilities.includes("browser"),
     "Computer requires Browser.",
-  );
+  )
+  .transform((capabilities) => [...new Set(capabilities)].sort());
 export const remoteMachineHostedConfigurationSchema = z.object({
   name: remoteMachineNameSchema.default("my-remote-machine"),
-  capabilities: remoteMachineCapabilitiesSchema.default(["shell", "files"]),
+  capabilities: remoteMachineCapabilitiesSchema.default(["files", "shell"]),
   specialist_id: machineIdSchema.nullable().default(null),
+  separation_choice: machineSeparationChoiceSchema,
 });
 export type RemoteMachineHostedConfiguration = z.output<
   typeof remoteMachineHostedConfigurationSchema
@@ -62,6 +78,9 @@ export const remoteMachinePolicySchema = z.object({
   job_history_days: z.number().int().positive(),
   operation_history_days: z.number().int().positive(),
   terminal_output_max_retention_seconds: z.number().int().nonnegative(),
+  separation_policy_version: z.literal(REMOTE_MACHINE_SEPARATION_POLICY),
+  separation_choices: z.array(machineSeparationChoiceSchema).length(3),
+  separation_warning: z.string().min(1),
   shared_environment_mode: z.string(),
   cross_client_secret_isolation: z.boolean(),
   inbound_network_service: z.boolean(),
@@ -75,17 +94,17 @@ export const remoteMachinePolicySchema = z.object({
 });
 export const remoteMachineSchema = z.object({
   node_id: machineIdSchema,
-  // Older servers may omit hosted configuration; absence is not an assignment.
-  name: remoteMachineNameSchema.optional(),
-  capabilities: remoteMachineCapabilitiesSchema.optional(),
-  specialist_id: machineIdSchema.nullable().optional(),
+  name: remoteMachineNameSchema,
+  capabilities: remoteMachineCapabilitiesSchema,
+  separation_choice: machineSeparationChoiceSchema,
+  separation_policy_version: z.literal(REMOTE_MACHINE_SEPARATION_POLICY),
+  machine_configuration: machineConfigurationSchema,
+  specialist_id: machineIdSchema.nullable(),
   specialist_assignment_state: z
-    .enum(["none", "pending", "assigned", "permissions_required", "failed"])
-    .optional(),
+    .enum(["none", "pending", "assigned", "not_assigned", "failed"]),
   specialist_assignment_error: z
     .literal("specialist_assignment_unavailable")
-    .nullable()
-    .optional(),
+    .nullable(),
   policy_version: z.literal(REMOTE_MACHINE_POLICY),
   data_policy_version: z.literal(REMOTE_MACHINE_DATA_POLICY),
   profile: remoteMachineProfileSchema,
@@ -122,10 +141,9 @@ export const remoteMachineSchema = z.object({
   active_operation_id: machineIdSchema.nullable(),
   cleanup_state: z.string(),
   stop_reason: z.string().nullable().optional(),
-  // Additive owner projection fields; absence on an older server is unknown.
-  free_slot: z.boolean().optional(),
-  runtime_run_id: machineIdSchema.nullable().optional(),
-  funded_until: machineTimeSchema.nullable().optional(),
+  free_slot: z.boolean(),
+  runtime_run_id: machineIdSchema.nullable(),
+  funded_until: machineTimeSchema.nullable(),
   last_heartbeat_at: machineTimeSchema.nullable(),
   updated_at: machineTimeSchema,
 });
@@ -289,6 +307,8 @@ export const remoteMachineQuoteRequestSchema = z.strictObject({
 export const remoteMachineCreateRequestSchema = z
   .strictObject({
     ...remoteMachineHostedConfigurationSchema.shape,
+    separation_policy_version: z.literal(REMOTE_MACHINE_SEPARATION_POLICY),
+    acknowledge_separation: z.boolean().refine(Boolean, "Review and accept the selected separation policy."),
     profile_version: z
       .literal(REMOTE_MACHINE_PROFILE)
       .default(REMOTE_MACHINE_PROFILE),

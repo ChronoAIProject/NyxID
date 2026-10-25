@@ -89,6 +89,7 @@ import { RemoteMachineBilling } from "./remote-machine-billing";
 import { RemoteMachineConfirmations } from "./remote-machine-confirmations";
 import { RemoteMachinePaidStart } from "./remote-machine-paid-start";
 import { RemoteMachineUsage } from "./remote-machine-usage";
+import { MachineApplicationStatus } from "@/components/assistant/machine-application-status";
 
 const actionReviewSchema = z.object({
   acknowledged: z
@@ -144,6 +145,7 @@ type RemoteMachineDetailProps = {
   readonly onClose?: () => void;
   readonly operationId?: string;
   readonly confirmationId?: string;
+  readonly initialAgentId?: string;
   readonly accessPanel?: React.ReactNode;
 };
 
@@ -162,6 +164,7 @@ function RemoteMachineDetailView({
   onClose,
   operationId: linkedOperationId,
   confirmationId,
+  initialAgentId,
   accessPanel,
 }: RemoteMachineDetailProps) {
   const userId = useAuthStore((state) => state.user?.id);
@@ -207,7 +210,7 @@ function RemoteMachineDetailView({
           selectedQuery.data.id === selectedOperationId
         ? selectedQuery.data
         : undefined;
-  const [tab, setTab] = useState(confirmationId ? "confirmations" : "overview");
+  const [tab, setTab] = useState(confirmationId ? "confirmations" : initialAgentId ? "access" : "overview");
   const [reviewAction, setReviewAction] = useState<OwnerAction | null>(null);
   const [paidResumeOpen, setPaidResumeOpen] = useState(false);
   const [acceptedAction, setAcceptedAction] = useState<OwnerAction | null>(
@@ -422,7 +425,7 @@ function RemoteMachineDetailView({
             <Badge variant="secondary">Capabilities not reported</Badge>
           )}
         </div>
-        <Badge variant="secondary">Shared environment</Badge>
+        <Badge variant="secondary">Mode is set per Agent</Badge>
         {onClose && (
           <Button variant="ghost" onClick={onClose}>
             Back to machines
@@ -503,6 +506,14 @@ function RemoteMachineDetailView({
           <TabsTrigger value="policy">Settings and rules</TabsTrigger>
         </TabsList>
         <TabsContent value="overview" className="mt-6 space-y-6">
+          <section aria-label="Machine readiness and Agent availability" className="space-y-2 rounded-lg border border-border p-3 text-12">
+            <p className="font-medium">{machine.resource_state === "ready" ? "Machine Ready" : `Machine ${readable(machine.resource_state)}`}</p>
+            <p>Machine readiness and Agent availability are separate. Agent mode, tools, current separation support and authority application are reviewed in Access.</p>
+            <p>Default for new Agent assignments: {machine.separation_choice === "automatic" ? "Automatic" : machine.separation_choice === "require_separated" ? "Require separated" : "Shared legacy"}. Existing Agent modes and grants are unchanged by this default.</p>
+            <MachineApplicationStatus configuration={machine.machine_configuration} />
+            <p>An unavailable Agent does not pause this machine or stop runtime charges. Paid runtime continues under its accepted run contract, including while idle; downstream service charges are separate. Use Access to repair authorization, Pause machine to request a stop, or Delete machine after reviewing data loss. Stop and accounting results require their own confirmation.</p>
+            <Button variant="secondary" onClick={() => setTab("access")}>Review Agent availability</Button>
+          </section>
           <section
             aria-label="Independent machine status"
             className="grid min-w-0 gap-4 sm:grid-cols-3"
@@ -579,8 +590,7 @@ function RemoteMachineDetailView({
                       none: "No specialist assigned",
                       pending: "Specialist assignment is pending",
                       assigned: "Specialist assigned",
-                      permissions_required:
-                        "Specialist permissions need configuration",
+                      not_assigned: "Specialist is no longer assigned",
                       failed: "Specialist assignment could not be completed",
                     }[machine.specialist_assignment_state]
                   : "Specialist assignment status is unavailable"}
@@ -588,8 +598,10 @@ function RemoteMachineDetailView({
               <p>
                 Agent permissions are configured separately. External OAuth and
                 Agent Key tools remain limited to authorized Commands and Files.
-                All granted clients share the OS user and workspace; file roots
-                do not isolate shell commands.
+                Sharing is set per Agent. Shared legacy Agents and external
+                clients share their configured OS user and workspace; file roots
+                do not isolate shell commands. Review each Agent’s saved mode
+                and current separation support in Access.
               </p>
               <div className="flex flex-wrap gap-2">
                 <Button onClick={() => setTab("access")}>
@@ -630,7 +642,7 @@ function RemoteMachineDetailView({
         </TabsContent>
         <TabsContent value="access" className="mt-6 space-y-6">
           {accessPanel ?? (
-            <RemoteMachineAgentAccess machineId={machineId} node={node} />
+            <RemoteMachineAgentAccess machineId={machineId} node={node} initialAgentId={initialAgentId ?? machine.specialist_id ?? undefined} />
           )}
           <MachineGrantList machineId={machineId} />
         </TabsContent>
@@ -1013,7 +1025,7 @@ function LifecycleActionDialog({
                   <p>
                     Temporary storage has no fixed capacity commitment.{" "}
                     Temporary data may be lost after pause or Pod recreation.
-                    All granted clients share the OS user and workspace. File
+                    Shared legacy Agents and external clients share their configured OS user and workspace. File
                     roots do not isolate shell commands.
                   </p>
                 </>
@@ -1428,15 +1440,17 @@ function RemoteMachinePolicyPanel({
             organization or charged to an organization wallet.
           </p>
           <p>
-            All authorized clients share the Machine and workspace. Commands and
-            file tools use the shared command OS user. Authorized agents also
-            share browser sessions in the existing shared mode. File roots
-            constrain file tools and working directories; they do not isolate
-            shell authority or secrets between clients.
+            Sharing is set per Agent. Shared legacy Agents and external clients
+            share their configured OS user and workspace. Shared legacy Agents
+            also share browser sessions. Separated assignments require current
+            support and their own workspace and browser profiles; they still
+            share the machine kernel. File roots constrain file tools and
+            working directories; they do not isolate shell authority or secrets
+            between shared clients. Review each Agent’s mode in Access.
           </p>
           <p>
-            Only /workspace persists; HOME, /tmp, browser profiles and downloads
-            are temporary unless safely saved in the workspace. Temporary
+            The legacy /workspace and separated workspaces are retained on the original protected volume. Identity mappings, generations and tombstones are supervisor-protected and retained for recovery. HOME, /tmp, browser profiles and downloads
+            are temporary; mode changes do not migrate shared files or copy cookies. Recovery failure keeps execution unavailable. Temporary
             storage is managed by the deployment environment; new Machines have
             no fixed temporary capacity commitment. Temporary data may be lost
             after pause or Pod recreation. A new runtime does not restore
