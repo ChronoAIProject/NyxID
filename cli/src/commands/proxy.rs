@@ -60,11 +60,18 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
             data,
             headers,
             stream,
+            envelope,
             by_id,
             via_service,
             auth,
         } => {
+            if envelope && !matches!(auth.output, OutputFormat::Json) {
+                bail!("--envelope requires --output json");
+            }
             let mut api = ApiClient::from_auth_checked(&auth).await?;
+            if !matches!(method.to_ascii_uppercase().as_str(), "GET" | "HEAD") {
+                api = api.without_token_refresh();
+            }
 
             // Build proxy path
             let trimmed_path = path.trim_start_matches('/');
@@ -122,12 +129,48 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
                 .await?;
 
             let status = resp.status();
+            let execution_id = resp
+                .headers()
+                .get("x-nyxid-execution-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
-                if body.is_empty() {
-                    bail!("Proxy request failed (HTTP {status})");
+                if status == reqwest::StatusCode::CONFLICT
+                    && let Ok(value) = serde_json::from_str::<Value>(&body)
+                    && value["error_code"] == 12800
+                    && let Some(id) = value["message"]
+                        .as_str()
+                        .and_then(super::billing_support::pending_id)
+                {
+                    return super::billing_support::pending(id, auth.output);
                 }
-                bail!("Proxy request failed (HTTP {status}): {body}");
+                return Err(crate::api::ApiError::new(
+                    format!("Proxy request {proxy_path}"),
+                    status,
+                    body,
+                )
+                .into());
+            }
+            if let Some(id) = &execution_id {
+                eprintln!("Execution: {id}");
+            }
+            if envelope {
+                let mut headers = serde_json::Map::new();
+                for name in ["x-nyxid-execution-id", "x-nyxid-agent-id", "x-request-id"] {
+                    if let Some(value) = resp.headers().get(name).and_then(|v| v.to_str().ok()) {
+                        headers.insert(name.into(), Value::String(value.into()));
+                    }
+                }
+                let body = resp.text().await.context("Failed to read response body")?;
+                let body = serde_json::from_str::<Value>(&body).unwrap_or(Value::String(body));
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"status":status.as_u16(),"execution_id":execution_id,"headers":headers,"body":body})
+                    )?
+                );
+                return Ok(());
             }
 
             if stream {
@@ -176,6 +219,7 @@ mod tests {
             data: data.map(str::to_string),
             headers: vec![],
             stream: false,
+            envelope: false,
             by_id,
             via_service: via.map(str::to_string),
             auth: mock_auth(uri),
@@ -352,7 +396,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Proxy request failed (HTTP 403 Forbidden): denied"
+            "Proxy request /proxy/s/openai/v1/models failed (HTTP 403 Forbidden): denied"
         );
     }
 
@@ -400,6 +444,7 @@ mod tests {
             data: None,
             headers: vec!["X-Custom: value".to_string()],
             stream: false,
+            envelope: false,
             by_id: false,
             via_service: None,
             auth: crate::test_support::mock_auth(server.uri()),
@@ -427,6 +472,7 @@ mod tests {
             data: Some(format!("@{}", tmp.display())),
             headers: vec![],
             stream: false,
+            envelope: false,
             by_id: false,
             via_service: None,
             auth: crate::test_support::mock_auth(server.uri()),

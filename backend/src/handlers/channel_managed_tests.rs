@@ -514,7 +514,7 @@ async fn platform_credentials_mask_rotate_clear_and_fallback_on_demand() {
             .get_version_num()
             == 4
     );
-    let document = bson::to_document(&original).unwrap();
+    let document = bson::to_document(&*original).unwrap();
     assert!(document.get_datetime("updated_at").is_ok());
     assert!(!format!("{original:?}").contains("secret-for-test"));
     let adapter = resolve_adapter("whatsapp", &state.token_exchange_cache).unwrap();
@@ -693,19 +693,27 @@ async fn aurinko_platform_credentials_share_provider_pair_and_keep_signing_secre
         existing_pair.client_secret_encrypted
     );
     assert_eq!(
-        state
-            .encryption_keys
-            .decrypt(shared.client_id_encrypted.as_ref().unwrap())
+        crate::services::credential_record_service::CredentialRecord::provider(&shared)
+            .decrypt(
+                &state.encryption_keys,
+                "client_id_encrypted",
+                shared.client_id_encrypted.as_ref().unwrap()
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .as_slice(),
         b"aurinko-application-id"
     );
     assert_eq!(
-        state
-            .encryption_keys
-            .decrypt(shared.client_secret_encrypted.as_ref().unwrap())
+        crate::services::credential_record_service::CredentialRecord::provider(&shared)
+            .decrypt(
+                &state.encryption_keys,
+                "client_secret_encrypted",
+                shared.client_secret_encrypted.as_ref().unwrap()
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .as_slice(),
         b"aurinko-application-secret"
     );
     let loaded = credentials::load_decrypted(&state.db, &state.encryption_keys, &descriptor)

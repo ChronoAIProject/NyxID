@@ -60,6 +60,28 @@ pub async fn prepare_machine_window_funding(
             super::super::allowances::ensure_current_period(db, &allowance, owner_id, now).await?,
         );
     }
+    for period in &periods {
+        if super::super::allowances::available_period_quantity(period) > 0
+            && let Some(lock) = &period.active_settlement
+        {
+            super::complete_allowance_lock(db, &period.id, &period.allowance_id, lock).await?;
+        }
+    }
+    for grant in super::super::grants::list_active_for_user(db, owner_id, now).await? {
+        if super::super::grants::service_scope_applies(
+            &grant.scope,
+            runtime_service_id,
+            Some(runtime_service_slug),
+        ) && super::super::service_limits::available_for_service(
+            &grant,
+            runtime_service_id,
+            Some(runtime_service_slug),
+        )? > Credits::ZERO
+            && let Some(lock) = &grant.active_settlement
+        {
+            super::complete_grant_lock(db, &grant.id, lock).await?;
+        }
+    }
     periods.sort_by(|left, right| super::expiry_order(left.period_end, right.period_end));
     Ok(MachineFundingCandidates {
         owner_id: owner_id.into(),
@@ -67,6 +89,45 @@ pub async fn prepare_machine_window_funding(
         service_slug: runtime_service_slug.into(),
         periods,
     })
+}
+
+impl MachineFundingCandidates {
+    /// Advisory outside-transaction check only. Admission reloads every benefit.
+    pub async fn benefits_cover(
+        &self,
+        db: &mongodb::Database,
+        seconds: i64,
+        rate: Credits,
+    ) -> AppResult<bool> {
+        let allowance = self.periods.iter().try_fold(0_i64, |sum, p| {
+            sum.checked_add(super::super::allowances::available_period_quantity(p))
+                .ok_or_else(|| AppError::Internal("Machine allowance overflow".into()))
+        })?;
+        let remaining = seconds.saturating_sub(allowance).max(0);
+        if remaining == 0 {
+            return Ok(true);
+        }
+        let mut needed = rate.checked_mul(remaining)?;
+        for grant in
+            super::super::grants::list_active_for_user(db, &self.owner_id, Utc::now()).await?
+        {
+            if super::super::grants::service_scope_applies(
+                &grant.scope,
+                self.service_id.as_deref(),
+                Some(&self.service_slug),
+            ) {
+                needed = needed.checked_sub(
+                    super::super::service_limits::available_for_service(
+                        &grant,
+                        self.service_id.as_deref(),
+                        Some(&self.service_slug),
+                    )?
+                    .min(needed),
+                )?;
+            }
+        }
+        Ok(needed == Credits::ZERO)
+    }
 }
 
 /// Reserve a single finite Machine window in a caller-owned transaction.
@@ -173,10 +234,7 @@ pub async fn reserve_machine_window_in_session(
         else {
             continue;
         };
-        if period.active_settlement.is_some()
-            || period.period_start > now
-            || period.period_end.is_some_and(|end| end <= now)
-        {
+        if period.period_start > now || period.period_end.is_some_and(|end| end <= now) {
             continue;
         }
         // A definition can shrink after preparation; preserve existing holds but
@@ -193,6 +251,11 @@ pub async fn reserve_machine_window_in_session(
         let wanted = remaining.min(available);
         if wanted == 0 {
             continue;
+        }
+        if period.active_settlement.is_some() {
+            return Err(AppError::Conflict(
+                "Machine allowance settlement is completing; retry".into(),
+            ));
         }
         let changed = periods.update_one(doc! { "_id": &period.id }, doc! {
             "$inc": { "reserved_quantity": wanted },
@@ -225,7 +288,6 @@ pub async fn reserve_machine_window_in_session(
             "status": "active",
             "issued_ledgered_at": { "$type": "date" },
             "remaining": { "$gt": Credits::ZERO },
-            "active_settlement": Bson::Null,
             "$or": [
                 { "expires_at": Bson::Null },
                 { "expires_at": { "$gt": bson::DateTime::from_chrono(now) } },
@@ -249,22 +311,40 @@ pub async fn reserve_machine_window_in_session(
         if remaining_cost == Credits::ZERO {
             break;
         }
-        let wanted = remaining_cost.min(super::super::grants::available_grant(&grant)?);
+        if grant.revoke_requested_at.is_some() {
+            continue;
+        }
+        if super::super::service_limits::available_for_service(
+            &grant,
+            candidates.service_id.as_deref(),
+            Some(&candidates.service_slug),
+        )? <= Credits::ZERO
+        {
+            continue;
+        }
+        if grant.active_settlement.is_some() {
+            return Err(AppError::Conflict(
+                "Issued credit settlement is completing; retry".into(),
+            ));
+        }
+        let wanted = remaining_cost.min(super::super::service_limits::available_for_service(
+            &grant,
+            candidates.service_id.as_deref(),
+            Some(&candidates.service_slug),
+        )?);
         if wanted <= Credits::ZERO {
             continue;
         }
-        let mut filter = super::spendable_grant_filter(&grant.id, wanted, now);
+        let (mut filter, update, key) = super::super::service_limits::reservation_change(
+            &grant,
+            candidates.service_id.as_deref(),
+            Some(&candidates.service_slug),
+            wanted,
+            now,
+        )?;
         filter.insert("recipient_user_id", owner_id);
-        filter.insert("issued_ledgered_at", doc! { "$type": "date" });
-        filter.insert("active_settlement", Bson::Null);
         let changed = grants_collection
-            .update_one(
-                filter,
-                doc! {
-                    "$inc": { "reserved": wanted },
-                    "$set": { "updated_at": bson::DateTime::from_chrono(now) },
-                },
-            )
+            .update_one(filter, update)
             .session(&mut *session)
             .await?;
         if changed.modified_count != 1 {
@@ -275,22 +355,31 @@ pub async fn reserve_machine_window_in_session(
         layer.grant_reservations.push(GrantReservationAllocation {
             grant_id: grant.id,
             amount: wanted,
+            service_limit_key: key,
         });
         remaining_cost = remaining_cost.checked_sub(wanted)?;
     }
 
-    if remaining_cost > Credits::ZERO && wallet.available_credits()? < remaining_cost {
+    let gross = super::super::taxes::reserve_gross_in_session(
+        db,
+        session,
+        &wallet,
+        &mut layer,
+        remaining_cost,
+    )
+    .await?;
+    if gross > Credits::ZERO && wallet.available_credits()? < gross {
         return Err(AppError::InsufficientCredits);
     }
-    if remaining_cost > Credits::ZERO {
+    if gross > Credits::ZERO {
         // Checked before MongoDB arithmetic, so accepted values stay within the
         // same Decimal128 range as every other exact Billing path.
-        wallet.reserved_credits.checked_add(remaining_cost)?;
+        wallet.reserved_credits.checked_add(gross)?;
         let changed = wallets
             .update_one(
                 doc! { "_id": &wallet.id, "owner_id": owner_id },
                 doc! {
-                    "$inc": { "reserved_credits": remaining_cost },
+                    "$inc": { "reserved_credits": gross },
                     "$set": { "updated_at": bson::DateTime::from_chrono(now) },
                 },
             )
@@ -302,11 +391,11 @@ pub async fn reserve_machine_window_in_session(
             ));
         }
     }
-    layer.reserved_credits = remaining_cost;
+    layer.reserved_credits = gross;
     Ok(BillingReservation {
         owner_id: owner_id.into(),
         wallet_id: wallet.id,
-        total_reserved_credits: remaining_cost,
+        total_reserved_credits: gross,
         layers: vec![layer],
     })
 }

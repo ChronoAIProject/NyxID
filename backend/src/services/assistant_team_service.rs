@@ -50,6 +50,9 @@ pub const MAX_DESCRIPTION_CHARS: usize = 2048;
 pub const MAX_GRANT_TARGETS: usize = 32;
 /// Loop guards for server-started event turns.
 pub const EVENT_TURNS_PER_HOUR: u64 = 20;
+/// Channel turns run at once for one owner, across all their bots and chats,
+/// separately from browser turns.
+pub const CHANNEL_TURNS_PER_OWNER: u32 = 4;
 pub const MAX_EVENT_STREAK: i32 = 3;
 /// Bounded like `nyx__wait_for_connection`, below NyxAgent's 150 s call timeout.
 pub const MAX_WAIT_SECS: u64 = 120;
@@ -111,12 +114,17 @@ pub async fn in_progress(
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
+        media_event_ids: Vec::new(),
+        media_declared: None,
+        media_sent_at: None,
+        invocation_id: None,
         id: Uuid::new_v4().to_string(),
         kind: kind.into(),
         text,
         agent_id: agent_id.map(str::to_owned),
         question_key: None,
         reply_to: Vec::new(),
+        source_event_ids: Vec::new(),
         bound: false,
         report_to: None,
         created_at: Utc::now(),
@@ -168,6 +176,7 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
     }
     let now = Utc::now();
     let agent = AssistantAgent {
+        channel_checking_notice: false,
         skills: Vec::new(),
         skills_revision: 0,
         skill_metadata: BTreeMap::new(),
@@ -195,15 +204,23 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         created_at: now,
         updated_at: now,
     };
-    match collection.insert_one(&agent).await {
-        Ok(_) => Ok(agent),
-        // A concurrent first use created it.
-        Err(error) if is_duplicate(&error) => collection
-            .find_one(doc! {"user_id": owner, "kind": "nyxbot"})
-            .await?
-            .ok_or_else(not_found),
-        Err(error) => Err(error.into()),
-    }
+    let context = (db.clone(), owner.to_owned(), agent);
+    super::transaction_service::run_db_only(db, &context, |session, (db, owner, agent)| {
+        Box::pin(async move {
+            super::erasure_admission::fence_in_session(db, owner, session).await?;
+            let collection = db.collection::<AssistantAgent>(AGENTS);
+            if let Some(winner) = collection
+                .find_one(doc! {"user_id":owner,"kind":"nyxbot"})
+                .session(&mut *session)
+                .await?
+            {
+                return Ok(winner);
+            }
+            collection.insert_one(agent).session(session).await?;
+            Ok(agent.clone())
+        })
+    })
+    .await
 }
 
 /// An agent of the owner by ID.
@@ -294,11 +311,81 @@ pub async fn delegable_specialist(
         Err(error) => return Err(error),
     }
 
+    let mut usable =
+        admitted_organization_specialists(db, actor, selector, OrgAgentAdmission::Use).await?;
+    match usable.len() {
+        0 => Err(not_found()),
+        1 => Ok(usable.pop().expect("one candidate")),
+        _ => {
+            let mut choices = Vec::with_capacity(usable.len());
+            for agent in &usable {
+                choices.push(qualified_name(db, agent).await?);
+            }
+            choices.sort();
+            Err(AppError::ValidationError(format!(
+                "Agent name is ambiguous; use one of: {}",
+                choices.join(", ")
+            )))
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OrgAgentAdmission {
+    Use,
+    Read,
+}
+
+impl OrgAgentAdmission {
+    async fn require_enabled(self, db: &Database, actor: &str) -> AppResult<()> {
+        match self {
+            Self::Use => super::org_agent_service::require_creation_enabled(db, actor).await,
+            Self::Read => Ok(()),
+        }
+    }
+
+    async fn admit(self, db: &Database, actor: &str, agent: &AssistantAgent) -> AppResult<()> {
+        match self {
+            Self::Use => super::org_agent_service::require_use(db, actor, agent).await,
+            Self::Read => {
+                if super::org_agent_service::access(db, actor, &agent.user_id)
+                    .await?
+                    .can_read()
+                {
+                    Ok(())
+                } else {
+                    Err(not_found())
+                }
+            }
+        }
+    }
+}
+
+/// Whether a bare or qualified name matches any readable organization specialist.
+/// Channel targets need no ambiguity selection because every match is refused.
+pub async fn names_readable_organization_specialist(
+    db: &Database,
+    actor: &str,
+    selector: &str,
+) -> AppResult<bool> {
+    match admitted_organization_specialists(db, actor, selector, OrgAgentAdmission::Read).await {
+        Ok(agents) => Ok(!agents.is_empty()),
+        Err(AppError::NotFound(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+async fn admitted_organization_specialists(
+    db: &Database,
+    actor: &str,
+    selector: &str,
+    admission: OrgAgentAdmission,
+) -> AppResult<Vec<AssistantAgent>> {
     if let Some((org_selector, agent_selector)) = selector.split_once('/') {
         if org_selector.is_empty() || agent_selector.is_empty() {
             return Err(not_found());
         }
-        super::org_agent_service::require_creation_enabled(db, actor).await?;
+        admission.require_enabled(db, actor).await?;
         let owner = super::org_agent_service::resolve_org_selector(db, actor, org_selector).await?;
         let agent = db
             .collection::<AssistantAgent>(AGENTS)
@@ -310,8 +397,8 @@ pub async fn delegable_specialist(
             })
             .await?
             .ok_or_else(not_found)?;
-        super::org_agent_service::require_use(db, actor, &agent).await?;
-        return Ok(agent);
+        admission.admit(db, actor, &agent).await?;
+        return Ok(vec![agent]);
     }
 
     if !valid_name(selector) {
@@ -335,31 +422,20 @@ pub async fn delegable_specialist(
     if candidates.is_empty() {
         return Err(not_found());
     }
-    super::org_agent_service::require_creation_enabled(db, actor).await?;
+    admission.require_enabled(db, actor).await?;
 
     let mut usable = Vec::with_capacity(candidates.len());
     for agent in candidates {
-        match super::org_agent_service::require_use(db, actor, &agent).await {
+        match admission.admit(db, actor, &agent).await {
             Ok(()) => usable.push(agent),
-            Err(error) if error.is_forbidden() => {}
+            Err(error)
+                if error.is_forbidden()
+                    || (matches!(admission, OrgAgentAdmission::Read)
+                        && matches!(error, AppError::NotFound(_))) => {}
             Err(error) => return Err(error),
         }
     }
-    match usable.len() {
-        0 => Err(not_found()),
-        1 => Ok(usable.pop().expect("one candidate")),
-        _ => {
-            let mut choices = Vec::with_capacity(usable.len());
-            for agent in &usable {
-                choices.push(qualified_name(db, agent).await?);
-            }
-            choices.sort();
-            Err(AppError::ValidationError(format!(
-                "Agent name is ambiguous; use one of: {}",
-                choices.join(", ")
-            )))
-        }
-    }
+    Ok(usable)
 }
 
 async fn qualified_name(db: &Database, agent: &AssistantAgent) -> AppResult<String> {
@@ -554,8 +630,11 @@ async fn create_thread_with_kind(
     snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
     learning_epoch: Option<i64>,
 ) -> AppResult<AssistantConversation> {
+    super::erasure_admission::fence_in_session(db, actor, session).await?;
     let now = Utc::now();
     let mut row = AssistantConversation {
+        invocation_controlled: false,
+        credential_invocation_id: None,
         platform_thread: None,
         machine_previews: false,
         platform_cleanup_pending: false,
@@ -787,16 +866,20 @@ pub async fn resolve_each_target(
     if targets.is_empty() {
         return Ok((resolved, refused));
     }
+    let trimmed_targets: Vec<String> = targets
+        .iter()
+        .map(|target| target.trim().to_string())
+        .collect();
     let catalog = mcp_service::load_operation_catalog(
         db,
         node_manager,
         owner,
         mcp_service::NodeScope::Unrestricted,
-        mcp_service::ServiceScope::Unrestricted,
+        mcp_service::ServiceScope::Preferring(&trimmed_targets),
     )
     .await?;
-    for target in targets {
-        let target = target.trim();
+    for target in &trimmed_targets {
+        let target = target.as_str();
         let refuse = |reason: String| Refused {
             service: identifier(target),
             reason,
@@ -1049,6 +1132,7 @@ async fn create_specialist_inner(
     };
     let now = Utc::now();
     let agent = AssistantAgent {
+        channel_checking_notice: false,
         skills: Vec::new(),
         skills_revision: 0,
         skill_metadata: BTreeMap::new(),
@@ -1317,6 +1401,26 @@ pub async fn update_agent(
         .await?
         .ok_or_else(not_found)?;
     super::org_agent_service::audit_change(db, actor, &updated, "profile").await;
+    Ok(updated)
+}
+
+/// Human-maintained preference, independent of prompt text and execution grants.
+pub async fn set_channel_checking_notice(
+    db: &Database,
+    actor: &str,
+    id: &str,
+    enabled: bool,
+) -> AppResult<AssistantAgent> {
+    let current = maintained_agent(db, actor, id).await?;
+    if current.destroyed_at.is_some() {
+        return Err(AppError::Conflict("That agent was destroyed".into()));
+    }
+    let updated = db.collection::<AssistantAgent>(AGENTS)
+        .find_one_and_update(
+            doc! {"_id": &current.id, "user_id": &current.user_id, "destroyed_at": bson::Bson::Null},
+            doc! {"$set": {"channel_checking_notice": enabled, "updated_at": bson::DateTime::now()}},
+        ).return_document(ReturnDocument::After).await?.ok_or_else(not_found)?;
+    super::org_agent_service::audit_change(db, actor, &updated, "channel_checking_notice").await;
     Ok(updated)
 }
 
@@ -1789,6 +1893,7 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                db.collection::<bson::Document>(crate::models::channel_adapter::BINDINGS).update_many(doc!{"agent_id":&agent.id,"enabled":true},doc!{"$set":{"enabled":false},"$inc":{"revision":1}}).session(&mut *session).await?;
                 super::assistant_agent_learning::destroyed_in_session(db, &agent.id, session)
                     .await?;
                 Box::pin(super::machine_access_service::destroyed_in_session(
@@ -1804,6 +1909,7 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     cursor.stream(&mut *session).try_collect().await?;
                 let mut children = Vec::new();
                 for row in &rows {
+                    db.collection::<bson::Document>(crate::models::channel_adapter::SESSIONS).update_many(doc!{"conversation_id":&row.id,"state":{"$ne":"closed"}},doc!{"$inc":{"generation":1},"$set":{"lease_expires_at":bson::DateTime::now()}}).session(&mut *session).await?;
                     for key in
                         thread_key_ids(db, &row.user_id, std::slice::from_ref(row), &mut *session)
                             .await?
@@ -1846,6 +1952,10 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     .delete_many(doc! {"user_id": &row.user_id, "conversation_id": &row.id})
                     .session(&mut *session)
                     .await?;
+                    db.collection::<bson::Document>(super::assistant_service_execution::COLLECTION)
+                        .delete_many(doc! {"user_id":&row.user_id,"conversation_id":&row.id})
+                        .session(&mut *session)
+                        .await?;
                     db.collection::<bson::Document>(ACKS)
                         .update_many(
                             doc! {"user_id": &row.user_id, "conversation_id": &row.id,
@@ -2112,6 +2222,7 @@ pub struct AgentSummary {
     pub model: String,
     /// The agent's own access mode; absent follows the owner's workspace mode.
     pub access_mode_override: Option<crate::models::assistant_settings::AccessMode>,
+    pub channel_checking_notice: bool,
     /// `running`, `idle`, or `destroyed`.
     pub status: &'static str,
     pub services: Vec<String>,
@@ -2435,6 +2546,7 @@ pub async fn summaries(
             created_by: agent.created_by.clone(),
             model: agent.model.clone(),
             access_mode_override: agent.access_mode_override,
+            channel_checking_notice: agent.channel_checking_notice,
             home_conversation_id: home_id,
             memory_count: if super::org_agent_service::can_maintain(&acl) {
                 agent.memory.len()

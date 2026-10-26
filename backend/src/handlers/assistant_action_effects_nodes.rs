@@ -151,7 +151,7 @@ pub struct AssistantDeviceResource {
     pub device_id: String,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantNodeEffectResponse {
     pub resource: AssistantNodeResource,
@@ -455,8 +455,9 @@ pub async fn register_node_token(
             replay_in_progress_registration(&state, &actor, receipt).await
         }
         ReceiptOutcome::Reserved(receipt) => {
-            let created = node_service::create_registration_token_with_id(
+            let created = node_service::create_registration_token_with_id_for_actor(
                 &state.db,
+                &actor,
                 &owner_user_id,
                 &name,
                 state.config.node_max_per_user,
@@ -783,6 +784,7 @@ pub async fn transfer_node(
     }
     let transfer = node_service::transfer_node_owner_with_expected_state_version(
         &state.db,
+        &state.encryption_keys,
         &actor,
         &node_id,
         &new_owner_user_id,
@@ -1098,6 +1100,13 @@ pub async fn onboard_device(
     Ok(Json(response))
 }
 
+impl std::fmt::Debug for AssistantNodeEffectResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AssistantNodeEffectResponse")
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1168,6 +1177,7 @@ mod tests {
             status: NodeStatus::Offline,
             auth_token_hash: "auth-hash".to_string(),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "signing-hash".to_string(),
             last_heartbeat_at: None,
             connected_at: None,
@@ -1247,6 +1257,7 @@ mod tests {
             status: NodeStatus::Offline,
             auth_token_hash: "auth-hash".to_string(),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "signing-hash".to_string(),
             last_heartbeat_at: None,
             connected_at: None,
@@ -1510,9 +1521,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let material = node_service::prepare_managed_credentials(&state.encryption_keys)
-            .await
-            .unwrap();
+        let material =
+            node_service::prepare_managed_credentials(&state.encryption_keys, node_id, &owner)
+                .await
+                .unwrap();
         let mut session = db.client().start_session().await.unwrap();
         session.start_transaction().await.unwrap();
         node_service::activate_managed_credentials(
@@ -1523,6 +1535,7 @@ mod tests {
             &crate::crypto::token::hash_token(&material.auth_token),
             &crate::crypto::token::hash_token(&material.signing_secret),
             &material.signing_secret_encrypted,
+            material.signing_secret_context_version,
             Utc::now(),
         )
         .await

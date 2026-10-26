@@ -298,7 +298,29 @@ pub async fn store_preview(
         return Ok(());
     }
     let id = Uuid::new_v4().to_string();
-    let encrypted = state.encryption_keys.encrypt(text.as_bytes()).await?;
+    let mut attachment = AssistantAttachment {
+        secret_context_versions: Default::default(),
+        id: id.clone(),
+        origin: "machine_preview".into(),
+        user_id: chat.user_id.clone(),
+        conversation_id: chat.conversation_id.clone(),
+        turn_id: chat.turn_id.clone().unwrap_or_default(),
+        content_type: "text/plain".into(),
+        size: text.len() as i64,
+        data_encrypted: Vec::new(),
+        created_at: Utc::now(),
+    };
+    attachment.data_encrypted = super::assistant_record_service::encrypt_image(
+        &state.encryption_keys,
+        &attachment,
+        text.as_bytes(),
+    )
+    .await?;
+    super::credential_record_service::mark_version(
+        &mut attachment.secret_context_versions,
+        &state.encryption_keys,
+        "data_encrypted",
+    );
     let mut session = state.db.client().start_session().await?;
     session.start_transaction().await?;
     // Capture and receipt reference commit together. Stop, settling, disabling,
@@ -318,17 +340,7 @@ pub async fn store_preview(
         state
             .db
             .collection::<AssistantAttachment>(ATTACHMENTS)
-            .insert_one(AssistantAttachment {
-                id: id.clone(),
-                origin: "machine_preview".into(),
-                user_id: chat.user_id.clone(),
-                conversation_id: chat.conversation_id.clone(),
-                turn_id: chat.turn_id.clone().unwrap_or_default(),
-                content_type: "text/plain".into(),
-                size: text.len() as i64,
-                data_encrypted: encrypted,
-                created_at: Utc::now(),
-            })
+            .insert_one(attachment)
             .session(&mut session)
             .await?;
         session.commit_transaction().await?;

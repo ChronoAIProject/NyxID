@@ -45,6 +45,7 @@ jobs:
     # start (checked on PRs by scripts/check-reusable-workflow-permissions.py).
     permissions:
       contents: read
+      actions: read
       attestations: read
     with:
       # The publish gate is a release validation, not a PR check, so path
@@ -92,6 +93,11 @@ jobs:
             file: cli/Dockerfile.machine-updater
     steps:
       - uses: actions/checkout@v6
+
+      - name: Prepare backend image memory reserve
+        if: matrix.component == 'backend'
+        timeout-minutes: 5
+        run: bash .github/scripts/prepare-backend-runner.sh
 
       - name: Compute lowercase image repo
         id: repo

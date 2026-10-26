@@ -3,6 +3,7 @@ use chrono::{Duration, Utc};
 use mongodb::bson::doc;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use url::Url;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
@@ -23,6 +24,16 @@ pub async fn validate_client(
     client_id: &str,
     redirect_uri: &str,
 ) -> AppResult<OauthClient> {
+    // Always apply the execution-time redirect policy before looking at any
+    // stored registration branch. Legacy rows and public fallback redirects
+    // must receive exactly the same scheme checks as new registrations.
+    validate_redirect_uri_scheme(redirect_uri).inspect_err(|_| {
+        tracing::warn!(
+            client_id,
+            reason = "invalid_redirect",
+            "OAuth redirect rejected"
+        );
+    })?;
     let client = db
         .collection::<OauthClient>(OAUTH_CLIENTS)
         .find_one(doc! { "_id": client_id })
@@ -51,6 +62,51 @@ pub async fn validate_client(
     }
 
     Err(AppError::InvalidRedirectUri)
+}
+
+const REJECTED_REDIRECT_SCHEMES: &[&str] = &[
+    "javascript",
+    "vbscript",
+    "data",
+    "file",
+    "blob",
+    "filesystem",
+    "about",
+    "view-source",
+];
+
+/// Normalize the characters that browsers discard before parsing a URL. Tabs,
+/// newlines and carriage returns are removed anywhere; leading/trailing C0
+/// controls and spaces are trimmed. Execution and registration reject a URI
+/// whenever this browser-normalized spelling differs from the raw OAuth value,
+/// preserving exact redirect matching.
+pub fn normalize_redirect_uri(raw: &str) -> String {
+    raw.chars()
+        .filter(|character| !matches!(character, '\t' | '\n' | '\r'))
+        .collect::<String>()
+        .trim_matches(|character: char| character <= '\u{20}')
+        .to_string()
+}
+
+/// Parse and enforce the one redirect-URI policy used at registration and
+/// execution time. The returned URL is safe for redirect-page rendering.
+pub fn validate_redirect_uri_scheme(raw: &str) -> AppResult<Url> {
+    let normalized = normalize_redirect_uri(raw);
+    if normalized != raw {
+        return Err(AppError::InvalidRedirectUri);
+    }
+    let parsed = Url::parse(&normalized).map_err(|_| AppError::InvalidRedirectUri)?;
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    if REJECTED_REDIRECT_SCHEMES.contains(&scheme.as_str()) {
+        return Err(AppError::InvalidRedirectUri);
+    }
+    if !matches!(scheme.as_str(), "http" | "https") && parsed.cannot_be_a_base() {
+        return Err(AppError::InvalidRedirectUri);
+    }
+    if parsed.fragment().is_some() {
+        return Err(AppError::InvalidRedirectUri);
+    }
+    Ok(parsed)
 }
 
 /// Validate that the requested scopes are a subset of the client's allowed scopes.
@@ -96,81 +152,7 @@ pub fn resolve_authorize_scope_for_client(
     )
 }
 
-/// Create an authorization code for the OAuth authorization code flow.
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub async fn create_authorization_code(
-    db: &mongodb::Database,
-    client_id: &str,
-    user_id: &str,
-    redirect_uri: &str,
-    scope: &str,
-    code_challenge: Option<&str>,
-    code_challenge_method: Option<&str>,
-    nonce: Option<&str>,
-    external_subject: Option<&ExternalSubjectRef>,
-    binding_grant_id: Option<&str>,
-    resource_uris: &[String],
-    allowed_service_ids: &[String],
-    allow_all_services: bool,
-) -> AppResult<String> {
-    create_authorization_code_with_incremental(
-        db,
-        client_id,
-        user_id,
-        redirect_uri,
-        scope,
-        code_challenge,
-        code_challenge_method,
-        nonce,
-        external_subject,
-        binding_grant_id,
-        resource_uris,
-        allowed_service_ids,
-        allow_all_services,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub async fn create_authorization_code_with_incremental(
-    db: &mongodb::Database,
-    client_id: &str,
-    user_id: &str,
-    redirect_uri: &str,
-    scope: &str,
-    code_challenge: Option<&str>,
-    code_challenge_method: Option<&str>,
-    nonce: Option<&str>,
-    external_subject: Option<&ExternalSubjectRef>,
-    binding_grant_id: Option<&str>,
-    resource_uris: &[String],
-    allowed_service_ids: &[String],
-    allow_all_services: bool,
-    incremental_consent: Option<&crate::models::consent::IncrementalConsent>,
-) -> AppResult<String> {
-    create_authorization_code_with_consent(
-        db,
-        client_id,
-        user_id,
-        redirect_uri,
-        scope,
-        code_challenge,
-        code_challenge_method,
-        nonce,
-        external_subject,
-        binding_grant_id,
-        resource_uris,
-        allowed_service_ids,
-        allow_all_services,
-        incremental_consent,
-        None,
-    )
-    .await
-}
-
+/// Create a code bound to the live protected-consent authority.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_authorization_code_with_consent(
     db: &mongodb::Database,
@@ -322,6 +304,18 @@ pub struct IssuedOAuthRefreshToken {
     pub refresh_token_jti: String,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct IssuancePause {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static ISSUANCE_PAUSE: std::sync::Arc<IssuancePause>;
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn issue_oauth_refresh_token(
     db: &mongodb::Database,
@@ -360,6 +354,11 @@ pub async fn issue_oauth_refresh_token(
         created_at: now,
     };
 
+    #[cfg(test)]
+    if let Ok(pause) = ISSUANCE_PAUSE.try_with(Clone::clone) {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
     db.collection::<RefreshToken>(REFRESH_TOKENS)
         .insert_one(&new_refresh)
         .await?;
@@ -462,6 +461,7 @@ pub async fn exchange_authorization_code(
         ));
     }
 
+    validate_redirect_uri_scheme(redirect_uri)?;
     if stored.redirect_uri != redirect_uri {
         return Err(AppError::InvalidRedirectUri);
     }
@@ -695,7 +695,7 @@ pub async fn revoke_issued_refresh(db: &mongodb::Database, jti: &str) -> AppResu
 /// the client binds an ephemeral port. Only `http` scheme is accepted (loopback
 /// connections never leave the machine, so TLS is unnecessary).
 fn is_loopback_redirect_uri(uri: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(uri) else {
+    let Ok(parsed) = validate_redirect_uri_scheme(uri) else {
         return false;
     };
     parsed.scheme() == "http"
@@ -714,7 +714,7 @@ fn is_loopback_redirect_uri(uri: &str) -> bool {
 /// Only non-standard schemes are accepted (`http` and `https` require explicit
 /// registration to prevent open-redirector vulnerabilities).
 fn is_private_use_uri_scheme(uri: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(uri) else {
+    let Ok(parsed) = validate_redirect_uri_scheme(uri) else {
         return false;
     };
     !matches!(parsed.scheme(), "http" | "https")
@@ -816,6 +816,49 @@ mod tests {
         assert!(!is_private_use_uri_scheme("not a uri"));
     }
 
+    #[test]
+    fn redirect_policy_normalizes_browser_controls_and_rejects_dangerous_schemes() {
+        for value in [
+            " JaVaScRiPt:marker ",
+            "java\tscript:marker",
+            "java\nscript:marker",
+            "vbscript:marker",
+            "data:text/plain,marker",
+            "file:///tmp/marker",
+            "blob:https://example.test/id",
+            "filesystem:https://example.test/temporary/x",
+            "about:blank",
+            "view-source:https://example.test",
+            "custom:",
+            "custom:payload",
+            "\u{0000}https://app.example/callback",
+            "https://app.example/callback\u{001f}",
+            "https://app.exa\tmple/callback",
+        ] {
+            assert!(
+                validate_redirect_uri_scheme(value).is_err(),
+                "unsafe redirect accepted: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_policy_keeps_native_and_loopback_redirects() {
+        for value in [
+            "cursor://oauth/callback",
+            "vscode://nyxid/auth",
+            "com.example.app:/oauth2redirect",
+            "http://127.0.0.1:43123/callback",
+            "http://localhost/callback",
+            "http://[::1]/callback",
+        ] {
+            assert!(
+                validate_redirect_uri_scheme(value).is_ok(),
+                "legitimate redirect rejected: {value}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn validate_client_accepts_exact_and_public_native_redirects() {
         let db = connect_test_database("oauth_val_ok")
@@ -870,6 +913,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validate_client_applies_redirect_policy_to_legacy_and_public_fallbacks() {
+        let db = connect_test_database("oauth_val_policy_branches")
+            .await
+            .expect("local MongoDB required for oauth_service tests");
+
+        let mut legacy = test_client("legacy-unsafe-client", "public", "");
+        legacy.redirect_uris = vec!["javascript:marker".to_string()];
+        insert_client(&db, &legacy).await;
+        let err = validate_client(&db, &legacy.id, "javascript:marker")
+            .await
+            .expect_err("legacy dangerous exact rows must be rejected at execution");
+        assert!(matches!(err, AppError::InvalidRedirectUri));
+
+        let public = test_client("public-opaque-client", "public", "");
+        insert_client(&db, &public).await;
+        let err = validate_client(&db, &public.id, "custom:payload")
+            .await
+            .expect_err("opaque public fallback redirects must be rejected");
+        assert!(matches!(err, AppError::InvalidRedirectUri));
+    }
+
+    #[tokio::test]
     async fn authenticate_client_handles_public_and_confidential_secret_paths() {
         let db = connect_test_database("oauth_auth")
             .await
@@ -919,7 +984,17 @@ mod tests {
             external_user_id: "ou_123".to_string(),
         };
 
-        let code = create_authorization_code(
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            "user-1",
+            "client-1",
+            "openid profile",
+            Some(vec!["svc-1".into()]),
+        )
+        .await
+        .unwrap();
+        let reference = super::super::consent_service::protected_reference(&consent).unwrap();
+        let code = create_authorization_code_with_consent(
             &db,
             "client-1",
             "user-1",
@@ -933,6 +1008,8 @@ mod tests {
             &["https://nyx.example/api/v1/proxy/s/openai".to_string()],
             &["svc-1".to_string()],
             false,
+            None,
+            Some(&reference),
         )
         .await
         .expect("create authorization code");
@@ -947,6 +1024,7 @@ mod tests {
         assert_ne!(stored.code_hash, code);
         assert_eq!(stored.client_id, "client-1");
         assert_eq!(stored.user_id, "user-1");
+        assert_eq!(stored.protected_consent, Some(reference));
         assert_eq!(stored.redirect_uri, "https://app.example/callback");
         assert_eq!(stored.scope, "openid profile");
         assert_eq!(stored.code_challenge.as_deref(), Some("challenge"));
@@ -975,9 +1053,20 @@ mod tests {
         let code = "empty-service-grant-code";
         let now = Utc::now();
 
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            &client.id,
+            "openid",
+            Some(Vec::new()),
+        )
+        .await
+        .unwrap();
+        let reference = super::super::consent_service::protected_reference(&consent).unwrap();
+
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
-                protected_consent: None,
+                protected_consent: Some(reference.clone()),
                 incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),
@@ -1077,9 +1166,20 @@ mod tests {
         .expect("insert user services");
 
         let code = "consent-only-resource-code";
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            &client.id,
+            "openid",
+            Some(vec![service_a_id.clone()]),
+        )
+        .await
+        .unwrap();
+        let reference = super::super::consent_service::protected_reference(&consent).unwrap();
+
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
-                protected_consent: None,
+                protected_consent: Some(reference.clone()),
                 incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),
@@ -1181,9 +1281,20 @@ mod tests {
         .expect("insert user services");
 
         let code = "consent-only-resource-reject-code";
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            &client.id,
+            "openid",
+            Some(vec![service_a_id.clone()]),
+        )
+        .await
+        .unwrap();
+        let reference = super::super::consent_service::protected_reference(&consent).unwrap();
+
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
-                protected_consent: None,
+                protected_consent: Some(reference.clone()),
                 incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),

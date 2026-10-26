@@ -30,6 +30,30 @@ use crate::services::channel_inbound_service::InboundDeps as WebhookHandlerDeps;
 // Adapter-driven webhook handlers
 // ---------------------------------------------------------------------------
 
+type ManagerProducers =
+    std::sync::Arc<crate::services::platform_manager_contract::PlatformManagerProducers>;
+
+pub async fn channel_webhook_with_runtime(
+    State(state): State<AppState>,
+    Path((platform, bot_id)): Path<(String, String)>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    producers: Option<axum::Extension<ManagerProducers>>,
+    body: Bytes,
+) -> axum::response::Response {
+    channel_webhook_with_producers(
+        State(state),
+        Path((platform, bot_id)),
+        uri,
+        headers,
+        body,
+        "https://api.telegram.org",
+        producers.map(|axum::Extension(value)| value),
+    )
+    .await
+}
+
+#[cfg(test)]
 pub async fn channel_webhook(
     State(state): State<AppState>,
     Path((platform, bot_id)): Path<(String, String)>,
@@ -48,6 +72,7 @@ pub async fn channel_webhook(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn channel_webhook_with_api(
     State(state): State<AppState>,
     Path((platform, bot_id)): Path<(String, String)>,
@@ -55,6 +80,27 @@ pub(crate) async fn channel_webhook_with_api(
     headers: HeaderMap,
     body: Bytes,
     telegram_api_base: &str,
+) -> axum::response::Response {
+    channel_webhook_with_producers(
+        State(state),
+        Path((platform, bot_id)),
+        uri,
+        headers,
+        body,
+        telegram_api_base,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn channel_webhook_with_producers(
+    State(state): State<AppState>,
+    Path((platform, bot_id)): Path<(String, String)>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: Bytes,
+    telegram_api_base: &str,
+    producers: Option<ManagerProducers>,
 ) -> axum::response::Response {
     use crate::services::channel_platform::WebhookPolicy;
     let Ok(adapter) = resolve_adapter(&platform, &state.token_exchange_cache) else {
@@ -106,6 +152,27 @@ pub(crate) async fn channel_webhook_with_api(
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         }
     }
+    if platform == "discord" {
+        let verified = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            crate::services::platform_entry_native::authenticate_discord_ack(
+                &state.db,
+                adapter.as_ref(),
+                &bot_id,
+                &headers,
+                &body,
+            ),
+        )
+        .await;
+        match verified {
+            Ok(Ok(())) => {}
+            Ok(Err(
+                crate::errors::AppError::ChannelWebhookVerificationFailed(_)
+                | crate::errors::AppError::Forbidden(_),
+            )) => return StatusCode::UNAUTHORIZED.into_response(),
+            Ok(Err(_)) | Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    }
     let empty_ack_is_text = adapter.registration().empty_ack_is_text;
     match adapter.webhook_policy(&body) {
         WebhookPolicy::RetryAwareInline => {
@@ -151,7 +218,7 @@ pub(crate) async fn channel_webhook_with_api(
         }
         WebhookPolicy::Challenge(response) => Json(response).into_response(),
         WebhookPolicy::Immediate(response) => {
-            tokio::spawn(async move {
+            crate::services::platform_native_reply_service::spawn_in_native_scope(async move {
                 // A WABA override covers all of its numbers. Managed callbacks
                 // fan out through the same verified dispatcher as the app route.
                 if adapter.platform_webhook()
@@ -161,16 +228,24 @@ pub(crate) async fn channel_webhook_with_api(
                             bot.platform == platform && bot.credential_source == "platform"
                         })
                 {
-                    if dispatch_platform_webhook(&state, &platform, &headers, &body)
-                        .await
-                        .is_err()
+                    if dispatch_platform_webhook_with_producers(
+                        &state,
+                        &platform,
+                        &headers,
+                        &body,
+                        producers.clone(),
+                    )
+                    .await
+                    .is_err()
                     {
                         tracing::warn!(bot_id = %bot_id, platform = %platform, "managed channel webhook processing failed");
                     }
                     return;
                 }
-                if let Err(e) =
-                    handle_webhook_inner(&state, &bot_id, &platform, &headers, &body).await
+                if let Err(e) = handle_webhook_inner_with_producers(
+                    &state, &bot_id, &platform, &headers, &body, producers,
+                )
+                .await
                 {
                     tracing::warn!(bot_id = %bot_id, platform = %platform, error = %e, "channel webhook processing failed (suppressed)");
                 }
@@ -178,7 +253,11 @@ pub(crate) async fn channel_webhook_with_api(
             webhook_response(response, empty_ack_is_text)
         }
         WebhookPolicy::Inline => {
-            match handle_webhook_inner(&state, &bot_id, &platform, &headers, &body).await {
+            match handle_webhook_inner_with_producers(
+                &state, &bot_id, &platform, &headers, &body, producers,
+            )
+            .await
+            {
                 Ok(response) => webhook_response(response, empty_ack_is_text),
                 Err(e) => {
                     tracing::warn!(bot_id = %bot_id, platform = %platform, error = %e, "channel webhook processing failed (suppressed)");
@@ -247,15 +326,17 @@ pub async fn platform_webhook(
     State(state): State<AppState>,
     Path(platform): Path<String>,
     headers: HeaderMap,
+    producers: Option<axum::Extension<ManagerProducers>>,
     body: Bytes,
 ) -> axum::response::Response {
+    let producers = producers.map(|axum::Extension(value)| value);
     if !resolve_adapter(&platform, &state.token_exchange_cache)
         .is_ok_and(|adapter| adapter.platform_webhook())
     {
         return StatusCode::NOT_FOUND.into_response();
     }
-    tokio::spawn(async move {
-        if dispatch_platform_webhook(&state, &platform, &headers, &body)
+    crate::services::platform_native_reply_service::spawn_in_native_scope(async move {
+        if dispatch_platform_webhook_with_producers(&state, &platform, &headers, &body, producers)
             .await
             .is_err()
         {
@@ -265,11 +346,22 @@ pub async fn platform_webhook(
     StatusCode::OK.into_response()
 }
 
+#[cfg(test)]
 pub(super) async fn dispatch_platform_webhook(
     state: &AppState,
     platform: &str,
     headers: &HeaderMap,
     body: &[u8],
+) -> crate::errors::AppResult<()> {
+    dispatch_platform_webhook_with_producers(state, platform, headers, body, None).await
+}
+
+pub(crate) async fn dispatch_platform_webhook_with_producers(
+    state: &AppState,
+    platform: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    producers: Option<ManagerProducers>,
 ) -> crate::errors::AppResult<()> {
     let adapter = resolve_adapter(platform, &state.token_exchange_cache)?;
     let descriptor = adapter
@@ -338,9 +430,16 @@ pub(super) async fn dispatch_platform_webhook(
             continue;
         };
         // Reuse per-bot verification and phone filtering for managed credentials.
-        if handle_webhook_inner(state, &bot.id, platform, headers, body)
-            .await
-            .is_err()
+        if handle_webhook_inner_with_producers(
+            state,
+            &bot.id,
+            platform,
+            headers,
+            body,
+            producers.clone(),
+        )
+        .await
+        .is_err()
         {
             tracing::warn!(platform, bot_id = %bot.id, "platform webhook bot processing failed");
         }
@@ -409,6 +508,7 @@ pub async fn channel_subscription(
 ///
 /// Returns errors for logging; the outer platform handler suppresses them and
 /// always returns 200 OK to prevent platforms from retrying failed deliveries.
+#[cfg(test)]
 async fn handle_webhook_inner(
     state: &AppState,
     bot_id: &str,
@@ -416,6 +516,32 @@ async fn handle_webhook_inner(
     headers: &HeaderMap,
     body: &[u8],
 ) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+    handle_webhook_inner_with_producers(state, bot_id, expected_platform, headers, body, None).await
+}
+
+pub(crate) async fn handle_webhook_inner_with_producers(
+    state: &AppState,
+    bot_id: &str,
+    expected_platform: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    producers: Option<ManagerProducers>,
+) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+    match crate::services::platform_entry_ingress_service::intercept(
+        state,
+        bot_id,
+        expected_platform,
+        headers,
+        body,
+        producers,
+    )
+    .await?
+    {
+        crate::services::platform_entry_ingress_service::NativeWebhook::Ordinary => {}
+        crate::services::platform_entry_ingress_service::NativeWebhook::Consumed(response) => {
+            return Ok(response);
+        }
+    }
     handle_webhook_inner_with_deps(
         WebhookHandlerDeps::from(state),
         bot_id,
@@ -877,6 +1003,13 @@ mod tests {
         state.config.channel_relay_callback_timeout_secs = 1;
         let bot_id = uuid::Uuid::new_v4().to_string();
         let owner_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let api_key_id = uuid::Uuid::new_v4().to_string();
         let (callback_url, received, shutdown_tx) =
             spawn_callback_server_with_outcome(callback_status).await;
@@ -987,6 +1120,8 @@ mod tests {
             assert!(adapter.dedup_inbound_by_platform_message_id());
             assert!(adapter.atomic_inbound_admission());
             let message = crate::services::channel_platform::InboundMessage {
+                embedded_attachments: Vec::new(),
+                embedded_attachments_omitted: 0,
                 platform_message_id: "500".into(),
                 conversation_id: "15551234567".into(),
                 conversation_type: "private".into(),
@@ -1319,6 +1454,7 @@ mod tests {
         crate::config::AppConfig {
             port: 3001,
             auth_device_eight_char_codes: false,
+            resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
@@ -1328,6 +1464,7 @@ mod tests {
             environment: "development".to_string(),
             jwt_private_key_path: key_dir.join("private.pem").display().to_string(),
             jwt_public_key_path: key_dir.join("public.pem").display().to_string(),
+            jwt_retained_public_key_paths: Vec::new(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
@@ -1352,6 +1489,8 @@ mod tests {
             smtp_from_address: None,
             encryption_key: Some(encryption_key.to_string()),
             encryption_key_previous: None,
+            allow_legacy_record_reads: true,
+            contextual_record_writes: true,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             platform_service_rate_limit_per_second: 2,
@@ -1361,6 +1500,7 @@ mod tests {
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
+            hmac_keyset_path: None,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
@@ -1392,6 +1532,7 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             instance_name: "test-backend".to_string(),
+            security_rollout: Default::default(),
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
             internal_dispatch_hmac_key: None,
@@ -1449,6 +1590,7 @@ mod tests {
             cloud_response_cache_max_entry_bytes: 1024 * 1024,
             cloud_response_cache_max_entries: 256,
             billing_enabled: false,
+            billing_allocations_enabled: false,
             lago_api_url: None,
             lago_api_key: None,
             lago_plan_code: "starter".to_string(),
@@ -1549,7 +1691,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-        tokio::spawn(async move {
+        crate::services::platform_native_reply_service::spawn_in_native_scope(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
@@ -1621,6 +1763,13 @@ mod tests {
         let jwt_keys = crate::test_utils::cached_test_jwt_keys();
         let encryption_keys = crate::crypto::aes::EncryptionKeys::from_config(&config);
         let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let bot_id = uuid::Uuid::new_v4().to_string();
         let api_key_id = uuid::Uuid::new_v4().to_string();
         let conversation_id = uuid::Uuid::new_v4().to_string();
@@ -1629,6 +1778,7 @@ mod tests {
         let verification_token_encrypted = encryption_keys.encrypt(b"verify_token").await.unwrap();
 
         let bot = crate::models::channel_bot::ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
@@ -1754,6 +1904,13 @@ mod tests {
         let mut mentioned_bot = bot.clone();
         mentioned_bot.id = uuid::Uuid::new_v4().to_string();
         mentioned_bot.user_id = foreign_key.user_id.clone();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &foreign_key.user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         mentioned_bot.platform_bot_id = if platform == "telegram" {
             "9876"
         } else {
@@ -1788,8 +1945,16 @@ mod tests {
         .await
         .unwrap();
 
-        // No sender identity, OAuth binding, notification link, or user row exists.
-        for collection in ["users", "oauth_broker_bindings", "notification_channels"] {
+        // No sender identity, OAuth binding, notification link, or user row
+        // exists; the only accounts are the two live bot owners.
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(crate::models::user::COLLECTION_NAME)
+                .count_documents(doc! {"_id":{"$nin":[&user_id,&foreign_key.user_id]}})
+                .await
+                .unwrap(),
+            0
+        );
+        for collection in ["oauth_broker_bindings", "notification_channels"] {
             assert_eq!(
                 db.collection::<mongodb::bson::Document>(collection)
                     .count_documents(doc! {})

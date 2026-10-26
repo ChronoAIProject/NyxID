@@ -34,7 +34,7 @@ A Catalog Manager may:
     credentials or cloud-metadata hosts);
   - set the first OAuth client on a provider that has none;
   - edit its authorization, token, revocation and device URLs, credential
-    mode, PKCE and token request settings only **before anyone has connected
+    mode, PKCE, hosted authorization nonce and token request settings only **before anyone has connected
     through it**: no `user_provider_tokens`, `user_provider_credentials` or
     `user_api_keys` row references it, including org-owned and API-key
     connections, because those settings decide where users' clients and
@@ -72,7 +72,12 @@ Only an Admin may:
   routes), operation policy, developer apps, visibility, category, skills, or
   tool twins;
 - write private or person-owned rows, and Tool offerings and their
-  operations.
+  operations;
+- resync connection identity (`nyxid catalog resync-identity`), which
+  rewrites those identity settings on every connection to a service. This
+  stays Admin-only even on rows a Catalog Manager created; on unmarked rows
+  their plain creator may also run it, matching who may change the row's
+  identity fields.
 
 A Catalog Manager owns the providers they create, including the right to
 change the token URL or clear the client. Admins should therefore not place
@@ -115,6 +120,15 @@ are removed before service API writes. Use the endpoint routes for operations.
 The field rules live in `backend/src/handlers/catalog_authority.rs`. They
 destructure every request field, so a new field does not compile until it is
 classified.
+
+For hosted OAuth2 providers that require a nonce, provider files and catalog
+manifests may set `authorization_nonce_required: true`. It defaults to false;
+omitted updates preserve the existing value. The provider wizard offers the
+setting, `provider show` reports it, and `catalog validate` checks its readback
+(treating an absent field from an older server as false). Upgrade all backend
+replicas before enabling it. Static nonce query parameters, URL fragments and a
+custom client-ID parameter named `nonce` conflict with enabled support. Other
+provider types accept missing/false only. See the [provider API](API.md#post-apiv1providers).
 
 ## Manifests
 

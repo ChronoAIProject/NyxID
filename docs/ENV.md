@@ -11,7 +11,7 @@ For deployment-specific guidance on these variables, see [DEPLOYMENT.md](DEPLOYM
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `DATABASE_URL` | MongoDB connection string | `mongodb://localhost:27017/nyxid?replicaSet=nyxid-rs&directConnection=true` |
-| `ENCRYPTION_KEY` | 32-byte hex-encoded AES-256 key (64 hex chars) | Output of `openssl rand -hex 32` |
+| `ENCRYPTION_KEY` | 32-byte hex AES-256 key (64 hex chars); required for `local`, optional legacy/local fallback with KMS | Output of `openssl rand -hex 32` |
 
 ## Encryption
 
@@ -49,9 +49,45 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3001` | HTTP listen port |
-| `BASE_URL` | `http://localhost:3001` | Backend base URL (used in JWT `aud`) |
+| `BASE_URL` | `http://localhost:3001` | Backend base URL (used in JWT `aud`); configured HTTPS enables HSTS without subdomain/preload commitments, independent of forwarded request headers. |
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
 | `ENVIRONMENT` | `development` | `development`, `staging`, `production` |
+
+### Frontend nginx policy
+
+| Variable | Default | Description |
+|---|---|---|
+| `BACKEND_URL` | `http://backend:3001` | Internal HTTP(S) upstream origin, without path/credentials/query/fragment. |
+| `NYXID_PUBLIC_ORIGIN` | `http://localhost:8080` | Trusted public frontend origin. HTTPS enables HSTS; production Compose passes `FRONTEND_URL`. |
+| `NYXID_BROWSER_CONNECT_ORIGINS` | *(empty)* | At most 16 space-separated HTTP(S) origins for custom runtime API destinations (analytics uses the authenticated same-origin relay); matching WS(S) origins are derived. Origin values are validated, never substituted as CSP/nginx fragments. |
+
+See [Production browser policy](BROWSER_SECURITY_POLICY.md) for response-specific
+CSP, supported resources, split credential routing and the production harness.
+
+## Request-bound resource reads
+
+| Variable | Default | Description |
+|---|---|---|
+| `NYXID_RESOURCE_REQUEST_PROOF_ENABLED` | `false` | Emit and introspect exact GET/HEAD proofs for an owner's live personal NyxBot turn after existing proxy admission. Requires a registered confidential resource client, JWT identity propagation and current AutoAllow policy. No guest, specialist, org-agent, node, mutation or deferred-command authority is enabled. |
+
+This is an additive transport using the server-owned `X-NyxID-Resource-Request`
+header. It does not replace `X-NyxID-Identity-Token` or make an ordinary identity
+JWT a bearer credential. Keep this flag off until every resource-server replica
+implements the exact-request verifier, and every NyxID replica implements the
+authenticated `resource_request` introspection path. Register the confidential
+client in the catalog's `introspection_client_ids`, enable the resource verifier
+(`CHRONO_NYXID_RESOURCE_REQUEST_ENABLED` for CMA), and only then enable this flag
+on NyxID. Verify with isolated read fixtures before admitting live traffic. For
+rollback, disable NyxID issuance first and allow the 60-second proof lifetime to
+expire before removing resource verification support. No runtime restart or
+sandbox change is required by this feature. See [Agent Isolation](AGENT_ISOLATION.md#request-bound-nyxbot-resource-reads).
+
+Deploying the provider still needs a verified drain of existing proxy streams
+and NyxBot turns. The current backend does not track those tasks through a
+graceful shutdown; losing a worker can end its turn as `turn_lost`, without
+automatic replay. Keep existing processes alive until their admitted work is
+complete and new work has been routed elsewhere. The disabled feature flag
+does not protect unrelated in-flight work from a backend process replacement.
 
 ## Remote Machine backend Kubernetes authentication
 
@@ -94,9 +130,11 @@ listener through a public Service, ingress, or load balancer.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `INSTANCE_NAME` | `POD_NAME`, then `HOSTNAME` | Stable name for one pod or host. A random process generation fences restarts that reuse this name. Kubernetes sets this from `metadata.name`. |
+| `SECURITY_ROLLOUT_REPLICAS` | *(empty)* | Complete comma-separated serving `INSTANCE_NAME` roster, identical on every upgraded replica. Empty/unready rosters block effective security feature activation with HTTP 503. See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md). |
+| `SECURITY_ROLLOUT_DRAINED` | `false` | Exact `true` acknowledges that all old/unregistered serving replicas and relevant writers were drained. This is an operator assertion, not discovery. It must be true on every declared replica for gated security feature activation. |
 | `INTERNAL_BIND_ADDR` | `127.0.0.1:3002` | Bind address for the private authenticated listener. Multi-replica deployments must bind it to a peer-reachable interface, such as `0.0.0.0:3002` inside a pod network. |
 | `INTERNAL_ADVERTISE_URL` | `POD_IP`, detected local IP, `HOSTNAME`, then `127.0.0.1` | Peer-reachable base URL stored in ownership records. NyxID detects a local routable IP when `POD_IP` is unset and `INTERNAL_BIND_ADDR` is non-loopback. Every generated URL uses the port from `INTERNAL_BIND_ADDR`. Set this variable to override detection with an internal pod IP or private DNS URL. Never set the public ingress URL. |
-| `INTERNAL_DISPATCH_HMAC_KEY` | derived from `ENCRYPTION_KEY` | Optional 32-byte HMAC key as 64 hex characters. All replicas must use the same value. Set it explicitly when the local encryption key is unavailable, such as with a KMS key provider. |
+| `INTERNAL_DISPATCH_HMAC_KEY` | legacy derivation from `ENCRYPTION_KEY`, then JWT PEM | Optional 32-byte hex override (64 hex characters) used during legacy HMAC preparation. A configured `HMAC_KEYSET_PATH` is authoritative after adoption. All replicas must retain the same final domain key; changing an override against a durable pin fails startup. |
 | `INTERNAL_AUTH_MAX_SKEW_SECS` | `30` | Maximum clock skew accepted by the internal request signature verifier. |
 | `INTERNAL_NONCE_TTL_SECS` | `120` | MongoDB replay-record lifetime for internal request nonces. This must exceed twice `INTERNAL_AUTH_MAX_SKEW_SECS`. |
 | `INTERNAL_DUPLEX_HANDSHAKE_TIMEOUT_SECS` | `5` | Maximum time an authenticated internal WebSocket may wait before sending its signed opening envelope. |
@@ -171,6 +209,7 @@ absolute accept URL from `runtime-config.api_base_url`; see
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATABASE_MAX_CONNECTIONS` | `10` | Connection pool max size |
+| `NYXID_TEST_DATABASE_URL` | unset; probes `127.0.0.1:27018`, then `127.0.0.1:27017` | Backend test-only MongoDB URI; authoritative when set, nonblank and pinned for the test process. An unusable override fails instead of falling back. The harness creates/drops isolated per-test databases; transaction tests require a writable replica set or mongos. |
 
 ## Billing Meter and Lago Sink
 
@@ -178,6 +217,7 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `BILLING_ALLOCATIONS_ENABLED` | `false` | Authoring capability for exact credit allocations, service/group ceilings and reclaim during holds. Enable only after upgrading every API replica and billing worker; see the allocation rollout contract below. Does not disable enforcement on existing allocations. |
 | `BILLING_ENABLED` | `false` | Enables platform usage capture and the prepaid wallet charging gate. When Lago is configured, owner wallets are provisioned idempotently on startup backfill, wallet access, registration best-effort, and first proxy use. |
 | `LAGO_API_URL` | *(empty)* | Lago API URL for the P2 sink. May include or omit `/api/v1`. |
 | `LAGO_API_KEY` | *(empty)* | Lago API bearer key for NyxID-to-Lago calls; redacted from config debug output. |
@@ -185,7 +225,7 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 | `LAGO_PAYMENT_PROVIDER_CODE` | *(empty)* | Code of the Lago Stripe payment provider connection. When set, newly created Lago customers are linked to it (`sync_with_provider: true`) so `POST /api/v1/billing/topup` can generate checkout URLs. Unset leaves customers unlinked and top-ups fail with `no_linked_payment_provider`; existing customers must be linked manually in the Lago dashboard. |
 | `LAGO_WEBHOOK_SECRET` | *(empty)* | Lago webhook verification secret for `POST /api/v1/webhooks/lago`; redacted from config debug output. Required to accept Lago-originated wallet/subscription updates. |
 | `BILLING_RECONCILE_INTERVAL_SECS` | `300` | Reconcile sweep interval. Set `0` to disable event push/reconcile sweeps. |
-| `BILLING_RATE_CACHE_TTL_SECS` | `900` | Maximum age of a read-only rate used for reservation sizing. A missing or older rate rejects a billable request before forwarding. The reconcile sweep mirrors the Lago plan's standard charges into the cache each cycle (and once at startup), so the default works when the sweep is enabled; raise it only when `BILLING_RECONCILE_INTERVAL_SECS=0`. |
+| `BILLING_RATE_CACHE_TTL_SECS` | `900` | Maximum age of read-only price and per-owner tax profiles used for reservation sizing. A missing or older rate rejects a billable request before forwarding. The reconcile sweep mirrors the Lago plan's standard charges into the cache each cycle (and once at startup), so the default works when the sweep is enabled; raise it only when `BILLING_RECONCILE_INTERVAL_SECS=0`. |
 | `BILLING_RESERVATION_ABANDON_SECS` | `600` | Grace before never-forwarded reserved rows are marked `abandoned`. |
 | `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS` | `0` | Default overdraft cap copied to newly provisioned wallets unless an admin sets the global default on `/admin/billing` (Settings), which then wins. Existing wallets keep their cap. The shared-store reservation gate enforces the wallet's cap atomically. |
 | `BILLING_FAIL_CLOSED` | `false` | Incident kill switch. When `BILLING_ENABLED=true`, rejects billable forwarding even when Lago is healthy; when billing is disabled it has no effect. |
@@ -207,6 +247,38 @@ Each lane owns `platform_svc_{slug}_byok` or `platform_svc_{slug}_pk` on
 Resale is unchanged and independently gated by `BILLING_RESALE_ENABLED`.
 See [platform keys and inference](PLATFORM_KEYS_AND_INFERENCE.md).
 
+### Merchant tax configuration and bills
+
+Lago owns taxes; NyxID reads a per-owner `billing_tax_profiles` cache containing
+resolved charge/plan/customer/billing-entity rates. `BILLING_RATE_CACHE_TTL_SECS`
+also controls tax freshness; no additional environment variable is required.
+Provisioning, customer/subscription notifications, plan/price invalidation and
+the bounded reconcile sweep keep it current. A missing/stale profile triggers
+one inline refresh with a five-second total provider timeout outside admission
+transactions. Failed attempts are persisted and suppress inline retries for 30 seconds,
+including cold profiles. Provisioning, webhook and reconcile refreshes bypass this
+backoff. After a failed refresh, wallet-funded
+admission fails closed. Fully allowance/grant-funded admission needs no profile.
+Verified empty taxes mean zero tax; failure-only cache records never do.
+For duplicate plan charges sharing a metric, NyxID conservatively uses the
+highest summed tax rate; provider refresh reconciles the difference. Percentage rates use exact decimal parsing
+with up to 12 fractional digits, matching `Credits` precision; negative,
+malformed or more precise rates fail closed rather than being rounded silently.
+
+Wallet holds and settlement include tax on the pre-tax wallet share; Lago events
+retain only pre-tax quantities. Half-up settlement and upward admission rounding
+use exact picocredits. Provider fee/tax cent rounding is trued up by existing
+`external:lago` refresh adjustments. Top-up invoices remain untaxed; grants and
+allowances never reach Lago and are not taxed.
+
+Deploy all replicas **before** ops assign customer taxes. Existing rows without
+tax fields settle pre-tax; there is no backfill or tax migration fence.
+[Billing operations](BILLING_OPERATIONS.md) documents manual merchant organization
+flag overrides, precedence and personal-vs-org resolution, and the customer-level
+Singapore GST / overseas 0% procedure. The personal Billing page reads Lago's
+current bill and finalized subscription invoices through `/billing/bill` and
+`/billing/invoices`; both APIs also accept an authorized `owner_id`.
+
 ### Billing flag matrix
 
 `BILLING_ENABLED`, `BILLING_RESALE_ENABLED`, and `BILLING_FAIL_CLOSED` are independent. `BILLING_ENABLED` controls platform metering, wallet provisioning, and the reservation gate; it does not implicitly enable catalog resale. `BILLING_RESALE_ENABLED` controls only the resale ledger layer, and `BILLING_FAIL_CLOSED` is consulted only when `BILLING_ENABLED=true`.
@@ -226,7 +298,7 @@ The Lago client is configured only when both `LAGO_API_URL` and `LAGO_API_KEY` a
 
 Admins may set an exact `credits_per_unit` price in a catalog service's `billing.platform_pricing` block. NyxID owns those prices and synchronizes a stable `platform_svc_{slug}` sum metric plus its standard charge onto `LAGO_PLAN_CODE`. Lago plan updates always round-trip the complete plan and every existing charge because `PUT /plans/{code}` replaces the charge array; existing charge ids and unrelated pricing must never be omitted. The saved row records `pending`, `synced`, or `failed`; failed and pending updates are retried by the reconcile sweep. Traffic switches to the service-specific metric only after synchronization succeeds, so a partial Lago update cannot silently apply a stale local price. Clearing a price immediately restores the legacy metric and persists a cleanup marker until the NyxID charge is removed and the local rate-cache row is marked `retired_at` (retained for historical usage pricing). Catalog services without `platform_pricing` continue using the legacy plan-authored platform metric and rate.
 
-Credit benefits use five collections. `credit_grants` stores one attributable row per recipient. `credit_schedules` stores recurring credit policy, and `credit_schedule_periods` stores derived walk progress. `usage_allowances` stores recurring free-unit definitions. `usage_allowance_periods` stores each owner's consumption and reservations for a UTC window. Platform admins manage grants, schedules, and allowances under `/api/v1/admin/credits`. Operators may read those admin endpoints but cannot mutate them. Flagged users read active balances from `GET /api/v1/billing/grants` and `GET /api/v1/billing/allowances`. An authorized organization member may pass `owner_id` to read the organization's benefits. Wallet mutations remain restricted to organization admins.
+Credit benefits use five financial/policy collections. A separate `credit_allocation_requests` collection stores durable actor-scoped request snapshots for retry-safe issuance; it does not hold funds. `credit_grants` stores one attributable row per recipient. `credit_schedules` stores recurring credit policy, and `credit_schedule_periods` stores derived walk progress. `usage_allowances` stores recurring free-unit definitions. `usage_allowance_periods` stores each owner's consumption and reservations for a UTC window. Platform admins manage grants, schedules, and allowances under `/api/v1/admin/credits`. Operators may read those admin endpoints. Operators with the Credits Manager role may issue and reclaim one-time allocations; schedules and allowance writes remain admin-only. Flagged users read active balances from `GET /api/v1/billing/grants` and `GET /api/v1/billing/allowances`. An authorized organization member may pass `owner_id` to read the organization's benefits. Wallet mutations remain restricted to organization admins.
 
 All three benefits support four recipient kinds: `all_users` (all active person and organization wallets), `selected_users` with `target_user_ids` (specific person or organization wallets), `org_members` with `target_org_ids` (the personal wallets of active people with non-revoked membership in the selected organizations, including viewers), and `groups` with `target_group_ids` (active people's direct `User.group_ids` membership, without parent/child expansion). Organization-member and group-member benefits never fund an organization wallet. Select the organization under `selected_users` to fund its shared wallet instead. Exactly the matching list must be non-empty; all other lists must be empty. Each selected list accepts 1–500 unique ids; organizations must be active organization users and groups must exist. New org/group one-shot expansion is capped at 100,000 resolved recipients before any grants are written; use a schedule for larger populations. Overlapping organizations or groups produce one benefit per person. A kind change in a partial update must supply the matching list; omitted previous lists are cleared.
 
@@ -237,6 +309,8 @@ The new provenance vectors default to empty when absent. This is an additive wir
 An "all users" one-shot grant snapshots active person and organization owners at issuance. A recurring schedule takes that snapshot when it claims the UTC period. An "all users" allowance applies dynamically as each owner spends. A scheduled grant's UUID v5 `_id` is derived from the schedule ID, the period start, and the recipient ID. That `_id` is the disbursement identity. Period progress and leases do not decide whether NyxID paid a recipient. Retries converge on the same ordinary grant and the existing `grant-issued:{grant_id}` ledger key. Schedule catch-up opens only the current window and never backfills elapsed credits. A paused schedule finishes an open period but opens no later period.
 
 One-shot issuance journals at most 50 recipients inline to bound a platform-wide request. Scheduled walks use the reconcile sweep's recipient budget. Unjournaled grants remain unspendable until recovery confirms their issuance entries. Credit schedules use `BILLING_RECONCILE_INTERVAL_SECS`; they add no environment variable.
+
+Credit allocation policies use the existing grant identity and exact Decimal128 credit fields. `BILLING_ALLOCATIONS_ENABLED=true` exposes authoring capability through `GET /api/v1/admin/credits/allocations/summary`. New clients use the dedicated `/allocations` and `/allocations/schedules` mutations so an older server returns an error instead of ignoring service ceilings. Upgrade and drain ALL old API replicas and billing workers before enabling the flag. This is an operator assertion, not automatic worker-version attestation. Turning it off later stops new authoring but does not remove existing ceilings or pending reclaim fences; never restart an older binary while such rows exist. The legacy revoke endpoint retains immediate-only behavior with the flag off and rejects held allocations without marking a pending request. Financial enforcement and recovery always honor persisted policies, regardless of this authoring flag.
 
 Funding order is free allowance units, exact promotional grant credits (soonest expiry first), then exact wallet credits. The reservation gate holds estimated allowance units and grant value, but settlement applies actual metric quantity and releases any excess hold. Grant reservations admitted before expiry remain valid; otherwise expiry is checked at the instant of reservation. Daily windows start at 00:00 UTC, weekly windows at Monday 00:00 UTC, monthly windows on the first day at 00:00 UTC, and one-time allowances never reset. Only the wallet-funded fraction of a finalized usage row is pushed to Lago. Fully benefit-funded rows are acknowledged locally, and Lago drift comparison sums that same wallet-funded decimal quantity, preventing grants or allowances from becoming a second invoice charge.
 
@@ -263,6 +337,14 @@ nyxid billing verify-topup-flow --amount-credits 1 --open
 ```
 
 Complete the Stripe sandbox checkout opened by the command. The verifier passes only when the reconciled wallet balance increases by exactly the paid amount and the checkout response is Stripe-backed.
+
+Human operators can inspect defaults with `nyxid admin billing config show`,
+prices with `nyxid admin billing service show <slug>` and
+`nyxid admin billing rates --service <slug>`, and integrity with
+`nyxid admin billing ledger verify --all`. Funding through
+`nyxid admin credits grant issue` and managed execution reads through
+`nyxid billing executions list|show` are covered in the
+[native billing reference](../skills/nyxid/references/billing.md).
 
 ## JWT
 
@@ -307,7 +389,7 @@ Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3).
 | `RATE_LIMIT_BURST` | `30` | Cluster-wide burst capacity and per-IP limit |
 | `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND` | `0` | Sustained requests/second per user for each platform-credentialed service. Defaults to `0` (disabled): enabling a cap on a shared credential is a deliberate operator decision taken after observing real traffic, so it never arrives with a deploy. |
 | `PLATFORM_SERVICE_RATE_LIMIT_BURST` | `10` | Burst capacity per user for each platform-credentialed service. |
-| `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | When true, a platform-credentialed catalog row with no `proxy_operation_policy` is refused on actor-addressed paths (`/proxy/s/{slug}`, `/llm/*`). Ships **disabled** so deploying changes no existing behaviour; enable per environment once every such row either carries a policy or is confirmed to receive no actor-addressed traffic. Server-chosen surfaces (the assistant) are unaffected either way — they cannot name an operation, so a policy has no meaning there. |
+| `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | Initially false. The first true process observation persists a sticky platform-policy cutover marker before serving. Actor-addressed master credentials then require the complete declared/drained replica roster with this env true, plus explicit policies on the conservative inventory of active master-capable catalog rows. Missing policy blocks readiness; an explicit empty policy is distinct and denies all operations. Expired siblings or changing this env to false do not undo cutover. See [activation and maintenance recovery](SECURITY_ROLLOUT_READINESS.md). Server-chosen surfaces retain their separate policy contract. |
 | `TRUSTED_PROXY_IPS` | *(empty)* | Comma-separated reverse-proxy IPv4/IPv6 addresses or CIDR ranges. Bare addresses mean `/32` (IPv4) or `/128` (IPv6); IPv4-mapped IPv6 addresses are normalized to IPv4. **Only list proxies configured to overwrite client-supplied forwarded headers.** From an allowlisted peer, resolution prefers `CF-Connecting-IP`, then scans `X-Forwarded-For` right-to-left while skipping trusted proxy hops, then uses `X-Real-IP`, then the TCP peer. `CF-Connecting-IP` is the primary Cloudflare path because it does not depend on a complete proxy-hop list. The XFF fallback requires every hop to be listed, including Cloudflare's published IPv4 and IPv6 ranges when Cloudflare is in front; otherwise the rightmost unlisted Cloudflare edge becomes the apparent client and rate-limit key. From an untrusted peer, strict public/device-login paths ignore all forwarded headers. The global limiter and node WebSocket attribution retain their legacy XFF-first behavior only while this setting is empty, then switch to the trusted resolver when configured. Invalid entries are dropped with a warning. Until this is set behind an internal ingress, requester IP and country are unavailable and strict public per-IP buckets can collapse to the ingress peer. |
 | `RATE_LIMIT_EXEMPT_IPS` | *(empty)* | Comma-separated client IPv4/IPv6 addresses or CIDRs exempt from the general per-IP and cluster-wide global request budgets. Matching requests consume neither budget and are admitted even when the global budget is exhausted. Invalid entries are dropped with a warning. This does not exempt authentication, account, API-key/agent, platform-service, public-proxy, device/login, or other dedicated protocol limits, nor connection capacity limits. |
 
@@ -352,11 +434,11 @@ The `nyxid` CLI's wizard-style commands (e.g. `nyxid service add`, `nyxid api-ke
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLI_PAIRING_HMAC_KEY` | *(derived from `ENCRYPTION_KEY`)* | Explicit 32-byte HMAC key (64 hex chars) for `CliPairing.code_hash`. Generate with `openssl rand -hex 32`. Set this in multi-instance deployments where `ENCRYPTION_KEY` is not configured (for example `KEY_PROVIDER=aws-kms` or `gcp-kms`) so every backend worker produces the same HMAC output for a given code. |
+| `CLI_PAIRING_HMAC_KEY` | legacy derivation from `ENCRYPTION_KEY`, then JWT PEM | Optional 32-byte hex override (64 hex chars) for pairing-code HMAC during legacy preparation. Replicas must share the same final domain key. A configured `HMAC_KEYSET_PATH` takes precedence; adopt the existing value before changing AES/JWT sources. |
 
 ### Key selection rules
 
-The backend picks the key at startup using the first match:
+When `HMAC_KEYSET_PATH` is configured, its pinned CLI-pairing value is authoritative. Without that file, legacy preparation picks the key using the first match:
 
 1. `CLI_PAIRING_HMAC_KEY` if set (must be 64 hex chars).
 2. Derived from `ENCRYPTION_KEY` via HMAC-SHA256 with domain-separated label `nyxid:cli-pairing-code-hmac-v1`. Stable across restarts and workers that share `ENCRYPTION_KEY`. This is the expected path for the local AES provider.
@@ -364,12 +446,29 @@ The backend picks the key at startup using the first match:
 
 If all three sources are missing, the backend refuses to start with a clear error message pointing at this section. In practice that branch is unreachable because the JWT private key is already required at startup.
 
-### When you must set it explicitly
+### Explicit overrides and rotation
 
-- You want to rotate the pairing-code HMAC independently of both `ENCRYPTION_KEY` and the JWT signing key (e.g. to rotate it without rotating JWTs).
-- Any deployment policy that forbids reusing key material across purposes.
+Explicit overrides can establish independent keys for a new deployment. On an existing deployment preserve the exact final domain keys. Independent adoption decouples their lifetime from AES/JWT sources; replacing a key with a different override is not a supported rotation protocol and fails the consistency pin.
 
-Otherwise the automatic derivation chain is safe: local deployments derive from `ENCRYPTION_KEY`, KMS deployments derive from the JWT signing key.
+Legacy derivation couples pairing and other domains to encryption/JWT sources. Adopt the unchanged independent keyset before rotating those sources; the durable consistency pin rejects accidental domain changes. See [key lifecycle preparation](security/KEY_LIFECYCLE.md).
+
+## Independent HMAC keyset and JWT overlap
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HMAC_KEYSET_PATH` | unset; unchanged legacy derivation with consistency check | Local JSON file, at most 4096 bytes, `version: 1`, with exactly six 64-hex fields: `cli_pairing`, `auth_device`, `audit_chain`, `assistant_action`, `billing_ledger`, `internal_dispatch`. Unix group/other permissions are rejected. Blank configuration is treated as unset. Authoritative when configured; no fallback on unreadable/malformed files. A majority-durable commitment pin rejects replacement. Export the existing final keys before JWT/AES source rotation using [the ordered preparation runbook](security/KEY_LIFECYCLE.md). This preserves keys; it is not arbitrary HMAC-key rotation. |
+| `JWT_RETAINED_PUBLIC_KEY_PATHS` | empty | Comma-separated list of at most sixteen retained RSA public PEM paths; whitespace around entries and empty entries are removed. Active/retained RSA keys must be at least 3072 bits, the active pair must match, and duplicate key IDs (including the active key) fail startup. Verification requires RS256 and a known `kid`; JWKS publishes active and retained keys. Stage all readers before activating a new signer and retain verifiers through required token lifetimes/JWKS caches. External Machine-provider trust roots stay separate. |
+
+## Product analytics and vendor erasure
+
+| Variable | Default | Semantics |
+|---|---|---|
+| `NYXID_TELEMETRY_DSN` | unset | Backend PostHog ingestion key/project configuration. A configured destination never grants account/device permission; absent/false consent and pre-login events fail closed. |
+| `NYXID_TELEMETRY_HOST` | `https://us.i.posthog.com` | Backend ingestion base URL for an explicit `NYXID_TELEMETRY_DSN`; self-hosters can override it. The built-in share-back destination uses its compiled host. The default does not establish a hosted deployment's location or contracts. |
+| `NYXID_SHARE_ANALYTICS` | off | Enables the compiled analytics destination when no nonblank `NYXID_TELEMETRY_DSN` is supplied; an explicit DSN takes precedence. Still subject to the same account/device dispatch gate. |
+| `NYXID_TELEMETRY_ERASURE_DESTINATIONS` | unset; empty inventory | JSON array of up to sixteen current/historical project APIs. Each object has only `id`, `api_host`, `project_id`, `personal_api_key`. `id` is 1–64 ASCII letters/digits/`-`/`_`, unique and not `unresolved`; `api_host` is an HTTPS origin without userinfo, path, query or fragment; `project_id` is 1–20 digits; the nonempty personal API key is at most 1024 bytes. Invalid configuration fails startup. Keys stay in runtime configuration; durable destination identities cannot be rebound to another project. Missing credentials leave erasure awaiting operator action; an empty list does not prove there is no historical vendor data. |
+
+The erasure credential is a project API credential, not the ingestion DSN. Preserve historical destination coverage and verify vendor processing; queue/HTTP acceptance is not deletion completion. See [TELEMETRY.md](TELEMETRY.md) for account/device controls, withdrawal, dispatch reconciliation and manual erasure evidence. `DO_NOT_TRACK` and `NYXID_TELEMETRY=off` further deny CLI events; `NYXID_TELEMETRY=on` does not grant consent.
 
 ## Audit Log Hash Chain (Optional)
 
@@ -377,11 +476,11 @@ NyxID audit-log rows created after this feature is enabled are tamper-evident. E
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AUDIT_CHAIN_HMAC_KEY` | *(derived from `ENCRYPTION_KEY`, then JWT private key)* | Explicit 32-byte HMAC key (64 hex chars) for audit-log hash chaining. Generate with `openssl rand -hex 32`. Set this when you need to rotate the audit-chain key independently of both `ENCRYPTION_KEY` and the JWT signing key, or when deployment policy forbids deriving secondary HMAC keys from those sources. |
+| `AUDIT_CHAIN_HMAC_KEY` | *(derived from `ENCRYPTION_KEY`, then JWT private key)* | Explicit 32-byte HMAC key (64 hex chars) for audit-log hash chaining. Generate with `openssl rand -hex 32`. Existing explicit override for the audit domain. Preserve the exact existing key; replacing it invalidates retained chains and persisted fingerprints. Use independent keyset adoption before JWT/encryption source rotation. |
 
 ### Key selection rules
 
-The backend picks the audit-chain key at startup using the first match:
+When `HMAC_KEYSET_PATH` is configured, its pinned audit value is authoritative. Without that file, legacy preparation picks the audit key using the first match:
 
 1. `AUDIT_CHAIN_HMAC_KEY` if set (must be 64 hex chars).
 2. Derived from `ENCRYPTION_KEY` via HMAC-SHA256 with the domain-separated `audit-chain` label.
@@ -442,6 +541,10 @@ Requires all four values. Create a Services ID and key at the [Apple Developer p
 | `APPROVAL_EXPIRY_INTERVAL_SECS` | `5` | Interval between approval expiry sweeps (seconds) |
 
 The approval system works without Telegram -- users can always approve/reject via the web UI. Telegram delivery requires `TELEGRAM_BOT_TOKEN`.
+
+A missing global preference defaults to **Writes only**: read operations can proceed; write and destructive operations require approval. Explicit stored true selects **All requests**, false selects **Off**. Lazy settings/channel and tool-approval creation leave the preference absent. Existing stored booleans keep their meaning, including unmarked true rows from the unreleased W9.3 build. Users can deliberately reset to Writes only through settings. This default has no environment toggle, and notification availability never suspends required approval.
+
+Drain and upgrade **every** backend replica and participating worker before accepting traffic under the new-user writes-only guarantee. Main-era replicas allow writes when the preference is missing; earlier W9.3 replicas gate reads and lazily persist true. Mixed versions therefore do not implement the guarantee. Publish the three-choice clients after backend cutover, and drain affected traffic before rollback. See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md#required-approval-and-delivery).
 
 **Telegram delivery modes:** When `TELEGRAM_WEBHOOK_URL` (and `TELEGRAM_WEBHOOK_SECRET`) are set, the backend registers a webhook with Telegram at startup. When only `TELEGRAM_BOT_TOKEN` is set (no webhook URL), the backend automatically falls back to `getUpdates` long polling -- ideal for local development without ngrok or tunnels.
 
@@ -627,8 +730,22 @@ cutover. See [Exact accounting](BILLING_EXACT_ACCOUNTING.md#d5-cutover-and-opera
 
 ### Machine node process environments
 
-Machine support adds no backend deployment environment variables. The machine
-container reads `NYXID_NODE_TOKEN` only during first registration (omit it for
+The backend's official updater-image verifier retains authenticated TUF rollback
+floors separately from node credentials. `NYXID_SERVER_TUF_STATE_DIR` selects an
+absolute private durable directory; native default is `$HOME/.nyxid/server-tuf`
+(`%USERPROFILE%` on Windows). The backend image sets `/var/lib/nyxid/tuf` and
+production Compose mounts the named `backend_tuf` volume there. Provision the
+directory mode0700 owned by the backend UID, under trusted parent directories.
+With a read-only root filesystem mount only that private durable directory
+writable. Keep it across restarts/upgrades; do not restore an older copy or use
+ephemeral storage. Permission, configuration and authenticated-state failures
+disable verified updater guidance without accepting an unverified image tag.
+The native CLI's distinct override is `NYXID_TUF_STATE_DIR`; the Docker companion
+uses the private update volume's `tuf/` directory. See [RELEASING.md](RELEASING.md#accepted-provenance-and-authenticated-time).
+
+Machine execution itself adds no backend credential environment variables;
+the updater-image verifier uses the trust-storage setting described above.
+The machine container reads `NYXID_NODE_TOKEN` only during first registration (omit it for
 pairing), and `NYXID_NODE_URL` selects the existing node WebSocket endpoint.
 The entrypoint removes the registration token before starting the daemon.
 `NYXID_PROFILE` keeps the existing CLI profile convention.
@@ -649,3 +766,52 @@ Git receives gateway URL rewrites and headers through process-only
 these settings to a global or repository config. No NyxID or provider
 credential is inherited or copied to the command environment. See
 [MACHINE_NODES.md](MACHINE_NODES.md).
+
+## Contextual encryption writer cutover
+
+| Variable | Default | Startup semantics |
+|---|---|---|
+| `CONTEXTUAL_RECORD_WRITES` | `false` | Accepts exactly `true`/`false` or `1`/`0`; other values fail startup. Enabling requires `CONTEXTUAL_RECORD_WRITERS_DRAINED=true` or `1`. Converted writers use supported legacy storage while off and contextual storage while on; configured-header writes require activation. |
+| `CONTEXTUAL_RECORD_WRITERS_DRAINED` | no acknowledgement | Startup-only operator assertion, read when contextual writes are enabled. Exactly `true` or `1` permits activation; absent/other values reject activation. It does not discover, stop or fence old binaries. |
+| `ALLOW_LEGACY_RECORD_READS` | `true` | Accepts exactly `true`/`false` or `1`/`0`; other values fail startup. Disabling requires contextual writes on. It controls converted adapters, not every raw crypto call or backup dependency. |
+
+`ALLOW_LEGACY_RECORD_READS`
+controls legacy decoding in converted contextual-encryption field adapters.
+Converted Node, MFA, saved-login and provider credential adapters consume it. Set `false` only after
+an authenticated migration/readiness pass and coordinated old-reader/writer
+drain. A mutable database version marker cannot re-enable legacy decoding when
+this trusted setting is false. This switch does not retire unconverted fields,
+old provider keys or backups. No production cutover has been performed by the
+remediation work.
+
+### Reader-first procedure
+
+`CONTEXTUAL_RECORD_WRITES` defaults to `false`. Converted encrypted-field writers preserve the exact legacy encrypted format
+and omit contextual version markers during reader staging. Node registration,
+rotation, transfer and managed activation use that compatibility path. Sensitive
+header edits require writer cutover and never fall back to new plaintext storage.
+Existing legacy readers remain available through `ALLOW_LEGACY_RECORD_READS=true`.
+
+Startup validates both settings together. The supported modes are:
+
+| `ALLOW_LEGACY_RECORD_READS` | `CONTEXTUAL_RECORD_WRITES` | Mode |
+| --- | --- | --- |
+| `true` | `false` | Compatible reader staging (the default). |
+| `true` | `true` | Contextual writes and migration; drained acknowledgement required. |
+| `false` | `true` | Strict readers; drained acknowledgement and completed authenticated inventory readiness required. |
+| `false` | `false` | Rejected at startup: compatible writers would create ciphertext this process cannot read. |
+
+The startup mode check does not establish migration readiness or cloud key-version
+retirement evidence. Those require the authenticated final inventory checks.
+
+Activating `CONTEXTUAL_RECORD_WRITES=true` requires the explicit startup
+acknowledgement `CONTEXTUAL_RECORD_WRITERS_DRAINED=true`. Deploy compatible readers
+with writes off, stop and drain all old application/background/CLI writers, verify
+that no old binary will restart, then activate on the compatible fleet. This is an
+operator-controlled drained cutover, not automatic mixed-version enforcement or a
+zero-downtime guarantee. Once any v3 value exists, rollback to an old reader is
+unsupported. Roll back only to a v3-compatible binary while retaining its keys.
+After authenticated migration readiness across every field adapter, separately
+turn legacy reads off. Old backups and historical KMS key versions retain their
+own decryption requirements; the currently configured KMS resource can still
+serve historical versions. See [the explicit migration API procedure](SECURITY.md#encrypted-record-migration). Pending field adapters still block complete readiness; the runbook does not certify a deployment.

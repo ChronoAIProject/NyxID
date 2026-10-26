@@ -292,7 +292,8 @@ pub async fn create_conversation(
             platform: conversation.platform.clone(),
             conversation_id_hash: hash_conversation_id(&conversation.platform_conversation_id),
         },
-    );
+    )
+    .await;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -559,7 +560,8 @@ pub async fn delete_conversation(
             platform: conv.platform.clone(),
             conversation_id_hash: hash_conversation_id(&conv.platform_conversation_id),
         },
-    );
+    )
+    .await;
 
     audit_service::log_for_user(
         state.db.clone(),

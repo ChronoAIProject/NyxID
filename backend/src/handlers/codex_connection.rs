@@ -34,7 +34,9 @@ async fn response(state: &AppState, user: &AuthUser) -> AppResult<ConnectionResp
     let provider = connection::provider(&state.db).await?;
     let token = connection::current(&state.db, &id, &provider.id).await?;
     let status = match &token {
-        Some(token) => connection::connection_status(&state.db, token).await?,
+        Some(token) => {
+            connection::connection_status(&state.db, &state.encryption_keys, token).await?
+        }
         None => "not_connected",
     };
     Ok(ConnectionResponse {
@@ -140,11 +142,14 @@ pub async fn verify(
     }
     let id = user.user_id.to_string();
     let token = connection::require_current(&state.db, &id, &body.connection).await?;
-    let service_id = connection::registered_service(&state.db, &token).await?;
+    let service_id =
+        connection::registered_service(&state.db, &state.encryption_keys, &token).await?;
     let (catalog, _) =
         crate::services::llm_gateway_service::resolve_llm_service_by_slug(&state.db, "openai")
             .await?;
-    let binding = connection::verification_binding(&state.db, &token, &service_id).await?;
+    let binding =
+        connection::verification_binding(&state.db, &state.encryption_keys, &token, &service_id)
+            .await?;
     let payload = serde_json::json!({"model":body.model,"input":"Reply OK.","max_output_tokens":32,"store":false});
     let request = Request::builder()
         .method("POST")
@@ -173,7 +178,10 @@ pub async fn verify(
     .await
     .unwrap_or("saved");
     let current = connection::require_current(&state.db, &id, &body.connection).await?;
-    if connection::verification_binding(&state.db, &current, &service_id).await? != binding {
+    if connection::verification_binding(&state.db, &state.encryption_keys, &current, &service_id)
+        .await?
+        != binding
+    {
         return Err(AppError::Conflict(
             "Credential changed during verification; verify again".into(),
         ));

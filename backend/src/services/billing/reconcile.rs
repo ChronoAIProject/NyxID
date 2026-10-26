@@ -72,6 +72,19 @@ impl BillingReconciler {
         if !super::exact_migration::ready(&self.db).await? {
             return Ok(ReconcileStats::default());
         }
+        // Benefit-only estimates can spill into wallet funding at settlement.
+        // Refresh before recovery: pending component/voice recovery may return
+        // early on a missing profile and must not starve its own refresh.
+        if self.config.billing_enabled
+            && let Some(lago) = &self.lago
+        {
+            super::taxes::reconcile(
+                &self.db,
+                lago.as_ref(),
+                self.config.billing_rate_cache_ttl_secs,
+            )
+            .await?;
+        }
         let mut stats = ReconcileStats::default();
         match super::pool_attempt::recover_expired(&self.db, Utc::now()).await {
             Ok(count) => stats.abandoned += count,
@@ -128,6 +141,14 @@ impl BillingReconciler {
         let mut runtime_billing = super::BillingService::new(self.db.clone(), self.config.clone());
         runtime_billing.lago = self.lago.clone();
         stats.service_price_syncs += runtime_billing.retry_machine_runtime_rates(4).await?;
+        // Price synchronization invalidates affected profiles. Refresh those
+        // within this pass; admissions also refresh individually on demand.
+        super::taxes::reconcile(
+            &self.db,
+            lago.as_ref(),
+            self.config.billing_rate_cache_ttl_secs,
+        )
+        .await?;
         self.push_unacked(lago.as_ref(), &mut stats).await?;
         self.compare_finalized_usage(lago.as_ref(), &mut stats)
             .await?;
@@ -664,6 +685,7 @@ mod tests {
     fn billing_enabled_config() -> crate::config::AppConfig {
         crate::config::AppConfig {
             billing_enabled: true,
+            billing_allocations_enabled: false,
             ..test_app_config()
         }
     }
@@ -738,6 +760,7 @@ mod tests {
             wallet_id: Some("wallet-1".to_string()),
             actor_user_id: "actor-1".to_string(),
             api_key_id: None,
+            assistant_source: None,
             user_service_id: None,
             service_id: Some("service-1".to_string()),
             service_slug: Some("service-one".to_string()),
@@ -746,6 +769,7 @@ mod tests {
             operation: None,
             credential_class: CredentialClass::UserOwned,
             model: None,
+            reported_model: None,
             token_breakdown: None,
             audio_tokens: None,
             image_tokens: None,

@@ -177,6 +177,18 @@ model at `models/billing_wallet.rs`).
 
 For mixed billing lanes, the allowance unit selector follows [the metering and allowance rules](USAGE_BILLING_LAGO_SPEC.md#40-metadata-only-route-context-r1).
 
+### Administrator credit allocations
+
+Only `/admin/credits` changes for allocation authoring. Its URL-backed tabs remain **Credit grants**, **Free allowances**, **Schedules**, in that order. A compact headline reports all remaining issued credits, with optional closed **Balance details**. The visible allocation list shows allocated, used, remaining and held amounts, expiry, recipient, inline service/group limits and reclaim. Future schedule values and free usage units are excluded from monetary totals. Cached summaries are labelled stale after a refresh failure; individual records and legacy actions remain usable when the summary is unavailable.
+
+**Allocate credits** combines recipient, exact amount, one-time or daily/weekly/monthly recurrence, expiry and optional eligible-service scope. Optional service limits are expanded initially. Each row can group multiple concrete services under one ceiling and optional label. Ceilings share the total; they do not set money aside or impose account-wide limits. Each recurring issuance has independent counters and frozen rules. Creating from Schedules defaults monthly. Schedule edits affect future periods, and pause stops future issuance independently from reclaiming an existing allocation.
+
+**Reclaim remaining credits** names the allocation ID, creation date and recurring origin before confirmation. It immediately stops new use from that allocation, including extra usage, while already-held work finishes. The final unused remainder is reclaimed once; purchased credits and other allocations remain intact. Pending reclaim remains visible. Expired/revoked legacy API rows without terminal details show unknown used value instead of inferring it.
+
+New authoring requires explicit backend capability. Older servers retain the existing grant/schedule controls and allowance bundles. An exact amount in a read response alone does not establish exact-write capability: whole legacy schedules edit via `amount_credits`; fractional or capped schedules preserve exact state and permit safe sparse notes/status edits while unsupported policy changes are disabled. Credits Manager Operators can allocate/reclaim one-time credits; schedules and free-allowance writes remain admin-only.
+
+Amounts are canonical decimal-credit strings with up to 12 exact places. These balances are distinct from usage cost estimates. Purchased funds still expire 365 days after settlement; issued funds use each allocation's chosen expiry. The personal Billing wallet, top-up/receipt and usage surfaces below retain their existing scope and APIs.
+
 ### Credit-benefit recipients
 
 The admin grant, credit schedule, and allowance dialogs share four choices:
@@ -388,8 +400,9 @@ the person has no chargeable wallet.
 read-only operators, and any user holding `nyxid:admin:usage:read` through a
 direct or group role (the seeded **Usage Viewer** role carries it). Usage-only
 role holders see just the Usage page in the admin navigation and command
-palette; Admins and Operators keep their existing admin navigation. Saving a
-workspace stays admin-only.
+palette, including its Dashboard, List and NyxBot tabs (NyxBot activity, model
+usage and feedback with comments); Admins and Operators keep their existing
+admin navigation. Saving a workspace stays admin-only.
 
 Usage-only readers never see identities beyond the usage data:
 
@@ -581,3 +594,63 @@ numbers and no receipts.
   invoice/receipt data. The frontend does not infer that missing provider information is payment success.
 - The existing wallet provisioning/unconfigured behavior is retained; billing readiness must be
   verified before payment or provisioning actions become available.
+
+### NyxBot model reporting
+
+The NyxBot tab's **Cost and billing by model** shows exact gross, wallet, grant,
+and allowance credits for attributed model executions. Its daily chart can
+switch funding measure. **Traffic by model** separates request and token charts
+and tables; cache/audio/image counts overlap the documented input/output totals.
+Model names identify stored billing models or request aliases. **Unknown model**
+means no nonblank model identity was recorded on an execution, including
+proxied executions settled before provider-reported models were captured.
+
+**Model services** charts requests by the inference service that handled each
+model execution (Top 20 + Other), with exact credits and tokens per service on
+expansion. The service is recorded for all history, so it also explains usage
+whose model is unknown.
+
+**Top billing accounts** uses the Usage dashboard panel (gross cost by billing
+account, Top 10 + Other, with its data table). It ranks the complete population
+by known gross cost, requests, then account identity; **Models by billing
+account** expands each account's model detail. Top model
+membership is stable across daily buckets. **Other** is the summed usage beyond
+the displayed model/account limit, including unavailable prices. **≥** marks a
+known cost subtotal with unpriced events; **Unavailable** means the selected
+amount could not be priced. Zero is reserved for known zero cost.
+
+Historical coverage notices distinguish unprovable platform candidates from
+confirmed assistant activity that cannot be classified as model execution.
+Both are excluded. Scope details show excluded orchestration, tool, and
+unclassified requests/costs. Recent activity is included alongside summaries;
+validation status indicates whether the reporting journal was stable for the
+read. Existing activity/outcome/feedback sections keep their own semantics.
+
+## Current bill, taxes and usage invoices
+
+The personal Billing tab includes **Current bill** and **Past usage invoices**.
+The current bill is the open calendar billing period in Lago: each wallet-funded
+charge shows its name, units and pre-tax amount, followed by subtotal, named tax
+rates/amounts, total tax and total so far. Lago's aggregate amounts are
+authoritative. Computed tax rows can differ because Lago rounds fees/taxes to
+cents; **Tax rounding** makes differences up to one cent per displayed tax row
+plus one cent explicit. If the difference exceeds that tolerance, the bill shows
+only Lago's aggregate **Tax**, omitting potentially outdated names and rates.
+The bill uses the current cached tax configuration and remains provisional until
+invoiced. Currency amounts use two decimals, dates use UTC, and invoice payment
+statuses appear as **Paid**, **Pending** or **Failed**.
+
+Past usage invoices are finalized subscription invoices. **Invoice total** is
+before prepaid credits. **Prepaid credits applied** explains how much the wallet
+paid; **Amount due** is the remaining payable balance. Each invoice includes its
+historical named tax rows and a **Download receipt** action. Top-up history
+continues to show the separate untaxed invoices for buying credits.
+
+Grant- and allowance-funded quantities never reach Lago, are not taxed and are
+intentionally absent from these bills. Usage remains the place to inspect those
+benefits. Wallet availability, reservations, pending debits and overdraft checks
+include tax on the wallet-funded share. The Usage funding split retains the
+pre-tax wallet share; the settlement ledger separately records tax.
+
+See [billing operations](BILLING_OPERATIONS.md) for manual merchant enablement,
+flag and owner resolution, Lago tax setup, and deployment order.

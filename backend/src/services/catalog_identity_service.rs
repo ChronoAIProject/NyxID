@@ -239,55 +239,109 @@ pub async fn propagate_catalog_update(
     }
 }
 
-/// Deliberately overwrite all identity fields for every instance of one
-/// catalog service. This is the operator recovery path for legacy drift and
-/// previously failed propagation.
+/// Result of one identity resync.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResyncOutcome {
+    /// Instances of the catalog service that were checked.
+    pub matched_count: u64,
+    /// Instances whose stored identity differed and were rewritten.
+    pub changed_count: u64,
+}
+
+/// Deliberately overwrite all identity fields on every instance of one catalog
+/// service whose stored identity differs from the catalog's, including
+/// customized instances. This is the recovery path for legacy drift and
+/// previously failed propagation. Instances that already match are untouched.
 pub async fn force_resync(
     db: &mongodb::Database,
     authority: &super::catalog_mutation_service::Authority,
     service: &DownstreamService,
     audit_key: &[u8],
-) -> AppResult<u64> {
+) -> AppResult<ResyncOutcome> {
     let db = db.clone();
     let observed = service.clone();
     let authority = authority.clone();
     let key = zeroize::Zeroizing::new(audit_key.to_vec());
     super::service_history::transaction::run(&db.clone(), async move |transaction| {
-        let result =
-            async {
-                let (live, _) = super::catalog_mutation_service::fence(
-                    &db,
-                    transaction,
-                    &observed,
-                    Some(&authority),
-                )
+        let result = async {
+            let (live, admin) = super::catalog_mutation_service::fence(
+                &db,
+                transaction,
+                &observed,
+                Some(&authority),
+            )
+            .await?;
+            let config = effective_identity_config(&live);
+            let instances = super::service_history::collection::<UserService>(&db, USER_SERVICES);
+            let matched_count = instances
+                .count_documents(doc! {"catalog_service_id": &live.id})
+                .session(&mut **transaction)
                 .await?;
-                let mut set_doc = identity_set_document(&effective_identity_config(&live));
-                set_doc.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
-                let result = super::service_history::collection::<UserService>(&db, USER_SERVICES)
-                    .update_many(doc! {"catalog_service_id": &live.id}, doc! {"$set":set_doc})
-                    .session(transaction)
-                    .await?;
-                db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-                    .update_one(
-                        doc! {"_id": &live.id},
-                        doc! {"$unset":{RECONCILIATION_FIELD:""}},
-                    )
-                    .session(&mut **transaction)
-                    .await?;
-                audit_service::log_actor_event_in_session(&db, transaction, &key, &authority.actor,
-                "catalog_identity_resync_succeeded", serde_json::json!({
-                    "catalog_service_id":live.id, "status":"success", "fields":IDENTITY_FIELDS,
-                    "matched_count":result.matched_count, "modified_count":result.modified_count,
-                    "skipped_customized_count":0
-                })).await?;
-                Ok(result.matched_count)
-            }
-            .await;
+            let mut set_doc = identity_set_document(&config);
+            set_doc.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
+            let changed_count = instances
+                .update_many(
+                    drifted_identity_filter(&live.id, &config),
+                    doc! {"$set": set_doc},
+                )
+                .session(transaction)
+                .await?
+                .modified_count;
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .update_one(
+                    doc! {"_id": &live.id},
+                    doc! {"$unset": {RECONCILIATION_FIELD: ""}},
+                )
+                .session(&mut **transaction)
+                .await?;
+            // Ingress admits only Admins and the row's plain creator; the
+            // fence reports which one still holds at commit.
+            audit_service::log_actor_event_in_session(
+                &db,
+                transaction,
+                &key,
+                &authority.actor,
+                "catalog_identity_resync_succeeded",
+                serde_json::json!({
+                    "catalog_service_id": live.id,
+                    "status": "success",
+                    "authority": if admin { "admin" } else { "creator" },
+                    "fields": IDENTITY_FIELDS,
+                    "matched_count": matched_count,
+                    "changed_count": changed_count,
+                }),
+            )
+            .await?;
+            Ok(ResyncOutcome {
+                matched_count,
+                changed_count,
+            })
+        }
+        .await;
         super::api_key_mutation_service::transaction_result(result)
     })
     .await
     .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+/// Instances of `catalog_service_id` with at least one identity field that
+/// differs from `config`. Missing legacy fields read as the model default, as
+/// in `inherited_field_filter`, so they differ only when the target does not.
+fn drifted_identity_filter(catalog_service_id: &str, config: &IdentityConfig) -> Document {
+    let defaults = identity_set_document(&IdentityConfig::none());
+    let differs: Vec<Document> = identity_set_document(config)
+        .into_iter()
+        .map(|(field, target)| {
+            let condition = if defaults.get(&field) == Some(&target) && target != Bson::Null {
+                doc! {"$exists": true, "$ne": target}
+            } else {
+                // `$ne: null` already excludes missing fields.
+                doc! {"$ne": target}
+            };
+            doc! {field: condition}
+        })
+        .collect();
+    doc! {"catalog_service_id": catalog_service_id, "$or": differs}
 }
 
 async fn mark_reconciliation_failed(
@@ -988,10 +1042,27 @@ mod tests {
             .await
             .expect("insert user service");
 
-        let affected = force_resync(&db, &resync_authority(&db).await, &service, &[2; 32])
+        let outcome = force_resync(&db, &resync_authority(&db).await, &service, &[2; 32])
             .await
             .expect("force resync");
-        assert_eq!(affected, 1);
+        assert_eq!(
+            outcome,
+            ResyncOutcome {
+                matched_count: 1,
+                changed_count: 1
+            }
+        );
+        let audit = db
+            .collection::<AuditLog>(AUDIT_LOG)
+            .find_one(doc! { "event_type": "catalog_identity_resync_succeeded" })
+            .await
+            .expect("find resync audit")
+            .expect("resync audit exists")
+            .event_data
+            .expect("resync audit data");
+        assert_eq!(audit["authority"], "admin");
+        assert_eq!(audit["matched_count"], 1);
+        assert_eq!(audit["changed_count"], 1);
 
         let after = db
             .collection::<UserService>(USER_SERVICES)
@@ -1008,6 +1079,88 @@ mod tests {
         assert_eq!(after.node_id.as_deref(), Some("node-a"));
         assert_eq!(after.node_priority, 9);
         assert_eq!(after.custom_user_agent.as_deref(), Some("OwnerAgent/2.0"));
+    }
+
+    #[tokio::test]
+    async fn force_resync_reads_missing_legacy_fields_as_model_defaults() {
+        let db = connect_test_database("catalog_identity_force_legacy")
+            .await
+            .expect("MongoDB required");
+        let authority = resync_authority(&db).await;
+        let defaults = catalog_service("catalog-defaults");
+        let mut forwarding = catalog_service("catalog-forwarding");
+        forwarding.slug = "catalog-forwarding".to_string();
+        forwarding.forward_access_token = true;
+        for service in [&defaults, &forwarding] {
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(service)
+                .await
+                .expect("insert catalog service");
+        }
+        for (id, catalog_id) in [
+            ("legacy-defaults", &defaults.id),
+            ("null-audience", &defaults.id),
+            ("legacy-forwarding", &forwarding.id),
+        ] {
+            db.collection::<UserService>(USER_SERVICES)
+                .insert_one(test_user_service(id, id, id, id, Some(catalog_id), None))
+                .await
+                .expect("insert user service");
+        }
+        // Legacy rows predate the identity fields; one also stores an explicit
+        // null audience, which reads the same as a missing one.
+        let updated_at = bson::DateTime::from_millis(1_000);
+        let raw = db.collection::<Document>(USER_SERVICES);
+        let mut unset = Document::new();
+        for field in IDENTITY_FIELDS {
+            unset.insert(field, "");
+        }
+        raw.update_many(
+            doc! {},
+            doc! {"$unset": unset, "$set": {"updated_at": updated_at}},
+        )
+        .await
+        .expect("strip identity fields");
+        raw.update_one(
+            doc! {"_id": "null-audience"},
+            doc! {"$set": {"identity_jwt_audience": Bson::Null}},
+        )
+        .await
+        .expect("store explicit null audience");
+
+        let outcome = force_resync(&db, &authority, &defaults, &[2; 32])
+            .await
+            .expect("resync defaults");
+        assert_eq!(
+            outcome,
+            ResyncOutcome {
+                matched_count: 2,
+                changed_count: 0
+            }
+        );
+        for id in ["legacy-defaults", "null-audience"] {
+            let row = raw.find_one(doc! {"_id": id}).await.unwrap().unwrap();
+            assert_eq!(row.get_datetime("updated_at").unwrap(), &updated_at);
+            assert!(!row.contains_key("identity_propagation_mode"));
+        }
+
+        let outcome = force_resync(&db, &authority, &forwarding, &[2; 32])
+            .await
+            .expect("resync forwarding");
+        assert_eq!(
+            outcome,
+            ResyncOutcome {
+                matched_count: 1,
+                changed_count: 1
+            }
+        );
+        let row = raw
+            .find_one(doc! {"_id": "legacy-forwarding"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.get_bool("forward_access_token").unwrap());
+        assert_ne!(row.get_datetime("updated_at").unwrap(), &updated_at);
     }
 
     #[tokio::test]

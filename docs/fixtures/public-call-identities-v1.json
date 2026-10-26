@@ -1,0 +1,5 @@
+{
+  "contract": "nyxid-public-call-identities.v1",
+  "accepted": ["call_1", "call-2", "A9"],
+  "rejected": [{}, {"call_id": null}, {"call_id": ""}, {"call_id": "call:1"}, {"call_id": "call/1"}, {"call_id": "call 1"}, {"call_id": "call\n1"}, {"call_id": "呼出し"}]
+}

@@ -263,6 +263,7 @@ export interface CatalogEntry {
 
 export interface RevocationCapability {
   readonly revokes_grant: boolean;
+  readonly effect_scope?: "token_only" | "grant_wide" | "request_scoped" | null;
 }
 
 export interface CatalogListResponse {

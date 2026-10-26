@@ -72,6 +72,15 @@ pub struct OraclePool {
     /// requeued. Default 14400 (4h) — browser deep-reasoning turns are slow.
     pub task_timeout_secs: u64,
     pub is_active: bool,
+    #[serde(default)]
+    pub lifecycle_version: i64,
+    /// Invalidates installed credentials without rewriting worker inventory.
+    #[serde(default)]
+    pub installation_epoch: i64,
+    #[serde(default)]
+    pub deletion_cleanup_pending: bool,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub deleted_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -130,6 +139,10 @@ mod tests {
 
     fn make_pool() -> OraclePool {
         OraclePool {
+            deleted_at: None,
+            lifecycle_version: 0,
+            installation_epoch: 0,
+            deletion_cleanup_pending: false,
             require_model_match: true,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),

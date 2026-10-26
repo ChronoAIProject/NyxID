@@ -45,6 +45,27 @@ pub struct AurinkoAdapter {
     origin: Option<String>,
 }
 
+// Task-scoped transport injection lets lifecycle workers use the same real
+// adapter and mock provider as their initiating test. Production has one fixed
+// origin; concurrent tests cannot redirect each other's cleanup requests.
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_ORIGIN: String;
+}
+
+pub(super) fn registered_adapter() -> AurinkoAdapter {
+    #[cfg(test)]
+    {
+        AurinkoAdapter {
+            origin: TEST_ORIGIN.try_with(Clone::clone).ok(),
+        }
+    }
+    #[cfg(not(test))]
+    {
+        AurinkoAdapter::default()
+    }
+}
+
 fn invalid() -> AppError {
     AppError::ChannelWebhookVerificationFailed("Invalid Aurinko notification".into())
 }
@@ -453,6 +474,8 @@ fn normalize_with_key(
             "sender_hash": sender_hash, "participant_hashes": participant_hashes});
     }
     Ok(Some(InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: id.into(),
         conversation_id: conversation_id(&bot.platform_bot_id, thread),
         conversation_type: "private".into(),

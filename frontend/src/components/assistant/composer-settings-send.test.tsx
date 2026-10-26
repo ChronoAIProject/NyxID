@@ -79,6 +79,32 @@ async function draftWithUpload() {
   });
 }
 
+it("shows the inherited specialist model and sends an explicit change from it", async () => {
+  render(
+    <QueryClientProvider client={client}>
+      <NyxAgentComposer
+        active={false}
+        sending={false}
+        ownerUserId="owner"
+        draftKey="screen:nyxagent:agent:specialist"
+        scope={{ kind: "conversations", agentId: "specialist" }}
+        agentModel="nyxagent/research"
+        onSend={onSend}
+        onStop={async () => {}}
+      />
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup({ skipHover: true });
+  await user.click(screen.getByRole("button", { name: /Thinking and permissions/ }));
+  const thinking = screen.getByRole("menuitemcheckbox", { name: "Thinking mode" });
+  expect(thinking).toHaveAttribute("aria-checked", "true");
+  await user.click(thinking);
+  await user.keyboard("{Escape}");
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Answer quickly" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(onSend).toHaveBeenCalledWith("Answer quickly", undefined, "nyxagent/chat"));
+});
+
 it("applies the selected model to an upload draft before sending and blocks duplicate submission", async () => {
   let complete!: () => void;
   const gate = new Promise<void>((resolve) => {
@@ -105,7 +131,7 @@ it("applies the selected model to an upload draft before sending and blocks dupl
     expect(change).toHaveBeenCalledWith(id, "nyxagent/research"),
   );
   expect(onSend).not.toHaveBeenCalled();
-  expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "Send message" })).not.toBeInTheDocument();
   await act(async () => complete());
   await waitFor(() =>
     expect(onSend).toHaveBeenCalledWith(

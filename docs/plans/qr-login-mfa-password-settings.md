@@ -1,6 +1,6 @@
 # QR login MFA and password settings
 
-Status: APPROVED by Opus 5.5 through the connected OpenRouter service
+Original plan status: APPROVED by Opus 5.5 through the connected OpenRouter service
 (`anthropic/claude-opus-5.5`, generation `gen-1792986323-K5kLDBKixDtam8UuxcYh`).
 All six initial review findings were addressed before approval.
 Implementation is complete and accepted after the primary agent's personal code
@@ -163,7 +163,7 @@ password-change action, including accounts linked to a social provider.
    same implementation session. No extra code-review agent, Codex subagent,
    deployment, merge, or external messages are authorized by this workflow.
 
-## Implementation review and evidence
+## Original-base implementation review and evidence
 
 The implementation adopts the draft and adds the mounted password-change route,
 shared Mongo limits, byte policy, hash CAS, reset final-write fence, and QR store
@@ -205,9 +205,9 @@ winner's stored password; the snapshot-level CAS race deterministically proves
 proof cookies, completes mounted `/auth/mfa/verify`, then uses its returned
 browser cookie for profile access and real QR approval.
 
-## Final validation
+## Original-base validation (8bdc90115)
 
-Final frontend snapshot: **190 tests passed in nine files, zero failures and no
+Original-base frontend snapshot: **190 tests passed in nine files, zero failures and no
 skipped tests**. From `frontend/`:
 
 ```sh
@@ -246,7 +246,7 @@ store tests and real-store QR integration tests. The test run prints Node's exis
 the new wire-log fixture had not enabled capture; the fixture now positively
 asserts stored data before exercising cleanup, and the final run passes.
 
-Backend runtime acceptance: **264 distinct selected tests passed**, with zero
+Original-base backend runtime acceptance: **264 distinct selected tests passed**, with zero
 skipped/ignored tests in every group, against the isolated local Mongo replica
 set. These are reconciled results across the diagnostic run and the two affected
 fixture regressions rerun after rebuilding:
@@ -320,3 +320,42 @@ and removed its temporary database directory after verification, on
 is `/tmp/nyxid-qr-password-mongo.json`. No repeat-runner child remained when
 round 3 resumed. No commit or PR had been created at that acceptance point;
 the user's subsequent request authorizes publication. No deployment was made.
+
+
+## Integration with main d102570af
+
+The original Opus approval and 190/264 results above describe the original base.
+They do not approve or validate this integration. The primary retains personal
+review and acceptance. The merge of main is being resolved in the existing
+worktree; the primary handles the merge commit, push and PR.
+
+Main enforces MFA on each new sign-in and distinguishes completed-session
+acceptance from authority to approve a new device. Its default-off
+`auth:mobile-mfa` rollout exemption remains intact. Unverified legacy or
+mobile-exempt approvers must verify their session before approving a new sign-in.
+After app approval, the receiving browser inherits verified authority and needs
+no second challenge. Legacy account QR and selectable v2 protocols retain their
+separate delivery paths, proof binding and single-use guarantees.
+
+QR restoration clears the prior account, telemetry, account-local state and
+account-bound analytics consent before requesting the delivered session profile.
+Pending password MFA persists until a fresh successful authenticated profile.
+Generation guards cover both response arrival and asynchronous body loading,
+including before global API 401 mutation. Late/cancelled attempts preserve newer
+identity, consent revision and MFA state. Profile retry never polls/redeems the
+grant again. Scoped restoration owns its local loading UI and leaves global
+`isLoading` unchanged; default, ephemeral and required-session callers retain
+main's behavior, including required-session error propagation.
+
+Voluntary password change uses a DB-only retryable transaction with the exact
+verified old hash, active/person/not-deleting guards, reset-token cancellation
+and `session_authority::revoke_pending`. Dedicated and legacy pending MFA proofs
+and unfinished login approvals are invalidated while completed sessions and
+refresh authority remain valid. Proof creation/completion fences the same user
+document. Reset uses its live token/server-time expiry CAS and main's full
+session-authority revocation in one transaction. Same-password replacement is
+still allowed. Shared authenticated-purpose policy supersedes the earlier
+marker-only cookie filter. Main's enrollment, disable/recovery, session/token
+fences and social mobile rollout semantics remain in force.
+
+Integration validation evidence will be recorded below after final checks.

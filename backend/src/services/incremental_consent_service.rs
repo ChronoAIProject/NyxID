@@ -127,9 +127,10 @@ pub async fn validate_current(
     let consent = consent_service::check_consent(db, user_id, client_id, "")
         .await?
         .ok_or_else(consent_service::grant_changed)?;
+    let current_fingerprint = consent_service::fingerprint(&consent)?;
     if consent.id != snapshot.consent_id
         || consent.revision != snapshot.consent_revision
-        || consent_service::fingerprint(&consent)? != snapshot.consent_fingerprint
+        || current_fingerprint != snapshot.consent_fingerprint
     {
         return Err(consent_service::grant_changed());
     }
@@ -223,7 +224,19 @@ pub async fn approve_with_machine(
         .into_iter()
         .filter(|id| !snapshot.current_service_ids.contains(id))
         .collect::<Vec<_>>();
+    let current_scopes = consent_service::normalize_scope_set(&snapshot.current_scopes);
+    let requested_scopes = consent_service::normalize_scope_set(&snapshot.scopes);
+    let scope_additions = requested_scopes
+        .difference(&current_scopes)
+        .cloned()
+        .collect::<Vec<_>>();
     validate_services(db, user_id, &additions).await?;
+    if additions.is_empty() && scope_additions.is_empty() && machine.is_none() {
+        // Replays and zero-addition approvals leave the authority row and any
+        // Machine grant untouched. The existing snapshot is already the
+        // caller's exact code authority.
+        return Ok(snapshot.clone());
+    }
     let grant_ids = if snapshot.allow_all_services {
         Vec::new()
     } else {

@@ -53,12 +53,15 @@ pub struct BillingRouteContext {
     pub machine_usage: Option<crate::models::usage_meter::MachineUsageAttribution>,
     /// An internal durable public call reservation; never accepted from HTTP.
     pub(crate) public_admission: Option<PublicBillingAdmission>,
+    /// Internal readiness probe uses the same durable funding transaction.
+    pub(crate) public_probe: bool,
     pub(crate) managed_admission: Option<ManagedBillingAdmission>,
     pub(crate) managed_billing: Option<ServiceBilling>,
     pub billing_request_id: String,
     pub billing_owner_id: String,
     pub actor_user_id: String,
     pub api_key_id: Option<String>,
+    pub(crate) assistant_source: Option<String>,
     pub user_service_id: Option<String>,
     pub catalog_service_id: Option<String>,
     pub service_slug: Option<String>,
@@ -106,6 +109,25 @@ pub(crate) struct ManagedBillingAdmission {
 }
 
 impl BillingRouteContext {
+    pub(crate) fn with_assistant_provenance(
+        mut self,
+        verified: bool,
+        orchestration: bool,
+        model_execution: bool,
+    ) -> Self {
+        self.assistant_source = Some(
+            if orchestration {
+                "orchestration"
+            } else if verified {
+                if model_execution { "model" } else { "tool" }
+            } else {
+                "other"
+            }
+            .into(),
+        );
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ingress: BillingIngress,
@@ -187,6 +209,7 @@ impl BillingRouteContext {
         }
         Self {
             public_admission: None,
+            public_probe: false,
             managed_admission: None,
             managed_billing: service_billing
                 .filter(|billing| billing.managed_execution.is_some())
@@ -198,6 +221,7 @@ impl BillingRouteContext {
             billing_owner_id,
             actor_user_id,
             api_key_id,
+            assistant_source: Some("other".into()),
             user_service_id,
             catalog_service_id,
             service_slug,
@@ -398,6 +422,27 @@ mod tests {
     use crate::services::billing::route_context::{BillingRouteContext, NodeIntent};
     use crate::services::billing::route_inventory::BillingIngress;
 
+    #[test]
+    fn nyxbot_provenance_uses_trusted_context_and_keeps_orchestration_separate() {
+        for (verified, parent, execution, expected) in [
+            (true, false, true, "model"),
+            (true, false, false, "tool"),
+            (false, true, true, "orchestration"),
+            (false, false, true, "other"),
+        ] {
+            let ctx = context_for(CredentialClass::UserOwned)
+                .with_assistant_provenance(verified, parent, execution);
+            let row = crate::services::billing::meter::reserved_row(
+                &ctx,
+                crate::models::usage_meter::BillingLayer::Platform,
+                BillingMetric::Requests,
+                "requests".into(),
+                None,
+                None,
+            );
+            assert_eq!(row.assistant_source.as_deref(), Some(expected));
+        }
+    }
     fn context_for(credential_class: CredentialClass) -> BillingRouteContext {
         let billing = ServiceBilling {
             managed_execution: None,

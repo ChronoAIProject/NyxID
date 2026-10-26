@@ -65,8 +65,13 @@ for HTTP response shapes.
 
 `expiry_days` prefills the date picker with the UTC date that many days ahead;
 date-only choices expire at 23:59:59 UTC on that date, following backend parsing.
-The actual-grant summary and approval payload use that same instant. `none` clears
-the expiry. These remain editable draft suggestions.
+The actual-grant summary and approval payload use that same instant. `none` selects
+explicit `never_expires: true` for the new parent; clearing a date without that
+choice uses the finite 90-day server default. These remain editable draft suggestions.
+A new child credential defaults to 90 days, clamped to the parent expiry. An
+existing parent is never modified when issuing a child. Stored legacy child
+nonexpiry remains unchanged during authentication and delivery. See
+[API key issuance and deployment](API_KEY_ISSUANCE.md) for replica/client rollout.
 
 Raw query length is bounded to 49,152 characters. Unknown names, malformed percent
 encoding, control characters, empty list entries, invalid enum values and duplicate

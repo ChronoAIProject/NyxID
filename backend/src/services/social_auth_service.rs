@@ -120,14 +120,16 @@ pub fn build_authorization_url(
 struct GitHubTokenResponse {
     access_token: Option<String>,
     error: Option<String>,
-    error_description: Option<String>,
+    #[serde(rename = "error_description")]
+    _error_description: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Deserialize)]
 struct GoogleTokenResponse {
     access_token: Option<String>,
     error: Option<String>,
-    error_description: Option<String>,
+    #[serde(rename = "error_description")]
+    _error_description: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Deserialize)]
@@ -168,21 +170,20 @@ pub async fn exchange_code(
                 ])
                 .send()
                 .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, "GitHub token exchange HTTP error");
+                .map_err(|_| {
+                    tracing::error!("GitHub token exchange HTTP error");
                     AppError::SocialAuthFailed("Failed to exchange code with GitHub".to_string())
                 })?;
 
-            let body: GitHubTokenResponse = resp.json().await.map_err(|e| {
-                tracing::error!(error = %e, "GitHub token response parse error");
+            let body: GitHubTokenResponse = resp.json().await.map_err(|_| {
+                tracing::error!("Invalid GitHub token response");
                 AppError::SocialAuthFailed("Failed to exchange code with GitHub".to_string())
             })?;
 
             if let Some(err) = body.error {
                 tracing::debug!(
                     provider = "github",
-                    error = %err,
-                    description = ?body.error_description,
+                    provider_code = super::provider_diagnostics::oauth_code(&err).code,
                     "Provider token exchange error"
                 );
                 return Err(AppError::SocialAuthFailed(
@@ -214,21 +215,20 @@ pub async fn exchange_code(
                 ])
                 .send()
                 .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, "Google token exchange HTTP error");
+                .map_err(|_| {
+                    tracing::error!("Google token exchange HTTP error");
                     AppError::SocialAuthFailed("Failed to exchange code with Google".to_string())
                 })?;
 
-            let body: GoogleTokenResponse = resp.json().await.map_err(|e| {
-                tracing::error!(error = %e, "Google token response parse error");
+            let body: GoogleTokenResponse = resp.json().await.map_err(|_| {
+                tracing::error!("Invalid Google token response");
                 AppError::SocialAuthFailed("Failed to exchange code with Google".to_string())
             })?;
 
             if let Some(err) = body.error {
                 tracing::debug!(
                     provider = "google",
-                    error = %err,
-                    description = ?body.error_description,
+                    provider_code = super::provider_diagnostics::oauth_code(&err).code,
                     "Provider token exchange error"
                 );
                 return Err(AppError::SocialAuthFailed(
@@ -262,18 +262,22 @@ pub async fn exchange_code(
                 ])
                 .send()
                 .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, "Apple token exchange HTTP error");
+                .map_err(|_| {
+                    tracing::error!("Apple token exchange HTTP error");
                     AppError::SocialAuthFailed("Failed to exchange code with Apple".to_string())
                 })?;
 
-            let body: AppleTokenResponse = resp.json().await.map_err(|e| {
-                tracing::error!(error = %e, "Apple token response parse error");
+            let body: AppleTokenResponse = resp.json().await.map_err(|_| {
+                tracing::error!("Invalid Apple token response");
                 AppError::SocialAuthFailed("Failed to exchange code with Apple".to_string())
             })?;
 
             if let Some(err) = body.error {
-                tracing::debug!(provider = "apple", error = %err, "Apple token exchange error");
+                tracing::debug!(
+                    provider = "apple",
+                    provider_code = super::provider_diagnostics::oauth_code(&err).code,
+                    "Apple token exchange error"
+                );
                 return Err(AppError::SocialAuthFailed(
                     "Failed to exchange code with Apple".to_string(),
                 ));
@@ -366,14 +370,14 @@ async fn fetch_github_profile(
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "GitHub user API HTTP error");
+        .map_err(|_| {
+            tracing::error!("GitHub user API HTTP error");
             AppError::SocialAuthFailed("Failed to fetch profile from GitHub".to_string())
         })?
         .json()
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "GitHub user API parse error");
+        .map_err(|_| {
+            tracing::error!("GitHub user API parse error");
             AppError::SocialAuthFailed("Invalid profile response from GitHub".to_string())
         })?;
 
@@ -403,14 +407,14 @@ async fn fetch_github_primary_email(
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "GitHub emails API HTTP error");
+        .map_err(|_| {
+            tracing::error!("GitHub emails API HTTP error");
             AppError::SocialAuthFailed("Failed to fetch emails from GitHub".to_string())
         })?
         .json()
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "GitHub emails API parse error");
+        .map_err(|_| {
+            tracing::error!("GitHub emails API parse error");
             AppError::SocialAuthFailed("Invalid email response from GitHub".to_string())
         })?;
 
@@ -434,14 +438,14 @@ async fn fetch_google_profile(
         .header("Authorization", format!("Bearer {access_token}"))
         .send()
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Google userinfo API HTTP error");
+        .map_err(|_| {
+            tracing::error!("Google userinfo API HTTP error");
             AppError::SocialAuthFailed("Failed to fetch profile from Google".to_string())
         })?
         .json()
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Google userinfo API parse error");
+        .map_err(|_| {
+            tracing::error!("Google userinfo API parse error");
             AppError::SocialAuthFailed("Invalid profile response from Google".to_string())
         })?;
 
@@ -767,6 +771,7 @@ mod tests {
         AppConfig {
             port: 3001,
             auth_device_eight_char_codes: false,
+            resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
@@ -774,6 +779,7 @@ mod tests {
             environment: "development".to_string(),
             jwt_private_key_path: "keys/private.pem".to_string(),
             jwt_public_key_path: "keys/public.pem".to_string(),
+            jwt_retained_public_key_paths: Vec::new(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
@@ -798,6 +804,8 @@ mod tests {
             smtp_from_address: None,
             encryption_key: Some("ab".repeat(32)),
             encryption_key_previous: None,
+            allow_legacy_record_reads: true,
+            contextual_record_writes: true,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             platform_service_rate_limit_per_second: 2,
@@ -807,6 +815,7 @@ mod tests {
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
+            hmac_keyset_path: None,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
@@ -841,6 +850,7 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             instance_name: "test-backend".to_string(),
+            security_rollout: Default::default(),
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
             internal_dispatch_hmac_key: None,
@@ -900,6 +910,7 @@ mod tests {
             cloud_response_cache_max_entry_bytes: 1024 * 1024,
             cloud_response_cache_max_entries: 256,
             billing_enabled: false,
+            billing_allocations_enabled: false,
             lago_api_url: None,
             lago_api_key: None,
             lago_plan_code: "starter".to_string(),

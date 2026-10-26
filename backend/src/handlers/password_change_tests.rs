@@ -76,7 +76,8 @@ async fn request_with_headers(
     let mut req = Request::builder()
         .method(method)
         .uri(format!("/api/v1{path}"))
-        .header("Content-Type", "application/json");
+        .header("Content-Type", "application/json")
+        .header("Origin", &state.config.frontend_url);
     if let Some(token) = authorization {
         req = req.header("Authorization", format!("Bearer {token}"));
     }
@@ -560,12 +561,14 @@ async fn password_change_pending_mfa_is_not_a_first_party_human_session() {
         .await
         .unwrap();
     let totp = totp_rs::TOTP::from_url(setup.qr_code_url).unwrap();
-    mfa_service::verify_totp_setup(
+    let recovery = mfa_service::verify_totp_setup(
         &state.db,
         &state.encryption_keys,
         &setup.factor_id,
         &user.id,
         &totp.generate_current().unwrap(),
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -624,7 +627,7 @@ async fn password_change_pending_mfa_is_not_a_first_party_human_session() {
         None,
         None,
         None,
-        json!({"mfa_token":pending, "code":totp.generate_current().unwrap(), "client":"web"}),
+        json!({"mfa_token":pending, "code":recovery[0], "client":"web"}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -798,4 +801,201 @@ async fn password_change_reset_route_uses_server_byte_policy() {
         .0,
         StatusCode::OK
     );
+}
+
+#[tokio::test]
+async fn password_change_cancels_pending_proofs_but_retains_completed_mfa_sessions() {
+    use crate::crypto::token::hash_token;
+    use crate::models::{
+        login_approval::{LoginApproval, LoginFlow},
+        session::{COLLECTION_NAME as SESSIONS, MFA_CHALLENGES, Session},
+    };
+    use crate::services::{
+        auth_device_service, login_approval_service, session_authority::DerivedMfaAuthority,
+    };
+    let state = state("password_change_pending_authority").await;
+    let (user, _) = actor(&state, Some("oldpassword"), false).await;
+    let setup = mfa_service::setup_totp(&state.db, &state.encryption_keys, &user.id, &user.email)
+        .await
+        .unwrap();
+    let totp = totp_rs::TOTP::from_url(setup.qr_code_url).unwrap();
+    let recovery = mfa_service::verify_totp_setup(
+        &state.db,
+        &state.encryption_keys,
+        &setup.factor_id,
+        &user.id,
+        &totp.generate_current().unwrap(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let live_user = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id":&user.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(live_user.mfa_enabled);
+    let current = token_service::create_derived_session_tokens(
+        &state.db,
+        &state.config,
+        &state.jwt_keys,
+        &user.id,
+        None,
+        None,
+        DerivedMfaAuthority::new(true, true),
+    )
+    .await
+    .unwrap();
+    let other = token_service::create_derived_session_tokens(
+        &state.db,
+        &state.config,
+        &state.jwt_keys,
+        &user.id,
+        None,
+        None,
+        DerivedMfaAuthority::new(true, true),
+    )
+    .await
+    .unwrap();
+    let pending_id = token_service::create_mfa_pending_session_for_password(
+        &state.db,
+        &live_user,
+        &hash_token("pending-current"),
+    )
+    .await
+    .unwrap();
+    let mut legacy = state
+        .db
+        .collection::<mongodb::bson::Document>(MFA_CHALLENGES)
+        .find_one(doc! {"_id":&pending_id})
+        .await
+        .unwrap()
+        .unwrap();
+    legacy.insert("_id", Uuid::new_v4().to_string());
+    legacy.insert("token_hash", hash_token("pending-legacy"));
+    legacy.insert("user_agent", "mfa_pending");
+    legacy.remove("purpose");
+    state
+        .db
+        .collection::<mongodb::bson::Document>(SESSIONS)
+        .insert_one(legacy)
+        .await
+        .unwrap();
+    let device = auth_device_service::initiate_v2(
+        &state.db,
+        state.auth_device_hmac_key.as_slice(),
+        Default::default(),
+        true,
+    )
+    .await
+    .unwrap();
+    let (approval, _) = login_approval_service::begin(
+        &state.db,
+        state.auth_device_hmac_key.as_slice(),
+        LoginFlow::Device,
+        &device.user_code,
+        false,
+    )
+    .await
+    .unwrap();
+    let approval = login_approval_service::identify_password(&state.db, &approval, &live_user)
+        .await
+        .unwrap();
+    assert!(!approval.verified && !approval.keep_signed_in);
+    let (status, body) = change(&state, &current.access_token, "oldpassword", "newpassword").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        state
+            .db
+            .collection::<Session>(MFA_CHALLENGES)
+            .find_one(doc! {"_id":&pending_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .revoked
+    );
+    assert!(
+        state
+            .db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! {"token_hash":hash_token("pending-legacy")})
+            .await
+            .unwrap()
+            .unwrap()
+            .revoked
+    );
+    assert!(
+        state
+            .db
+            .collection::<LoginApproval>("login_approvals")
+            .find_one(doc! {"_id":&approval.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .closed
+    );
+    for pending in ["pending-current", "pending-legacy"] {
+        let (status, body) = request(
+            &state,
+            "POST",
+            "/auth/mfa/verify",
+            None,
+            None,
+            None,
+            json!({"mfa_token":pending,"code":recovery[0],"client":"web"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{pending}: {body}");
+    }
+    // The old verified password snapshot cannot install new proof authority.
+    assert!(
+        token_service::create_mfa_pending_session_for_password(
+            &state.db,
+            &live_user,
+            &hash_token("stale-new-proof")
+        )
+        .await
+        .is_err()
+    );
+    let (fresh_approval, _) = login_approval_service::begin(
+        &state.db,
+        state.auth_device_hmac_key.as_slice(),
+        LoginFlow::Device,
+        &device.user_code,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        login_approval_service::identify_password(&state.db, &fresh_approval, &live_user)
+            .await
+            .is_err()
+    );
+    for tokens in [current, other] {
+        let (status, profile) = request(
+            &state,
+            "GET",
+            "/users/me",
+            Some(&tokens.access_token),
+            None,
+            None,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{profile}");
+        assert_eq!(profile["id"], user.id);
+        token_service::refresh_tokens(
+            &state.db,
+            &state.config,
+            &state.jwt_keys,
+            &tokens.refresh_token,
+            None,
+            None,
+        )
+        .await
+        .expect("completed MFA refresh authority retained");
+    }
 }

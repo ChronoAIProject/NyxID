@@ -34,6 +34,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Service Endpoints](#service-endpoints)
   - [MCP Config](#mcp-config)
   - [Service Pools](#service-pools)
+  - [Oracle Pool Lifecycle](#oracle-pool-lifecycle-unreleased)
   - [Managed Execution Status](#managed-execution-status)
   - [Proxy](#proxy)
   - [Proxy Service Discovery](#proxy-service-discovery)
@@ -47,6 +48,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [User Consents](#user-consents)
   - [OIDC Discovery](#oidc-discovery)
   - [Admin](#admin)
+  - [Credit Allocations](#credit-allocations)
   - [Admin Roles](#admin-roles)
   - [Admin Groups](#admin-groups)
   - [Admin Service Accounts](#admin-service-accounts)
@@ -55,7 +57,10 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Device Token Management](#device-token-management)
   - [Approval Management](#approval-management)
   - [Telegram New Channel Creation](#telegram-new-channel-creation)
+  - [NyxBot service adapters](#nyxbot-service-adapters)
   - [Webhooks](#webhooks)
+- [Owner NyxBot invocations](#owner-nyxbot-invocations)
+- [Assistant voice and dictation](#assistant-voice-and-dictation)
 
 ---
 
@@ -156,6 +161,7 @@ CLI text errors preserve the existing `Error: ...` line and append the accepted 
 | 2000 | `authentication_failed`    | 401         | Wrong email/password or invalid MFA code |
 | 2001 | `token_expired`            | 401         | JWT has expired                          |
 | 2002 | `mfa_required`             | 403         | MFA verification needed to complete login|
+| 2003 | `mfa_step_up_required` | 403 | Verify the current session before approving a sign-in on another device |
 | 3000 | `pkce_verification_failed` | 400         | PKCE code_verifier mismatch              |
 | 3001 | `invalid_redirect_uri`     | 400         | Redirect URI not registered for client   |
 | 3002 | `invalid_scope`            | 400         | Requested scope not allowed              |
@@ -695,7 +701,7 @@ cannot approve or mint login grants.
 or a `kind: "new"` selection containing the confirmed key permissions. Restricted
 decisions use a distinct fail-closed route so an old replica cannot silently
 interpret that choice as full account approval. Creation and delivery revalidate
-eligibility and effective authority.
+eligibility and effective authority. New parent keys default to restricted grants and 90 days; explicit `never_expires: true` selects a nonexpiring parent. Newly issued child credentials still default to at most 90 days, bounded by the parent expiry. Explicit child expiry cannot exceed the parent. The response reports the stored parent and child expiries separately. See [issuance rollout](API_KEY_ISSUANCE.md).
 
 Successful CLI polling returns a tagged union. `auth_kind: "account_session"`
 includes `access_token`, `refresh_token`, `token_type` and `expires_in`.
@@ -858,8 +864,11 @@ Reset a user's password using a valid reset token.
 - `1008 validation_error` (400) -- Password outside 8–128 UTF-8 bytes
 - `1000 bad_request` (400) -- Token invalid, expired, replaced, or already used
 
-Reset completion requires an active person account and atomically consumes the
-still-current, unexpired token. Reusing the current password is permitted.
+Reset completion requires an active person account that is not being deleted.
+It atomically consumes the still-current token with a server-time expiry check
+and revokes completed sessions, refresh tokens, pending MFA challenges and
+unfinished login approval proofs in the same transaction. Reusing the current
+password is permitted.
 
 **Example:**
 
@@ -903,12 +912,16 @@ accounts, organization identities, and inactive accounts are rejected.
 
 A new password equal to the current password is allowed, matching reset-password
 behavior. Every successful change replaces the hash with a new salted Argon2id
-hash and clears any pending password-reset token and expiry in the same atomic
-update. Reset completion also checks its still-current, unexpired token at the
-final write, so an obsolete reset cannot overwrite a completed change.
+hash, clears any pending password-reset token and expiry, and cancels pending
+MFA challenges (including legacy proofs) and unfinished login approvals in one
+transaction. The credential CAS requires a live active person who is not being
+deleted. Proof creation/completion serializes on the same user document. Reset
+completion checks its still-current token and server-time expiry at the final
+write, so an obsolete reset cannot overwrite a completed change. A successful
+reset revokes all sessions and refresh authority transactionally.
 
-All existing browser, access-token, and refresh-token sessions remain valid,
-including the caller's session. Use the session revocation endpoints separately
+Completed browser, access-token, and refresh-token sessions remain valid after a
+voluntary change, including the caller's session. Use the session revocation endpoints separately
 when needed. Successful changes emit a metadata-only `password_changed` audit
 event with `sessions_retained: true`; passwords and hashes are never returned.
 
@@ -1046,9 +1059,9 @@ OAuth callback handler. Called by the provider after user authorization.
 | `state`   | string | CSRF state token (must match the `nyx_social_state` cookie) |
 | `error`   | string | Error code from the provider (if authorization was denied) |
 
-**Response (302 on success, web):** Redirects to the frontend root and sets the `nyx_session` cookie.
+**Response (302 on success, web):** For users without MFA, redirects to the frontend root and sets the `nyx_session` cookie. For users with MFA enabled, no session is created: the callback sets the narrowly scoped, HttpOnly `nyx_mfa_challenge` cookie for five minutes and redirects to `/login?mfa=required` (with a trusted `return_to` value when an OAuth authorization is being resumed).
 
-**Response (302 on success, mobile):** Redirects to the provided deep link with `status=success`, `provider`, `user_id`, `access_token`, `refresh_token`, and `expires_in` query parameters.
+**Response (302 on success, mobile):** For users without MFA, redirects to the provided deep link with `status=success`, `provider`, `user_id`, `access_token`, `refresh_token`, and `expires_in` query parameters. When `auth:mobile-mfa` is enabled for the signing-in person, MFA users receive no tokens; the deep link fragment contains `status=mfa_required`, `provider`, and the short-lived `mfa_token` challenge. The app posts that token and a TOTP/recovery code to `/auth/mfa/verify`. The flag defaults off: MFA users receive the normal success tokens with a persisted mobile-rollout exemption. Resolution includes live org overrides and occurs only at sign-in; a later flag flip does not revoke existing devices. While off, a social first-factor holder can sign in through mobile without an MFA code.
 
 **Response (302 on error):** Redirects to `{FRONTEND_URL}/login?error={error_key}`.
 
@@ -1073,6 +1086,7 @@ Possible error keys in the redirect:
 - `social_auth_conflict` is reserved for write-time identity collisions (for example, if the provider identity is already bound to another account)
 - New users created via social login have `email_verified = true` (provider verified the email) and no password set
 - Existing email/password accounts keep their password login path after social linking
+- Existing accounts with MFA enabled must complete MFA before a browser session is issued; mobile social MFA follows `auth:mobile-mfa` (default off). The challenge token never appears in a web URL, audit row, log, or telemetry event.
 
 ---
 
@@ -1206,22 +1220,25 @@ Create a new API key. The full key is returned only in this response and cannot 
 |--------------|--------|----------|----------------------------------------------|
 | `name`       | string | Yes      | Human-readable name for the key              |
 | `scopes`     | string | No       | Space-separated scopes (default: `"read"`)   |
-| `expires_at` | string | No       | ISO 8601 expiration datetime                 |
+| `expires_at` | string/null | No | Future RFC3339 instant or date-only UTC end of day. Omitted, null or empty means creation time + 90 days. Stored and returned at millisecond precision. |
+| `never_expires` | boolean | No | Explicitly select no expiry (default false); cannot be true with a nonempty `expires_at`. |
 | `description` | string | No      | Optional description of key purpose          |
-| `allowed_service_ids` | string[] | No | UserService IDs this key can proxy. Only enforced when `allow_all_services: false`. Providing values without also setting `allow_all_services: false` will silently store the list but **not** scope the key. |
-| `allowed_node_ids` | string[] | No | Node IDs this key can route through. Only enforced when `allow_all_nodes: false`. Providing values without also setting `allow_all_nodes: false` will silently store the list but **not** scope the key. |
-| `allow_all_services` | boolean | No | If true, key can access all user's external services (default: true) |
-| `allow_all_nodes` | boolean | No | If true, key can route through all user's nodes (default: true) |
+| `allowed_service_ids` | string[] | No | UserService IDs this key can proxy; omitted means empty. Incompatible with `allow_all_services: true`. |
+| `allowed_node_ids` | string[] | No | Node IDs this key can route through; omitted means empty. Incompatible with `allow_all_nodes: true`. |
+| `allow_all_services` | boolean | No | If true, key can access all user's external services (default: false) |
+| `allow_all_nodes` | boolean | No | If true, key can route through all user's nodes (default: false) |
 
-> **Scoping API keys:** To create a scoped key you must set BOTH `allow_all_services: false` AND a non-empty `allowed_service_ids` (and likewise `allow_all_nodes: false` + `allowed_node_ids` for node scoping). Either alone is a no-op. The defaults exist for backward compatibility with pre-scope keys, so a naive payload yields a broad key.
+> New keys start with restricted service/node authority and a finite lifetime. An empty restricted list grants no resources. Broad grants and nonexpiry require explicit choices. Existing stored keys retain their policy, including legacy absent fields; rotation preserves that policy. See [issuance and rollout](API_KEY_ISSUANCE.md).
 
-Broad key (default):
+Explicit broad, nonexpiring key:
 
 ```json
 {
   "name": "Production API Key",
   "scopes": "read write",
-  "expires_at": "2026-01-01T00:00:00Z"
+  "allow_all_services": true,
+  "allow_all_nodes": true,
+  "never_expires": true
 }
 ```
 
@@ -1245,7 +1262,8 @@ Scoped key:
   "key_prefix": "nyx_k_a1b2c3d4",
   "full_key": "nyx_k_a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef12345678",
   "scopes": "read write",
-  "created_at": "2025-06-01T10:00:00+00:00"
+  "created_at": "2025-06-01T10:00:00+00:00",
+  "expires_at": null
 }
 ```
 
@@ -1297,7 +1315,7 @@ curl -X DELETE http://localhost:3001/api/v1/api-keys/a1b2c3d4-e5f6-7890-abcd-ef1
 
 #### POST /api/v1/api-keys/{key_id}/rotate
 
-Rotate an API key: deactivate the existing key and create a new one with the same name and scopes. The new full key is returned in the response.
+Rotate an API key: deactivate the existing key and create a new one with the same stored permissions and expiry (including nonexpiry). The new full key is returned in the response.
 
 **Auth:** Required
 
@@ -1316,7 +1334,8 @@ Rotate an API key: deactivate the existing key and create a new one with the sam
   "key_prefix": "nyx_k_b2c3d4e5",
   "full_key": "nyx_k_b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef12345678ab",
   "scopes": "read write",
-  "created_at": "2025-06-02T10:00:00+00:00"
+  "created_at": "2025-06-02T10:00:00+00:00",
+  "expires_at": null
 }
 ```
 
@@ -1587,9 +1606,14 @@ Get a single downstream service by ID.
   "identity_jwt_audience": null,
   "created_by": "550e8400-e29b-41d4-a716-446655440000",
   "created_at": "2025-06-01T10:00:00+00:00",
-  "updated_at": "2025-06-01T10:00:00+00:00"
+  "updated_at": "2025-06-01T10:00:00+00:00",
+  "can_resync_identity": false
 }
 ```
+
+`can_resync_identity` says whether the caller may use
+[`POST /api/v1/services/{service_id}/resync-identity`](#post-apiv1servicesservice_idresync-identity).
+Only this endpoint computes it; list, create and update responses omit it.
 
 **Errors:**
 - `1003 not_found` -- Service does not exist
@@ -1696,6 +1720,70 @@ Deactivate a downstream service (soft delete). Only admins or the original servi
 ```bash
 curl -X DELETE http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef \
   -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### POST /api/v1/services/{service_id}/resync-identity
+
+Overwrite the identity-forwarding settings on every connection (`UserService`)
+created from this catalog service with the service's current settings,
+including connections whose settings were customized. The fields are
+`identity_propagation_mode`, `identity_include_user_id`,
+`identity_include_email`, `identity_include_name`, `identity_jwt_audience`,
+`forward_access_token`, `inject_delegation_token` and `delegation_token_scope`.
+Connections whose stored values already match are not rewritten, so their
+`updated_at` and history are unchanged. It also clears a pending or failed
+identity propagation marker on the service. It does not touch stored
+credentials or anyone's sign-in with the downstream service.
+
+Ordinary service edits (`PUT /api/v1/services/{service_id}`) already copy
+identity changes to connections that still match the previous value, and skip
+customized ones. Resync is the deliberate override for that drift.
+
+**Auth:** First-party human session (API keys, service accounts, delegated and
+relay tokens are refused). The caller must be allowed to change this service's
+identity fields through `PUT /api/v1/services/{service_id}`: an Admin, or the
+service's creator under the plain creator rule. Catalog Managers and Tools
+Managers are refused because identity fields are Admin-only for them, including
+on rows they created; person-owned rows are Admin-only. The service must be an
+HTTP service. The write commits in one transaction that rechecks this authority
+against the live service row.
+
+**Response (200):**
+
+```json
+{
+  "catalog_service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
+  "matched_count": 37,
+  "changed_count": 2,
+  "affected_count": 2
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `matched_count` | Connections to this service that were checked |
+| `changed_count` | Connections whose settings differed and were rewritten |
+| `affected_count` | Deprecated alias of `changed_count`. Earlier releases counted every connection here, changed or not |
+
+The `catalog_identity_resync_succeeded` audit event records the actor,
+`authority` (`admin` or `creator`), the field list, `matched_count` and
+`changed_count`.
+
+**Errors:**
+- `1002 forbidden` -- Not a first-party human session, or not allowed to change this service's identity fields
+- `1003 not_found` -- Service does not exist
+- `1000 bad_request` -- The service is not an HTTP service
+- `1004 conflict` -- The service's authority or identity settings changed while the request ran; reload and retry
+
+**CLI:** `nyxid catalog resync-identity <SERVICE_ID_OR_SLUG> [--yes] [--output json]`
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/resync-identity \
+  -H "Authorization: Bearer <access_token>"
 ```
 
 ---
@@ -1835,6 +1923,15 @@ curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-56789
 ### SSH
 
 NyxID supports authenticated SSH-over-WebSocket tunnels plus short-lived SSH certificate issuance for downstream services.
+
+NyxBot callers retain these routes under the existing permission modes. Exact
+certificate/session admission binds the connection (or existing catalog-only
+authority), requested parameters and bounded lifetime. Organization use asks in
+Auto and Ask every time; Full access admits without a prompt. Retry the same
+request with `X-NyxID-Acknowledgement-Id` after allowing its action card. A tunnel
+or terminal card authorizes that one session's dynamic traffic, with live
+revocation checks; it does not represent per-frame approval. See
+[NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
 
 SSH configuration is embedded directly in the service object under `ssh_config` when `service_type` is `"ssh"`. Create SSH services with `POST /api/v1/services` and update them with `PUT /api/v1/services/{service_id}` instead of calling separate SSH-specific CRUD endpoints.
 
@@ -2157,6 +2254,7 @@ Contract guarantees for `contract_version: "1.0"`:
 - Only currently executable operations are in `services`. Credential-unavailable services are counted in diagnostics but omitted. Service and node scope restrictions are applied before publication.
 - `service_scope_restricted` and `node_scope_restricted` report that caller scope is active. `node_scope_exclusions_present` may explain an omission only after service authorization has established that the service is caller-visible; it is a boolean and never enumerates excluded nodes or services. Diagnostics never include excluded-resource counts, IDs, node topology, credential material, tokens, or internal routing details.
 - REST `/mcp/config` and stateless MCP `tools/list` use the same scoped catalog loader, including auto-connected service expansion. Assistant chat keys discover services before acknowledgement on both surfaces; platform grants and account acknowledgement gate execution, not discovery. MCP adds its protocol-specific account/meta-tools separately. Stateful MCP sessions may show only the subset activated for that session.
+- Service selection applies authority before same-slug collision resolution. Organization specialist catalogs contain only connections from the bound organization that the live member ACL permits; an ungranted row may be listed with `chat_access: acknowledgement_required` and is then handled by the existing service gate. `nyx__list_connected_services` rows for user services include `owner_kind` (`personal` or `organization`), and `nyx__search_tools` accepts an exact connection ID query and includes `service_id` in each service match.
 
 `catalog_digest` is the source revision for the normalized descriptor. It is `sha256:<lowercase-hex>` over compact UTF-8 JSON containing exactly `{"contract_version":"1.0","services":[...]}`. Services are sorted by `service_id`, endpoints by `endpoint_id`, and every JSON object key recursively in lexicographic order. `user_id`, `proxy_base_url`, diagnostics, counts, and observation time are excluded. Consumers must not substitute fetch time or a local counter for this digest.
 
@@ -2230,12 +2328,13 @@ Platform services are included only when the user has a valid connection with sa
     "invalid_contract_services": 0,
     "service_scope_restricted": false,
     "node_scope_restricted": false,
-    "node_scope_exclusions_present": false
+    "node_scope_exclusions_present": false,
+    "shadowed_connections": 0
   }
 }
 ```
 
-If the caller has no visible connections, `services` is empty, counts are `0`, and `diagnostics.no_visible_connections` is `true`. Other typed diagnostics distinguish visible-but-unavailable credentials/routes, generic-only fallback, and invalid visible operation contracts without exposing secrets or authorization-excluded resources.
+If the caller has no visible connections, `services` is empty, counts are `0`, and `diagnostics.no_visible_connections` is `true`. Other typed diagnostics distinguish visible-but-unavailable credentials/routes, generic-only fallback, invalid visible operation contracts, and caller-authorized same-slug connections omitted by precedence (`shadowed_connections`) without exposing secrets or authorization-excluded resources.
 
 **Example:**
 
@@ -2623,6 +2722,7 @@ List all active provider configurations.
       "has_oauth_config": false,
       "default_scopes": null,
       "supports_pkce": false,
+      "authorization_nonce_required": false,
       "token_endpoint_auth_method": "client_secret_post",
       "extra_auth_params": null,
       "device_code_format": "rfc8628",
@@ -2671,6 +2771,7 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `client_id`         | string   | OAuth2   | OAuth2 client ID (required for `oauth2` type, encrypted at rest)     |
 | `client_secret`     | string   | OAuth2   | OAuth2 client secret (required for `oauth2` type, encrypted at rest) |
 | `supports_pkce`     | boolean  | No       | Whether the provider supports PKCE (default: `false`)                |
+| `authorization_nonce_required` | boolean | No | Default `false`; generate a fresh nonce for each hosted OAuth2 authorization-code attempt. See the hosted nonce contract below. |
 | `token_endpoint_auth_method` | string | No | `client_secret_post` (default) or `client_secret_basic`             |
 | `extra_auth_params` | object   | No       | Extra authorization URL parameters (e.g., `{"access_type": "offline"}`) |
 | `device_code_url`   | string   | device_code | Device authorization endpoint (required for `device_code` type)   |
@@ -2682,6 +2783,14 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `api_key_url`       | string   | No       | URL where users can create API keys                                  |
 | `icon_url`          | string   | No       | Provider icon/logo URL                                               |
 | `documentation_url` | string   | No       | Provider documentation URL                                           |
+
+**Hosted authorization nonce contract:** `authorization_nonce_required` is additive and default-off. Omitted create values become `false`; omitted updates preserve the stored value. Responses include the setting; consumers of older servers should treat a missing response field as `false`. Explicit `true` is rejected for provider types other than `oauth2`; missing/false remain valid. It is a client-bound OAuth setting under the existing Admin/Catalog Manager permission rules.
+
+When explicitly enabled, NyxID generates 32 cryptographically random bytes, encodes them as URL-safe base64 without padding, stores the value separately as `OAuthState.authorization_nonce`, and sends exactly that value once as `nonce` on the hosted OAuth2 authorization request. It is independent of OAuth state, PKCE and ChatConnect popup correlation. Enabled configurations reject authorization URLs containing a `nonce` query parameter (including a percent-encoded key) or a fragment, and reject `client_id_param_name` equal to `nonce` after trimming. Validation applies to the effective configuration on later URL/parameter edits too. `extra_auth_params` cannot override nonce, state or PKCE.
+
+This capability applies only to hosted OAuth2 authorization-code initiation, including ChatConnect and hosted connect links; node-owned OAuth and public login/OIDC have separate flows. Callback handling does not require a nonce or consume external ID tokens. Attempts started before activation remain valid, including legacy states without this field. Code exchange, refresh and revocation requests are unchanged; existing tokens need no migration or reconnection solely for this setting.
+
+Upgrade **all backend replicas before activation**: older initiators ignore the capability. Configure Hubstaff explicitly after upgrade while retaining `hubstaff:read`, PKCE S256 and the existing client authentication. No `openid` scope or provider-slug inference is needed. This contract does not establish live Hubstaff validation.
 
 **Slug Validation:** Must contain only lowercase letters, digits, and hyphens. No leading, trailing, or consecutive hyphens.
 
@@ -2810,6 +2919,7 @@ Update a provider configuration. Only the provided fields are updated (partial u
 | `client_id`         | string   | No       | OAuth2 client ID (encrypted at rest)                 |
 | `client_secret`     | string   | No       | OAuth2 client secret (encrypted at rest)             |
 | `supports_pkce`     | boolean  | No       | PKCE support flag                                    |
+| `authorization_nonce_required` | boolean | No | Set or clear the hosted OAuth2 authorization nonce capability. Omission preserves the stored setting. |
 | `token_endpoint_auth_method` | string | No | `client_secret_post` or `client_secret_basic`       |
 | `extra_auth_params` | object   | No       | Extra authorization URL parameters                   |
 | `device_code_url`   | string   | No       | Device authorization endpoint                        |
@@ -4051,7 +4161,7 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Streaming:** If the client sends `Accept: text/event-stream` or the upstream responds with `Content-Type: text/event-stream`, NyxID forwards the SSE stream without buffering and strips `content-length`.
 
-**Transaction Approval:** If the resource owner has `approval_required` enabled, has at least one active notification channel, and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing approval grant. If no grant exists, an approval request is created (with Telegram notification if configured) and the **HTTP connection is held open** until the user approves/rejects or the configured timeout expires. If approved, the request proceeds and the downstream response is returned. If rejected or timed out, a `403 Forbidden` is returned. The implicit global default is suspended while the owner has no active notification channel and never applies to auto-connected (auto-provisioned, credential-free) services. Explicit per-service `ServiceApprovalConfig` rows apply regardless of channel availability or the auto-connected exemption. Direct browser sessions (session cookie auth) bypass approval.
+**Transaction Approval:** When the resolved approval policy requires approval and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing grant in grant mode. Otherwise it persists a pending request and **holds the HTTP connection open** until approval, rejection, or timeout. Notification delivery is attempted when configured; an unavailable provider or missing channel never authorizes execution. Review and decide pending requests in `/approvals/history`, using **Refresh** to discover requests created after the page opened. Approved requests proceed; rejection or timeout returns `403 Forbidden`. An absent global preference uses **Writes only**: read-class operations proceed without approval, while write and destructive operations require it. Explicit stored true selects **All requests** and false selects **Off**; existing booleans keep their meaning. Lazy notification settings creation preserves the absent preference. The implicit global default exempts auto-connected (auto-provisioned, credential-free) services; explicit per-service and org `ServiceApprovalConfig` policies retain their precedence and existing grant semantics. Direct browser sessions (session cookie auth) bypass approval requirements; explicit Deny rules still refuse execution. Upgrade and drain all serving replicas and participating workers before relying on this contract; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
 
 **Limits:** Request body is limited to 10 MB for proxy requests.
 
@@ -4227,7 +4337,7 @@ Three access modes are available:
 
 Streaming is supported for providers that expose SSE-compatible streaming APIs. When the request sets `"stream": true`, NyxID returns `text/event-stream` and forwards or translates provider SSE events on the fly.
 
-**Transaction Approval:** The same blocking approval flow applies to LLM gateway endpoints as to the proxy. If the resource owner has `approval_required` enabled, has at least one active notification channel, and the request uses a non-session auth method (API key, delegated token, service account, or access token), the connection is held open until the user approves/rejects or the timeout expires. The implicit global default is suspended while the owner has no active notification channel and never applies to auto-connected (auto-provisioned, credential-free) services. Explicit per-service `ServiceApprovalConfig` rows apply regardless of channel availability or the auto-connected exemption. See the [Proxy](#proxy) section for details.
+**Transaction Approval:** LLM gateway endpoints share the blocking approval flow described under [Proxy](#proxy). Required programmatic requests wait for approval, rejection, or expiry independently of notification availability. The unset **Writes only** preference allows read-class generation under the catalog inference metadata and closed stateless request contract. Provider storage, resource effects and unknown request extensions remain writes. Explicit true still gates reads and explicit false allows writes; explicit per-service/org policies, auto-connected exemptions and grant semantics retain their documented behavior. Pending requests remain available in web Approval History when delivery is unavailable.
 
 #### GET /api/v1/llm/status
 
@@ -4712,7 +4822,7 @@ Token revocation endpoint per [RFC 7009](https://tools.ietf.org/html/rfc7009). R
 
 **Response:** Always returns `200 OK` with an empty body, per RFC 7009. This applies even if the token is invalid, already revoked, or client authentication fails.
 
-Refresh tokens are revoked in the database (marked `revoked = true`). Access tokens are stateless JWTs and cannot be explicitly revoked; they expire naturally (default: 15 minutes).
+Refresh tokens are revoked in the database. Access JWT authentication also checks the live active user, with additional session and token-class fences. First-party session revocation applies immediately to NyxID requests. Ordinary OAuth client access tokens currently have a consent-revocation window until expiry (default 15 minutes plus configured verification leeway); external relying parties validating offline cannot observe immediate database revocation. Token expiry and supported remote-provider revocation are separate lifecycle effects.
 
 **Example:**
 
@@ -5538,6 +5648,11 @@ Complete MFA enrollment by verifying a TOTP code. On success, MFA is enabled on 
 
 **Auth:** Required
 
+MFA enrollment is a first-party human operation. Browser sessions and first-party
+access tokens may call this route; API keys, service-account tokens, delegated
+tokens, and relay tokens are rejected. Successful confirmation keeps the current
+session and revokes other sessions, refresh tokens, and session-fallback MCP rows.
+
 **Request Body:**
 
 | Field  | Type   | Required | Description                           |
@@ -5575,6 +5690,89 @@ curl -X POST http://localhost:3001/api/v1/auth/mfa/confirm \
   -H "Content-Type: application/json" \
   -d '{"code": "123456"}'
 ```
+
+#### POST /api/v1/auth/mfa/verify
+
+Redeem a five-minute first-factor challenge with a TOTP or single-use recovery
+code. Password login and token clients send `mfa_token` in the JSON body. A web
+social login may omit it: the server reads the HttpOnly `nyx_mfa_challenge`
+cookie instead. Success issues the normal browser cookie or token response and
+clears the challenge cookie. The cookie value is never placed in a URL.
+
+```json
+{ "code": "123456", "client": "web" }
+```
+
+Expired, cancelled, unknown, exhausted and already consumed challenges return HTTP 401
+with `details.reason: "mfa_challenge_expired"` and clear the challenge cookie.
+A wrong code on a live challenge keeps the cookie and spends the existing attempt budget.
+Clients return to sign-in after terminal failures. The web form explicitly offers recovery codes.
+
+When `auth:mobile-mfa` is enabled for the signing-in person, social id_token exchange (Google/GitHub/Apple native-mobile flow) at `/oauth/token` uses OAuth error JSON (HTTP 400):
+
+```json
+{ "error": "mfa_required", "error_description": "MFA required", "error_code": 2002, "session_token": "<five-minute-challenge>" }
+```
+
+No access/refresh token or session is issued in that response. Send `session_token`
+as `mfa_token` with `code` and `client: "token"` (or `"mobile"`) to MFA verify.
+Password login keeps its existing HTTP 403 error code 2002 response.
+
+The default-off flag skips the social token-exchange MFA challenge and persists a mobile-exempt session. Password login, including `client: "mobile"`, always retains MFA. No environment variable controls this flag.
+
+Skipped mobile MFA records metadata-only `mfa: skipped_mobile_rollout` in the `social_login` audit for redirect sign-in or the `social_token_exchange` audit for native exchange. Both paths also emit `auth.mobile_mfa_exempted` through the existing telemetry consent gates.
+
+Completed legacy sessions with absent/null assurance and mobile-exempt sessions keep authenticating through cookie, bearer, refresh and MCP fallback until normal expiry/revocation. Parent-less legacy MCP fallback for MFA accounts has a fixed 30-day bound from creation, independent of its sliding idle expiry. Explicit unverified sessions are rejected for MFA accounts. A sid-less legacy first-party refresh acquires a fixed 30-day session on first refresh; successors cannot extend its expiry. In-flight legacy device codes, login codes and approvals without assurance fail closed.
+
+Third-party OAuth authorize/consent is SSO from existing IdP authority and accepts legacy/mobile-exempt sessions. Account management, such as API-key management, is also not a NyxID sign-in derivation. A new NyxID sign-in derived from an existing device requires verified authority for an MFA account.
+
+#### POST /api/v1/auth/mfa/step-up
+
+Verify the **current** session before authorizing a sign-in on another device.
+
+**Auth:** First-party human cookie session or first-party bearer with `sid`. API keys, service accounts, delegated/relay and OAuth-client tokens receive the standard HTTP 403 credential-type denial. Sid-less bearers cannot step up.
+
+```json
+{ "code": "123456" }
+```
+
+Accepts TOTP or a single-use recovery code using the login verifier, replay protection and shared per-account rate budget (10 attempts per 300 seconds). Success atomically sets verified assurance and removes any exemption from this live session, with a metadata-only `mfa_step_up` audit. It does not issue tokens or extend expiry.
+
+**Response (200):** `{ "message": "Session verified" }`.
+
+**Errors:** HTTP 400 for MFA not enabled or wrong/replayed/consumed codes; HTTP 429 when the shared verification budget is exhausted; HTTP 401 for expired/revoked session authority.
+
+For MFA accounts, device approval, Agent Key approval, login-code minting, CLI-token and app identity approval from legacy/mobile-exempt authority return:
+
+```json
+{
+  "error": "mfa_step_up_required",
+  "error_code": 2003,
+  "message": "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."
+}
+```
+
+This is HTTP 403 and does not expire the approver session. Verify through step-up and retry the original action. Web shows an inline authenticator/recovery prompt; mobile shows it only when `/users/me.capabilities.enabled_features` includes `auth:mobile-mfa`, otherwise it directs the user to the NyxID website to verify and approve or create a login code. Enrollment continues to verify the current session and sign out other devices.
+
+Requester-side device polls and browser handoff creation return terminal `auth_device_access_denied` (403 / 11204) when an old approval lacks verified authority; the browser stops polling and shows a denied request. Start a new request after verifying the approver. The CLI explicitly handles `mfa_step_up_required` with exit code 23 for login-code redemption of an old in-flight code; generate a new code from a verified session.
+
+#### POST /api/v1/auth/mfa/cancel
+
+Abandon a pending browser challenge. This deletes the challenge and clears the
+`nyx_mfa_challenge` cookie. It is safe to call after expiry or a replay.
+
+#### POST /api/v1/auth/mfa/disable
+
+Disable MFA after proving a current factor. Every account must send `code`; a
+password-backed account must also send its current `password` (including social-linked accounts that retain one). `GET /users/me` reports `has_password` for this decision. Social-only
+accounts omit `password`. Recovery codes are consumed when used for disable.
+
+```json
+{ "code": "123456", "password": "current-password" }
+```
+
+The route is first-party human only and applies the same rate limits and account
+state fencing as login MFA.
 
 ---
 
@@ -7092,6 +7290,35 @@ custom role. Holders get read-only access: `PUT /admin/usage/workspace` stays
 admin-only. `GET /api/v1/users/me` reports the result as
 `capabilities.read_admin_usage`.
 
+#### GET /api/v1/admin/assistant/model-usage
+
+Returns attributed NyxBot and specialist model costs, requests, and provider
+token counts, with daily UTC series and top billing accounts. Same read access
+as Admin Usage: Admin, Operator, or the `nyxid:admin:usage:read` permission
+(Usage Viewer). `GET /api/v1/admin/assistant/analytics` and
+`GET /api/v1/admin/assistant/feedback`, which back the rest of the Usage ->
+NyxBot tab, use the same check.
+
+Use `from` and `to` RFC 3339 timestamps for a positive window of at most 31 days.
+An optional `model` selects an exact, case-sensitive billing model (trimmed,
+1–256 characters); `unknown_model=true` selects missing model identities and
+cannot be combined with `model`.
+
+The response contains `window`, `freshness`, `totals`, `models`, `daily`,
+`accounts`, `other_accounts`, `services`, and `excluded`. `services` breaks
+model executions down by inference service (Top 20 plus a summed Other row with
+`service: null`); the service is recorded on every execution, including those
+whose model is unknown. Costs are exact decimal credit
+strings or null. Top 20 models and Top 10 accounts include summed Other usage;
+account rows include their own model breakdown. Excluded populations disclose
+orchestration, ordinary tools, unclassified assistant activity, and historical
+platform records without provable attribution. See the full
+[reporting contract](BILLING_ANALYTICS.md#nyxbot-model-usage).
+
+**Errors:** `400` invalid window or model filter; `403` without Admin, Operator,
+or `nyxid:admin:usage:read` access; `503` (`12200`) when the bounded report
+times out.
+
 #### GET /api/v1/admin/usage/identities
 
 Options for the Usage page's actor/owner filters, or labels for saved filter
@@ -7840,6 +8067,29 @@ Service account tokens do **not** include `sid`, `roles`, `groups`, `permissions
 
 ---
 
+## Security Rollout Readiness
+
+```
+GET /api/v1/admin/security-readiness
+Authorization: Bearer <admin_or_operator_access_token>
+```
+
+Returns a map keyed by security capability. Each report includes `ready`,
+`blockers`, `expected_replicas`, `live_generations`,
+`platform_policy_required`, `catalog_missing_policy`, and
+`catalog_explicit_empty_policy`. Catalog counts apply to the platform-policy
+capability. Missing, duplicate, stale, unsupported or differently configured
+serving processes block effective activation. Ordinary effective flag gates
+return `503 security_readiness_unavailable` (code `12900`) while unready.
+
+This endpoint requires admin/operator access and is separate from public
+`/health`. Roster/drain declarations are operational prerequisites; the
+`approval:required-web-v1` report is diagnostic and does not fence old serving
+replicas. See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md) for
+configuration, stored-policy boundaries and sticky platform cutover/recovery.
+
+---
+
 ## Notification Settings
 
 Manage notification channels and approval preferences. All endpoints require authentication (human-only, no service accounts or delegated tokens).
@@ -7860,14 +8110,41 @@ Authorization: Bearer <access_token>
   "telegram_enabled": true,
   "push_enabled": true,
   "push_device_count": 1,
+  "global_approval_mode": "writes_only",
   "approval_required": true,
   "approval_suspended": false,
+  "approval_delivery_configured": true,
+  "approval_web_available": true,
   "approval_timeout_secs": 30,
   "grant_expiry_days": 30
 }
 ```
 
-The global `approval_required` preference is enforced only while at least one Telegram or push notification channel is active. `approval_suspended` is `true` when the stored preference remains on but no channel is currently available; enforcement resumes automatically when a channel becomes active again.
+`global_approval_mode` is `writes_only` (the unset default), `all`, or `off`.
+Writes only requires approval for write and destructive operations and allows reads;
+All requests requires approval for every verb; Off removes only the global fallback.
+Explicit per-service rules and organization policies retain their precedence.
+The compatibility boolean `approval_required` is true for writes-only and all;
+clients must use `global_approval_mode` to distinguish them. Older servers omit
+that field: a stored/returned true means All requests, and false means Off.
+
+New channels leave the stored preference absent and use a 300-second timeout.
+Lazy settings reads and tool-approval creation never choose a preference. Stored
+true/false rows retain their exact behavior, including rows from the unreleased
+W9.3 lazy-creation build. They have no reliable provenance marker and are never
+silently reset. An owner can explicitly select Writes only to clear the choice.
+A missing preference on any row means writes-only; existing timeout values and
+the legacy missing-timeout default of 30 seconds remain unchanged.
+
+Approval enforcement is independent of notification delivery. This server returns
+`approval_suspended: false` and `approval_web_available: true`: pending requests
+can be decided in Approval History without Telegram or push.
+`approval_delivery_configured` reports enabled registration plus initialized
+provider configuration; it does not promise a successful send. Older servers may
+omit these fields or report suspension, so clients retain cautious channel guidance.
+Upgrade and drain every old replica before relying on write approval for new
+users; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
+
 
 **curl:**
 
@@ -7889,19 +8166,24 @@ Content-Type: application/json
 ```json
 {
   "telegram_enabled": true,
-  "approval_required": true,
+  "global_approval_mode": "writes_only",
   "approval_timeout_secs": 60,
   "grant_expiry_days": 14
 }
 ```
 
-All fields are optional. Only provided fields are updated.
+All fields are optional. Only provided fields are updated. `global_approval_mode`
+accepts `writes_only`, `all`, or `off`. Selecting `writes_only` clears the stored
+boolean. The legacy `approval_required` write remains supported: true selects
+All requests, false selects Off. Conflicting mode/boolean writes return 400;
+omitting both preserves the current choice. The authorization evidence endpoint
+also includes `global_approval_mode`.
 
 **Validation:**
 - `approval_timeout_secs`: 10..=300
 - `grant_expiry_days`: 1..=365
 - `telegram_enabled: true` requires a linked Telegram account
-- `approval_required: true` (turning it on from off) requires an active Telegram or push channel; an already-enabled preference may keep its value while channels are disabled (protection is suspended)
+- `approval_required: true` can be enabled with no external notification channel. Pending requests wait for a web decision or expire without executing.
 
 **Response (200):**
 
@@ -7912,8 +8194,11 @@ All fields are optional. Only provided fields are updated.
   "telegram_enabled": true,
   "push_enabled": true,
   "push_device_count": 1,
+  "global_approval_mode": "writes_only",
   "approval_required": true,
   "approval_suspended": false,
+  "approval_delivery_configured": true,
+  "approval_web_available": true,
   "approval_timeout_secs": 60,
   "grant_expiry_days": 14
 }
@@ -7972,7 +8257,7 @@ Clears the linked Telegram account and disables Telegram notifications.
 }
 ```
 
-If approval protection remains enabled but no active channel remains, the message is `Telegram disconnected. Approval protection is suspended until a notification channel is available; it resumes automatically.`
+If approval remains required and no configured delivery remains, the response directs the user to Approval History on the web. Disconnecting Telegram does not suspend required approval.
 
 **curl:**
 
@@ -7995,7 +8280,7 @@ Authorization: Bearer <access_token>
 Content-Type: application/json
 ```
 
-Register or refresh a device token for push notifications. If a device with the same `token` already exists, its metadata is updated (token refresh). The first registered device automatically enables push notifications. Registration never changes the stored `approval_required` preference; if protection was suspended, it resumes from that existing preference when the push channel becomes active.
+Register or refresh a device token for push notifications. If a device with the same `token` already exists, its metadata is updated (token refresh). The first registered device automatically enables push notifications. Registration never changes the stored `approval_required` preference. It adds a notification route; required approval is already enforced independently of that route, and provider configuration does not guarantee successful delivery.
 
 **Request Body:**
 
@@ -8102,7 +8387,7 @@ Remove a registered push notification device. If no devices remain after removal
 }
 ```
 
-If approval protection remains enabled but no active channel remains, the message is `Device removed. Approval protection is suspended until a notification channel is available; it resumes automatically.`
+If approval remains required and no configured delivery remains, the response directs the user to Approval History on the web. Removing the last device does not suspend required approval.
 
 **Errors:**
 - `1003 not_found` -- Device not found
@@ -8314,7 +8599,7 @@ Authorization: Bearer <access_token>
 
 **Auth:** Required (human-only -- rejects delegated tokens and service account tokens).
 
-Returns all per-service approval configurations for the current user. These override the global `approval_required` setting on a per-service basis (only the global fallback is subject to channel suspension and the auto-connected exemption).
+Returns all per-service approval configurations for the current user. These override the global `approval_required` setting on a per-service basis (the global fallback retains the auto-connected exemption; delivery never suspends approval).
 
 **Response (200):**
 
@@ -8349,7 +8634,7 @@ Content-Type: application/json
 
 **Auth:** Required (human-only).
 
-Creates or updates a per-service approval override. When set, this value takes precedence over the global `notification_channels.approval_required` setting for the specified service (only the global fallback is subject to channel suspension and the auto-connected exemption).
+Creates or updates a per-service approval override. When set, this value takes precedence over the global `notification_channels.approval_required` setting for the specified service (the global fallback retains the auto-connected exemption; delivery never suspends approval).
 
 **Request:**
 
@@ -8395,7 +8680,7 @@ Authorization: Bearer <access_token>
 
 **Auth:** Required (human-only).
 
-Removes the per-service approval override, reverting to the global `approval_required` setting for this service (the global fallback is subject to channel suspension and the auto-connected exemption).
+Removes the per-service approval override, reverting to the global `approval_required` setting for this service (the global fallback retains the auto-connected exemption; delivery never suspends approval).
 
 **Response (200):**
 
@@ -8461,6 +8746,44 @@ Routes below are relative to `/api/v1`. Creation routes require an authenticated
 Request responses expose `auto_connect` (false for legacy requests) and nullable `connection_error` with safe automatic-retry text. Automatic connection continues while the browser is closed; clients poll the saved request rather than POSTing `/connect`.
 
 The connect body uses a decimal string for `telegram_bot_id` and an integer for `revision`, for example `{"telegram_bot_id":"900","revision":6}`. Manager credentials use the existing admin platform-credentials routes with provider `telegram-new`. Neither manager nor child bot tokens are returned to customers.
+
+### Manager registry and shared BotFather help
+
+The following routes are relative to `/api/v1/admin` and require a first-party
+human administrator with a current admin role. Responses containing management
+state use `Cache-Control: no-store`. Manager tokens are write-only. The original
+`telegram-new` Platform Credentials entry remains the default manager; additional
+managers use their verified numeric Telegram bot identity. The registry allows
+at most 100 managers, including the default.
+
+| Method | Route | Request and result |
+| --- | --- | --- |
+| GET | `/telegram-managers` | List `{manager_bot_id, username, ready, legacy_default}` records. |
+| POST | `/telegram-managers` | Configure `{token}` after Telegram identity verification; returns the configured manager's metadata. |
+| POST | `/telegram-managers/clear` | Remove an additional manager with `{manager_bot_id}`; returns 204. Live dependencies prevent removal. Manage the default through Platform Credentials. |
+| GET | `/platform-help` | List libraries with `{id, name, version, published_revision, draft, updated_at}`. |
+| POST | `/platform-help` | Create `{name}`, seeded with the built-in published help. |
+| PUT | `/platform-help/{id}` | Save `{version, content}` as a draft. |
+| POST | `/platform-help/{id}/publish` | Publish `{version}` or republish a historical version with `{version, rollback_revision}`. Returns the updated library; rollback appends a revision. |
+| GET | `/platform-help/{id}/history` | Read up to 50 revisions, newest first; `?before={revision}` pages backward. Each entry includes `{revision, content, published_at, published_by}`. |
+| GET | `/platform-bots/{id}/help-library` | Read `{profile_id, library_id, version}`; an unassigned profile uses the shared default library. |
+| PUT | `/platform-bots/{id}/help-library` | Assign `{generation, version, library_id}` using the current profile generation and assignment version. |
+
+`content` contains `articles: [{id, title, body, tags}]` and
+`use_cases: [{id, title, description, example_prompts}]`. IDs are unique lowercase
+hyphenated slugs across both lists. Libraries allow 1–30 articles, up to 20 use
+cases and 16 KiB of serialized content. Invalid content returns 400; stale edit,
+publication or assignment versions return 409. Saving a draft leaves published
+content available. Publishing affects new turns on every assigned bot, while
+an in-flight turn retains its first selected library revision.
+
+Additional manager webhooks use
+`POST /api/v1/webhooks/channel/telegram-new/manager/{id}` and verify the
+selected manager's own webhook secret. The existing default-manager webhook is
+retained. After browser approval, the pairing response provides a `confirmation_command`;
+the page also constructs a Telegram return link for the selected manager.
+Polling and `/check` report
+status; completion still requires proof from the originating Telegram account.
 
 ---
 
@@ -8627,6 +8950,75 @@ Human `POST/PUT /api/v1/services` use the same skill validation/history path; up
 The operation-contract route returns the authorized catalog service's bounded source OpenAPI document, preserving upstream server declarations. It does not rewrite proxy URLs or grant execution access; generated skills must use the consumer's authorized NyxID service connection. It reads a configured `openapi_spec_url` through NyxID's hardened, size-limited path, resolving known hosted overlay URLs locally. When the URL is absent or empty, it falls back to an embedded overlay registered for the service slug. The configured URL must be readable without downstream credentials; this route never injects a service-account or catalog credential. Authenticated custom documents need a separate, explicitly scoped contract-fetch capability. The route never resolves a user-managed `/keys` service, injects a credential, or returns the caller-wide `/mcp/config` catalog. The discovery response includes the catalog service `id`, `slug`, `name`, and current skill revision. Catalog and MCP responses retain name recommendations and expose optional refs/revision. Ref-only changes do not change the existing `catalog_digest`; `skills_manifest_digest` is a separate versioned digest. Instance names suppress inherited refs. See [Service account curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for exact payloads, grant limits, history pagination, recovery, runtime confinement, rollout ordering, and the boundary with Ornn package content CRU.
 
 
+## Owner NyxBot invocations
+
+These endpoints let a first-party owner account session or access token drive
+the existing NyxBot engine. Developer OAuth clients, delegated tokens, service
+accounts, relay tokens, and API keys (including Agent Key login) are rejected.
+The local `nyxid nyxbot` commands use this resource; no MCP setup is required.
+
+| Method and path | Behavior |
+| --- | --- |
+| `POST /api/v1/assistant/nyxagent/invocations` | Admit owner work atomically, or return its existing receipt |
+| `GET /api/v1/assistant/nyxagent/invocations/{invocation_id}` | Read durable status, bounded replies, and required actions |
+| `POST /api/v1/assistant/nyxagent/invocations/{invocation_id}/cancel` | Fence that invocation and its associated work, then request cancellation |
+
+Create requires `idempotency_key` (a canonical UUID v4) and `text`. Optional
+`conversation_id` resumes a private owner thread; optional `agent_id` and
+`model` select a new thread and cannot accompany `conversation_id`. Unknown
+fields are rejected. New admissions return HTTP 202, identical retries HTTP
+200, and changed requests with the same owner/key HTTP 409. The public
+invocation ID is that owner-scoped idempotency key.
+
+Existing grants, billing, and owner confirmations apply. A local wait timeout
+does not cancel work. Cancellation cannot undo effects already dispatched to
+an external service; unconfirmed external stops remain `requires_review`.
+
+Admission defaults off behind `assistant:owner-invocations`. Upgrade every
+replica before enabling it. Inspection and cancellation remain available with
+admission off while the engine is enabled. After the first admission, recovery
+is forward-fix-only because older binaries do not enforce the invocation
+credential and cancellation fences.
+
+See the [owner CLI/API reference](chat/09-owner-cli-api.md) for the full
+request/response schema, lifecycle, limits, and rollout contract, and the
+[CLI reference](site/cli/reference/nyxbot.md) for terminal examples.
+
+NyxBot channel link and chat override targets follow the organization-agent
+boundary and recovery contract in [ORG_AGENTS.md](ORG_AGENTS.md).
+
+## Assistant voice and dictation
+
+The [voice contract](chat/11-voice.md) specifies the existing call lifecycle,
+options, controls, captions and billing. Platform audio in a private specialist
+thread does not require granting OpenAI as a tool. The live conversation, agent
+and key binding, platform ACL, operation restrictions and billing admission still
+apply. BYOK retains the exact selected connection's ownership and grant checks.
+
+Dictation adds two first-party human browser routes:
+
+| Route | Contract |
+| --- | --- |
+| `GET /api/v1/assistant/nyxagent/dictation/options?conversation_id={id}` | Read-only eligibility and price discovery. Returns `options`, `transcription_model` (`gpt-live-transcribe`) and `max_seconds` (`120`). Options use the voice option schema with platform OpenAI sources. No funds are reserved by discovery. |
+| `GET /api/v1/assistant/nyxagent/conversations/{id}/dictation` | Same-origin WebSocket upgrade authenticated by a live browser session. Requires enabled voice features and a private authorized conversation; delegated credentials cannot execute it. |
+
+Within five seconds of upgrading, send one JSON message containing
+`client_request_id` and `preferences` (the existing voice preferences schema).
+The server selects only platform OpenAI transcription. After the server's `ready`
+event, send binary PCM16 mono audio at 24 kHz, at most 4096 bytes per message, or
+the exact text message `{"type":"stop"}`. Capture is bounded to 120 seconds.
+Provider commands, keys, tools and destination overrides are not accepted.
+
+Server events are `ready` (`session_id`, `model`), `delta` and `completed`
+(`item_id`, `order`, `text`; completion also includes `confirmed_seconds`),
+`stopped` (`confirmed`), and `error` (the standard sanitized `error` envelope).
+The browser reviews the resulting text before inserting it into a draft; the
+transport never submits a chat message. Closing capture releases the microphone
+immediately while the server drains forwarded audio within a bounded deadline
+and settles provider-confirmed input duration. See the
+[transport and accounting contract](chat/11-voice.md#bounded-transcription-transport-and-accounting)
+for limits, exact duration handling and recovery.
+
 ## Assistant skill review and image input
 
 `GET /api/v1/assistant/nyxagent/conversations/{id}` accepts an optional `card`
@@ -8670,6 +9062,36 @@ Tools updates distinguish omission from JSON `null` for `supplier` and `import_s
 
 CLI catalog creation requires `--endpoint-url` or `--twin-of` (otherwise the local error is `Catalog creation requires --endpoint-url or --twin-of`). Catalog updates support `--clear-supplier`, conflicting with `--supplier`. Tools table output formats prices as `Free` or `<credits> credits / <metric>`, limits as `<n>/s, burst <b>` or `none`, and topics as a comma-separated list. `tools show` prints rows for each operation (name, method, path, risk, data scope, cost class). JSON output remains the raw response.
 
+## Oracle pool lifecycle (unreleased)
+
+Oracle is an authenticated asynchronous browser-worker task relay. Pool management
+accepts the same JWT/general API-key callers as other Oracle consumer operations;
+shared worker and installation tokens do not authorize management. The pool owner
+is the existing person/org `user_id`; platform visibility grants discovery/use,
+not ownership. The first tagged release containing issues #1527/#1542 adds:
+
+| Method and path | Request | Success / conflicts |
+|---|---|---|
+| `POST /api/v1/oracle/pools/{id_or_slug}/transfer` | `owner_user_id` UUID, optional `rotate_worker_token` (default false), optional `visibility:"private"` for org-visible → person | 200 `{pool, worker_token?}`, no-store; source/destination manager ACL, active own-person or active managed org, ten-pool destination limit |
+| `DELETE /api/v1/oracle/pools/{id_or_slug}` | No body | 200 `{id,slug,status:"deleted",cleanup:"asynchronous",deleted_at}`, identical on authorized retry; 409 `oracle_pool_active_work` for queued/dispatched tasks or queued/delivered commands; 403 forbidden, 404 unknown |
+
+Transfer preserves pool identity/settings/history and the shared token by default.
+Owner changes require fresh installation credentials. Deletion reserves the slug,
+hides discovery and invalidates all workers at commit. Durable bounded cleanup
+then closes idle sessions and removes worker rows and encrypted login material;
+`cleanup:"asynchronous"` acknowledges this policy, not physical completion.
+Terminal task TTLs and readable history remain. Idle online
+workers do not block deletion. Settle active work before deletion. All replicas and
+old in-flight requests must be upgraded/drained before lifecycle operations are
+used. See [Oracle Relay](ORACLE_RELAY.md#pool-ownership-and-deletion-unreleased-1527-1542)
+for retention, retry, concurrency, token and deployment contracts and CLI examples.
+
+DELETE also settles deadline-expired worker commands from any generation in at
+most sixteen separately committed batches of 256 IDs per request. HTTP 409 /
+11017 can therefore mean that bounded expiry progress was made and more remains;
+retry DELETE. Unexpired work still blocks deletion. Authorization is checked for
+every batch, and an interruption or later conflict preserves committed expiry.
+Already-deleted pools skip expiry and return their stable acknowledgement.
 ## Complete channel replies
 
 `POST /api/v1/channel-relay/reply` and `/thread-reply` accept one complete
@@ -8696,3 +9118,199 @@ can send the same image once as a document under the
 A response with `"delivered_as": ["file"]` reports this actual transport kind,
 and the outbound message's `content_type` is `file`. The reply anchor, topic and
 caption are preserved. Other adapters can omit this field.
+
+## NyxBot exact service selection and consent
+
+An authenticated first-party human owner may prefix a new NyxAgent message with
+`/service <connection UUID or unambiguous connection slug>` followed by a newline
+and the request. The composer offers the same next-message choice. The selector
+lasts one admitted turn and chooses identity, not permission. API keys (including
+conversation, delegated and service-account keys), guests and webhook inputs
+cannot install human selection. Ordinary new turns clear it. An approved-card
+continuation inherits only that card's exact target and operation; expired,
+denied or consumed cards install no selection.
+
+Assistant raw proxy/LLM/SSH exec retries accept
+`X-NyxID-Acknowledgement-Id`; MCP service and native tools accept the existing
+`acknowledgement_id`. Native Oracle submit, attach and extract request bodies add
+optional `acknowledgement_id: string`. NyxID consumes this control metadata only
+for assistant execution; ordinary endpoint clients keep their payload contract.
+No acknowledgement transport metadata reaches the provider. Assistant chat keys
+use exact SSH exec and bounded certificate/tunnel/terminal session admission.
+For assistant calls, organization use asks in Auto and Ask every time and Full
+access proceeds without a prompt. Certificate cards bind the subject public key
+and principal; session cards bind the exact connection, principal/initial terminal
+geometry and maximum lifetime (at most one hour). Resume the same request with
+`X-NyxID-Acknowledgement-Id`. Session consent covers dynamic session traffic;
+revocation, config drift or elapsed authority closes the session. Ordinary client
+routing and existing personal catalog-only access are retained.
+
+Organization-use refusals persist the existing action card and return its
+`acknowledgement_id`. Full access bypasses consent while retaining preference
+and authority checks. Raw stateless org model consent admits an exact model and
+connection for the resumed turn; MCP/stateful actions retain exact semantic
+request consent. Machine exec cards explicitly admit declared exact organization
+connections for that command/job. See [execution contract](NYXBOT_SERVICE_EXECUTION.md).
+
+## NyxBot service adapters
+
+The default-off `nyxbot:service-adapters` flag gates adapter setup and execution.
+Upgrade every API replica before enabling it. The existing
+`GET /api/v1/channel-platforms` contract is unchanged. See the
+[operator guide](NYXBOT_SERVICE_ADAPTERS.md) for provider setup, supported
+credential modes, dynamic instructions, FAQ grants and billing requirements.
+
+Prefix every path below with `/api/v1`. Binding management and secret/session
+issuance require a first-party human account and verify ownership. Administrator
+account/allocation routes additionally require the administrator role. Capability
+metadata allows delegated `account:read`. List routes accept `after` and return
+`next_after_id`; an absent cursor marks the final page.
+
+| Method | Path | Result |
+| --- | --- | --- |
+| GET | `/channel-adapters` | Versioned executable descriptors in `adapters`, including legacy/disabled profiles. |
+| GET | `/channel-adapter-bindings` | Owner's bindings, readiness and next cursor. |
+| POST | `/channel-adapter-bindings` | Verify provider resources and create a binding; returns its descriptor and readiness. |
+| POST | `/channel-adapter-bindings/{id}/disable` | Disable admission and start cleanup; 204. |
+| POST | `/channel-adapter-bindings/{id}/verify` | Reverify and enable; returns the updated binding. |
+| DELETE | `/channel-adapter-bindings/{id}` | Remove a disabled, settled binding; 204. |
+| POST | `/channel-adapter-bindings/{id}/custom-llm-setup` | ElevenLabs Custom LLM URL, API key and model; secret-bearing response. |
+| POST | `/channel-adapter-bindings/{id}/sessions` | Issue a distinct ElevenLabs guest session and `extra_body` authentication. |
+| POST | `/channel-adapter-bindings/{id}/sessions/{sid}/end` | End an owned ElevenLabs guest session; 204. |
+| GET, POST | `/admin/channel-adapter-accounts` | List or configure trusted provider accounts; POST returns 204. |
+| DELETE | `/admin/channel-adapter-accounts/{id}` | Remove trust after allocations are removed; 204. |
+| GET, POST | `/admin/channel-adapter-allocations` | List or allocate platform number/application resources with tariff evidence. |
+| DELETE | `/admin/channel-adapter-allocations/{id}` | Revoke allocation; pending cleanup prevents premature removal. |
+
+Binding creation accepts `adapter_id`, `contract_version: 1`, `label`, `agent_id`,
+`credential` and provider-specific resource settings. `credential` is either
+`{"kind":"connection","user_service_id":"..."}` or
+`{"kind":"platform","catalog_service_id":"..."}`. Carrier settings include
+`account_id`, `resource_id`, `phone_number`, `application_id`, `voice` and
+`language`; user-owned Telnyx additionally supplies `webhook_public_key`.
+ElevenLabs uses its agent ID as `application_id`. Creation verifies ownership
+without placing a call or sending SMS. A binding response contains identifiers,
+configuration, `enabled`, `revision`, `verified_at`, `webhook_url` and per-operation
+`availability`; it never returns stored credentials.
+
+Provider-facing routes authenticate their own protocol instead of a human login:
+
+| Method | Path | Authentication and transport |
+| --- | --- | --- |
+| POST | `/webhooks/call-adapters/{id}` | Telnyx Ed25519 or Twilio signature plus bound resource proof; bounded body, XML response. |
+| POST | `/webhooks/call-adapters/{id}/sms-receipts/{send}` | Signed, correlated delivery receipt; bounded body, XML response. |
+| GET | `/webhooks/call-adapters/{id}/socket/{sid}` | Admitted session ticket, plus Twilio signature when applicable; WebSocket upgrade. |
+| POST | `/webhooks/call-adapters/{id}/v1/chat/completions` | Custom LLM bearer and separately issued guest-session credentials; bounded JSON input and SSE output. |
+
+Caller messages never grant owner authority. Specialist guest grants, live
+binding/session authority and catalog operation policy remain mandatory at
+execution. Provider retries do not automatically repeat uncertain effects.
+
+
+### Credit Allocations
+
+All routes below require authentication and retain the existing admin Credits
+role boundaries. They are additive to existing `/admin/credits/grants`,
+`/admin/credits/schedules` and allowance APIs; personal billing routes are unchanged.
+
+| Route | Authority | Contract |
+| --- | --- | --- |
+| `GET /api/v1/admin/credits/allocations/summary` | Admin or Operator | `allocations_v1` authoring capability and exact decimal-string summary: remaining, unreserved, held, pending activation/reclaim, expired awaiting cleanup, restricted, generated time. Subsets are not additive funds. No financial writes. |
+| `POST /api/v1/admin/credits/allocations` | Admin or Credits Manager Operator | Issue one-time allocation using existing recipient/scope fields plus exact decimal `amount`, optional UUID `request_id`, and optional `service_limits`. |
+| `DELETE /api/v1/admin/credits/allocations/{grant_id}` | Admin or Credits Manager Operator | Reclaim only this allocation's unused funds. Held work completes; response may carry `revoke_requested_at` until final reclaim. Replays converge on the same state. |
+| `POST /api/v1/admin/credits/allocations/schedules` | Admin | Create daily/weekly/monthly policy with expiry and optional limits/request UUID. Each period freezes policy; each recipient grant has fresh counters. |
+| `PATCH /api/v1/admin/credits/allocations/schedules/{schedule_id}` | Admin | Sparse reviewed edits; changes apply to future periods. Pausing does not reclaim existing allocations. |
+
+New mutations require `BILLING_ALLOCATIONS_ENABLED`; disabled deployments reject
+new policy authoring. Never retry capped policies through legacy endpoints on a
+missing capability. An exact read field alone is not proof of exact write support.
+Legacy omitted fields remain supported; legacy immediate revoke rejects holds
+when the new capability is disabled.
+
+Creation accepts the canonical exact string `amount` without an
+`amount_credits` field, for both one-time and recurring allocations. Legacy
+whole-integer `amount_credits` requests remain valid. When both fields are
+present, `amount` takes precedence; omitting both, or providing a nonpositive,
+malformed or unrepresentable effective amount, rejects the request without
+creating an allocation or schedule. Sparse recurring updates preserve an
+omitted amount, and apply the same exact-field precedence when supplied.
+
+`service_limits` entries contain `service_refs` (one or more concrete catalog IDs
+or compatible slugs), exact decimal `amount`, and optional `label`. Canonical
+services must be disjoint across rules and within selected eligibility. Limits
+are ceilings inside a shared total, not earmarked pots; unspecified eligible
+services remain unrestricted. Returned rules include exact limit/consumed/raw
+reserved/additive held values and canonical members. Grant responses preserve
+legacy fields and add exact `held`, `terminal_amount`, `reclaimed`, pending reclaim
+and rule details. Money supports twelve fractional digits without JSON-number loss.
+
+An actor-scoped request UUID freezes payload and recipients. Retrying the same
+payload resumes safely; reusing the UUID for different settings returns conflict.
+See [exact allocation accounting](BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim)
+for rollout, activation, journal and recovery guarantees.
+
+## NyxBot gateway release review
+
+All routes require a live platform admin. Delegated `account:read` access is denied
+by the existing `/admin` route class. Responses contain captured public identity,
+state, revision and versions; they omit credentials, key IDs/hashes, ciphertext and
+remote response bodies. See [gateway lifecycle](CHANNEL_EVENT_GATEWAY.md#nyxbot-gateway-retirement-and-recovery).
+
+| Method | Path | Request and response |
+| --- | --- | --- |
+| GET | `/api/v1/admin/nyxbot-gateway-releases` | Optional `after` UUID cursor, `limit` (default 50, capped at 100), comma-separated `states` (default `due,review_required`). Returns `{items, next_cursor}` ordered by ID. |
+| POST | `/api/v1/admin/nyxbot-gateway-releases/{id}/inspect` | Returns `{captured, observation}` with captured revision and a fresh sanitized observation; does not change captured authority. |
+| POST | `/api/v1/admin/nyxbot-gateway-releases/{id}/resolve` | Body `{revision, observation, action, dispatch_drained?}`. Echo the inspected observation and revision; returns 204 after a live admin check and fresh matching observation. |
+
+Observation `status` is `missing`, `matching` (with `channel_id`, `version`),
+`changed` (with optional `version`), `malformed`, `destination_changed`,
+`live_reference` or `owner_unavailable`. Resolution actions are `retry_original`,
+`preserve_changed`, `confirm_missing`. Only `review_required` records can be
+resolved. `retry_original` accepts `matching`, or `missing` while the channel
+identity is still unknown. `preserve_changed` accepts every status except
+`matching` and `missing`; it settles as `preserved` without deleting anything,
+records the observation status in audit metadata, and leaves `gateway_released`
+false. `confirm_missing` accepts `missing`. For an uncertain create, it also
+requires the 24-hour dispatch window to have elapsed and `dispatch_drained: true`;
+absence alone never proves no creation. A stale revision/observation returns
+conflict; an invalid action returns validation failure. Authority/storage
+unavailability is retryable. No action deletes a replacement version.
+
+### OAuth consent decisions
+
+Browser consent forms submit a `browser_form=true` marker. Successful, denied,
+and callback-error decisions return a script-free 200 interstitial that performs
+a meta-refresh to the already validated callback; API and non-browser callers
+retain the normal 302/JSON contract. An unauthenticated form is also completed
+through the interstitial before its same-origin `/login?return_to=...` navigation.
+OAuth redirect URIs are checked at both
+registration and execution time. HTTP(S), loopback HTTP, and RFC 8252 private-use
+native schemes (including reverse-DNS schemes with a path) are accepted;
+browser execution, content, local-file, and opaque schemes are rejected with
+the normal invalid-redirect error.
+Registration trims surrounding whitespace and stores the trimmed exact string;
+embedded tab/CR/LF are rejected. Execution requires the exact registered string
+and rejects browser-normalized whitespace/control variants.
+
+An ordinary approval preserves the live consent's existing scopes, service
+allowlist, and expiry and unions the newly approved request. The standard screen does not
+provide a complete editable view of the grant, so it cannot silently narrow
+previous authority; use Authorized Applications to revoke or narrow access.
+Reordered or duplicate selections are equal authority and are a no-op: the
+consent id, revision, issuance fence, and Machine external grant remain stable.
+Incremental approval with no additions has the same no-op behavior. Pure broadening
+preserves the existing authority revision and does not invalidate tokens bound to it;
+each token remains limited to its own scope, service, and resource claims. Narrowing,
+expiry shortening, revoke, regrant, and authority-removing Machine or binding changes
+create a new revision and invalidate tokens bound to the previous revision.
+
+The new code carries only the approved request's validated scope, its service
+selection and required resource services; it does not inherit the older stored
+union or its allow-all flag. CAS uses an independent optional `write_version`,
+compatible with old rows/readers. Signed decisions bind the revocation generation, so a request issued before
+revocation fails with a conflict and requires fresh authorization; a new request
+can authorize immediately. Old signed requests use a conservative timestamp
+compatibility fence, including same-second revocation. Double submit before
+revocation is harmless. URI
+spelling is preserved exactly: tab/CR/LF anywhere and leading/trailing C0/space
+are rejected rather than normalized into a match.

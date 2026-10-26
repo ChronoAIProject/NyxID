@@ -1,3 +1,4 @@
+import { BillingBill } from "@/components/billing/billing-bill";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { billingPanelSearch, type AccountPanelParams } from "@/lib/assistant/account-panel-search";
 import { useEffect, useEffectEvent, useState } from "react";
@@ -214,9 +215,14 @@ export function BillingPage({
           />
           <BillingBenefits catalog={catalog} />
           <BillingMachines />
+          <BillingBill enabled={billingReady} />
           <BillingTopUpHistory />
         </TabsContent>
         <TabsContent value="usage" className="mt-6 space-y-6">
+          <p className="text-12 text-text-tertiary">
+            Credit usage includes voice calls, dictation, and assistant tasks.
+            Explore a service below for its recorded usage and charges.
+          </p>
           <UsageFilters
             services={services}
             values={selected}

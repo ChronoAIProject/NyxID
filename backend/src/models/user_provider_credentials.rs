@@ -3,8 +3,12 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "user_provider_credentials";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UserProviderCredentials {
+    /// Explicit field storage dispatch. Missing entries use the documented
+    /// legacy decoder only while trusted legacy reads remain enabled.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -22,6 +26,13 @@ pub struct UserProviderCredentials {
     pub updated_at: DateTime<Utc>,
 }
 
+impl std::fmt::Debug for UserProviderCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserProviderCredentials")
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -34,6 +45,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_with_credentials() {
         let cred = UserProviderCredentials {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
@@ -55,6 +67,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_without_secrets() {
         let cred = UserProviderCredentials {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),

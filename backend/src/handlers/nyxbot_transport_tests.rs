@@ -184,6 +184,8 @@ async fn org_gateway_refusal_leaves_relay_route_keys_and_settings_unchanged() {
     assert_eq!(after.route_api_key_id, before.route_api_key_id);
     assert_eq!(after.route_id, before.route_id);
     assert_eq!(after.owner_sender_ids, before.owner_sender_ids);
+    assert_eq!(after.link_code_hash, before.link_code_hash);
+    assert_eq!(after.link_code_expires_at, before.link_code_expires_at);
     assert!(after.pending_agent_api_key_id.is_none() && after.pending_route_api_key_id.is_none());
     assert!(after.gateway_fallback_at.is_some());
     assert_eq!(
@@ -535,7 +537,7 @@ async fn pending_org_return_waits_for_stale_cleanup_before_retrying() {
     // After the stale interval, cleanup deletes the org-owned prepared key
     // before a fresh return can replace the working gateway route.
     channels.update_one(doc! {"_id": &row.id}, doc! {"$set": {
-        "relay_attempted_at": bson::DateTime::from_chrono(Utc::now() - ChronoDuration::minutes(MOVE_STALE_MINUTES + 1))
+        "relay_attempted_at": bson::DateTime::from_chrono(Utc::now() - ChronoDuration::minutes(releases::SETUP_MINUTES + 1))
     }}).await.unwrap();
     switch_to_gateway(&state).await.unwrap();
     let recovered = load_channel(&state, OWNER, &row.id).await.unwrap();
@@ -573,12 +575,23 @@ async fn gateway_return_preserves_exact_private_chat_mapping_without_merging_sen
     set_flag(&state, FlagTarget::User(OWNER.into()), true).await;
     switch_to_gateway(&state).await.unwrap();
     let on = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(
+        chats::sync_gateway_groups(&state, &on, true).await.unwrap(),
+        None
+    );
+    assert!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .gateway_no_progress
+    );
     chats::adopt_relay_chat(&state, &on, PARTITION, "dm", "guest", None)
         .await
         .unwrap();
     set_flag(&state, FlagTarget::User(OWNER.into()), false).await;
     switch_to_gateway(&state).await.unwrap();
     let off = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert!(!off.gateway_no_progress);
     assert_eq!(
         chats::partition_after_gateway(&state, &off, relay.clone())
             .await
@@ -592,10 +605,23 @@ async fn gateway_return_preserves_exact_private_chat_mapping_without_merging_sen
             .unwrap(),
         stranger
     );
+    // A legacy direct row may still contain proof from an old binding.
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"gateway_no_progress": true}},
+        )
+        .await
+        .unwrap();
     // A second move gets a new gateway partition but retains this same chat.
     set_flag(&state, FlagTarget::User(OWNER.into()), true).await;
     switch_to_gateway(&state).await.unwrap();
     let on = load_channel(&state, OWNER, &row.id).await.unwrap();
+    // mock_gateway asserts proof is false at the actual pending-key callback;
+    // move_to_gateway then earns new proof from its complete policy echo.
+    assert!(on.gateway_no_progress);
     let next = format!("conv_{}", "a".repeat(32));
     chats::adopt_relay_chat(&state, &on, &next, "dm", "guest", None)
         .await

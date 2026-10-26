@@ -3,6 +3,7 @@ pub mod admin_anonymous_endpoints;
 pub mod admin_billing;
 #[cfg(test)]
 mod admin_billing_tests;
+pub mod admin_encrypted_records;
 pub mod admin_feature_flags;
 pub mod admin_groups;
 pub mod admin_helpers;
@@ -84,6 +85,7 @@ pub mod node_agent;
 pub mod node_ws;
 pub mod notifications;
 pub mod oauth;
+pub(crate) mod oauth_consent_response;
 pub mod oidc_discovery;
 pub mod openclaw_channel;
 pub mod oracle_login_profiles;
@@ -141,6 +143,7 @@ mod catalog_editor_tests;
 #[cfg(test)]
 mod tools_tests;
 
+pub mod admin_assistant;
 pub mod assistant_feedback;
 #[cfg(test)]
 mod assistant_feedback_tests;
@@ -206,3 +209,12 @@ pub mod machine_external_grant;
 pub mod admin_remote_machine_platform;
 #[cfg(test)]
 mod tools_manager_tests;
+
+pub mod assistant_invocations;
+pub mod call_adapters;
+
+pub mod platform_help;
+
+pub mod telegram_managers;
+
+pub mod nyxbot_gateway_releases;

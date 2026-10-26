@@ -14,6 +14,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation } from "@/types/assistant";
 import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagent";
 import type { User } from "@/types/api";
+import { FEATURE_FLAG, userHasFeature, type FeatureFlag } from "@/lib/feature-flags";
 import {
   AssistantSidebar,
   type SidebarAgents,
@@ -29,7 +30,10 @@ vi.mock("@/hooks/use-assistant-workspace", () => ({
 const accountMocks = vi.hoisted(() => ({ navigate: vi.fn(), logout: vi.fn(), nyxagent: false, panel: undefined as string | undefined, open: vi.fn() }));
 vi.mock("@/hooks/use-account-panel", () => ({ useAccountPanel: () => ({ current: { panel: accountMocks.panel }, prepareMenuOpen: (...args: unknown[]) => () => accountMocks.open(...args) }) }));
 vi.mock("@/hooks/use-auth", () => ({ useLogout: () => ({ mutateAsync: accountMocks.logout }) }));
-vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: () => accountMocks.nyxagent }));
+vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: (flag: FeatureFlag) => {
+  const enabled = useAuthStore((state) => userHasFeature(state.user, flag));
+  return flag === FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW ? enabled : accountMocks.nyxagent;
+} }));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => accountMocks.navigate,
   Link: ({
@@ -849,4 +853,41 @@ describe("AssistantSidebar account menu", () => {
       );
     },
   );
+});
+
+
+it.each([['discord', 'Discord'], ['slack', 'Slack'], ['whatsapp', 'WhatsApp'], ['lark', 'Lark'], ['feishu', 'Feishu'], ['x', 'X']] as const)(
+  'opens the saved %s personal conversation using its actual platform label', async (platform, name) => {
+    const user = userEvent.setup();
+    const saved: Conversation = { ...CONVERSATION, title: 'Saved native conversation', platform_thread: {
+      platform, manager_id: 'profile-id', binding_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', binding_generation: 1,
+    }};
+    const { onSelect } = renderSidebar(vi.fn(), [saved], saved.id);
+    const row = screen.getByRole('button', { name: 'Saved native conversation' });
+    expect(row).toHaveTextContent(name);
+    expect(row).not.toHaveTextContent('Telegram');
+    await user.click(row);
+    expect(onSelect).toHaveBeenCalledWith(saved.id);
+  },
+);
+
+
+describe("restricted workspace previews", () => {
+  it("hides both previews without a server capability, even with Calvin email and local hints", () => {
+    useAuthStore.setState({ user: { ...USER, email: "calvin.tan@aelf.io" } });
+    localStorage.setItem("assistant:workspace-preview", "true");
+    renderSidebar();
+    expect(screen.queryByText("Artifacts")).not.toBeInTheDocument();
+    expect(screen.queryByText("Activity")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Approvals" })).toBeInTheDocument();
+  });
+
+  it("shows existing disabled previews only when the server resolves the flag", () => {
+    useAuthStore.setState({ user: { ...USER, capabilities: {
+      enabled_features: [FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW],
+    } } });
+    renderSidebar();
+    expect(screen.getByText("Artifacts").closest('[aria-disabled="true"]')).toBeInTheDocument();
+    expect(screen.getByText("Activity").closest('[aria-disabled="true"]')).toBeInTheDocument();
+  });
 });

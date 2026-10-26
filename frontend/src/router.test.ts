@@ -1,4 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createMemoryHistory, createRouter } from "@tanstack/react-router";
+import { capture } from "./lib/telemetry";
+
+vi.mock("./lib/telemetry", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./lib/telemetry")>(),
+  capture: vi.fn(),
+}));
 import {
   channelBotSetupRoute,
   loginAgentKeyRoute,
@@ -8,6 +15,33 @@ import {
   router,
 } from "./router";
 import { isPublicPath } from "./lib/public-paths";
+
+it("captures a caught assistant route-loading error and deduplicates its rendering fallback", async () => {
+  const route = Object.values(router.routesById).find((r) => r.fullPath === "/assistant");
+  if (!route) throw new Error("assistant route is not registered");
+  const beforeLoad = route.options.beforeLoad;
+  const failure = new Error("private loader failure");
+  vi.mocked(capture).mockClear();
+  route.options.beforeLoad = () => { throw failure; };
+  try {
+    const isolated = createRouter({
+      routeTree: router.routeTree,
+      history: createMemoryHistory({ initialEntries: ["/assistant"] }),
+    });
+    await isolated.load();
+    expect(isolated.state.matches.at(-1)?.status).toBe("error");
+    expect(capture).toHaveBeenCalledExactlyOnceWith({ name: "nyxbot.error", props: expect.objectContaining({
+      error_code: "NYXBOT_UNKNOWN_ERROR", stage: "runtime", route: "/assistant",
+    }) });
+    route.options.onCatch?.(failure);
+    expect(capture).toHaveBeenCalledExactlyOnceWith({ name: "nyxbot.error", props: expect.objectContaining({
+      error_code: "NYXBOT_UNKNOWN_ERROR", stage: "runtime", route: "/assistant",
+    }) });
+    expect(JSON.stringify(vi.mocked(capture).mock.calls)).not.toContain("private");
+  } finally {
+    route.options.beforeLoad = beforeLoad;
+  }
+});
 
 describe.each([loginAgentKeyRoute, loginDeviceRoute])(
   "Login approval route $fullPath",
@@ -204,6 +238,31 @@ describe("Tools management direct URL guard", () => {
     if (allowed) await expect(result).resolves.toBeUndefined();
     else
       await expect(result).rejects.toMatchObject({ options: { to: "/tools" } });
+  });
+});
+
+
+describe("NyxBot usage tab", () => {
+  const route = Object.values(router.routesById).find((entry) => entry.fullPath === "/admin/usage")!;
+  it("preserves the URL tab before authentication has loaded", () => {
+    useAuthStore.setState({ user: null, isLoading: true });
+    const validate = route.options.validateSearch;
+    if (typeof validate !== "function") throw new Error("Expected a search validator");
+    expect(validate({ tab: "nyxbot" })).toMatchObject({ tab: "nyxbot" });
+    expect(validate({ tab: "unknown" })).toMatchObject({ tab: "dashboard" });
+  });
+  it.each([
+    ["admin", false, true],
+    ["operator", false, true],
+    ["user", true, true],
+    ["user", false, false],
+  ] as const)("gates NyxBot for %s with usage read %s", async (role, readUsage, allowed) => {
+    useAuthStore.setState({ isLoading: false, user: { ...catalogUser, role, is_admin: role === "admin", is_operator: role === "operator", capabilities: { read_admin_usage: readUsage } } });
+    const guard = route.options.beforeLoad!;
+    const context = { search: { tab: "nyxbot" }, location: { searchStr: "?tab=nyxbot" } } as never;
+    const result = Promise.resolve().then(() => guard(context));
+    if (allowed) await expect(result).resolves.toBeUndefined();
+    else await expect(result).rejects.toMatchObject({ options: { to: "/admin/usage", search: { tab: "dashboard" }, replace: true } });
   });
 });
 

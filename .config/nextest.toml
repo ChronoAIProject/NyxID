@@ -1,12 +1,66 @@
+experimental = ["wrapper-scripts"]
+
+[scripts.wrapper.telegram-personal-journey-stack]
+command = "env RUST_MIN_STACK=16777216"
+target-runner = "within-wrapper"
+
 [profile.ci]
 fail-fast = false
-# The slowest test in a healthy run takes about 40 s. Terminate any test after
-# five minutes so a stalled runner or a hung test fails fast with its name and
-# output (and junit.xml is still written) instead of consuming the 90-minute
-# job timeout. No retries: a flaky test must stay visible.
+# Terminate any test after five minutes so a stalled runner or hung test reports
+# its name and output (and junit.xml is still written) instead of consuming the
+# entire job timeout.
 slow-timeout = { period = "60s", terminate-after = 5 }
+# One retry absorbs a single transient (an I/O-stalled runner, a wall-clock
+# window boundary, a concurrent touch racing an exact-source edit) without
+# hiding it: nextest records the first attempt as <flakyFailure> in junit.xml,
+# and .github/scripts/backend_shards.py lists every retried test by name in the
+# job summary. A test that fails twice still fails the run.
+retries = 1
 
 [profile.ci.junit]
 path = "junit.xml"
 store-success-output = false
 store-failure-output = true
+
+# The two concurrent deliveries in this journey exceed libtest's 2 MiB stack,
+# including in the unchanged base-coverage checkout. Match the 16 MiB used by
+# run_native_journey_test without changing other tests' stack requirements.
+[[profile.ci.scripts]]
+filter = "binary_id(=nyxid::bin/nyxid-server) & test(=services::platform_manager_transport::journey_tests::telegram_personal_link_saved_reply_web_history_and_unlink_journey)"
+run-wrapper = "telegram-personal-journey-stack"
+
+# These tests observe real MongoDB work against wall-clock deadlines.
+# Keep concurrent fixture creation and cleanup out of their observation windows.
+[[profile.ci.overrides]]
+filter = "test(=handlers::assistant_nyxagent::tests::capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot) | test(=handlers::assistant_nyxagent::tests::capacity_retry_after_never_extends_trigger_grace_deadline) | test(=handlers::assistant_nyxagent::tests::expired_or_nearly_expired_run_grace_preserves_dispatch_and_response_bounds) | test(=handlers::assistant_nyxagent::tests::lost_session_rebinds_with_recap_and_same_turn_id)"
+threads-required = "num-cpus"
+
+# Stream-bound tests use 400ms/500ms deadlines and one measures settlement
+# against a four-second ceiling. They need the same isolation as the recovery
+# tests above so unrelated database setup/drop work cannot consume those bounds.
+[[profile.ci.overrides]]
+filter = """
+test(=handlers::assistant_nyxagent::tests::delayed_headers_fail_as_first_byte_with_internal_stage) |
+test(=handlers::assistant_nyxagent::tests::keepalives_before_created_satisfy_first_byte_and_the_turn_completes) |
+test(=handlers::assistant_nyxagent::tests::keepalive_only_stream_fails_on_no_progress_with_its_response_id) |
+test(=handlers::assistant_nyxagent::tests::tool_progress_events_reset_the_no_progress_bound) |
+test(=handlers::assistant_nyxagent::tests::silent_transport_fails_on_the_idle_bound) |
+test(=handlers::assistant_nyxagent::tests::unreachable_upstream_fails_at_connect) |
+test(=handlers::assistant_nyxagent::tests::capacity_refusals_recover_after_old_retry_limit_and_slow_proof_respects_first_byte_bound)
+"""
+threads-required = "num-cpus"
+
+# These tests require positive live-consent reads within the production 200ms
+# MongoDB / 250ms overall deadlines. Reserve the runner's test slots so unrelated
+# MongoDB fixture churn cannot turn their healthy-admission preconditions into
+# intentional fail-closed drops. Keep the real deadlines and all assertions.
+[[profile.ci.overrides]]
+filter = "test(=telemetry::tests::track_enqueues_scrubbed_capture_job_with_common_properties) | test(=telemetry::tests::track_silently_drops_when_channel_is_full) | test(=telemetry::tests::dispatch_checks_live_revision_across_independent_clients) | test(=services::analytics_dispatch_service::tests::retained_uncertainty_is_bounded_without_expiring_proof_and_accepted_rows_are_removed)"
+threads-required = "num-cpus"
+
+# Mounted admission requires live OAuth authority before testing flag denial.
+# Concurrent fixture churn exhausted the real authority-read deadline in coverage;
+# keep that deadline and the 403/no-effects assertions while reserving test slots.
+[[profile.ci.overrides]]
+filter = "test(=routes::remote_machine_flag_tests::flag_absent_and_explicit_off_block_all_mounted_admission_before_effects_for_users_and_admins)"
+threads-required = "num-cpus"

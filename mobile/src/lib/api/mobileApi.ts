@@ -14,6 +14,7 @@ import {
   listApprovalRequestsRequest,
   listChallengesRequest,
   loginWithPasswordRequest,
+  verifyMfaRequest,
   registerWithPasswordRequest,
   registerPushTokenRequest,
   revokeApprovalRequest,
@@ -79,6 +80,10 @@ export const mobileApi = {
   previewAuthDevice: previewAuthDeviceRequest,
   approveAuthDevice: approveAuthDeviceRequest,
   denyAuthDevice: denyAuthDeviceRequest,
+  async verifyMfa(body: { code: string; mfa_token: string }): Promise<LoginWithPasswordResponse> {
+    const response = await verifyMfaRequest(body);
+    return { userId: response.user_id, accessToken: response.access_token, expiresIn: response.expires_in, refreshToken: response.refresh_token };
+  },
   async loginWithPassword(input: LoginWithPasswordInput): Promise<LoginWithPasswordResponse> {
     const response = await loginWithPasswordRequest({
       email: input.email,

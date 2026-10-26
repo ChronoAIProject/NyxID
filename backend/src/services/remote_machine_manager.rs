@@ -1,4 +1,4 @@
-//! Durable Sandbox effect consumer and observation loop. No Pod/PVC mutations.
+//! Durable Sandbox effect consumer and bounded original-resource recovery loop.
 use super::{remote_machine_operation_service as operations, remote_machine_service as lifecycle};
 use crate::{
     errors::{AppError, AppResult},
@@ -158,6 +158,7 @@ impl Manager {
     /// API results are observations, never a lifecycle success by themselves.
     pub async fn tick(&self) -> AppResult<()> {
         lifecycle::suspend_ineligible_with_billing(&self.db, self.billing.clone()).await?;
+        operations::cancel_undispatched_delete_effects(&self.db).await?;
         for _ in 0..16 {
             let Some(effect) =
                 operations::claim_effect(&self.db, Utc::now(), Duration::from_secs(60)).await?
@@ -166,6 +167,19 @@ impl Manager {
             };
             let claim = effect.claim_id.as_deref().ok_or_else(unavailable)?;
             let result = self.apply_effect(&effect).await;
+            if result.is_err() && operations::has_fresh_undispatched_claim(&effect) {
+                // apply_effect can itself safety-pause before returning an
+                // error. Seal that same claim before either acknowledgement
+                // exit can discard its final non-dispatch attestation.
+                if let Some(current) =
+                    lifecycle::get_machine(&self.db, &effect.owner_id, &effect.machine_id).await?
+                {
+                    Box::pin(operations::cancel_undispatched_claim(
+                        &self.db, &current, &effect,
+                    ))
+                    .await?;
+                }
+            }
             operations::acknowledge_effect(
                 &self.db,
                 &effect.id,
@@ -180,20 +194,13 @@ impl Manager {
                     .await?;
             }
         }
-        let machines: Vec<ManagedMachine> = self
-            .db
-            .collection(MACHINES)
-            .find(doc! {"resource_state":{"$ne":"deleted"}})
-            .sort(doc! {"manager_observed_at":1,"_id":1})
-            .limit(64)
-            .await?
-            .try_collect()
-            .await?;
+        let machines = self.observation_candidates().await?;
         // Observation includes large transactional/BSON futures. Poll each
         // bounded observation on the existing Tokio scheduler instead of
         // nesting its entire poll stack below the lifecycle pass. JoinSet
         // owns cancellation: dropping this pass aborts its observation tasks.
         let mut observations = tokio::task::JoinSet::new();
+        let mut first_error = None;
         for machine in machines {
             if observations.len() == 8 {
                 let result = observations
@@ -203,33 +210,39 @@ impl Manager {
                     .map_err(|_| unavailable())
                     .and_then(|result| result);
                 if let Err(error) = result {
-                    observations.shutdown().await;
-                    return Err(error);
+                    first_error.get_or_insert(error);
                 }
             }
             let manager = self.clone();
             observations.spawn(async move {
-                // Repair a lost diagnostic append after durable quarantine,
-                // without waiting for Kubernetes connectivity to recover.
-                if machine.native_uncertainty.is_some() {
-                    manager.record_native_investigation(&machine).await?;
+                let result: AppResult<()> = async {
+                    // Repair a lost diagnostic append after durable quarantine,
+                    // without waiting for Kubernetes connectivity to recover.
+                    if machine.native_uncertainty.is_some() {
+                        manager.record_native_investigation(&machine).await?;
+                    }
+                    if !matches!(
+                        tokio::time::timeout(Duration::from_secs(45), manager.observe(&machine))
+                            .await,
+                        Ok(Ok(()))
+                    ) && let Some(op) = &machine.active_operation_id
+                    {
+                        manager.progress(op, "runtime_evidence_pending").await?;
+                    }
+                    if machine.specialist_assignment_state == "pending" {
+                        // The durable pending choice survives a lost WSS response.
+                        // Existing assignment policy is applied only once, while Ready.
+                        let _ = super::remote_machine_configuration::assign_specialist(
+                            &manager.db,
+                            &machine.node_id,
+                        )
+                        .await;
+                    }
+                    Ok(())
                 }
-                if !matches!(
-                    tokio::time::timeout(Duration::from_secs(45), manager.observe(&machine)).await,
-                    Ok(Ok(()))
-                ) && let Some(op) = &machine.active_operation_id
-                {
-                    manager.progress(op, "runtime_evidence_pending").await?;
-                }
-                if machine.specialist_assignment_state == "pending" {
-                    // The durable pending choice survives a lost WSS response.
-                    // Existing assignment policy is applied only once, while Ready.
-                    let _ = super::remote_machine_configuration::assign_specialist(
-                        &manager.db,
-                        &machine.node_id,
-                    )
-                    .await;
-                }
+                .await;
+                // An unknown machine still moves to the back of its scan
+                // share, including diagnostic failures before native I/O.
                 manager
                     .db
                     .collection::<Document>(MACHINES)
@@ -238,18 +251,89 @@ impl Manager {
                         doc! {"$set":{"manager_observed_at":bson::DateTime::now()}},
                     )
                     .await?;
-                Ok::<(), AppError>(())
+                result
             });
         }
         while let Some(result) = observations.join_next().await {
             if let Err(error) = result.map_err(|_| unavailable()).and_then(|result| result) {
-                observations.shutdown().await;
-                return Err(error);
+                first_error.get_or_insert(error);
             }
         }
+        // Finalized tombstones retain their exact cleanup authority. This
+        // independent bounded share catches controller resources that appear
+        // after the final transaction without reopening financial state.
+        self.reconcile_finalized_cleanup().await?;
         self.inventory().await?;
         super::remote_machine_events::sweep(&self.db, Utc::now()).await?;
         super::remote_machine_reclamation::sweep(&self.db, Utc::now()).await?;
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Give due original deletes their own bounded share. An operation lookup
+    /// excludes stale/superseded delete rows and future retries before the
+    /// limit, so neither ordinary machines nor old operations can starve them.
+    async fn observation_candidates(&self) -> AppResult<Vec<ManagedMachine>> {
+        let rows: Vec<Document> = self.db.collection::<Document>(MACHINES).aggregate(vec![
+            doc! {"$match":{"resource_state":"deleting","active_operation_id":{"$type":"string"}}},
+            doc! {"$lookup":{"from":OPERATIONS,"let":{"operation":"$active_operation_id","machine":"$_id","owner":"$owner_id"},
+                "pipeline":[{"$match":{"action":"delete","state":{"$in":["accepted","applying","reconciling"]},
+                    "$or":[{"next_attempt_at":bson::Bson::Null},{"next_attempt_at":{"$lte":bson::DateTime::now()}}],
+                    "terminal_at":bson::Bson::Null,
+                    "$expr":{"$and":[{"$eq":["$_id","$$operation"]},{"$eq":["$machine_id","$$machine"]},{"$eq":["$owner_id","$$owner"]},
+                        super::remote_machine_delete_retry::eligible_expression(Utc::now())]}}},
+                    {"$project":{"_id":1}}],"as":"due_delete"}},
+            doc! {"$match":{"due_delete.0":{"$exists":true}}},
+            doc! {"$sort":{"manager_observed_at":1,"_id":1}},
+            doc! {"$limit":32_i64},
+            doc! {"$unset":"due_delete"},
+        ]).max_time(Duration::from_secs(3)).await?.try_collect().await?;
+        let mut machines = rows
+            .into_iter()
+            .map(|row| bson::from_document(row).map_err(|_| unavailable()))
+            .collect::<AppResult<Vec<ManagedMachine>>>()?;
+        let ordinary: Vec<ManagedMachine> = self
+            .db
+            .collection(MACHINES)
+            .find(doc! {"resource_state":{"$nin":["deleted","deleting"]}})
+            .sort(doc! {"manager_observed_at":1,"_id":1})
+            .limit(32)
+            .max_time(Duration::from_secs(3))
+            .await?
+            .try_collect()
+            .await?;
+        machines.extend(ordinary);
+        Ok(machines)
+    }
+
+    async fn finalized_cleanup_candidates(&self) -> AppResult<Vec<ManagedMachine>> {
+        Ok(self.db.collection::<ManagedMachine>(MACHINES)
+            .find(doc! {"resource_state":"deleted","sandbox_uid":{"$type":"string"},
+                "active_operation_id":{"$type":"string"},"delete_recovery.evidence_version":{"$in":[1_i32,super::remote_machine_delete_recovery::EVIDENCE_VERSION]}})
+            .sort(doc! {"manager_observed_at":1,"_id":1}).limit(8)
+            .max_time(Duration::from_secs(3)).await?.try_collect().await?)
+    }
+
+    async fn reconcile_finalized_cleanup(&self) -> AppResult<()> {
+        let machines = self.finalized_cleanup_candidates().await?;
+        let mut work = futures::stream::iter(machines).map(|machine| async move {
+            // Recovery returns private resource blockers. One blocked tombstone
+            // cannot prevent other original scopes from making progress.
+            let result = tokio::time::timeout(Duration::from_secs(45),
+                super::remote_machine_delete_recovery::advance(self, &machine)).await;
+            self.db.collection::<Document>(MACHINES).update_one(
+                doc! {"_id":&machine.node_id,"resource_state":"deleted"},
+                doc! {"$set":{"manager_observed_at":bson::DateTime::now()}},
+            ).await?;
+            if !matches!(result, Ok(Ok(())))
+                && !matches!(&result, Ok(Err(error)) if super::remote_machine_delete_recovery::observation_error_code(error).is_some())
+            {
+                tracing::warn!(machine_id=%machine.node_id, "Remote Machine retained-resource cleanup pending");
+            }
+            Ok::<(), AppError>(())
+        }).buffer_unordered(4);
+        while let Some(result) = work.next().await {
+            result?;
+        }
         Ok(())
     }
 
@@ -261,7 +345,16 @@ impl Manager {
         // Free safety windows use the same native shutdownTime contract.
         let free: Vec<ManagedMachine> = self.db.collection(MACHINES).find(doc!{"free_slot":true,"resource_state":{"$in":["ready","provisioning","resuming"]}}).sort(doc!{"native_safety_checked_at":1,"_id":1}).limit(16).max_time(Duration::from_secs(3)).await?.try_collect().await?;
         for machine in free {
-            if machine
+            if super::remote_machine_runtime::pending_resume_initialization(
+                &self.db,
+                &machine,
+                Utc::now(),
+            )
+            .await?
+            {
+                // Keep the stopped predecessor's deadline unchanged. The
+                // accepted finite Resume will initialize the next generation.
+            } else if machine
                 .native_run_not_after
                 .is_some_and(|at| at <= Utc::now())
             {
@@ -279,7 +372,7 @@ impl Manager {
             self.db
                 .collection::<Document>(MACHINES)
                 .update_one(
-                    doc! {"_id":&machine.node_id},
+                    super::remote_machine_runtime::maintenance_snapshot_filter(&machine),
                     doc! {"$set":{"native_safety_checked_at":bson::DateTime::now()}},
                 )
                 .await?;
@@ -338,7 +431,14 @@ impl Manager {
         Ok(())
     }
 
-    pub async fn apply_effect(&self, effect: &MachineEffectOutbox) -> AppResult<()> {
+    pub fn apply_effect<'a>(
+        &'a self,
+        effect: &'a MachineEffectOutbox,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(self.apply_effect_inner(effect))
+    }
+
+    async fn apply_effect_inner(&self, effect: &MachineEffectOutbox) -> AppResult<()> {
         let mut machine = lifecycle::get_machine(&self.db, &effect.owner_id, &effect.machine_id)
             .await?
             .ok_or_else(unavailable)?;
@@ -352,21 +452,29 @@ impl Manager {
         if machine.active_operation_id.as_deref() != Some(effect.operation_id.as_str()) {
             // The successor owns desired state. Old lost-response effects are
             // never allowed to resurrect or remove its resource.
+            let cancelled =
+                operations::cancel_undispatched_claim(&self.db, &machine, effect).await?;
+            if !cancelled && operations::has_fresh_undispatched_claim(effect) {
+                return Err(unavailable());
+            }
+            // Legacy unknown deliveries may be acknowledged as inert work;
+            // that bookkeeping never discharges their request responsibility.
             return Ok(());
         }
-        if effect.kind == EffectKind::DeleteSandbox
-            && !lifecycle::deletion_authorized(&self.db, &machine.node_id).await?
+        if machine.resource_state == ResourceState::Deleting
+            && effect.kind != EffectKind::DeleteSandbox
         {
-            return Err(AppError::Conflict(
-                "machine_owner_deletion_basis_required".into(),
-            ));
-        }
-        if effect.kind == EffectKind::DeleteSandbox
-            && lifecycle::finalize_unallocated_delete(&self.db, &machine.node_id)
-                .await?
-                .is_some()
-        {
+            let cancelled =
+                operations::cancel_undispatched_claim(&self.db, &machine, effect).await?;
+            if !cancelled && operations::has_fresh_undispatched_claim(effect) {
+                return Err(unavailable());
+            }
+            // Legacy unknown deliveries may be acknowledged as inert work;
+            // that bookkeeping never discharges their request responsibility.
             return Ok(());
+        }
+        if effect.kind == EffectKind::DeleteSandbox {
+            return super::remote_machine_delete_recovery::advance(self, &machine).await;
         }
         let requires_funding = matches!(
             effect.kind,
@@ -440,7 +548,7 @@ impl Manager {
         }
         if matches!(
             effect.kind,
-            EffectKind::SuspendSandbox | EffectKind::DeleteSandbox | EffectKind::RekeySandbox
+            EffectKind::SuspendSandbox | EffectKind::RekeySandbox
         ) && machine.sandbox_uid.is_none()
         {
             // A create response may have been lost. Read and bind the original
@@ -457,11 +565,14 @@ impl Manager {
             && effect.desired_mode == "running")
             || (effect.kind == EffectKind::RekeySandbox
                 && operation.desired_runtime_generation == Some(machine.runtime_generation));
-        if running {
+        let running_dispatch = if running {
             super::remote_machine_runtime::validate_saved_contract(&self.db, &machine).await?;
             self.require_workspace(&machine).await?;
             machine = super::remote_machine_runtime::mark_submission(&self.db, &machine).await?;
-        }
+            Some(operations::begin_submission(&self.db, &machine, effect).await?)
+        } else {
+            None
+        };
         let intent = super::remote_machine_adapter::intent(
             &machine,
             &effect.operation_id,
@@ -469,24 +580,101 @@ impl Manager {
             running,
             &self.bootstrap_base_url,
         );
-        let observation = if let Some(uid) = &machine.sandbox_uid {
-            // Delete starts by stopping. Resource deletion follows verified stop
-            // in observe(); API/CR disappearance does not release the free slot.
+        if let Some(dispatch) = &running_dispatch
+            && !self
+                .running_dispatch_is_live(&machine, &effect.id, dispatch)
+                .await?
+        {
+            return Ok(());
+        }
+        let observation = if let Some(uid) = machine.sandbox_uid.clone() {
             self.api
-                .apply_if_uid(&intent, uid)
+                .apply_if_uid(&intent, &uid)
                 .await
                 .map_err(api_error)?
         } else {
             if let Some(current) = self.api.get_for_intent(&intent).await.map_err(api_error)? {
                 current
             } else {
+                if let Some(dispatch) = &running_dispatch
+                    && !self
+                        .running_dispatch_is_live(&machine, &effect.id, dispatch)
+                        .await?
+                {
+                    return Ok(());
+                }
                 self.api.apply(&intent).await.map_err(api_error)?
             }
         };
+        if let Some(dispatch) = &running_dispatch {
+            operations::finish_submission(&self.db, &effect.id, dispatch, Some(&observation))
+                .await?;
+        }
         self.record_observation(&machine, &observation).await?;
         self.progress(&effect.operation_id, "runtime_evidence_pending")
             .await?;
         Ok(())
+    }
+
+    /// A durable dispatch remains unresolved if the request is cancelled after
+    /// it starts. Only a request fenced out before this call is terminal here.
+    async fn running_dispatch_is_live(
+        &self,
+        machine: &ManagedMachine,
+        effect: &str,
+        dispatch: &str,
+    ) -> AppResult<bool> {
+        let live = lifecycle::managed_machine_for_node(&self.db, &machine.node_id)
+            .await?
+            .ok_or_else(unavailable)?;
+        let allowed = live.owner_id == machine.owner_id
+            && live.revision == machine.revision
+            && live.active_operation_id == machine.active_operation_id
+            && matches!(
+                live.resource_state,
+                ResourceState::Provisioning
+                    | ResourceState::Ready
+                    | ResourceState::Resuming
+                    | ResourceState::Reconciling
+                    | ResourceState::Degraded
+            )
+            && live.runtime_generation == machine.runtime_generation
+            && live.credential_epoch == machine.credential_epoch
+            && live.writer_fence == machine.writer_fence
+            && live.native_uncertainty.is_none()
+            && super::remote_machine_runtime::funding_is_live(&live, Utc::now());
+        if !allowed {
+            operations::finish_submission(&self.db, effect, dispatch, None).await?;
+        }
+        Ok(allowed)
+    }
+
+    /// Operation labels do not advance Kubernetes generation. Record the exact
+    /// next generation only when this UID/RV-preconditioned patch changes spec,
+    /// before I/O so a lost response retains the original stop responsibility.
+    async fn prepare_delete_suspension(
+        &self,
+        machine: &ManagedMachine,
+        observed: &SandboxObservation,
+    ) -> AppResult<ManagedMachine> {
+        if machine.resource_state != ResourceState::Deleting
+            || (observed.desired_suspended && observed.shutdown_time.is_none())
+        {
+            return Ok(machine.clone());
+        }
+        let generation = observed
+            .generation
+            .filter(|g| *g > 0)
+            .and_then(|g| g.checked_add(1))
+            .ok_or_else(unavailable)?;
+        self.db.collection::<ManagedMachine>(MACHINES).find_one_and_update(
+            doc! {"_id":&machine.node_id,"owner_id":&machine.owner_id,"revision":machine.revision,
+                "resource_state":"deleting","active_operation_id":&machine.active_operation_id,
+                "runtime_generation":machine.runtime_generation,"credential_epoch":machine.credential_epoch,
+                "writer_fence":&machine.writer_fence,"sandbox_uid":&machine.sandbox_uid,"writer_admitted":false},
+            doc! {"$set":{"delete_suspension_generation":generation,
+                "delete_suspension_operation_id":&machine.active_operation_id},"$inc":{"revision":1_i64}},
+        ).return_document(mongodb::options::ReturnDocument::After).await?.ok_or_else(unavailable)
     }
 
     async fn uncertain(&self, machine: &ManagedMachine, reason: &'static str) -> AppResult<()> {
@@ -556,16 +744,29 @@ impl Manager {
         Ok(())
     }
 
-    async fn record_observation(
+    fn record_observation<'a>(
+        &'a self,
+        machine: &'a ManagedMachine,
+        observed: &'a SandboxObservation,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(self.record_observation_inner(machine, observed, None))
+    }
+
+    async fn record_observation_inner(
         &self,
         machine: &ManagedMachine,
         observed: &SandboxObservation,
+        delete_snapshot: Option<&mut ManagedMachine>,
     ) -> AppResult<()> {
         use super::remote_machine_native as native;
         use crate::models::remote_machine::NativeRuntimeObservation;
-        let mut machine = lifecycle::get_machine(&self.db, &machine.owner_id, &machine.node_id)
-            .await?
-            .ok_or_else(unavailable)?;
+        let mut machine = if delete_snapshot.is_some() {
+            machine.clone()
+        } else {
+            lifecycle::get_machine(&self.db, &machine.owner_id, &machine.node_id)
+                .await?
+                .ok_or_else(unavailable)?
+        };
         if machine.native_uncertainty.is_some() {
             return Err(unavailable());
         }
@@ -623,12 +824,24 @@ impl Manager {
             .api
             .list_owned_resources(&machine.sandbox_namespace, "pods", uid)
             .await
-            .map_err(api_error)?;
+            .map_err(|error| {
+                if delete_snapshot.is_some() {
+                    super::remote_machine_delete_recovery::api_pending(&machine, error)
+                } else {
+                    api_error(error)
+                }
+            })?;
         let pvcs = self
             .api
             .list_owned_resources(&machine.sandbox_namespace, "persistentvolumeclaims", uid)
             .await
-            .map_err(api_error)?;
+            .map_err(|error| {
+                if delete_snapshot.is_some() {
+                    super::remote_machine_delete_recovery::api_pending(&machine, error)
+                } else {
+                    api_error(error)
+                }
+            })?;
         if pods.len() > 1 || pvcs.len() > 1 {
             return self.uncertain(&machine, "multiple_owned_resources").await;
         }
@@ -696,7 +909,13 @@ impl Manager {
                 .api
                 .resource(&machine.sandbox_namespace, "pods", name)
                 .await
-                .map_err(api_error)?
+                .map_err(|error| {
+                    if delete_snapshot.is_some() {
+                        super::remote_machine_delete_recovery::api_pending(&machine, error)
+                    } else {
+                        api_error(error)
+                    }
+                })?
                 .is_some()
         {
             return self
@@ -743,7 +962,13 @@ impl Manager {
                 .api
                 .persistent_volume(name)
                 .await
-                .map_err(api_error)?
+                .map_err(|error| {
+                    if delete_snapshot.is_some() {
+                        super::remote_machine_delete_recovery::api_pending(&machine, error)
+                    } else {
+                        api_error(error)
+                    }
+                })?
                 .ok_or_else(unavailable)?;
             if pv.claim_uid != pvc.uid
                 || pv.claim_namespace.as_deref() != Some(machine.sandbox_namespace.as_str())
@@ -779,7 +1004,16 @@ impl Manager {
             && observed.observed_generation == Some(generation)
             && pods.is_empty()
             && observed.deletion_timestamp.is_none()
-            && (machine.pod_uid.is_none() || node.is_some());
+            && (machine.pod_uid.is_none() || node.is_some())
+            && (machine.resource_state != ResourceState::Deleting
+                || (machine.delete_suspension_operation_id.as_ref() == Some(&operation_id)
+                    && machine.delete_suspension_generation == Some(generation))
+                || machine.native_observation.as_ref().is_some_and(|previous| {
+                    previous.stop_confirmed
+                        && previous.operation_id == operation_id
+                        && previous.sandbox_generation == generation
+                        && native::predecessor_stopped(&machine)
+                }));
         if machine.resource_state == ResourceState::Ready && !running {
             if pod.is_some_and(|p| {
                 p.phase.as_deref() == Some("Running") && p.deletion_timestamp.is_none()
@@ -834,16 +1068,46 @@ impl Manager {
                 uid, generation, resource_version
             ),
         };
-        native::record(&self.db, &machine, &observation, bindings).await?;
+        let saved = native::record(&self.db, &machine, &observation, bindings).await?;
+        if let Some(snapshot) = delete_snapshot {
+            *snapshot = saved;
+        }
         Ok(())
     }
 
-    async fn observe_resource(&self, machine: &ManagedMachine) -> AppResult<()> {
+    pub(crate) fn observe_resource<'a>(
+        &'a self,
+        machine: &'a ManagedMachine,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(self.observe_resource_inner(machine, None))
+    }
+
+    pub(crate) fn observe_delete_resource<'a>(
+        &'a self,
+        machine: &'a mut ManagedMachine,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(async move {
+            let snapshot = machine.clone();
+            self.observe_resource_inner(&snapshot, Some(machine)).await
+        })
+    }
+
+    async fn observe_resource_inner(
+        &self,
+        machine: &ManagedMachine,
+        mut delete_snapshot: Option<&mut ManagedMachine>,
+    ) -> AppResult<()> {
         if let Some(mut observed) = self
             .api
             .get(&machine.sandbox_namespace, &machine.sandbox_name)
             .await
-            .map_err(api_error)?
+            .map_err(|error| {
+                if delete_snapshot.is_some() {
+                    super::remote_machine_delete_recovery::api_pending(machine, error)
+                } else {
+                    api_error(error)
+                }
+            })?
         {
             // A previously admitted HTTP request can finish after a newer
             // owner transaction. Repair only the current Sandbox desired state;
@@ -851,6 +1115,9 @@ impl Manager {
             let mut current = lifecycle::get_machine(&self.db, &machine.owner_id, &machine.node_id)
                 .await?
                 .ok_or_else(unavailable)?;
+            if delete_snapshot.is_some() && current.revision != machine.revision {
+                return Err(AppError::Conflict("delete_evidence_raced".into()));
+            }
             if current
                 .sandbox_uid
                 .as_deref()
@@ -944,10 +1211,26 @@ impl Manager {
                     return Err(unavailable());
                 }
                 if running {
+                    super::remote_machine_runtime::validate_saved_contract(&self.db, &current)
+                        .await?;
                     self.require_workspace(&current).await?;
                     current =
                         super::remote_machine_runtime::mark_submission(&self.db, &current).await?;
                 }
+                let running_dispatch = if running {
+                    let effect = self.db.collection::<MachineEffectOutbox>(
+                        crate::models::remote_machine_outbox::COLLECTION_NAME,
+                    ).find_one(doc! {"operation_id":&operation_id,"machine_id":&current.node_id,
+                        "owner_id":&current.owner_id,"kind":{"$in":["create_sandbox","resume_sandbox",
+                            "rekey_sandbox","reconcile_sandbox","update_sandbox_deadline"]},
+                        "$or":[{"desired_mode":"running"},{"kind":"rekey_sandbox"}]})
+                        .sort(doc! {"created_at":-1,"_id":-1}).await?.ok_or_else(unavailable)?;
+                    let dispatch =
+                        operations::begin_submission(&self.db, &current, &effect).await?;
+                    Some((effect.id, dispatch))
+                } else {
+                    None
+                };
                 let intent = super::remote_machine_adapter::intent(
                     &current,
                     &operation_id,
@@ -955,13 +1238,53 @@ impl Manager {
                     running,
                     &self.bootstrap_base_url,
                 );
-                observed = self
-                    .api
-                    .apply_if_uid(&intent, &uid)
-                    .await
-                    .map_err(api_error)?;
+                if let Some((effect, dispatch)) = &running_dispatch
+                    && !self
+                        .running_dispatch_is_live(&current, effect, dispatch)
+                        .await?
+                {
+                    return Ok(());
+                }
+                observed = if current.resource_state == ResourceState::Deleting {
+                    current = self.prepare_delete_suspension(&current, &observed).await?;
+                    if let Some(snapshot) = delete_snapshot.as_deref_mut() {
+                        *snapshot = current.clone();
+                    }
+                    self.api
+                        .suspend_if_identity(
+                            &intent,
+                            &uid,
+                            observed
+                                .resource_version
+                                .as_deref()
+                                .ok_or_else(unavailable)?,
+                        )
+                        .await
+                        .map_err(|error| {
+                            if delete_snapshot.is_some() {
+                                super::remote_machine_delete_recovery::api_pending(&current, error)
+                            } else {
+                                api_error(error)
+                            }
+                        })?
+                } else {
+                    self.api
+                        .apply_if_uid(&intent, &uid)
+                        .await
+                        .map_err(api_error)?
+                };
+                if let Some((effect, dispatch)) = &running_dispatch {
+                    operations::finish_submission(&self.db, effect, dispatch, Some(&observed))
+                        .await?;
+                }
             }
-            self.record_observation(&current, &observed).await?;
+            if let Some(snapshot) = delete_snapshot {
+                *snapshot = current.clone();
+                Box::pin(self.record_observation_inner(&current, &observed, Some(snapshot)))
+                    .await?;
+            } else {
+                self.record_observation(&current, &observed).await?;
+            }
         } else if machine.sandbox_uid.is_some() {
             return self
                 .uncertain(machine, "sandbox_disappeared_without_native_stop")
@@ -970,19 +1293,24 @@ impl Manager {
         Ok(())
     }
 
-    pub async fn observe(&self, machine: &ManagedMachine) -> AppResult<()> {
-        let mut current = lifecycle::get_machine(&self.db, &machine.owner_id, &machine.node_id)
+    /// Allocate the lifecycle stage before polling it. Its independent BSON and
+    /// accounting stages must not be embedded in each caller's async frame.
+    pub fn observe<'a>(
+        &'a self,
+        machine: &'a ManagedMachine,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(self.observe_inner(machine))
+    }
+
+    async fn observe_inner(&self, machine: &ManagedMachine) -> AppResult<()> {
+        let current = lifecycle::get_machine(&self.db, &machine.owner_id, &machine.node_id)
             .await?
             .ok_or_else(unavailable)?;
-        if current.resource_state == ResourceState::Deleting {
-            if !lifecycle::deletion_authorized(&self.db, &current.node_id).await? {
-                return Err(AppError::Conflict(
-                    "machine_owner_deletion_basis_required".into(),
-                ));
-            }
-            current = lifecycle::get_machine(&self.db, &current.owner_id, &current.node_id)
-                .await?
-                .ok_or_else(unavailable)?;
+        if current.resource_state == ResourceState::Deleting
+            || (current.resource_state == ResourceState::Deleted
+                && current.delete_recovery.is_some())
+        {
+            return super::remote_machine_delete_recovery::advance(self, &current).await;
         }
         if super::remote_machine_runtime::finalize_never_submitted(
             &self.db,
@@ -995,13 +1323,6 @@ impl Manager {
         }
         if current.resource_state == ResourceState::Deleted {
             return self.complete_if_final(&current).await;
-        }
-        if machine.resource_state == ResourceState::Deleting
-            && lifecycle::finalize_unallocated_delete(&self.db, &machine.node_id)
-                .await?
-                .is_some()
-        {
-            return self.complete_if_final(machine).await;
         }
         if let Some(operation_id) = &current.active_operation_id
             && let Some(op) =
@@ -1064,14 +1385,6 @@ impl Manager {
                     return Err(unavailable());
                 }
             }
-        }
-        if current.resource_state == ResourceState::Deleting
-            && super::remote_machine_native::predecessor_stopped(&current)
-            && current.native_observation.as_ref().is_some_and(|o| {
-                Some(o.operation_id.as_str()) == current.active_operation_id.as_deref()
-            })
-        {
-            return self.finish_native_delete(&current).await;
         }
         self.observe_resource(&current).await?;
         let machine = lifecycle::get_machine(&self.db, &current.owner_id, &current.node_id)
@@ -1164,134 +1477,10 @@ impl Manager {
     }
 
     async fn finish_native_delete(&self, machine: &ManagedMachine) -> AppResult<()> {
-        if machine.native_uncertainty.is_some()
-            || !super::remote_machine_native::predecessor_stopped(machine)
-            || !lifecycle::deletion_authorized(&self.db, &machine.node_id).await?
-        {
-            return Err(unavailable());
-        }
-        if machine
-            .native_observation
-            .as_ref()
-            .is_none_or(|o| Some(o.operation_id.as_str()) != machine.active_operation_id.as_deref())
-        {
-            return Err(unavailable());
-        }
-        if !machine.free_slot {
-            let settlement = match &self.billing {
-                Some(billing) => {
-                    super::remote_machine_runtime::native_observe_and_settle(
-                        &self.db,
-                        billing.clone(),
-                        machine,
-                        machine
-                            .native_observation
-                            .as_ref()
-                            .ok_or_else(unavailable)?,
-                    )
-                    .await
-                }
-                None => Err(unavailable()),
-            };
-            if settlement.is_err() {
-                self.db
-                    .collection::<Document>(MACHINES)
-                    .update_one(
-                        doc! {"_id":&machine.node_id,"revision":machine.revision},
-                        doc! {"$set":{"billing_state":"pending"}},
-                    )
-                    .await?;
-            }
-        }
-        let uid = machine.sandbox_uid.as_deref().ok_or_else(unavailable)?;
-        // Immediate local credential removal is independent of slow GC/accounting.
-        self.db.collection::<Document>(crate::models::node::COLLECTION_NAME).update_one(
-            doc!{"_id":&machine.node_id,"user_id":&machine.owner_id},
-            doc!{"$set":{"is_active":false,"status":"offline","signing_secret_encrypted":bson::Bson::Null,
-                "auth_token_hash":crate::crypto::token::hash_token(&uuid::Uuid::new_v4().to_string()),
-                "signing_secret_hash":crate::crypto::token::hash_token(&uuid::Uuid::new_v4().to_string()),"connection_owner":bson::Bson::Null}}
-        ).await?;
-        if let Some(sandbox) = self
-            .api
-            .get(&machine.sandbox_namespace, &machine.sandbox_name)
-            .await
-            .map_err(api_error)?
-        {
-            if sandbox.sandbox_uid.as_deref() != Some(uid)
-                || sandbox.machine_id.as_deref() != Some(&machine.node_id)
-                || sandbox.owner_id.as_deref() != Some(&machine.owner_id)
-            {
-                return self
-                    .uncertain(machine, "delete_sandbox_ownership_conflict")
-                    .await;
-            }
-            self.api
-                .delete_if_uid(&machine.sandbox_namespace, &machine.sandbox_name, uid)
-                .await
-                .map_err(api_error)?;
-            return Err(unavailable()); // submission is never cleanup completion
-        }
-        for resource in ["pods", "persistentvolumeclaims"] {
-            if !self
-                .api
-                .list_owned_resources(&machine.sandbox_namespace, resource, uid)
-                .await
-                .map_err(api_error)?
-                .is_empty()
-            {
-                return Err(unavailable());
-            }
-        }
-        if let Some(name) = &machine.native_pod_name
-            && self
-                .api
-                .resource(&machine.sandbox_namespace, "pods", name)
-                .await
-                .map_err(api_error)?
-                .is_some()
-        {
-            return Err(unavailable());
-        }
-        if let Some(name) = &machine.pvc_name {
-            if self
-                .api
-                .resource(&machine.sandbox_namespace, "persistentvolumeclaims", name)
-                .await
-                .map_err(api_error)?
-                .is_some()
-            {
-                return Err(unavailable());
-            }
-            // Never release unknown/Retain backing storage based on claim absence.
-            if machine.native_pv_reclaim_policy.as_deref() != Some("Delete") {
-                return Err(unavailable());
-            }
-            let pv_name = machine.native_pv_name.as_deref().ok_or_else(unavailable)?;
-            if machine.native_pv_uid.is_none()
-                || self
-                    .api
-                    .persistent_volume(pv_name)
-                    .await
-                    .map_err(api_error)?
-                    .is_some()
-            {
-                return Err(unavailable());
-            }
-        } else if machine.pvc_uid.is_some() {
-            return Err(unavailable());
-        }
-        let reference = format!(
-            "kubernetes-native-cleanup:{}:{}:{}:{}",
-            uid,
-            machine.pvc_uid.as_deref().unwrap_or("unallocated"),
-            machine.native_pv_uid.as_deref().unwrap_or("unallocated"),
-            Utc::now().timestamp_millis()
-        );
-        super::remote_machine_native::finalize_stop(&self.db, machine, Some(&reference)).await?;
-        self.complete_if_final(machine).await
+        super::remote_machine_delete_recovery::advance(self, machine).await
     }
 
-    async fn complete_if_final(&self, previous: &ManagedMachine) -> AppResult<()> {
+    pub(crate) async fn complete_if_final(&self, previous: &ManagedMachine) -> AppResult<()> {
         let Some(op_id) = &previous.active_operation_id else {
             return Ok(());
         };
@@ -1310,7 +1499,7 @@ impl Manager {
             LifecycleAction::Reconcile => machine.resource_state == ResourceState::Ready,
         };
         if final_state {
-            self.db.collection::<Document>(OPERATIONS).update_one(doc! {"_id":op_id,"state":{"$in":["accepted","applying","reconciling"]}}, doc! {"$set":{"state":"succeeded","cleanup_state":&machine.cleanup_state,"terminal_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),"error_code":bson::Bson::Null,"error_message":bson::Bson::Null}}).await?;
+            self.db.collection::<Document>(OPERATIONS).update_one(doc! {"_id":op_id,"state":{"$in":["accepted","applying","reconciling"]}}, doc! {"$set":{"state":"succeeded","cleanup_state":&machine.cleanup_state,"terminal_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),"error_code":bson::Bson::Null,"error_message":bson::Bson::Null,"next_attempt_at":bson::Bson::Null}}).await?;
             super::remote_machine_events::record(
                 &self.db,
                 &op,
@@ -1323,8 +1512,26 @@ impl Manager {
         Ok(())
     }
 
-    async fn progress(&self, operation: &str, code: &str) -> AppResult<()> {
-        self.db.collection::<Document>(OPERATIONS).update_one(doc! {"_id":operation,"state":{"$in":["accepted","applying","reconciling"]}}, doc! {"$set":{"state":"reconciling","error_code":code,"error_message":"Awaiting current Kubernetes resource observations; work data remains retained","next_attempt_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::seconds(10)),"updated_at":bson::DateTime::now()},"$inc":{"retry_count":1}}).await?;
+    pub(crate) async fn progress(&self, operation: &str, code: &str) -> AppResult<()> {
+        let mut filter = doc! {"_id":operation,"action":"delete","state":{"$in":["accepted","applying","reconciling"]}};
+        if matches!(code, "sandbox_effect_pending" | "runtime_evidence_pending") {
+            filter.insert("error_code", doc! {"$in":[bson::Bson::Null,bson::Bson::from("sandbox_effect_pending"),bson::Bson::from("runtime_evidence_pending")]});
+        }
+        // Only shared admission consumes/schedules a delete attempt. Internal
+        // milestones and wrapper errors preserve its budget and last blocker.
+        self.db.collection::<Document>(OPERATIONS).update_one(filter, doc! {
+            "$set":{"state":"reconciling","error_code":code,
+                "error_message":"Awaiting verified lifecycle responsibilities; work data remains retained",
+                "updated_at":bson::DateTime::now()},
+        }).await?;
+        self.db.collection::<Document>(OPERATIONS).update_one(
+            doc! {"_id":operation,"action":{"$ne":"delete"},"state":{"$in":["accepted","applying","reconciling"]}}, doc! {
+            "$set":{"state":"reconciling","error_code":code,
+                "error_message":"Awaiting verified lifecycle responsibilities; work data remains retained",
+                "updated_at":bson::DateTime::now()},
+            "$max":{"next_attempt_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::seconds(10))},
+            "$inc":{"retry_count":1},
+        }).await?;
         Ok(())
     }
 

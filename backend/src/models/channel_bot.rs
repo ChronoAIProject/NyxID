@@ -74,6 +74,9 @@ pub enum XChannelEvent {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelBot {
+    /// Additional Telegram manager webhook identity. Legacy default has no suffix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_instance: Option<i64>,
     #[serde(default)]
     pub diagnostics: ChannelBotDiagnostics,
     /// Absent on legacy X channels, which receive DMs only.
@@ -326,6 +329,7 @@ mod tests {
 
     fn make_channel_bot() -> ChannelBot {
         ChannelBot {
+            manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,

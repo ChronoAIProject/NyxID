@@ -446,6 +446,7 @@ pub async fn approve(
 ) -> AppResult<PrivateJson<DecisionResponse>> {
     let result = async {
         let ip = decision_limit(&state, &user, &headers, addr, "approve").await?;
+        crate::services::session_authority::require_derived_mfa(user.derived_mfa_authority())?;
         let expiry = body
             .credential_expires_at
             .as_deref()
@@ -580,7 +581,8 @@ pub async fn poll(
                 method: "agent_key".into(),
                 mfa_required: false,
             },
-        );
+        )
+        .await;
         Ok(private_json(DeliveryResponse {
             credential: result.credential.to_string(),
             credential_id: result.credential_id,

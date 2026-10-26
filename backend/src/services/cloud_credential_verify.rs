@@ -80,7 +80,7 @@ pub async fn verify_aws_sigv4(
         req = req.header(n, v);
     }
     for h in &signed {
-        req = req.header(&h.name, &h.value);
+        req = req.header(&h.name, h.value.as_str());
     }
 
     let response = match tokio::time::timeout(VERIFY_TIMEOUT, req.send()).await {

@@ -192,6 +192,7 @@ pub(crate) async fn fixture() -> (crate::AppState, String, MockServer) {
 
 pub(crate) fn service<'a>(state: &'a crate::AppState, base: &'a str) -> TelegramNewService<'a> {
     TelegramNewService {
+        manager_id: None,
         db: &state.db,
         keys: &state.encryption_keys,
         config: &state.config,
@@ -2703,9 +2704,9 @@ async fn telegram_new_manager_channel_acknowledges_before_callback_and_routes_on
             axum::body::Bytes::from(
                 serde_json::to_vec(&message(json!({
                     "text": "hello agent",
-                    "reply_to_message": {"message_id": 9, "text": "private-claim-code"},
+                    "reply_to_message": {"message_id": 9, "from":{"id":100}, "text": "private-claim-code"},
                     "quote": {"text": "private-claim-code"},
-                    "external_reply": {"text": "private-claim-code"},
+                    "external_reply": {"origin":{"type":"user","sender_user":{"id":100}},"text": "private-claim-code"},
                 })))
                 .unwrap(),
             ),
@@ -2851,6 +2852,8 @@ async fn platform_onboarding_native_command_errors_reply_safely_and_provider_fai
     let channel = register_manager_channel(&state, &actor, &server).await;
     let now = Utc::now();
     let profile = PlatformBotConfig {
+        identity_version: None,
+        native_entry: None,
         guide: None,
         id: uuid::Uuid::new_v4().to_string(),
         channel_bot_id: channel.id.clone(),

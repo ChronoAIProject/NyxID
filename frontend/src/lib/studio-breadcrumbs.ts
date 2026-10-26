@@ -89,7 +89,8 @@ const TAB_SECTIONS: Readonly<Record<string, TabSection>> = {
     billing: "Billing",
     usage: "Usage",
   }),
-  "/admin/usage": tabSection(["dashboard", "list"], "dashboard", {
+  "/admin/usage": tabSection(["dashboard", "list", "nyxbot"], "dashboard", {
+    nyxbot: "NyxBot",
     dashboard: "Dashboard",
     list: "List",
   }),

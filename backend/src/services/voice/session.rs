@@ -56,6 +56,52 @@ pub async fn admit(
     credential_identity: String,
     worker: &str,
 ) -> AppResult<VoiceSession> {
+    admit_audio(
+        db,
+        user,
+        conversation,
+        client_request_id,
+        preferences,
+        credential_identity,
+        worker,
+        false,
+    )
+    .await
+}
+
+pub async fn admit_dictation(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    request: &str,
+    preferences: VoicePreferences,
+    identity: String,
+    worker: &str,
+) -> AppResult<VoiceSession> {
+    admit_audio(
+        db,
+        user,
+        conversation,
+        request,
+        preferences,
+        identity,
+        worker,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn admit_audio(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    client_request_id: &str,
+    preferences: VoicePreferences,
+    credential_identity: String,
+    worker: &str,
+    dictation: bool,
+) -> AppResult<VoiceSession> {
     super::super::assistant_voice::require_enabled(db, user)
         .await
         .map_err(|e| crate::errors::voice_start::Stage::Flag.error(e))?;
@@ -92,6 +138,7 @@ pub async fn admit(
         voice_claim_fence: 0,
         purge_requested: false,
         protocol: None,
+        dictation,
         measured_ms: 0,
         state: SessionState::Starting,
         live_slot: true,
@@ -236,7 +283,7 @@ pub async fn close(
                 if purge && !closed.purge_requested {
                     db.collection::<Document>(COLLECTION_NAME).update_one(doc! {"_id":&closed.id},doc! {"$set":{"purge_requested":true}}).session(&mut *tx).await?;
                 }
-                if closed.receipt_message_id.is_none() && !purge {
+                if closed.receipt_message_id.is_none() && !purge && !closed.dictation {
                     super::receipt::append(&db, tx, &closed).await?;
                 }
                 if purge

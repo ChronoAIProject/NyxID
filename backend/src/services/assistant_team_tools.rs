@@ -43,6 +43,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "settings_link",
     "update_settings",
     "channel_bot_setup_link",
+    "channel_setup_guide",
     "machine_setup_link",
     "machine_pair",
     "connect_channel_bot",
@@ -176,6 +177,7 @@ pub fn read_only(name: &str) -> bool {
             | "learning_status"
             | "learning_list_proposals"
             | "list_groups"
+            | "channel_setup_guide"
             | "list_channel_agents"
             | "list_channel_chats"
             | "list_channel_threads"
@@ -386,7 +388,9 @@ pub fn schema(name: &str) -> Value {
         "link_channel_bot" => (
             json!({"channel_agent_id": string(64),
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
-                    "description": "\"nyxbot\" or a specialist name or id"}}),
+                    "description": "\"nyxbot\" or one of the user's personal specialist names \
+                    or IDs; organization specialists cannot be linked to channel bots \
+                    or chats"}}),
             vec!["channel_agent_id", "agent"],
         ),
         "remember" => (
@@ -401,7 +405,7 @@ pub fn schema(name: &str) -> Value {
             json!({"chat_id": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "A chat id from nyxid__list_channel_chats (or the chat \
                     id NyxID named in your instructions)"},
-                "text": {"type": "string", "minLength": 1, "maxLength": 4000,
+                "text": {"type": "string", "minLength": 1, "maxLength": super::assistant_nyxagent::MAX_MESSAGE_CHARS,
                     "description": "The message to post, as plain text"},
                 "include_images": {"type": "boolean", "default": false,
                     "description": "Also send the tool images of this turn only (verified \
@@ -434,8 +438,9 @@ pub fn schema(name: &str) -> Value {
                 "allow_posts": {"type": "boolean",
                     "description": "Let the chat's agent post there without being asked"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
-                    "description": "\"nyxbot\", a specialist name or id, or \"default\" for \
-                    the channel bot's agent"}}),
+                    "description": "\"nyxbot\", one of the user's personal specialist names \
+                    or IDs, or \"default\" for the channel bot's agent; organization \
+                    specialists cannot be linked to channel bots or chats"}}),
             vec!["chat_id"],
         ),
         "update_channel_access" => (
@@ -503,14 +508,17 @@ pub fn schema(name: &str) -> Value {
             json!({"code":string(16),"acknowledgement_id":string(64)}),
             vec!["code"],
         ),
+        "channel_setup_guide" => (json!({}), vec![]),
         "channel_bot_setup_link" => (
             json!({"platform": {"type": "string", "minLength": 1, "maxLength": 32,
                     "description": "Channel to create, e.g. telegram, discord, slack, lark, \
-                    feishu, whatsapp"},
+                    feishu, whatsapp, x"},
                 "label": {"type": "string", "minLength": 1, "maxLength": 60,
                     "description": "Optional bot name"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
-                    "description": "\"nyxbot\" (default) or a specialist name or id"}}),
+                    "description": "\"nyxbot\" (default) or one of the user's personal \
+                    specialist names or IDs; organization specialists cannot be linked \
+                    to channel bots or chats"}}),
             vec!["platform"],
         ),
         "connect_channel_bot" => (
@@ -520,7 +528,9 @@ pub fn schema(name: &str) -> Value {
                 "bot_id": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "Deprecated alias of bot"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
-                    "description": "\"nyxbot\" (default) or a specialist name or id"}}),
+                    "description": "\"nyxbot\" (default) or one of the user's personal \
+                    specialist names or IDs; organization specialists cannot be linked \
+                    to channel bots or chats"}}),
             vec![],
         ),
         "list_channel_agents" => (json!({}), vec![]),
@@ -727,20 +737,31 @@ pub(crate) fn description(name: &str) -> &'static str {
         "machine_pair" => {
             "Pair a machine using the short code printed by nyxid node setup. Full access pairs directly with a receipt; other modes raise an owner-only card showing hostname, OS, IP and capabilities. The code alone authorizes nothing. Never ask for or accept a setup token in chat."
         }
+        "channel_setup_guide" => {
+            "Read the built-in, versioned channel setup procedure and X DM Q&A. Uses source-verified routes and separates account, receive, send, agent route and automatic-reply evidence. No Ornn skill needed; no provider calls or messages."
+        }
         "channel_bot_setup_link" => {
             "Help the user create a new channel bot: returns NyxID's one-page setup link (for \
             Telegram, bot creation inside Telegram when available). Secrets are entered on that \
             page, never in chat. Once the bot exists NyxID links it to you or the named \
-            specialist automatically and tells you."
+            personal specialist automatically and tells you; organization specialists cannot be \
+            linked to channel bots or chats."
         }
         "connect_channel_bot" => {
-            "Link a channel bot to you or to a specialist: the user's own bots and those of \
-            organizations they administer (nyxid__list_channel_bots lists both, with each \
-            org). Name it by id or label. The user's Telegram bots use the Agent Event Gateway; \
-            org bots and other platforms connect through NyxID directly. Returns a link the \
-            user opens once in the chat app to verify they own it."
+            "Link a channel bot to you or to one of the user's personal specialists: the \
+            user's own bots and those of organizations they administer \
+            (nyxid__list_channel_bots lists both, with each org). Organization \
+            specialists cannot be linked to channel bots or chats. Name it by id or \
+            label. The user's Telegram bots use the Agent Event Gateway; other \
+            platforms use the selected live transport; a gateway flag alone does not \
+            prove platform support. Returns a link the user opens once in the chat app \
+            to verify they own it."
         }
-        "link_channel_bot" => "Move a connected channel bot to you or to another specialist.",
+        "link_channel_bot" => {
+            "Move a connected channel bot to NyxBot or one of the user's personal \
+            specialists; organization specialists cannot be linked to channel bots or \
+            chats."
+        }
         "list_channel_agents" => {
             "List connected channel bots, the agent each one reaches, and status."
         }
@@ -777,7 +798,8 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Change one chat's settings when the user asks: answer every message or only \
             mentions and replies (groups default to mentions); let members other than the user \
             talk to the agent (default once the user has talked to the bot there); allow \
-            posting there; or give the chat its own agent. Guests never act for the user: you \
+            posting there; or give the chat its own personal specialist. Organization specialists \
+            cannot be linked to channel bots or chats. Guests never act for the user: you \
             answer them without tools, and a specialist given the chat uses only its own \
             services, as far as nyxid__set_guest_access lets guests (by default looking up, \
             creating and acting, never changing or deleting what exists), so give a chat a \
@@ -806,6 +828,7 @@ fn endpoints_for(names: &[&str]) -> Vec<McpToolEndpoint> {
     names
         .iter()
         .map(|name| McpToolEndpoint {
+            attachment_input: None,
             async_operation: None,
             endpoint_id: format!("nyxid__{name}"),
             name: (*name).into(),

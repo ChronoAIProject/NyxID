@@ -1,5 +1,5 @@
 import { analyticsAmount, plotAmount } from "@/lib/usage-analytics";
-import { useId, type CSSProperties } from "react";
+import { useId } from "react";
 import {
   Area,
   AreaChart,
@@ -21,6 +21,7 @@ import {
   formatAnalyticsValue,
   unitLabel,
   INTERVAL_LABELS,
+  BREAKDOWN_LABELS,
   PANEL_HEIGHTS,
   partialBucket,
   bucketBounds,
@@ -32,6 +33,12 @@ import type {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ChevronDown } from "lucide-react";
+import { ChartGradients } from "./chart-gradients";
+import {
+  chartTick,
+  chartTooltipStyle,
+  chartTooltipTextStyle,
+} from "./chart-style";
 import "./visualization.css";
 
 const COLORS = [
@@ -60,63 +67,6 @@ const seriesColor = (index: number, other: boolean) =>
   other
     ? "var(--analytics-other)"
     : (COLORS[index % COLORS.length] ?? COLORS[0]);
-function ChartGradients({
-  id,
-  colors,
-  horizontal = false,
-}: {
-  id: string;
-  colors: string[];
-  horizontal?: boolean;
-}) {
-  return (
-    <defs>
-      {colors.map((color, index) => (
-        <linearGradient
-          key={`area-${index}`}
-          id={`${id}-area-${index}`}
-          x1="0"
-          y1="0"
-          x2="0"
-          y2="1"
-        >
-          <stop
-            offset="0%"
-            stopColor={color}
-            stopOpacity="var(--analytics-area-top)"
-          />
-          <stop
-            offset="55%"
-            stopColor={color}
-            stopOpacity="var(--analytics-area-middle)"
-          />
-          <stop offset="100%" stopColor={color} stopOpacity={0} />
-        </linearGradient>
-      ))}
-      {colors.map((color, index) => (
-        <linearGradient
-          key={`bar-${index}`}
-          id={`${id}-bar-${index}`}
-          x1="0"
-          y1={horizontal ? "0" : "1"}
-          x2={horizontal ? "1" : "0"}
-          y2="0"
-        >
-          <stop
-            offset="0%"
-            stopColor={color}
-            stopOpacity="var(--analytics-bar-start)"
-          />
-          <stop
-            offset="100%"
-            stopColor={color}
-            stopOpacity="var(--analytics-bar-end)"
-          />
-        </linearGradient>
-      ))}
-    </defs>
-  );
-}
 export function ChartView({
   data,
   panel,
@@ -161,27 +111,12 @@ export function ChartView({
     (slice) => slice.value !== null && slice.value > 0,
   );
   const noUsage = data.totals.events === 0;
-  const tick = {
-    fill: "var(--analytics-label)",
-    fontSize: 11,
-    fontFamily: "var(--font-sans)",
-  };
+  const tick = chartTick;
   const seriesColors = data.series.map((series, index) =>
     color(index, series.is_other),
   );
-  const tooltipStyle: CSSProperties = {
-    background: "var(--color-popover)",
-    border: "1px solid var(--color-border)",
-    borderRadius: 10,
-    padding: "10px 12px",
-    boxShadow: "0 8px 24px rgb(0 0 0 / 16%)",
-    color: "var(--color-foreground)",
-    fontSize: 12,
-    maxWidth: "min(420px, calc(100vw - 32px))",
-    whiteSpace: "normal",
-    overflowWrap: "anywhere",
-  };
-  const tooltipTextStyle = { color: "var(--color-popover-foreground)" };
+  const tooltipStyle = chartTooltipStyle;
+  const tooltipTextStyle = chartTooltipTextStyle;
   const timeLabel = (bucket: string) => {
     const label = `${bucketLabel(bucket, data.granularity, true)} UTC`;
     if (!partialBucket(bucket, data)) return label;
@@ -663,7 +598,11 @@ export function ChartView({
                 <thead className="sticky top-0 bg-muted/90">
                   <tr>
                     <th className="px-3 py-2 font-medium">
-                      {temporal ? "Time (UTC)" : "Group"}
+                      {temporal
+                        ? "Time (UTC)"
+                        : panel.top === 0
+                          ? "Group"
+                          : BREAKDOWN_LABELS[panel.breakdown]}
                     </th>
                     <th className="px-3 py-2 text-right font-medium">{unit}</th>
                     {temporal &&

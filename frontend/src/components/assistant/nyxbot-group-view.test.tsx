@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import type {
@@ -331,5 +331,36 @@ describe("group message timestamps", () => {
       "2026-10-02T09:15:00.000Z",
     ]);
     for (const time of times) expect(time).toHaveTextContent(/2026/);
+  });
+});
+
+
+describe("group message body copy integration", () => {
+  function row(role: "user" | "agent", text: string) {
+    group = makeGroup([NYXBOT]);
+    const message = { id: "copy", group_id: group.id, seq: 1, role, text,
+      agent_id: NYXBOT, agent_name: "NyxBot", created_at: "2026-10-01T00:00:00Z",
+      activities: [], attachments: [], recipient_agent_ids: [] } as unknown as AssistantGroupMessage;
+    return <GroupMessageRow groupId={group.id} message={message} names={[]} members={group.members} onOpenAgent={() => undefined} />;
+  }
+  it("copies the sanitized assistant body with Markdown code intact", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const markdown = "**Answer**\n\n```ts\n  run()\n```";
+    render(row("agent", `${markdown}\n<function_calls>hidden-tool-input</function_calls>`));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(markdown);
+  });
+  it("copies original user text without rendered recipients or timestamps", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const original = "@NyxBot  <function_calls>literal example</function_calls>  ";
+    render(row("user", original));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(original);
+  });
+  it("has no copy button for output without a visible body", () => {
+    render(row("agent", "<function_calls>hidden</function_calls>"));
+    expect(screen.queryByRole("button", { name: "Copy message" })).not.toBeInTheDocument();
   });
 });

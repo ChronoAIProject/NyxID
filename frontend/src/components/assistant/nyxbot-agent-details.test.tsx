@@ -595,3 +595,19 @@ it("hides the agent model selector without the internal model-controls flag", as
   const profile = await screen.findByRole("form", { name: "Profile" });
   expect(within(profile).queryByRole("combobox", { name: "Agent model" })).not.toBeInTheDocument();
 });
+
+it("saves the optional channel progress reply without changing grants or prompt", async () => {
+  const { user } = renderSheet();
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  const profile = await within(sheet).findByRole("form", { name: "Profile" });
+  const progress = within(profile).getByRole("switch", { name: "Channel progress reply" });
+  expect(progress).not.toBeChecked();
+  await user.click(progress);
+  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(writes).toContainEqual({
+    method: "PATCH",
+    endpoint: "/assistant/nyxagent/agents/agent-researcher",
+    body: { channel_checking_notice: true },
+  }));
+  await waitFor(() => expect(within(sheet).getByRole("button", { name: "Save" })).toBeDisabled());
+});

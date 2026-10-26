@@ -29,6 +29,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "list_agent_key_bindings",
     "bind_agent_key_credential",
     "unbind_agent_key_credential",
+    "list_channel_adapters",
     "list_channel_bots",
     "get_channel_bot",
     "update_channel_bot",
@@ -55,6 +56,7 @@ pub fn read_only(name: &str) -> bool {
         "list_agent_keys"
             | "get_agent_key"
             | "list_agent_key_bindings"
+            | "list_channel_adapters"
             | "list_channel_bots"
             | "get_channel_bot"
             | "list_channel_routes"
@@ -200,11 +202,16 @@ fn description(name: &str) -> String {
                 service. Never enter a raw credential."
         }
         "unbind_agent_key_credential" => "Delete an agent credential binding.",
+        "list_channel_adapters" => {
+            "Discover implemented phone, SMS and speech profiles, their limits and credential modes, and the owner setup URL. Setup is an owner action in Settings; no calls or messages are sent."
+        }
         "list_channel_bots" => {
             "List the user's channel bots and those of organizations they administer (owner: \
             personal or the org), without credentials or tokens."
         }
-        "get_channel_bot" => "Inspect a channel bot's non-secret settings.",
+        "get_channel_bot" => {
+            "Inspect an authorized bot's credential source/connection ID, read-only health, authenticated receive/outbound timestamps and recovery recommendation. Does not Verify, Resubscribe or send. Use channel_setup_guide for the built-in procedure; historical traffic does not prove current automatic replies."
+        }
         "update_channel_bot" => {
             "Update a channel bot label or public app id. Enter credentials in the UI."
         }
@@ -317,6 +324,7 @@ fn account_service() -> McpToolService {
         endpoints: TOOL_NAMES
             .iter()
             .map(|name| McpToolEndpoint {
+                attachment_input: None,
                 async_operation: None,
                 endpoint_id: format!("nyxid__{name}"),
                 name: (*name).into(),
@@ -495,7 +503,33 @@ fn error_result_inner(
             };
         }
 
-        error if error.is_forbidden() || matches!(error, AppError::Unauthorized(_)) => {
+        AppError::ForbiddenWithGuidance { guidance, .. }
+            if matches!(
+                guidance.as_ref(),
+                crate::errors::access_denial::AccessDenial::OrganizationAgentChannelUnsupported { .. }
+            ) =>
+        {
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: super::assistant_acknowledgement_service::organization_agent_channel_refusal(
+                ),
+            };
+        }
+        // Forbidden messages are authored for this same principal and tell
+        // the agent how to correct its request or report the refusal. Guided
+        // denials keep their metadata HTTP-only, so guided and plain denials
+        // have the same assistant shape.
+        AppError::Forbidden(message) | AppError::ForbiddenWithGuidance { message, .. } => {
+            let message: String = message.chars().take(300).collect();
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({"error": body.error, "error_code": body.error_code,
+                    "message": message}),
+            };
+        }
+        AppError::Unauthorized(_) => {
             "This operation requires a conversation key and human acknowledgement."
         }
         AppError::Conflict(_) => {
@@ -589,7 +623,15 @@ impl AccountTools<'_> {
             .map(|chat| chat.conversation_id.clone());
         let result = match chat {
             Ok(Some(chat)) => Box::pin(self.execute_authorized(&chat, auth, tool_name, args)).await,
-            Ok(None) => Err(AppError::Forbidden("Conversation key required".into())),
+            Ok(None) => Ok(ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({
+                    "error": "forbidden",
+                    "error_code": 1002,
+                    "message": "This operation requires a conversation key and human acknowledgement."
+                }),
+            }),
             Err(error) => Err(error),
         };
         let mut result = result.unwrap_or_else(error_result);
@@ -987,7 +1029,8 @@ impl AccountTools<'_> {
             | "list_agent_key_bindings"
             | "bind_agent_key_credential"
             | "unbind_agent_key_credential" => Box::pin(self.dispatch_keys(user, name, args)),
-            "list_channel_bots"
+            "list_channel_adapters"
+            | "list_channel_bots"
             | "get_channel_bot"
             | "update_channel_bot"
             | "delete_channel_bot"
@@ -1125,6 +1168,27 @@ impl AccountTools<'_> {
 
     async fn dispatch_channels(&self, user: &str, name: &str, args: &Value) -> AppResult<Value> {
         match name {
+            "list_channel_adapters" => {
+                let enabled = super::feature_flag_service::personal_flag_enabled(
+                    self.db,
+                    user,
+                    super::feature_flag_service::NYXBOT_ADAPTERS_FLAG_KEY,
+                )
+                .await?;
+                let adapters: Vec<_> =
+                    channel_adapters::registered_interfaces(self.token_exchange_cache)
+                        .into_iter()
+                        .map(|a| match a {
+                            channel_adapters::RegisteredInterface::Messaging(a) => {
+                                super::channel_capability::describe(a.as_ref())
+                            }
+                            channel_adapters::RegisteredInterface::Nyxbot(a) => a.descriptor(),
+                        })
+                        .collect();
+                Ok(
+                    json!({"adapters":adapters,"setup_enabled":enabled,"setup_reason":if enabled{None}else{Some("disabled")},"setup_url":format!("{}/assistant?panel=nyxbot",self.config.frontend_url.trim_end_matches('/')),"setup_instructions":"After all API replicas are upgraded, an administrator can enable nyxbot:service-adapters. Open NyxBot Settings, Phone and speech connections. Select an owner-configured specialist; for a Notion FAQ grant Notion and set Guest access to Read. Public callers never inherit owner authority."}),
+                )
+            }
             "list_channel_bots" => {
                 // The user's own bots and those of organizations they administer.
                 let bots = channel_bot_service::list_all_bots(self.db, user).await?;
@@ -1140,7 +1204,19 @@ impl AccountTools<'_> {
             "get_channel_bot" => {
                 let bot = self.managed_bot(user, text(args, "bot_id")).await?;
                 let orgs = self.org_names(user, [bot.user_id.clone()]).await?;
-                Ok(owned_bot_view(&bot, user, &orgs))
+                let mut view = owned_bot_view(&bot, user, &orgs);
+                let gateway = channel_bot_service::gateway_linked(self.db, &bot.id).await?;
+                view["health"] = super::channel_bot_health::setup_evidence(&bot, gateway);
+                view["personal_routing_available"] = json!(
+                    super::platform_bot_authority::permits_personal_routes(self.db, &bot.id)
+                        .await?
+                );
+                view["setup_url"] = json!(format!(
+                    "{}/channel-bots/{}",
+                    self.config.frontend_url.trim_end_matches('/'),
+                    bot.id
+                ));
+                Ok(view)
             }
             "update_channel_bot" | "delete_channel_bot" => {
                 let bot = self.managed_bot(user, text(args, "bot_id")).await?;
@@ -1445,6 +1521,7 @@ mod search_tests {
         home.service_name = "Home Assistant at office".into();
         home.endpoints = (0..40)
             .map(|i| McpToolEndpoint {
+                attachment_input: None,
                 async_operation: None,
                 endpoint_id: format!("home{i}"),
                 name: format!("get_states_{i}"),
@@ -1461,5 +1538,115 @@ mod search_tests {
             let found = crate::services::mcp_service::search_all_tools(&services, query);
             assert_eq!(found.matches[0].name, "nyxid__spawn_subagent", "{query}");
         }
+    }
+
+    #[test]
+    fn forbidden_messages_are_bounded_and_guidance_stays_http_only() {
+        use crate::errors::access_denial::CredentialType;
+        for message in ["Missing scope".to_owned(), "界".repeat(301)] {
+            let plain = error_result(AppError::Forbidden(message.clone()));
+            assert!(plain.is_error);
+            assert!(plain.permission_request.is_none());
+            assert_eq!(
+                plain.value,
+                json!({"error": "forbidden", "error_code": 1002,
+                "message": message.chars().take(300).collect::<String>()})
+            );
+            let mut guided = vec![AppError::insufficient_scope(message.clone())];
+            for kind in [
+                CredentialType::ApiKey,
+                CredentialType::Delegated,
+                CredentialType::Relay,
+                CredentialType::ServiceAccount,
+                CredentialType::OauthClient,
+            ] {
+                guided.push(AppError::unsupported_credential(&message, kind));
+            }
+            for error in guided {
+                let result = error_result(error);
+                assert!(result.is_error);
+                assert!(result.permission_request.is_none());
+                assert_eq!(result.value, plain.value);
+            }
+        }
+    }
+
+    #[test]
+    fn unauthorized_keeps_fixed_conversation_key_copy() {
+        let result = error_result(AppError::Unauthorized(
+            "private authentication detail".into(),
+        ));
+        assert!(result.is_error);
+        assert_eq!(
+            result.value,
+            json!({"error": "unauthorized", "error_code": 1001,
+                "message": "This operation requires a conversation key and human acknowledgement."})
+        );
+        assert!(
+            !result
+                .value
+                .to_string()
+                .contains("private authentication detail")
+        );
+        assert!(result.permission_request.is_none());
+    }
+
+    #[tokio::test]
+    async fn account_tool_without_conversation_key_keeps_fixed_refusal_and_audits_it() {
+        let db = crate::test_utils::connect_transaction_test_database("account_tool_no_key").await;
+        let state = crate::test_utils::test_app_state(db);
+        let owner = uuid::Uuid::new_v4().to_string();
+        let tools = AccountTools {
+            db: &state.db,
+            keys: &state.encryption_keys,
+            http: &state.http_client,
+            config: &state.config,
+            token_exchange_cache: &state.token_exchange_cache,
+            node_manager: &state.node_ws_manager,
+        };
+        for method in [AuthMethod::Session, AuthMethod::ApiKey] {
+            let mut auth = crate::test_utils::test_auth_user(&owner);
+            auth.auth_method = method;
+            if auth.auth_method == AuthMethod::ApiKey {
+                auth.api_key_id = Some(uuid::Uuid::new_v4().to_string());
+            }
+            let result = tools.execute(&auth, "nyxid__list_nodes", &json!({})).await;
+            assert!(result.is_error);
+            assert!(result.permission_request.is_none());
+            assert_eq!(
+                result.value,
+                json!({"error": "forbidden", "error_code": 1002,
+            "message": "This operation requires a conversation key and human acknowledgement."})
+            );
+            let audit = state
+                .db
+                .collection::<crate::models::audit_log::AuditLog>(
+                    crate::models::audit_log::COLLECTION_NAME,
+                )
+                .find_one(doc! {
+                    "user_id": &owner,
+                    "event_type": "assistant_account_tool_call",
+                    "api_key_id": &auth.api_key_id,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let data = audit.event_data.unwrap();
+            assert_eq!(data["outcome"], "refused");
+            assert_eq!(data["tool_name"], "nyxid__list_nodes");
+            assert!(data["conversation_id"].is_null());
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<mongodb::bson::Document>(
+                    crate::models::assistant_acknowledgement::COLLECTION_NAME
+                )
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        state.db.drop().await.unwrap();
     }
 }

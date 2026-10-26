@@ -200,28 +200,38 @@ export function ApiKeyScopesField({ form }: Props) {
   );
 }
 
-export function ApiKeyExpiryField({ form }: Props) {
+export function ApiKeyExpiryField({ form, allowNeverExpires = true }: Props & {
+  allowNeverExpires?: boolean;
+}) {
+  const neverExpires = form.watch("never_expires") ?? false;
   return (
-    <FormField
-      control={form.control}
-      name="expires_at"
-      render={({ field }) => (
+    <div className="space-y-2">
+      {allowNeverExpires && (
+        <FormField control={form.control} name="never_expires" render={({ field }) => (
+          <FormItem>
+            <label className="flex items-center gap-2 text-12">
+              <Checkbox checked={field.value ?? false} onCheckedChange={(checked) => {
+                field.onChange(checked === true);
+                form.setValue("expires_at", checked === true ? null
+                  : new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10));
+              }} />
+              No expiry
+            </label>
+            <FormMessage />
+          </FormItem>
+        )} />
+      )}
+      {!neverExpires && <FormField control={form.control} name="expires_at" render={({ field }) => (
         <FormItem>
-          <FormLabel>
-            Expiry Date{" "}
-            <span className="text-muted-foreground">(optional)</span>
-          </FormLabel>
+          <FormLabel>Expiry date</FormLabel>
           <FormControl>
-            <DatePicker
-              value={field.value ?? null}
-              onChange={(v) => field.onChange(v)}
-              minDate={new Date().toISOString().slice(0, 10)}
-              placeholder="No expiry"
-            />
+            <DatePicker value={field.value ?? null} onChange={field.onChange}
+              minDate={new Date().toISOString().slice(0, 10)} placeholder="90 days by default" />
           </FormControl>
+          <p className="text-xs text-muted-foreground">A blank date defaults to 90 days.</p>
           <FormMessage />
         </FormItem>
-      )}
-    />
+      )} />}
+    </div>
   );
 }

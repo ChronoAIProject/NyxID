@@ -428,13 +428,31 @@ async fn administrative_or_missing_owner_never_authorizes_workspace_erasure() {
                 .await
                 .unwrap();
             if admin_delete {
-                crate::services::admin_user_service::delete_user_cascade(
+                crate::test_utils::init_test_audit_chain_hmac_key();
+                crate::services::personal_erasure_service::ensure_indexes(&db)
+                    .await
+                    .unwrap();
+                let accepted = crate::services::personal_erasure_service::accept(
                     &db,
-                    &uuid::Uuid::new_v4().to_string(),
                     &owner,
+                    &uuid::Uuid::new_v4().to_string(),
+                    None,
                 )
                 .await
                 .unwrap();
+                assert_eq!(
+                    accepted.status,
+                    crate::models::personal_erasure::ErasureStatus::Accepted
+                );
+                assert!(
+                    db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+                        .find_one(
+                            doc! {"_id":&owner,"is_active":false,"platform_personal_deleting":true}
+                        )
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
             } else {
                 db.collection::<Document>(crate::models::user::COLLECTION_NAME)
                     .delete_one(doc! {"_id":&owner})
@@ -517,8 +535,16 @@ async fn previously_queued_unconsented_delete_cannot_finalize_or_release_slot() 
         .delete_one(doc! {"_id":&owner})
         .await
         .unwrap();
+    let result = lifecycle::finalize_unallocated_delete(&db, id).await;
+    let outcome = match &result {
+        Ok(Some(_)) => "finalized",
+        Ok(None) => "pending",
+        Err(crate::errors::AppError::Conflict(code)) => code,
+        Err(_) => "other_error",
+    };
     assert!(
-        matches!(lifecycle::finalize_unallocated_delete(&db,id).await,Err(crate::errors::AppError::Conflict(code)) if code=="machine_owner_deletion_basis_required")
+        matches!(&result, Err(crate::errors::AppError::Conflict(code)) if code=="machine_owner_deletion_basis_required"),
+        "unconsented deletion must report its authorization failure: {outcome}"
     );
     assert_eq!(
         Box::pin(lifecycle::suspend_ineligible(&db)).await.unwrap(),
@@ -563,7 +589,7 @@ async fn wrong_owner_or_unrecognized_deletion_basis_retains_workspace() {
         db.collection::<Document>(MACHINES).update_one(doc! {"_id":id},doc! {"$set":{
             "resource_state":"paused","pvc_uid":"retained-workspace",
             "deletion_basis":{"owner_id":if wrong_owner {uuid::Uuid::new_v4().to_string()} else {owner.clone()},
-                "source":"account_owner","policy_version":if wrong_owner {"machine-data"} else {"unrecognized"},"accepted_at":bson::DateTime::now()}
+                "source":"account_owner","policy_version":if wrong_owner {"machine-data-provider-revocation-v2"} else {"unrecognized"},"accepted_at":bson::DateTime::now()}
         }}).await.unwrap();
         db.collection::<Document>(crate::models::user::COLLECTION_NAME)
             .delete_one(doc! {"_id":&owner})
@@ -611,19 +637,30 @@ async fn account_deletion_cascade_queues_cleanup_for_an_already_paused_workspace
         .insert_one(doc! {"_id":&job_id,"user_id":&owner,"node_id":machine_id,"status":"running"})
         .await
         .unwrap();
-    crate::services::admin_user_service::delete_current_user_cascade(
+    crate::test_utils::init_test_audit_chain_hmac_key();
+    crate::services::personal_erasure_service::ensure_indexes(&db)
+        .await
+        .unwrap();
+    let accepted = crate::services::personal_erasure_service::accept(
         &db,
         &owner,
-        crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+        &owner,
+        Some(crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION),
     )
     .await
     .unwrap();
+    // Acceptance fences the account and records owner consent. The user source
+    // remains until the Machine lifecycle supplies actual cleanup evidence.
+    assert_eq!(
+        accepted.status,
+        crate::models::personal_erasure::ErasureStatus::Accepted
+    );
     assert!(
         db.collection::<Document>(crate::models::user::COLLECTION_NAME)
-            .find_one(doc! {"_id":&owner})
+            .find_one(doc! {"_id":&owner,"is_active":false,"platform_personal_deleting":true})
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
     assert!(
         db.collection::<Document>(crate::models::machine_job::COLLECTION_NAME)
@@ -1380,6 +1417,49 @@ async fn remote_machine_never_submitted_delete_finalizes_without_provider_assump
 }
 
 #[tokio::test]
+async fn remote_machine_unallocated_delete_rejects_unresolved_submission_responsibility() {
+    let (db, owner) = lifecycle_fixture("delete_unresolved_submission").await;
+    let created = lifecycle::create_machine(&db, creation(&owner, "create"))
+        .await
+        .unwrap();
+    let deletion = lifecycle::request_action(
+        &db,
+        action(&created.machine, LifecycleAction::Delete, "delete"),
+    )
+    .await
+    .unwrap();
+    db.collection::<mongodb::bson::Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &created.machine.node_id},
+            doc! {"$set": {"runtime_submission_started_at": mongodb::bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        lifecycle::finalize_unallocated_delete(&db, &created.machine.node_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "generation zero must not erase a persisted in-flight submission obligation"
+    );
+    let stored = lifecycle::get_machine(&db, &owner, &created.machine.node_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.resource_state, ResourceState::Deleting);
+    assert_eq!(
+        stored.active_operation_id.as_deref(),
+        Some(deletion.operation.id.as_str())
+    );
+    assert!(
+        !lifecycle::entitlement(&db, &owner)
+            .await
+            .unwrap()
+            .free_slot_available
+    );
+}
+
+#[tokio::test]
 async fn remote_machine_lost_ready_observation_closes_admission_but_keeps_identity() {
     let (db, owner) = lifecycle_fixture("remote_lost_ready").await;
     let sandbox = uuid::Uuid::new_v4().to_string();
@@ -1667,7 +1747,9 @@ async fn hosted_specialist_assignment_uses_existing_defaults_and_never_regrants_
         assistant_team_service as team, machine_access_service as access,
         remote_machine_configuration as config,
     };
-    for editor_enabled in [false, true] {
+    for (editor_enabled, explicit_legacy) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
         let f = crate::services::assistant_authority_tests::fixture("hosted_specialist").await;
         lifecycle::ensure_indexes(&f.state.db).await.unwrap();
         access::ensure_indexes(&f.state.db).await.unwrap();
@@ -1704,6 +1786,10 @@ async fn hosted_specialist_assignment_uses_existing_defaults_and_never_regrants_
             roots: vec!["/workspace".into()],
             runtime_id: uuid::Uuid::new_v4().to_string(),
             commands_isolated: Some(true),
+            // Readiness alone must never invent a new legacy choice. With an
+            // explicit choice, the existing editor defaults still apply.
+            separation_choice: explicit_legacy
+                .then_some(nyxid_machine::context::Choice::SharedLegacy),
             ..Default::default()
         };
         f.state.db.collection::<Document>(crate::models::node::COLLECTION_NAME).update_one(
@@ -1726,9 +1812,20 @@ async fn hosted_specialist_assignment_uses_existing_defaults_and_never_regrants_
         assert!(assigned.machine_node_ids.contains(&created.machine.node_id));
         let policy = access::policy(&f.state.db, &f.chat.agent_id).await.unwrap();
         let grant = &policy.assignments[&created.machine.node_id];
-        assert_eq!(grant.capabilities.shell, !editor_enabled);
-        assert_eq!(grant.capabilities.browser, !editor_enabled);
-        assert_eq!(grant.capabilities.computer, !editor_enabled);
+        assert_eq!(
+            grant.mode,
+            if explicit_legacy {
+                "shared_legacy"
+            } else {
+                "selection_required"
+            }
+        );
+        let default_enabled = explicit_legacy && !editor_enabled;
+        assert_eq!(grant.capabilities.shell, default_enabled);
+        assert_eq!(grant.capabilities.files, default_enabled);
+        assert_eq!(grant.capabilities.browser, default_enabled);
+        assert_eq!(grant.capabilities.computer, default_enabled);
+        assert_eq!(grant.capabilities.developer_browser, default_enabled);
         let machine = lifecycle::managed_machine_for_node(&f.state.db, &created.machine.node_id)
             .await
             .unwrap()
@@ -1736,7 +1833,7 @@ async fn hosted_specialist_assignment_uses_existing_defaults_and_never_regrants_
         let view = config::safe_view(&f.state.db, &machine).await.unwrap();
         assert_eq!(
             view.specialist_assignment_state,
-            if editor_enabled {
+            if editor_enabled || !explicit_legacy {
                 "permissions_required"
             } else {
                 "assigned"
@@ -1877,7 +1974,7 @@ async fn individual_delete_requires_current_owner_ack_and_preserves_original_bas
     for patch in [
         json!({"data_policy_version":null}),
         json!({"data_policy_version":"remote-machine-data-v1"}),
-        json!({"data_policy_version":"machine-data"}),
+        json!({"data_policy_version":"machine-data-provider-revocation-v2"}),
         json!({"acknowledge_data_loss":false}),
     ] {
         let mut denied = accepted.clone();
@@ -2016,4 +2113,80 @@ async fn profile_binding_normalizes_omitted_selection_and_rejects_changed_replay
         1
     );
     db.drop().await.unwrap();
+}
+
+#[test]
+fn deletion_diagnostic_projection_is_allowlisted_and_redacted() {
+    use crate::models::remote_machine_operation::{CleanupState, MachineOperation, OperationState};
+    let now = Utc::now();
+    let mut operation = MachineOperation {
+        id: "operation".into(),
+        owner_id: "private-owner".into(),
+        machine_id: Some("machine".into()),
+        action: LifecycleAction::Delete,
+        idempotency_key_hash: "private-idempotency".into(),
+        request_digest: "private-request".into(),
+        expected_revision: Some(1),
+        desired_runtime_generation: Some(1),
+        state: OperationState::Reconciling,
+        cleanup_state: CleanupState::Pending,
+        effect_id: Some("private-effect".into()),
+        error_code: None,
+        error_message: Some("private-upstream-response credential writer-fence".into()),
+        evidence_digest: Some("private-evidence".into()),
+        retry_count: 1,
+        delete_retry: None,
+        next_attempt_at: None,
+        deadline_at: None,
+        created_at: now,
+        updated_at: now,
+        terminal_at: None,
+    };
+    for code in [
+        "delete_kubernetes_authentication_failed",
+        "delete_kubernetes_access_denied",
+        "delete_kubernetes_observation_timed_out",
+        "delete_kubernetes_credentials_unavailable",
+        "delete_kubernetes_transport_failed",
+        "delete_kubernetes_http_failed",
+        "delete_kubernetes_response_invalid",
+        "delete_kubernetes_inventory_incomplete",
+        "delete_kubernetes_inventory_limit_exceeded",
+        "delete_resource_observation_unknown",
+        "delete_attempt_timed_out",
+    ] {
+        operation.error_code = Some(code.into());
+        operation.action = LifecycleAction::Delete;
+        let view = lifecycle::safe_operation_view(&operation);
+        assert_eq!(view.error_code.as_deref(), Some(code));
+        assert!(view.error_message.as_deref().unwrap().contains("pending"));
+        let encoded = serde_json::to_string(&view).unwrap();
+        for secret in ["private-", "credential writer-fence"] {
+            assert!(
+                !encoded.contains(secret),
+                "diagnostic leaked a protected fixture value"
+            );
+        }
+        operation.action = LifecycleAction::Create;
+        assert_eq!(
+            lifecycle::safe_operation_view(&operation)
+                .error_code
+                .as_deref(),
+            Some("operation_reconciling")
+        );
+    }
+    operation.action = LifecycleAction::Delete;
+    for code in [
+        "delete_kubernetes_unrecognized",
+        "delete_kubernetes_access_denied?token=private-token",
+    ] {
+        operation.error_code = Some(code.into());
+        let view = lifecycle::safe_operation_view(&operation);
+        assert_eq!(view.error_code.as_deref(), Some("operation_reconciling"));
+        assert!(!serde_json::to_string(&view).unwrap().contains("private-"));
+    }
+    operation.error_code = None;
+    let view = lifecycle::safe_operation_view(&operation);
+    assert_eq!(view.error_code, None);
+    assert_eq!(view.error_message, None);
 }

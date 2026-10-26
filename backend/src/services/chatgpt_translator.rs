@@ -931,6 +931,16 @@ fn chatgpt_http_client() -> AppResult<reqwest::Client> {
         .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))
 }
 
+/// Deterministic semantic transport projection used by assistant admission.
+pub(crate) fn execution_headers() -> Vec<(String, String)> {
+    vec![
+        ("content-type".into(), "application/json".into()),
+        ("accept".into(), "text/event-stream".into()),
+        ("originator".into(), "codex_cli_rs".into()),
+        ("user-agent".into(), codex_user_agent()),
+    ]
+}
+
 fn build_chatgpt_request(
     client: &reqwest::Client,
     api_url: &str,
@@ -1045,10 +1055,7 @@ async fn send_to_chatgpt_with_api_url(
     if !status.is_success() {
         let error_body = response.text().await.unwrap_or_default();
         finalize_usage_capture(None, usage_complete, None, error_body.len() as i64).await;
-        tracing::warn!(
-            "ChatGPT backend returned HTTP {status}: {}",
-            truncate_for_log(&error_body, 1000),
-        );
+        tracing::warn!(status = %status, body_bytes = error_body.len(), "ChatGPT backend rejected request");
 
         let content_type = if error_body.starts_with('{') {
             "application/json"

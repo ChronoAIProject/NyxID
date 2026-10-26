@@ -95,8 +95,12 @@ async fn password_change_and_reset_final_updates_fence_each_other() {
 }
 
 #[tokio::test]
-async fn password_change_final_cas_rejects_deactivated_and_org_accounts() {
-    for change in [doc! {"is_active": false}, doc! {"user_type":"org"}] {
+async fn password_change_final_cas_rejects_inactive_org_and_deleting_accounts() {
+    for change in [
+        doc! {"is_active": false},
+        doc! {"user_type":"org"},
+        doc! {"platform_personal_deleting":true},
+    ] {
         let (db, user) = fixture("password_change_live_actor").await;
         db.collection::<User>(USERS)
             .update_one(doc! {"_id": &user.id}, doc! {"$set": change})

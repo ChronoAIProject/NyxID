@@ -18,6 +18,8 @@ import type { User } from "@/types/api";
  * every call site becomes compile-time checked.
  */
 export const FEATURE_FLAG = {
+  // Off permits mobile social first-factor holders to sign in without MFA.
+  MOBILE_MFA: "auth:mobile-mfa",
   INVITATION_CODE: "auth:invitation-code",
   AI_ASSISTANT: "experimental:ai-assistant",
   BILLING: "experimental:billing",
@@ -28,14 +30,19 @@ export const FEATURE_FLAG = {
   VOICE_GROK: "assistant:voice-grok",
   VOICE_GROK_PLATFORM: "assistant:voice-grok-platform",
   VOICE_OPENAI_PLATFORM: "assistant:voice-openai-platform",
+  ASSISTANT_OWNER_INVOCATIONS: "assistant:owner-invocations",
   NYXAGENT_ENGINE: "assistant:nyxagent-engine",
   ASSISTANT_MODEL_CONTROLS: "assistant:model-controls",
+  ASSISTANT_WORKSPACE_PREVIEW: "assistant:workspace-preview",
   ORG_AGENTS: "assistant:org-agents",
   MACHINE_CAPABILITIES: "assistant:machine-capabilities",
   MACHINE_CONTEXTS: "assistant:machine-contexts",
   AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
+  CHANNEL_MEDIA: "assistant:channel-media",
+  ATTACHMENT_WRITES: "assistant:attachment-writes",
   AGENT_LEARNING: "assistant:agent-learning",
   SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
+  NYXBOT_ADAPTERS: "nyxbot:service-adapters",
   NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
   NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
   NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",

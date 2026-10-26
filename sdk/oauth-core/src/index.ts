@@ -26,6 +26,22 @@ export interface NyxIDTokenSet {
   readonly refreshToken?: string;
   readonly idToken?: string;
   readonly scope?: string;
+  /** Epoch milliseconds at which the access token expires. */
+  readonly expiresAt?: number;
+}
+
+export class NyxIDRefreshError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly retryAfterMs?: number;
+
+  constructor(code: string, message: string, retryable: boolean, retryAfterMs?: number) {
+    super(message);
+    this.name = "NyxIDRefreshError";
+    this.code = code;
+    this.retryable = retryable;
+    this.retryAfterMs = retryAfterMs;
+  }
 }
 
 export interface OAuthUserInfo {
@@ -55,6 +71,10 @@ interface TokenResponse {
   readonly scope?: string;
 }
 
+const ACCESS_TOKEN_REFRESH_SKEW_MS = 60_000;
+const MAX_REFRESH_ATTEMPTS = 3;
+const refreshFlights = new WeakMap<StorageLike, Map<string, Promise<NyxIDTokenSet>>>();
+
 export interface StorageLike {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
@@ -79,8 +99,13 @@ class MemoryStorage implements StorageLike {
 
 function resolveStorage(explicit?: StorageLike): StorageLike {
   if (explicit) return explicit;
-  if (typeof window !== "undefined" && window.localStorage) {
-    return window.localStorage;
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      return window.localStorage;
+    }
+  } catch {
+    // Sandboxed and privacy-mode documents can throw while exposing the
+    // localStorage getter. The in-memory store still supports the OAuth flow.
   }
   return new MemoryStorage();
 }
@@ -121,6 +146,7 @@ export class NyxIDClient {
   private readonly fetchFn: typeof fetch;
   private readonly pendingKey: string;
   private readonly tokensKey: string;
+  private refreshPromise: Promise<NyxIDTokenSet> | null = null;
 
   constructor(config: NyxIDClientConfig) {
     this.baseUrl = normalizeBaseUrl(config.baseUrl);
@@ -251,6 +277,7 @@ export class NyxIDClient {
       refreshToken: body.refresh_token,
       idToken: body.id_token,
       scope: body.scope,
+      expiresAt: Date.now() + body.expires_in * 1000,
     };
     this.storage.setItem(this.tokensKey, JSON.stringify(tokens));
     this.storage.removeItem(this.pendingKey);
@@ -267,13 +294,150 @@ export class NyxIDClient {
     }
   }
 
+  /** Refresh the current token set, single-flight within this tab. */
+  async refreshToken(): Promise<NyxIDTokenSet> {
+    if (this.refreshPromise) return this.refreshPromise;
+    let flights = refreshFlights.get(this.storage);
+    if (!flights) {
+      flights = new Map();
+      refreshFlights.set(this.storage, flights);
+    }
+    const sharedFlight = flights.get(this.tokensKey);
+    if (sharedFlight) return sharedFlight;
+    const current = this.getStoredTokens();
+    if (!current?.refreshToken) {
+      throw new NyxIDRefreshError("missing_refresh_token", "Missing refresh token", false);
+    }
+    this.refreshPromise = this.withRefreshLock(() => this.performRefresh(current))
+      .finally(() => {
+        this.refreshPromise = null;
+        flights.delete(this.tokensKey);
+      });
+    flights.set(this.tokensKey, this.refreshPromise);
+    return this.refreshPromise;
+  }
+
+  /** Return a usable access token, refreshing shortly before expiry. */
+  async getAccessToken(): Promise<string> {
+    const current = this.getStoredTokens();
+    if (!current?.accessToken) throw new Error("Missing access token");
+    if (
+      current.expiresAt !== undefined &&
+      current.expiresAt - Date.now() > ACCESS_TOKEN_REFRESH_SKEW_MS
+    ) {
+      return current.accessToken;
+    }
+    if (!current.refreshToken) {
+      if (current.expiresAt !== undefined && current.expiresAt <= Date.now()) {
+        throw new NyxIDRefreshError("missing_refresh_token", "Access token expired; sign in again", false);
+      }
+      return current.accessToken;
+    }
+    return (await this.refreshToken()).accessToken;
+  }
+
+  private async performRefresh(previous: NyxIDTokenSet): Promise<NyxIDTokenSet> {
+    // Another tab may have rotated the token while this tab waited for the
+    // lock. Adopt its successor without sending the old refresh token again.
+    const latest = this.getStoredTokens();
+    if (!latest) throw new NyxIDRefreshError("session_changed", "Session was cleared during refresh", false);
+    if (latest.refreshToken !== previous.refreshToken) return latest;
+    const form = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: previous.refreshToken!,
+      client_id: this.clientId,
+    });
+    let lastError: NyxIDRefreshError | null = null;
+    for (let attempt = 0; attempt < MAX_REFRESH_ATTEMPTS; attempt += 1) {
+      const current = this.getStoredTokens();
+      if (!current) throw new NyxIDRefreshError("session_changed", "Session was cleared during refresh", false);
+      if (current.refreshToken !== previous.refreshToken) return current;
+      try {
+        const response = await this.fetchFn(`${this.baseUrl}/oauth/token`, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: form.toString(),
+        });
+        if (response.ok) {
+          const body = (await response.json()) as TokenResponse;
+          const tokens: NyxIDTokenSet = {
+            accessToken: body.access_token,
+            tokenType: body.token_type,
+            expiresIn: body.expires_in,
+            refreshToken: body.refresh_token ?? previous.refreshToken,
+            idToken: body.id_token,
+            scope: body.scope ?? previous.scope,
+            expiresAt: Date.now() + body.expires_in * 1000,
+          };
+          const after = this.getStoredTokens();
+          if (!after) throw new NyxIDRefreshError("session_changed", "Session was cleared during refresh", false);
+          if (after.refreshToken !== previous.refreshToken) return after;
+          // One synchronous write is the atomic storage transition visible to
+          // this SDK. Never remove the old token before this succeeds.
+          this.storage.setItem(this.tokensKey, JSON.stringify(tokens));
+          return tokens;
+        }
+        const body = (await response.json().catch(() => null)) as { error?: string; error_description?: string } | null;
+        if (body?.error === "invalid_grant") {
+          const after = this.getStoredTokens();
+          if (after && after.refreshToken !== previous.refreshToken) return after;
+          this.storage.removeItem(this.tokensKey);
+          throw new NyxIDRefreshError("invalid_grant", body.error_description ?? "Refresh token is no longer valid", false);
+        }
+        const retryable = response.status === 503 || body?.error === "temporarily_unavailable";
+        if (!retryable) {
+          throw new NyxIDRefreshError(body?.error ?? "refresh_failed", body?.error_description ?? `Token refresh failed (${response.status})`, false);
+        }
+        const header = response.headers.get("Retry-After");
+        const retryAfterMs = header
+          ? /^\d+(?:\.\d+)?$/.test(header)
+            ? Number(header) * 1000
+            : Math.max(0, Date.parse(header) - Date.now()) || undefined
+          : undefined;
+        lastError = new NyxIDRefreshError(body?.error ?? "temporarily_unavailable", body?.error_description ?? "Token refresh is temporarily unavailable", true, retryAfterMs);
+      } catch (error) {
+        if (error instanceof NyxIDRefreshError && !error.retryable) throw error;
+        lastError = error instanceof NyxIDRefreshError
+          ? error
+          : new NyxIDRefreshError("network_error", "Token refresh network request failed", true);
+      }
+      if (attempt + 1 < MAX_REFRESH_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, lastError?.retryAfterMs ?? 250 * 2 ** attempt));
+      }
+    }
+    throw lastError ?? new NyxIDRefreshError("temporarily_unavailable", "Token refresh failed", true);
+  }
+
+  private async withRefreshLock<T>(task: () => Promise<T>): Promise<T> {
+    const locks = (globalThis as { navigator?: { locks?: { request: <R>(name: string, callback: () => Promise<R>) => Promise<R> } } }).navigator?.locks;
+    if (locks) return locks.request(`nyxid:refresh:${this.clientId}`, task);
+    // Shared persistent storage requires an actual cross-document mutex.
+    // localStorage read/write leases cannot implement CAS and can expire while
+    // a background tab is suspended. Fail closed rather than reuse a rotated
+    // credential. Tab-local/custom storage retains in-tab single-flight.
+    let shared = false;
+    try {
+      shared = typeof window !== "undefined" && this.storage === window.localStorage;
+    } catch {
+      // A throwing localStorage getter means the resolved store is tab-local.
+    }
+    if (shared) {
+      throw new NyxIDRefreshError(
+        "refresh_coordination_unavailable",
+        "Shared token refresh requires Web Locks; use tab-local storage in this browser",
+        true,
+      );
+    }
+    return task();
+  }
+
   clearSession(): void {
     this.storage.removeItem(this.pendingKey);
     this.storage.removeItem(this.tokensKey);
   }
 
   async getUserInfo(accessToken?: string): Promise<OAuthUserInfo> {
-    const token = accessToken ?? this.getStoredTokens()?.accessToken;
+    const token = accessToken ?? await this.getAccessToken();
     if (!token) {
       throw new Error("Missing access token");
     }

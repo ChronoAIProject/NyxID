@@ -1,11 +1,21 @@
 # Configurable billing analytics
 
-The existing `/admin/usage` page contains Dashboard and List tabs. Dashboard uses
-Recharts 3.8, the visualization library already used by NyxID, with an Operations
+The existing `/admin/usage` page contains Dashboard, List, and NyxBot tabs.
+Dashboard uses Recharts 3.8, the visualization library already used by NyxID, with an Operations
 grid and multiple private saved views. List reuses the existing service,
-credential-class, and user ranking tables. Both tabs share service, acting-user,
-billing-account and time-range filters. There is one Usage navigation entry;
+credential-class, and user ranking tables. Dashboard and List share service, acting-user,
+billing-account and time-range filters directly below the Usage heading, above
+the tabs and summary. **Users** selects request actors; **Users / organizations**
+selects billing owners. Organization selection does not include all activity by
+its members: platform-key requests bill the acting person. Choose the last
+24 hours, 7 days, 30 days, or a custom UTC range. There is one Usage navigation entry;
 `/admin/analytics` redirects to it.
+
+NyxBot shows assistant activity, turn outcomes, and reply feedback using the same
+chart styling. Its date range and feedback filters are independent of the billing
+workspace, and access requires an admin or operator role. See the
+[NyxBot activity contract](chat/08-nyxagent-engine.md#admin-nyxbot-activity) for
+metric definitions, endpoint bounds, and feedback semantics.
 
 ## Design and library decision
 
@@ -227,17 +237,29 @@ input/output totals are preserved, and the UI does not infer a missing image
 breakdown. New image details require the updated backend; a local frontend using
 the production backend can show only the fields that backend already returns.
 
-Panels can break down by service, acting user, billing account, or credential class.
+Panels can break down by service, model, acting user, billing account, or credential class.
 Credential classes use the same names as the platform's List view. Service/user/
-account legends support drilldown using the shared filters; credential classes
+account legends support drilldown using the shared filters; models and credential classes
 are reporting groups without an identity-filter action.
+
+Each panel exposes a **Group by** selector. For example, filter to Chrono LLM
+and choose **Model** to inspect its recorded model usage. New workspaces include
+a **Tokens by model** panel; saved workspaces keep their existing panels.
+Identical recorded model IDs combine across services (for example, Chrono LLM
+and direct DeepSeek usage); distinct aliases remain separate. Service, actor,
+billing-owner, and time filters apply before this grouping.
+Model grouping reuses the pricing-model / provider-reported-model projection
+described under [NyxBot model usage](#nyxbot-model-usage), without changing rates
+or Lago events. Missing model identities appear as **Unattributed**; history is
+not backfilled. Real models named Other or Unattributed receive a `(model)`
+suffix so they remain distinct from the aggregate and missing-value buckets.
 
 Safe future derived measures include cost per request and tokens per request,
 calculated from matching populations with a null result for zero denominators.
 Cost coverage must account for overlap between legacy and uncosted counts.
-Cache-hit rates require provider-specific accounting. Model metadata exists in
-some meter and rollup records, but a model breakdown needs an explicit reporting
-contract and missing-value rules; it does not require inventing model data.
+Cache-hit rates require provider-specific accounting. Recorded model identities
+do not establish the resolved provider, fallback, or revision; those details
+require an upstream reporting contract.
 Agent/API-key and route breakdowns require a review of retained rollup dimensions.
 Latency percentiles, HTTP error rates, funnels, retention, and fiat revenue need
 additional reporting inputs and are not offered as fabricated metrics.
@@ -299,7 +321,8 @@ Use the revision returned by GET or PUT for subsequent updates. `chart` accepts
 `line`, `bar`, `pie` (rendered as a donut), or `combo`. Measures are `cost`,
 `requests`, `total_tokens`, `quantity`, `wallet_cost`, `grant_cost`, and
 `allowance_cost`. `quantity` selects an existing billing metric through `metric`.
-Breakdowns are `service`, `user` (acting person), or `owner` (billing account).
+Breakdowns are `service`, `model`, `user` (request actor), `owner` (billing account),
+or `credential_class`.
 `top` is 0 for aggregate, 5, or 10. Combined charts show the selected measure as
 stacked bars and requests on a labeled right axis; requests alone use a single
 axis. Standard-width panels follow their layout's grid; full-width panels span it.
@@ -424,3 +447,115 @@ For mixed historical data, normalize each amount before summing (the backend's
 Exact keys take precedence, including explicit null. Numeric legacy `*_micros`
 values always use microcredits, including Decimal128 query mirrors.
 Rollup `legacy_grant_cost` replaces legacy integer `legacy_grant`.
+
+## NyxBot model usage
+
+The NyxBot tab at `/admin/usage` adds cost and traffic reporting to the existing
+activity, outcomes, and feedback views. The whole tab, including
+`GET /api/v1/admin/assistant/model-usage`, `/analytics`, and `/feedback`, has the
+same read access as the rest of Usage: admins, operators, and holders of
+`nyxid:admin:usage:read` (such as the Usage Viewer role). It uses the tab's
+positive UTC window of at most 31 days.
+An exact `model` filter (trimmed, case sensitive, 1–256 characters) or
+`unknown_model=true` applies to the entire billing/traffic snapshot and account
+rankings. Missing, empty, and whitespace-only recorded models share the unknown
+bucket. No string is reserved as an unknown sentinel. Model names are stored
+billing identities, which may be request aliases; they do not assert a resolved
+provider model. Conversation settings and transcript length are never usage
+sources.
+
+The pricing `model` on a usage row is the request model when the ingress already
+knows it (the `/llm` gateway and Codex translation); it selects model-specific
+cached rates and is sent to Lago. Proxy, node, service-pool and MCP inference
+settlements also record `reported_model`: the model the provider reported in the
+response that carried the usage (OpenAI/xAI `model`, Responses API
+`response.model`, Anthropic `message.model`, Gemini `modelVersion`), written on
+every row of the request. It is observability only: it never selects a rate, is
+never sent to Lago and is not part of ledger entries. Reports group by the
+pricing model, else the reported model; legacy-cost rows (estimated from a
+model-keyed cached rate) keep their pricing model alone. Only plain identifiers
+of at most 128 characters (ASCII letters, digits and `-._:/@+`) are recorded.
+Rows settled before this capture stay in the unknown bucket; there is no
+backfill because no model was stored. Upgrade every replica: rows settled or
+folded by an older replica are reported without the reported model.
+
+The response reuses the journal-validated reporting engine: raw boundary hours,
+unfolded tail, hourly summaries, and daily summaries have the same pricing and
+primary-row counting rules. Exact credit strings preserve twelve fractional
+digits. Missing historical prices yield unavailable costs or a known subtotal
+with `unknown_cost_events`; they never turn an unpriced event into free usage.
+Known exact funding survives an unavailable legacy rate even inside the same
+actor/owner/service/model/key group. The new `ModelStats` DTO contains only
+computed requests, events, token measures, price-coverage counts, and exact
+costs, avoiding unsupported quantities, distinct counts, and duplicate legacy
+money projections.
+
+Model requests and tokens count the primary platform row only. Component and
+resale rows contribute their independent charges without copying request/token
+counts. Total tokens equal provider-reported input plus output. Cache read and
+write can overlap input; audio/image tokens are reported subsets. The cost scope
+is the charges attached to model executions, including wallet, grant, allowance,
+and independent resale charges. NyxAgent orchestration and ordinary tools have
+separate excluded cost/request totals, so a parent aggregate token report cannot
+be added to its provider children as another model execution.
+
+One report snapshot returns full-period Top 20 models, their daily UTC series,
+and summed Other; full-period membership stays fixed across days. Charts separate
+credits, requests, and tokens, with exact daily tables and exact tooltip values.
+The Top 10 billing accounts are ranked across the complete server population by
+known gross cost, requests, then account identity. Each selected account has its
+own Top 20 model breakdown and an exact summed Other row; remaining accounts
+have a summed Other total. Null cost sorts below a known zero, and partial cost
+can affect ranking. Exact model search reaches models outside the Top 20. These
+NyxBot model filters are independent of the generic workspace's `model` breakdown.
+`services` ranks the same model population by inference service (`service_id`
+and `service_slug` rollup dimensions, names resolved from the catalog) with the
+same ordering, a Top 20 and a summed Other row. It honours the model filter and
+needs no new stored data, so it covers history recorded before model names were
+captured.
+
+### Attribution and historical coverage
+
+Modern meters snapshot a server-authored `assistant_source`: `model`, `tool`,
+`orchestration`, or `other`. Model/tool provenance requires a live trusted
+assistant turn fence or trusted MCP assistant-chat context. The internal
+NyxAgent admission marker identifies the human-authenticated orchestration hop;
+the direct `assistant_nyxagent_egress` transport snapshots the same orchestration
+source on its own outer-hop billing context.
+Inference execution classification combines trusted gateway ingress, catalog
+inference metadata, or a provider-linked `llm-*` service identity with a supported
+execution endpoint. It includes realtime GET only with a WebSocket upgrade;
+model listing, discovery, and session-token endpoints are excluded. Pricing
+configuration and token-capture enablement do not decide whether a request is
+model execution. No unrelated proxy path adds a credential lookup.
+
+The user-editable API-key `platform=nyxid-assistant` label is never proof.
+Historical billable partitions can recover an actor-bound key through current
+encrypted-credential metadata, conversation credential metadata, server-authored
+provision/replacement audit events, or a durable server-only API-key marker.
+Rotation recovery walks predecessors and successors, including an old revoked
+key whose only remaining proof is on its current successor, in bounded walks of up to 32 records in
+each direction. The metadata-only lineage view excludes credential material.
+Successor traversal explicitly requires a string predecessor, making the existing
+partial unique predecessor index usable. Every proof lookup projects metadata
+and returns at most one match; duplicate audit/conversation rows do not fan out
+usage. Historical execution recovery additionally requires retained inference
+service evidence and token-family/image metering or reported tokens. Confirmed
+assistant activity lacking that evidence is returned as `unclassified`, with
+excluded requests and costs, rather than presented as unknown-model inference.
+
+Legacy free summaries lack API-key attribution. Their root-only measures remain
+an explicit unattributed residual when new source partitions are added to the
+same stable root. Raw records may still permit a separate bounded recovery; this
+page does not scan all raw interior hours or claim all such identities were
+irreversibly deleted. Other old billed records may also lack retained proof.
+`unattributable_legacy` therefore describes **platform-wide historical candidates**
+whose NyxBot share is unknown, not confirmed missing NyxBot usage. Their counts
+are excluded and visibly disclosed. Neither user-wide activity nor a guessed
+identity fills this gap.
+
+Full provenance preservation requires every rollup writer to be upgraded. During
+a mixed-version rollout, an old writer ignores the new source field and can fold
+newly captured free usage into a summary without attribution. Those summaries
+remain uncovered and excluded by the scoped report; a recent meter timestamp
+alone does not establish coverage.

@@ -4,8 +4,8 @@ metadata:
   name: nyxid-machine-manager
   namespace: nyxid-machine
 rules:
-  # Manager can submit and observe Sandbox intent only. The Agent Sandbox
-  # controller remains the sole Pod/PVC reconciler; no pod/exec or pvc writes.
+  # Agent Sandbox creates workloads; Kubernetes GC reclaims its children.
+  # Manager only suspends/deletes the original Sandbox, never Pod/PVC objects.
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]

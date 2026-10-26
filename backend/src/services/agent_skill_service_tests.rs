@@ -550,6 +550,8 @@ async fn agent_skill_legacy_documents_and_turn_metadata() {
         AgentSkillMetadata {
             description: "bounded description".into(),
             size_bytes: 99,
+            preload_paths: vec![],
+            preload_bytes: 0,
         },
     );
     let prompt = instructions(&agent);

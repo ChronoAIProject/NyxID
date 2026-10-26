@@ -21,7 +21,8 @@ fn validate_new_password(password: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Replace an existing human credential while retaining all existing sessions.
+/// Replace an existing human credential, retaining completed sessions and
+/// cancelling pending first factors.
 pub async fn change_password(
     db: &mongodb::Database,
     user_id: &str,
@@ -36,7 +37,7 @@ pub async fn change_password(
     validate_new_password(&new_password)?;
     let mut user = db
         .collection::<User>(USERS)
-        .find_one(doc! { "_id": user_id })
+        .find_one(doc! { "_id": user_id, "platform_personal_deleting": {"$ne": true} })
         .await?
         .ok_or_else(|| AppError::Forbidden("Account is unavailable".into()))?;
     ensure_person_user(&user)?;
@@ -67,25 +68,40 @@ async fn replace_verified_password(
     old_hash: &str,
     new_hash: &str,
 ) -> AppResult<()> {
-    let result = db
-        .collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": user_id, "password_hash": old_hash,
-            "user_type": "person", "is_active": true },
-            doc! { "$set": {
-                "password_hash": new_hash,
-                "password_reset_token": null,
-                "password_reset_expires_at": null,
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
-            }},
-        )
-        .await?;
-    if result.matched_count != 1 {
-        return Err(AppError::Conflict(
-            "Account or password changed; retry with the current password".into(),
-        ));
-    }
-    Ok(())
+    let context = (db, user_id, old_hash, new_hash);
+    super::transaction_service::run_db_only(
+        db,
+        &context,
+        |transaction, &(db, user_id, old_hash, new_hash)| {
+            Box::pin(async move {
+                let result = db
+                    .collection::<User>(USERS)
+                    .update_one(
+                        doc! { "_id": user_id, "password_hash": old_hash,
+                        "user_type": "person", "is_active": true,
+                        "platform_personal_deleting": {"$ne": true} },
+                        doc! { "$set": {
+                            "password_hash": new_hash,
+                            "password_reset_token": null,
+                            "password_reset_expires_at": null,
+                            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                        }},
+                    )
+                    .session(&mut *transaction)
+                    .await?;
+                if result.matched_count != 1 {
+                    return Err(AppError::Conflict(
+                        "Account or password changed; retry with the current password".into(),
+                    ));
+                }
+                // Password proof creation/completion also fences this user document.
+                // Completed sessions retain their authority; old first factors do not.
+                super::session_authority::revoke_pending(db, user_id, transaction).await?;
+                Ok(())
+            })
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -108,9 +124,9 @@ pub fn ensure_person_user(user: &User) -> AppResult<()> {
 /// Result of a successful registration.
 pub struct RegisterResult {
     pub user_id: String,
-    /// Used in debug builds to log the verification token.
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
-    pub email_verification_token: String,
+    /// Raw material is exposed only to verification regressions, never handlers.
+    #[cfg(test)]
+    pub email_verification_token: Zeroizing<String>,
     /// `true` when a new user was actually inserted; `false` when the email
     /// already existed and a fake success was returned for email-enumeration
     /// protection. Callers that hold a reserved invite code must use this to
@@ -166,13 +182,14 @@ pub async fn register_user(
         tracing::warn!(email = %email, "Registration attempt for existing email");
         return Ok(RegisterResult {
             user_id: Uuid::new_v4().to_string(), // Fake ID, not stored
-            email_verification_token: generate_random_token(), // Fake token
+            #[cfg(test)]
+            email_verification_token: Zeroizing::new(generate_random_token()),
             actually_created: false,
         });
     }
 
     let password_hash = password::hash_password(password_raw)?;
-    let verification_token = generate_random_token();
+    let verification_token = Zeroizing::new(generate_random_token());
     // Store the hash of the verification token, not the raw token
     let verification_token_hash = hash_token(&verification_token);
     let now = Utc::now();
@@ -219,6 +236,7 @@ pub async fn register_user(
 
     Ok(RegisterResult {
         user_id,
+        #[cfg(test)]
         email_verification_token: verification_token,
         actually_created: true,
     })
@@ -366,6 +384,44 @@ pub async fn initiate_password_reset(
     Ok(Some(reset_token))
 }
 
+/// Bind a password already verified by authenticate_user to the live credential
+/// and MFA requirement. The write serializes installation of its authority with
+/// reset/deletion/enrollment. Never accept a stale verified User snapshot alone.
+pub(crate) async fn fence_password_proof(
+    db: &mongodb::Database,
+    user: &User,
+    transaction: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    let hash = user.password_hash.as_deref().ok_or_else(|| {
+        AppError::AuthenticationFailed("Password authentication is unavailable".into())
+    })?;
+    let mut filter = doc! {"_id":&user.id,"password_hash":hash,"is_active":true,
+    "user_type":{"$ne":"org"},"platform_personal_deleting":{"$ne":true}};
+    filter.insert(
+        "mfa_enabled",
+        if user.mfa_enabled {
+            bson::Bson::Boolean(true)
+        } else {
+            bson::Bson::Document(doc! {"$ne":true})
+        },
+    );
+    let changed = db
+        .collection::<bson::Document>(USERS)
+        .update_one(
+            filter,
+            doc! {"$set":{"password_login_fence":Uuid::new_v4().to_string()}},
+        )
+        .session(transaction)
+        .await
+        .map_err(super::transaction_service::map_error)?;
+    if changed.matched_count != 1 {
+        return Err(AppError::AuthenticationFailed(
+            "Authentication changed; sign in again".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Complete a password reset with the token and new password.
 ///
 /// Hashes the incoming token for comparison against stored hash.
@@ -419,28 +475,40 @@ async fn finish_password_reset(
     token_hash: &str,
     new_hash: &str,
 ) -> AppResult<()> {
-    let now = Utc::now();
-    let result = db
-        .collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": user_id, "user_type": "person", "is_active": true,
-            "password_reset_token": token_hash,
-            "password_reset_expires_at": { "$gt": bson::DateTime::from_chrono(now) } },
-            doc! { "$set": {
-                "password_hash": new_hash,
-                "password_reset_token": null,
-                "password_reset_expires_at": null,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
-
-    if result.matched_count != 1 {
-        return Err(AppError::BadRequest(
-            "Invalid or expired reset token".into(),
-        ));
-    }
-    Ok(())
+    let context = (db, user_id, token_hash, new_hash);
+    super::transaction_service::run_db_only(
+        db,
+        &context,
+        |transaction, &(db, user_id, token_hash, new_hash)| {
+            Box::pin(async move {
+                let result = db
+                    .collection::<User>(USERS)
+                    .update_one(
+                        doc! { "_id": user_id, "user_type": "person", "is_active": true,
+                        "platform_personal_deleting": {"$ne": true},
+                        "password_reset_token": token_hash,
+                        "$expr": {"$gt": ["$password_reset_expires_at", "$$NOW"]} },
+                        doc! { "$set": {
+                            "password_hash": new_hash,
+                            "password_reset_token": null,
+                            "password_reset_expires_at": null,
+                            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                        }},
+                    )
+                    .session(&mut *transaction)
+                    .await?;
+                if result.matched_count != 1 {
+                    return Err(AppError::BadRequest(
+                        "Invalid or expired reset token".into(),
+                    ));
+                }
+                super::session_authority::revoke_all_in_transaction(db, user_id, transaction)
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
 }
 
 /// Promote an existing user to admin by email address.

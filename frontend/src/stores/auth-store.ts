@@ -1,3 +1,4 @@
+import { useConsentStore } from "@/stores/consent-store";
 import { useServiceCardView } from "@/stores/service-card-view-store";
 import { create } from "zustand";
 import type { User, LoginResponse } from "@/types/api";
@@ -25,9 +26,10 @@ function clearAccountLocalState(): void {
   useAssistantWireLogStore.getState().reset();
 }
 
-function clearAccountIdentity({ resetTelemetry = false } = {}): void {
+function clearAccountIdentity(): void {
   // Reset attribution before publishing the cleared account state.
-  if (resetTelemetry) telemetryReset();
+  telemetryReset();
+  useConsentStore.getState().bindAccount(null);
   clearAccountLocalState();
   transitionAssistantIdentity(null);
 }
@@ -36,7 +38,9 @@ function applyIdentityTransition(
   previousUser: User | null,
   nextUser: User | null,
 ): void {
+  useConsentStore.getState().bindAccount(nextUser?.id ?? null);
   if (previousUser?.id === nextUser?.id) return;
+  telemetryReset();
   useServiceCardView.setState({
     accountId: nextUser?.id,
     filters: undefined,
@@ -65,6 +69,7 @@ interface AuthActions {
   readonly logout: () => Promise<void>;
   readonly checkAuth: (options?: {
     ephemeral?: boolean;
+    requireSession?: boolean;
     /** QR session handoff: clear the unconfirmed identity and fence restoration. */
     isCurrent?: () => boolean;
   }) => Promise<boolean>;
@@ -119,7 +124,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     try {
       await api.post<void>("/auth/logout");
     } finally {
-      clearAccountIdentity({ resetTelemetry: true });
+      clearAccountIdentity();
       set({
         user: null,
         isAuthenticated: false,
@@ -131,6 +136,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
 
   checkAuth: async ({
     ephemeral = false,
+    requireSession = false,
     isCurrent,
   } = {}): Promise<boolean> => {
     const authorityGuard = isCurrent
@@ -143,7 +149,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     if (isCurrent) {
       // The delivered cookie may belong to a different account. No old identity
       // is authoritative while its replacement profile is still unconfirmed.
-      clearAccountIdentity({ resetTelemetry: true });
+      clearAccountIdentity();
       set({ user: null, isAuthenticated: false });
     } else {
       set({ isLoading: true });
@@ -165,21 +171,21 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         mfaRequired: false,
         mfaToken: null,
       });
-      // Associate the restored session with its user_id so pageviews
-      // captured after boot attribute correctly. Safe no-op when
-      // telemetry is off.
+      // Bind explicit events to the freshly restored account.
       if (!ephemeral) telemetryIdentify(user.id);
       return true;
     } catch (error) {
       // Scoped failures retain pending MFA and leave global loading untouched.
-      if (isCurrent) return false;
+      if (isCurrent) {
+        if (requireSession) throw error;
+        return false;
+      }
       if (error instanceof ApiError && error.status === 401) {
         // Session expired / server rejected — this is a sign-out path
         // and must reset the telemetry identity before we wipe state
-        // so subsequent pageviews attribute to a fresh anon, not the
-        // ex-user. Parity with the explicit `logout()` branch above.
+        // so no later event retains the former account.
         if (!ephemeral) {
-          clearAccountIdentity({ resetTelemetry: true });
+          clearAccountIdentity();
         } else {
           transitionAssistantIdentity(null);
         }
@@ -187,6 +193,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       } else {
         set({ isLoading: false });
       }
+      if (requireSession) throw error;
       return false;
     }
   },

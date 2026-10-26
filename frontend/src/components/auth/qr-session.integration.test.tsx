@@ -11,6 +11,7 @@ import {
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { WebDeviceLogin } from "./web-device-login";
 import { LoginPage } from "@/pages/login";
+import { useConsentStore } from "@/stores/consent-store";
 import { useAuthStore } from "@/stores/auth-store";
 
 vi.mock("qrcode", () => ({
@@ -30,6 +31,8 @@ const profile = {
   email_verified: true,
 };
 beforeEach(() => {
+  localStorage.clear();
+  useConsentStore.getState().bindAccount(null);
   useAuthStore.setState({
     user: null,
     isAuthenticated: false,
@@ -91,7 +94,7 @@ it("clears a pending password MFA challenge only after QR profile verification a
     component: WebDeviceLogin,
   });
   const dashboard = createRoute({
-    path: "/dashboard",
+    path: "/assistant",
     getParentRoute: () => root,
     component: () => <div>Authenticated destination</div>,
     beforeLoad: () => {
@@ -130,7 +133,7 @@ it("clears a pending password MFA challenge only after QR profile verification a
     completeProfile(new Response(JSON.stringify(profile)));
   });
   await screen.findByText("Authenticated destination");
-  expect(router.state.location.pathname).toBe("/dashboard");
+  expect(router.state.location.pathname).toBe("/assistant");
   cleanup();
   render(
     <QueryClientProvider client={client}>
@@ -170,7 +173,7 @@ async function renderQr() {
     component: WebDeviceLogin,
   });
   const dashboard = createRoute({
-    path: "/dashboard",
+    path: "/assistant",
     getParentRoute: () => root,
     component: () => <div>Authenticated destination</div>,
   });
@@ -224,6 +227,8 @@ it.each([401, 503])(
   "requires fresh confirmation after profile %s and retries only the delivered session",
   async (status) => {
     useAuthStore.getState().setUser(differentAccount);
+    useConsentStore.getState().setConsent(true);
+    expect(useConsentStore.getState().accountId).toBe(differentAccount.id);
     await useAuthStore.getState().login("qr@example.com", "password");
     const { router } = await renderQr();
     expect(
@@ -234,6 +239,10 @@ it.each([401, 503])(
       isAuthenticated: false,
       mfaRequired: true,
       mfaToken: "pending-password-mfa",
+    });
+    expect(useConsentStore.getState()).toMatchObject({
+      accountId: null,
+      enabled: false,
     });
     await act(async () => {
       completeProfile(profileFailure(status));
@@ -273,6 +282,10 @@ it.each([401, 503])(
     });
     await screen.findByText("Authenticated destination");
     expect(useAuthStore.getState().user?.id).toBe(profile.id);
+    expect(useConsentStore.getState()).toMatchObject({
+      accountId: profile.id,
+      enabled: false,
+    });
     expect(useAuthStore.getState().isAuthenticated).toBe(true);
     expect(useAuthStore.getState().mfaRequired).toBe(false);
     expect(useAuthStore.getState().mfaToken).toBeNull();
@@ -309,6 +322,7 @@ it.each([
       useAuthStore.setState({ isLoading: true });
     });
     const newerState = useAuthStore.getState();
+    const newerConsent = useConsentStore.getState();
     await act(async () => {
       finishOldProfile(
         status === 200
@@ -317,6 +331,7 @@ it.each([
       );
     });
     expect(useAuthStore.getState()).toBe(newerState);
+    expect(useConsentStore.getState()).toBe(newerConsent);
     expect(view.router.state.location.pathname).toBe("/qr");
     expect(
       screen.queryByText("Authenticated destination"),
@@ -346,9 +361,11 @@ it("fences profile application after cancellation while the response body is sti
     useAuthStore.getState().setMfaRequired(true, "newer-password-challenge");
   });
   const newerState = useAuthStore.getState();
+  const newerConsent = useConsentStore.getState();
   await act(async () => {
     finishBody(profile);
   });
   expect(useAuthStore.getState()).toBe(newerState);
+  expect(useConsentStore.getState()).toBe(newerConsent);
   expect(view.router.state.location.pathname).toBe("/qr");
 });

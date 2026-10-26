@@ -25,4 +25,17 @@ describe("deriveTurnStatus", () => {
   it("returns no status after settlement", () => {
     expect(deriveTurnStatus({ activeTurn: null, live: false, pendingApproval: false, retrying: false })).toBeNull();
   });
+
+  it("keeps one turn start across phase changes and uses the oldest running call", () => {
+    const started_at = "2026-10-21T00:00:00Z";
+    const activeTurn = { started_at, activities: [
+      { status: "completed", label: "finished", started_at },
+      { status: "running", label: "first", started_at: "2026-10-21T00:00:05Z" },
+      { status: "running", label: "second", started_at: "2026-10-21T00:00:10Z" },
+    ] };
+    expect(status({ activeTurn })).toMatchObject({ startedAt: started_at, toolLabel: "first", toolStartedAt: "2026-10-21T00:00:05Z" });
+    expect(status({ activeTurn, pendingApproval: true }).startedAt).toBe(started_at);
+    expect(status({ activeTurn: { started_at, activities: [] }, retrying: true }).startedAt).toBe(started_at);
+    expect(status({ activeTurn: { started_at, continuations: 1 } }).startedAt).toBe(started_at);
+  });
 });

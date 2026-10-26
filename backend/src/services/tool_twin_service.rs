@@ -9,17 +9,19 @@ use futures::TryStreamExt;
 use mongodb::{Database, bson::doc};
 use serde_json::{Value, json};
 
-pub async fn prepare_create(db: &Database, body: Value) -> AppResult<Value> {
-    prepare_create_for_actor(db, body, None).await
-}
-
-pub async fn prepare_create_for_actor(
+/// Internal inheritance keeps decoded header owners typed and zeroizing. Stored
+/// ciphertext never enters caller JSON; creation binds values to the new row.
+pub(crate) async fn prepare_create_for_actor(
     db: &Database,
-    mut body: Value,
+    keys: Option<&crate::crypto::aes::EncryptionKeys>,
+    mut body: crate::crypto::secret_json::SecretJson,
     manager: Option<&str>,
-) -> AppResult<Value> {
+) -> AppResult<(
+    crate::crypto::secret_json::SecretJson,
+    Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+)> {
     let Some(reference) = body.get("twin_of_service_id").and_then(Value::as_str) else {
-        return Ok(body);
+        return Ok((body, None));
     };
     let source = db
         .collection::<DownstreamService>(COLLECTION_NAME)
@@ -78,6 +80,24 @@ pub async fn prepare_create_for_actor(
     body["provider_config_id"] = Value::Null;
     body["credential"] = Value::Null;
     body["twin_of_service_id"] = source.id.clone().into();
+    let inherited_headers = if manager.is_none() && body.get("default_request_headers").is_none() {
+        let resolved = super::default_header_service::catalog(keys, &source).await?;
+        Some(
+            resolved
+                .into_iter()
+                .map(
+                    |header| crate::models::default_request_header::DefaultRequestHeader {
+                        name: header.name,
+                        value: header.value,
+                        sensitive: header.sensitive,
+                        overridable: header.overridable,
+                    },
+                )
+                .collect(),
+        )
+    } else {
+        None
+    };
     let mut inherited = json!({
         "name":source.name, "base_url":source.base_url,
         "auth_method":source.auth_method,
@@ -96,7 +116,6 @@ pub async fn prepare_create_for_actor(
             "auth_scheme":source.auth_scheme,
             "destination_targets":source.destination_targets,
             "asyncapi_spec_url":source.asyncapi_spec_url,
-            "default_request_headers":source.default_request_headers,
             "custom_user_agent":source.custom_user_agent,
             "capabilities":source.capabilities,
             "platform_key":{"enabled":true,"audience":"public","allowed_owner_ids":[]}
@@ -113,7 +132,7 @@ pub async fn prepare_create_for_actor(
         target.entry(key.clone()).or_insert_with(|| value.clone());
     }
     target.insert("import_source".into(), inherited["import_source"].clone());
-    Ok(body)
+    Ok((body, inherited_headers))
 }
 
 pub async fn clone_endpoints(

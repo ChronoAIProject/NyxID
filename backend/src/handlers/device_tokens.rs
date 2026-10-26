@@ -19,7 +19,7 @@ const MAX_DEVICES_PER_USER: usize = 10;
 
 // --- Request types ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct RegisterDeviceRequest {
     pub platform: String,
     pub token: String,
@@ -28,7 +28,7 @@ pub struct RegisterDeviceRequest {
     pub app_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct UnregisterCurrentDeviceRequest {
     pub platform: String,
     pub token: String,
@@ -303,7 +303,8 @@ pub async fn register_device(
         TelemetryEvent::NotificationDeviceRegistered {
             platform: body.platform.clone(),
         },
-    );
+    )
+    .await;
 
     Ok(Json(DeviceResponse {
         device_id,
@@ -397,8 +398,13 @@ pub async fn remove_device(
         .await?;
 
     let updated_channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
-    let approval_suspended = updated_channel.approval_required
-        && !notification_service::has_active_notification_channel(&updated_channel);
+    let web_only = updated_channel.approval_required != Some(false)
+        && !notification_service::approval_delivery_configured(
+            &updated_channel,
+            &state.config,
+            state.fcm_auth.is_some(),
+            state.apns_auth.is_some(),
+        );
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -406,7 +412,8 @@ pub async fn remove_device(
         "push_device_removed",
         Some(serde_json::json!({
             "device_id": device_id,
-            "approval_suspended": approval_suspended,
+            "approval_suspended": false,
+            "approval_web_only": web_only,
         })),
     );
 
@@ -420,11 +427,12 @@ pub async fn remove_device(
             auth_user.api_key_id.as_deref(),
             &tele,
             TelemetryEvent::NotificationDeviceRemoved { platform },
-        );
+        )
+        .await;
     }
 
-    let message = if approval_suspended {
-        "Device removed. Approval protection is suspended until a notification channel is available; it resumes automatically.".to_string()
+    let message = if web_only {
+        "Device removed. Approval remains required. Review pending requests in Approval History on the web.".to_string()
     } else {
         "Device removed".to_string()
     };
@@ -480,9 +488,14 @@ pub async fn remove_current_device(
         .await?;
 
     let updated_channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
-    let approval_suspended = token_was_present
-        && updated_channel.approval_required
-        && !notification_service::has_active_notification_channel(&updated_channel);
+    let web_only = token_was_present
+        && updated_channel.approval_required != Some(false)
+        && !notification_service::approval_delivery_configured(
+            &updated_channel,
+            &state.config,
+            state.fcm_auth.is_some(),
+            state.apns_auth.is_some(),
+        );
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -491,7 +504,8 @@ pub async fn remove_current_device(
         Some(serde_json::json!({
             "platform": body.platform,
             "token_removed": token_was_present,
-            "approval_suspended": approval_suspended,
+            "approval_suspended": false,
+            "approval_web_only": web_only,
         })),
     );
 
@@ -506,11 +520,12 @@ pub async fn remove_current_device(
             TelemetryEvent::NotificationDeviceRemoved {
                 platform: body.platform.clone(),
             },
-        );
+        )
+        .await;
     }
 
-    let message = if approval_suspended {
-        "Current device removed. Approval protection is suspended until a notification channel is available; it resumes automatically.".to_string()
+    let message = if web_only {
+        "Current device removed. Approval remains required. Review pending requests in Approval History on the web.".to_string()
     } else {
         "Current device removed".to_string()
     };
@@ -634,8 +649,8 @@ fn push_device_registered_audit_metadata(
     serde_json::json!({
         "device_id": device_id,
         "platform": platform,
-        "approval_resumed": channel.approval_required
-            && !notification_service::has_active_notification_channel(channel),
+        "approval_required": channel.approval_required,
+        "approval_resumed": false,
     })
 }
 
@@ -726,6 +741,20 @@ fn disable_push_update_doc() -> Document {
     doc! {
         "push_enabled": false,
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
+    }
+}
+
+impl std::fmt::Debug for RegisterDeviceRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisterDeviceRequest")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for UnregisterCurrentDeviceRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnregisterCurrentDeviceRequest")
+            .finish_non_exhaustive()
     }
 }
 
@@ -954,14 +983,14 @@ mod tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
-            approval_required: true,
+            approval_required: Some(true),
             push_enabled: true,
             push_devices: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
 
-        assert!(channel.approval_required);
+        assert_eq!(channel.approval_required, Some(true));
         assert!(!notification_service::has_active_notification_channel(
             &channel
         ));
@@ -979,7 +1008,7 @@ mod tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
-            approval_required: true,
+            approval_required: Some(true),
             push_enabled: true,
             push_devices: vec![],
             created_at: Utc::now(),
@@ -1003,7 +1032,7 @@ mod tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
-            approval_required: true,
+            approval_required: Some(true),
             push_enabled: false,
             push_devices: vec![],
             created_at: Utc::now(),
@@ -1012,7 +1041,8 @@ mod tests {
 
         let metadata = push_device_registered_audit_metadata(&channel, "device-id", "fcm");
 
-        assert_eq!(metadata["approval_resumed"], true);
+        assert_eq!(metadata["approval_resumed"], false);
+        assert_eq!(metadata["approval_required"], true);
         assert_eq!(metadata["device_id"], "device-id");
         assert_eq!(metadata["platform"], "fcm");
         assert!(metadata.get("token").is_none());
@@ -1026,7 +1056,7 @@ mod tests {
         );
 
         let mut approval_off = channel;
-        approval_off.approval_required = false;
+        approval_off.approval_required = Some(false);
         assert_eq!(
             push_device_registered_audit_metadata(&approval_off, "device-id", "fcm")["approval_resumed"],
             false
@@ -1118,7 +1148,7 @@ mod tests {
                         telegram_link_code_expires_at: None,
                         approval_timeout_secs: 30,
                         grant_expiry_days: 30,
-                        approval_required,
+                        approval_required: Some(approval_required),
                         push_enabled: has_existing_device,
                         push_devices: if has_existing_device {
                             vec![old_device.clone()]
@@ -1148,7 +1178,8 @@ mod tests {
                     .unwrap()
                     .expect("registration channel");
                 assert_eq!(
-                    saved.approval_required, approval_required,
+                    saved.approval_required,
+                    Some(approval_required),
                     "{path} path changed approval_required"
                 );
             }
@@ -1156,7 +1187,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn logout_login_round_trip_preserves_approval_and_resumes_enforcement() {
+    async fn logout_login_round_trip_keeps_approval_required() {
         let Some(db) = connect_test_database("device_logout_login_approval").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -1184,7 +1215,7 @@ mod tests {
                 telegram_link_code_expires_at: None,
                 approval_timeout_secs: 30,
                 grant_expiry_days: 30,
-                approval_required: true,
+                approval_required: Some(true),
                 push_enabled: true,
                 push_devices: vec![old_device],
                 created_at: Utc::now(),
@@ -1207,14 +1238,18 @@ mod tests {
         let after_logout = notification_service::get_or_create_channel(&db, &user_id)
             .await
             .unwrap();
-        assert!(after_logout.approval_required);
+        assert_eq!(after_logout.approval_required, Some(true));
         assert!(!notification_service::has_active_notification_channel(
             &after_logout
         ));
         assert!(
-            !crate::services::approval_service::user_requires_approval(&db, &user_id)
-                .await
-                .unwrap()
+            crate::services::approval_service::user_requires_approval(
+                &db,
+                &user_id,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
         );
 
         let new_device = DeviceToken {
@@ -1237,14 +1272,18 @@ mod tests {
         let after_login = notification_service::get_or_create_channel(&db, &user_id)
             .await
             .unwrap();
-        assert!(after_login.approval_required);
+        assert_eq!(after_login.approval_required, Some(true));
         assert!(notification_service::has_active_notification_channel(
             &after_login
         ));
         assert!(
-            crate::services::approval_service::user_requires_approval(&db, &user_id)
-                .await
-                .unwrap()
+            crate::services::approval_service::user_requires_approval(
+                &db,
+                &user_id,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
         );
     }
 
@@ -1281,7 +1320,7 @@ mod tests {
                 telegram_link_code_expires_at: None,
                 approval_timeout_secs: 30,
                 grant_expiry_days: 30,
-                approval_required: true,
+                approval_required: Some(true),
                 push_enabled: true,
                 // `$pull` removes every matching token. Duplicate legacy rows
                 // must still count as losing the previous owner's last channel.
@@ -1307,14 +1346,18 @@ mod tests {
             .await
             .unwrap()
             .expect("previous owner channel");
-        assert!(saved.approval_required);
+        assert_eq!(saved.approval_required, Some(true));
         assert!(!notification_service::has_active_notification_channel(
             &saved
         ));
         assert!(
-            !crate::services::approval_service::user_requires_approval(&db, &previous_user_id)
-                .await
-                .unwrap()
+            crate::services::approval_service::user_requires_approval(
+                &db,
+                &previous_user_id,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
         );
     }
 }

@@ -3,12 +3,16 @@ pub mod apple_client_secret;
 pub mod device_code;
 pub mod dpop;
 pub mod hmac_keys;
+pub(crate) mod hmac_lifecycle;
 pub mod jwks;
 pub mod jwt;
+#[cfg(test)]
+mod jwt_verifier_inventory_tests;
 pub mod key_provider;
 pub mod local_key_provider;
 pub mod mtls;
 pub mod password;
+pub(crate) mod secret_json;
 pub mod telegram;
 pub mod token;
 

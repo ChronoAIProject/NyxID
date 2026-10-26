@@ -8,8 +8,12 @@ set -euo pipefail
 # must be far above the nextest peak. The test data set is tiny: cap the
 # WiredTiger cache instead of letting it claim half of the runner's RAM next
 # to the instrumented test binary.
+# Keep rseq registered by glibc so MongoDB uses tcmalloc's per-thread caches.
+# Its per-CPU caches are incompatible with Linux 6.19+ (SERVER-121912).
+# MongoDB's rseq_kernel_compatibility_check.js tests this setting explicitly.
 docker run --detach --name nyxid-test-mongodb --publish 27017:27017 \
   --ulimit nofile=1048576:1048576 \
+  --env GLIBC_TUNABLES=glibc.pthread.rseq=1 \
   mongo:8.0@sha256:4968f22d0c6c10ef29952f3e807f62872ba22b3312f25803564fbfc08255efc2 --replSet rs0 --bind_ip_all \
   --wiredTigerCacheSizeGB 2 \
   --setParameter minSnapshotHistoryWindowInSeconds=0 \

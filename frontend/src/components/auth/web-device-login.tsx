@@ -93,7 +93,7 @@ export function WebDeviceLogin({
       window.location.assign(trustedReturnTo);
       return;
     }
-    void navigate({ to: "/dashboard" as string });
+    void navigate({ to: "/assistant" as string });
   }, [deviceLogin.phase, navigate, returnTo]);
 
   function setOpen(open: boolean) {

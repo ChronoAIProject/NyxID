@@ -242,6 +242,7 @@ fn machine_docker_creation_preserves_ca_mounts_and_sandbox_profile() {
     let output = harness
         .command("start")
         .arg("--machine")
+        .args(["--separation", "shared-legacy"])
         .env("NYXID_CA_CERT", &path)
         .output()
         .unwrap();
@@ -265,6 +266,10 @@ fn machine_docker_creation_preserves_ca_mounts_and_sandbox_profile() {
         path.display()
     );
     assert!(run.windows(2).any(|args| args == ["--mount", &mount]));
+    assert!(
+        run.windows(2)
+            .any(|args| args == ["-e", "NYXID_MACHINE_SEPARATION=shared-legacy"])
+    );
     assert!(
         run.windows(2)
             .any(|args| args[0] == "--security-opt" && args[1].starts_with("seccomp="))

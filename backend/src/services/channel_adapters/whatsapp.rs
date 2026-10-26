@@ -161,6 +161,8 @@ fn parse_message(message: &Value, contacts: &Value) -> Option<InboundMessage> {
         .and_then(|contact| contact["profile"]["name"].as_str())
         .map(String::from);
     Some(InboundMessage {
+        embedded_attachments: Vec::new(),
+        embedded_attachments_omitted: 0,
         platform_message_id: message_id.to_string(),
         conversation_id: sender.to_string(),
         conversation_type: "private".to_string(),

@@ -8,6 +8,7 @@ use crate::test_utils::{connect_transaction_test_database, test_membership, test
 async fn fixture() -> (Database, OraclePool, String, String) {
     let db = connect_transaction_test_database("oracle_worker_incarnation").await;
     enrollment::ensure_indexes(&db).await.unwrap();
+    ensure_test_command_indexes(&db).await;
     let org = uuid::Uuid::new_v4().to_string();
     let first = uuid::Uuid::new_v4().to_string();
     let second = uuid::Uuid::new_v4().to_string();
@@ -70,6 +71,7 @@ async fn oracle_enrollment_management_aba_cannot_control_replacement_or_migrate_
         .unwrap();
     let stale_command = enqueue_worker_command(
         &db,
+        &pool,
         &authorized,
         &first,
         OracleWorkerCommandKind::Drain,
@@ -78,7 +80,7 @@ async fn oracle_enrollment_management_aba_cannot_control_replacement_or_migrate_
     )
     .await
     .unwrap();
-    forget_authorized_worker(&db, &authorized, true)
+    forget_authorized_worker(&db, &pool, &authorized, &pool.user_id, true)
         .await
         .unwrap();
     // Reuse both the public label and client-chosen installation ID under another member.
@@ -86,6 +88,7 @@ async fn oracle_enrollment_management_aba_cannot_control_replacement_or_migrate_
     assert_ne!(authorized.generation, replacement.generation);
     let command = enqueue_worker_command(
         &db,
+        &pool,
         &replacement,
         &second,
         OracleWorkerCommandKind::Drain,
@@ -102,6 +105,7 @@ async fn oracle_enrollment_management_aba_cannot_control_replacement_or_migrate_
     assert!(
         enqueue_worker_command(
             &db,
+            &pool,
             &authorized,
             &first,
             OracleWorkerCommandKind::Resume,
@@ -112,17 +116,17 @@ async fn oracle_enrollment_management_aba_cannot_control_replacement_or_migrate_
         .is_err()
     );
     assert!(
-        cancel_worker_command(&db, &authorized, &command.id)
+        cancel_worker_command(&db, &pool, &authorized, &pool.user_id, &command.id)
             .await
             .is_err()
     );
     assert!(
-        forget_authorized_worker(&db, &authorized, true)
+        forget_authorized_worker(&db, &pool, &authorized, &pool.user_id, true)
             .await
             .is_err()
     );
     assert!(
-        list_worker_commands(&db, &authorized)
+        list_worker_commands(&db, &pool, &authorized, &pool.user_id)
             .await
             .unwrap()
             .is_empty()
@@ -135,7 +139,10 @@ async fn oracle_enrollment_management_aba_cannot_control_replacement_or_migrate_
         replacement.generation
     );
     assert_eq!(
-        list_worker_commands(&db, &replacement).await.unwrap()[0].id,
+        list_worker_commands(&db, &pool, &replacement, &pool.user_id)
+            .await
+            .unwrap()[0]
+            .id,
         command.id
     );
     // Even an orphaned command from an older writer cannot migrate to the replacement.
@@ -171,6 +178,7 @@ async fn oracle_enrollment_forget_rolls_back_every_collection_together() {
     let worker = enrolled(&db, &pool, &first, &uuid::Uuid::new_v4().to_string()).await;
     let command = enqueue_worker_command(
         &db,
+        &pool,
         &worker,
         &first,
         OracleWorkerCommandKind::Drain,
@@ -241,7 +249,9 @@ async fn oracle_enrollment_forget_rolls_back_every_collection_together() {
             .len(),
         1
     );
-    forget_authorized_worker(&db, &worker, true).await.unwrap();
+    forget_authorized_worker(&db, &pool, &worker, &pool.user_id, true)
+        .await
+        .unwrap();
     assert!(
         get_worker(&db, &pool.id, &worker.worker_label)
             .await
@@ -266,10 +276,24 @@ async fn oracle_enrollment_legacy_none_generation_commands_stay_compatible_witho
         .insert_one(&worker)
         .await
         .unwrap();
+    assert!(matches!(
+        enqueue_worker_command(
+            &db,
+            &pool,
+            &worker,
+            &actor,
+            OracleWorkerCommandKind::Drain,
+            None,
+            None,
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
     let command = enqueue_worker_command(
         &db,
+        &pool,
         &worker,
-        &actor,
+        &pool.user_id,
         OracleWorkerCommandKind::Drain,
         None,
         None,
@@ -334,7 +358,7 @@ async fn oracle_enrollment_stale_authenticated_heartbeat_cannot_resurrect_or_rea
         pool: pool.clone(),
         installation: Some(authorized.clone()),
     };
-    forget_authorized_worker(&db, &authorized, true)
+    forget_authorized_worker(&db, &pool, &authorized, &pool.user_id, true)
         .await
         .unwrap();
     let input = || WorkerPresenceInput {
@@ -380,6 +404,7 @@ async fn oracle_enrollment_stale_authenticated_heartbeat_cannot_resurrect_or_rea
     let replacement = enrolled(&db, &pool, &second, &instance).await;
     let command = enqueue_worker_command(
         &db,
+        &pool,
         &replacement,
         &second,
         OracleWorkerCommandKind::Drain,
@@ -394,13 +419,14 @@ async fn oracle_enrollment_stale_authenticated_heartbeat_cannot_resurrect_or_rea
             .is_err()
     );
     assert!(
-        deliver_next_command_for_worker(&db, &authorized, &authorized.capabilities)
+        deliver_next_command_for_worker(&db, &pool, &authorized, &authorized.capabilities)
             .await
             .is_err()
     );
     assert!(
         apply_command_reports_for_worker(
             &db,
+            &pool,
             &authorized,
             vec![CommandReport {
                 command_id: command.id.clone(),
@@ -412,7 +438,7 @@ async fn oracle_enrollment_stale_authenticated_heartbeat_cannot_resurrect_or_rea
         .is_err()
     );
     assert!(
-        recently_cancelled_delivered_for_worker(&db, &authorized)
+        recently_cancelled_delivered_for_worker(&db, &pool, &authorized)
             .await
             .is_err()
     );
@@ -431,7 +457,7 @@ async fn oracle_enrollment_stale_authenticated_heartbeat_cannot_resurrect_or_rea
         OracleWorkerCommandStatus::Queued
     );
     assert_eq!(
-        deliver_next_command_for_worker(&db, &replacement, &replacement.capabilities)
+        deliver_next_command_for_worker(&db, &pool, &replacement, &replacement.capabilities)
             .await
             .unwrap()
             .unwrap()

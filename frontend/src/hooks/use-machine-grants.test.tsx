@@ -7,7 +7,7 @@ import type { User } from "@/types/api";
 import { prepareMachineConsent, useMachineGrant, useMachineGrantList, useRevokeMachineGrant, useSaveMachineGrant } from "./use-machine-grants";
 const transport = vi.fn<typeof fetch>();
 const nodeId = "b7b0c3da-5d64-4b90-bbae-9bd7aa42104c";
-const selection = { assignments: { [nodeId]: { capabilities: { shell: true, files: true, browser: false, computer: false, developer_browser: false }, file_roots: ["/workspace"], service_ids: [] } } };
+const selection = { separation: "shared_legacy" as const, legacy_warning_acknowledged: true, assignments: { [nodeId]: { capabilities: { shell: true, files: true, browser: false, computer: false, developer_browser: false }, file_roots: ["/workspace"], service_ids: [] } } };
 const grant = {
   id: "grant-one", source: { kind: "api_key", api_key_id: "key", api_key_state_version_at_approval: 3 },
   revision: 1, policy_revision: 1, status: "active", expires_at: "2099-01-01T00:00:00Z",

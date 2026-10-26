@@ -343,8 +343,9 @@ pub async fn queue_native_deadline_in_session(
         return Ok(false);
     }
     let changed = db.collection::<Document>(MACHINES).update_one(doc!{
-        "_id":&machine.node_id,"revision":machine.revision,
+        "_id":&machine.node_id,"owner_id":&machine.owner_id,"revision":machine.revision,
         "runtime_generation":machine.runtime_generation,"credential_epoch":machine.credential_epoch,
+        "writer_fence":&machine.writer_fence,"writer_admitted":machine.writer_admitted,
         "active_operation_id":&operation_id,"resource_state":machine.resource_state.as_str()
     },doc!{"$set":{"native_run_not_after":bson::DateTime::from_chrono(cutoff)},
         "$inc":{"native_deadline_fence":1_i64}}).session(&mut *session).await?;
@@ -365,15 +366,84 @@ pub async fn queue_native_deadline_in_session(
             state: EffectState::Pending,
             attempts: 0,
             claim_id: None,
+            undispatched_claim_id: None,
             claimed_until: None,
             last_error: None,
             available_at: Some(now),
+            submission: None,
             created_at: now,
             updated_at: now,
         })
         .session(&mut *session)
         .await?;
     Ok(true)
+}
+
+/// Bind maintenance to the exact lifecycle decision it evaluated. Evidence-only
+/// writes need not advance revision, so retain the execution tuple as well.
+pub(crate) fn maintenance_snapshot_filter(machine: &ManagedMachine) -> Document {
+    doc! {
+        "_id":&machine.node_id,"owner_id":&machine.owner_id,"revision":machine.revision,
+        "active_operation_id":&machine.active_operation_id,
+        "runtime_generation":machine.runtime_generation,"credential_epoch":machine.credential_epoch,
+        "writer_fence":&machine.writer_fence,"writer_admitted":machine.writer_admitted,
+        "resource_state":machine.resource_state.as_str(),"native_uncertainty":&machine.native_uncertainty,
+    }
+}
+
+/// A stopped predecessor's deadline cannot govern a newly accepted Resume.
+/// This only defers old-generation maintenance; it grants no execution, money
+/// or deadline extension. The worker still owns generation initialization.
+pub(crate) async fn pending_resume_initialization(
+    db: &Database,
+    machine: &ManagedMachine,
+    now: DateTime<Utc>,
+) -> AppResult<bool> {
+    use crate::models::remote_machine_operation::{LifecycleAction, OperationState};
+    if machine.resource_state != ResourceState::Resuming
+        || machine.writer_admitted
+        || machine.native_uncertainty.is_some()
+        || !funding_is_live(machine, now)
+        || !(has_never_submitted_stop(machine)
+            || super::remote_machine_native::predecessor_stopped(machine))
+    {
+        return Ok(false);
+    }
+    let Some(next_generation) = machine.runtime_generation.checked_add(1) else {
+        return Ok(false);
+    };
+    let Some(operation_id) = machine.active_operation_id.as_deref() else {
+        return Ok(false);
+    };
+    let Some(operation) =
+        super::remote_machine_operation_service::get_operation(db, &machine.owner_id, operation_id)
+            .await?
+    else {
+        return Ok(false);
+    };
+    if operation.machine_id.as_deref() != Some(machine.node_id.as_str())
+        || operation.action != LifecycleAction::Resume
+        || operation.terminal_at.is_some()
+        || !matches!(
+            operation.state,
+            OperationState::Accepted | OperationState::Applying | OperationState::Reconciling
+        )
+        || operation.desired_runtime_generation != Some(next_generation)
+        || operation
+            .expected_revision
+            .is_none_or(|revision| revision >= machine.revision)
+        || operation
+            .deadline_at
+            .unwrap_or(operation.created_at + Duration::minutes(15))
+            <= now
+    {
+        return Ok(false);
+    }
+    let owner = db
+        .collection::<Document>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id":&machine.owner_id})
+        .await?;
+    Ok(lifecycle::owner_ineligibility(owner.as_ref()).is_none())
 }
 
 pub async fn ensure_native_deadline(
@@ -393,11 +463,7 @@ pub async fn ensure_native_deadline(
             let result: AppResult<()> = async {
                 let current = db_owned
                     .collection::<ManagedMachine>(MACHINES)
-                    .find_one(doc! {
-                        "_id":&snapshot.node_id,"runtime_generation":snapshot.runtime_generation,
-                        "credential_epoch":snapshot.credential_epoch,
-                        "active_operation_id":&snapshot.active_operation_id
-                    })
+                    .find_one(maintenance_snapshot_filter(&snapshot))
                     .session(&mut *session)
                     .await?
                     .ok_or(AppError::MachineNotAllowed)?;
@@ -588,7 +654,6 @@ pub async fn stop_in_session(
         )
         .await
 }
-#[cfg(test)]
 pub async fn require_accounting_final(db: &Database, machine: &ManagedMachine) -> AppResult<()> {
     if machine.free_slot {
         return Ok(());
@@ -784,6 +849,78 @@ pub async fn native_observe_and_settle(
     Ok(())
 }
 
+/// Consume only an already persisted, original-delete stop. It cannot produce
+/// running/Ready evidence, extend coverage, rekey or authorize replacement.
+pub(crate) async fn settle_persisted_delete(
+    db: &Database,
+    billing: Arc<BillingService>,
+    machine: &ManagedMachine,
+) -> AppResult<()> {
+    let progress = machine
+        .delete_recovery
+        .as_ref()
+        .ok_or_else(|| AppError::Conflict("delete_evidence_missing".into()))?;
+    if !super::remote_machine_delete_recovery::stop_is_valid(machine, progress) {
+        return Err(AppError::Conflict("delete_stop_evidence_mismatch".into()));
+    }
+    if machine.free_slot {
+        return Ok(());
+    }
+    let stop = progress
+        .stop
+        .as_ref()
+        .ok_or(AppError::MachineNotAllowed)?
+        .clone();
+    let run_id = machine
+        .runtime_run_id
+        .clone()
+        .ok_or_else(|| AppError::Conflict("runtime_contract_missing".into()))?;
+    let db_owned = db.clone();
+    let snapshot = machine.clone();
+    let progress = progress.clone();
+    let billing_tx = billing.clone();
+    let run_owned = run_id.clone();
+    db_owned.client().start_session().await?.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
+        let result:AppResult<()>=async {
+            if !lifecycle::deletion_authorized_in_session(&db_owned,session,&snapshot.node_id).await? {return Err(AppError::MachineNotAllowed);}
+            let changed=db_owned.collection::<Document>(MACHINES).update_one(doc!{"_id":&snapshot.node_id,"revision":snapshot.revision,
+                "resource_state":"deleting","writer_admitted":false,"active_operation_id":&progress.operation_id,
+                "runtime_generation":progress.runtime_generation,"credential_epoch":progress.credential_epoch,"writer_fence":&progress.writer_fence,
+                "native_uncertainty":&progress.original_uncertainty,"delete_recovery.evidence_version":super::remote_machine_delete_recovery::EVIDENCE_VERSION,"delete_recovery":bson::to_bson(&progress).map_err(|_|AppError::MachineNotAllowed)?},
+                doc!{"$inc":{"billing_evidence_fence":1_i64}}).session(&mut *session).await?;
+            if changed.matched_count!=1{return Err(AppError::Conflict("delete_stop_evidence_raced".into()));}
+            if stop.kind == crate::models::remote_machine::DeleteStopKind::ControlPlaneWorkloadAbsent
+                && !super::remote_machine_operation_service::delete_creation_responsibilities_terminal_in_session(&db_owned,session,&snapshot).await?
+            {
+                return Err(AppError::Conflict("creation_result_unknown".into()));
+            }
+            let run=db_owned.collection::<MachineRuntimeRun>(RUN_COLLECTION).find_one(doc!{"_id":&run_owned,"node_id":&snapshot.node_id,"owner_id":&snapshot.owner_id,"runtime_generation":progress.runtime_generation}).session(&mut *session).await?.ok_or(AppError::MachineNotAllowed)?;
+            if run.state==MachineRuntimeRunState::Closed{return Ok(());}
+            if run.stop_ns.is_none() {
+                billing_tx.request_machine_runtime_stop_in_session(session,&run_owned,progress.runtime_generation,false).await?;
+                billing_tx.prove_machine_stop_observed_in_session(session,&run_owned,progress.runtime_generation,stop.observed_at,&stop.evidence_ref).await?;
+            }
+            for _ in 0..8 {if billing_tx.finalize_machine_interval_in_session(session,&run_owned).await?.is_none(){break;}}
+            Ok(())
+        }.await;api_key_mutation_service::transaction_result(result)
+    }).await.map_err(api_key_mutation_service::map_transaction_error)?;
+    billing.settle_machine_runtime(&run_id, 8).await?;
+    db.client()
+        .start_session()
+        .await?
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            api_key_mutation_service::transaction_result(
+                billing
+                    .close_machine_runtime_in_session(session, &run_id)
+                    .await,
+            )
+        })
+        .await
+        .map_err(api_key_mutation_service::map_transaction_error)
+}
+
 /// Returns the committed cutoff. It never renews a stopped or accepted-but-not-ready run.
 pub async fn renew(
     db: &Database,
@@ -872,7 +1009,7 @@ pub async fn safety_pause(
     let now = Utc::now();
     db_owned.client().start_session().await?.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
         let result: AppResult<()> = async {
-            let changed=db_owned.collection::<Document>(MACHINES).update_one(doc! {"_id":&machine.node_id,"revision":machine.revision,"resource_state":{"$in":["provisioning","ready","degraded","resuming","reconciling","stopping"]}},doc! {"$set":{"resource_state":"stopping","stop_reason":&reason,"writer_admitted":false,"active_operation_id":&operation_id,"cleanup_state":"pending","updated_at":bson::DateTime::from_chrono(now)},"$inc":{"revision":1_i64}}).session(&mut *session).await?;
+            let changed=db_owned.collection::<Document>(MACHINES).update_one(maintenance_snapshot_filter(&machine),doc! {"$set":{"resource_state":"stopping","stop_reason":&reason,"writer_admitted":false,"active_operation_id":&operation_id,"cleanup_state":"pending","updated_at":bson::DateTime::from_chrono(now)},"$inc":{"revision":1_i64}}).session(&mut *session).await?;
             if changed.matched_count!=1{return Err(AppError::Conflict("runtime_safety_stop_raced".into()));}
             stop_in_session(&db_owned,billing.as_deref(),session,&machine,false).await?;
             db_owned.collection::<Document>(crate::models::node::COLLECTION_NAME).update_one(doc! {"_id":&machine.node_id},doc! {"$set":{"is_active":false,"status":"offline","connection_owner":bson::Bson::Null},"$inc":{"machine_authority_admission_fence":1_i64}}).session(&mut *session).await?;
@@ -881,8 +1018,8 @@ pub async fn safety_pause(
             }
             let op=MachineOperation{id:operation_id.clone(),owner_id:machine.owner_id.clone(),machine_id:Some(machine.node_id.clone()),action:LifecycleAction::Pause,
                 idempotency_key_hash:format!("system:{}:{}",reason,machine.revision),request_digest:format!("{}:{}",reason,machine.revision),expected_revision:Some(machine.revision),desired_runtime_generation:Some(machine.runtime_generation),
-                state:OperationState::Accepted,cleanup_state:CleanupState::Pending,effect_id:Some(effect_id.clone()),error_code:Some(reason.clone()),error_message:None,evidence_digest:None,retry_count:0,next_attempt_at:Some(now),deadline_at:Some(now+Duration::hours(24)),created_at:now,updated_at:now,terminal_at:None};
-            let effect=MachineEffectOutbox{id:effect_id.clone(),operation_id:operation_id.clone(),machine_id:machine.node_id.clone(),owner_id:machine.owner_id.clone(),kind:EffectKind::SuspendSandbox,effect_digest:format!("{}:{}",reason,machine.revision),namespace:machine.sandbox_namespace.clone(),sandbox_name:machine.sandbox_name.clone(),desired_mode:"suspended".into(),state:EffectState::Pending,attempts:0,claim_id:None,claimed_until:None,last_error:None,available_at:Some(now),created_at:now,updated_at:now};
+                state:OperationState::Accepted,cleanup_state:CleanupState::Pending,effect_id:Some(effect_id.clone()),error_code:Some(reason.clone()),error_message:None,evidence_digest:None,retry_count:0,delete_retry:None,next_attempt_at:Some(now),deadline_at:Some(now+Duration::hours(24)),created_at:now,updated_at:now,terminal_at:None};
+            let effect=MachineEffectOutbox{id:effect_id.clone(),operation_id:operation_id.clone(),machine_id:machine.node_id.clone(),owner_id:machine.owner_id.clone(),kind:EffectKind::SuspendSandbox,effect_digest:format!("{}:{}",reason,machine.revision),namespace:machine.sandbox_namespace.clone(),sandbox_name:machine.sandbox_name.clone(),desired_mode:"suspended".into(),state:EffectState::Pending,attempts:0,claim_id:None,undispatched_claim_id:None,claimed_until:None,last_error:None,available_at:Some(now),submission:None,created_at:now,updated_at:now};
             db_owned.collection::<MachineOperation>(OPERATIONS).insert_one(op).session(&mut *session).await?;
             db_owned.collection::<MachineEffectOutbox>(OUTBOX).insert_one(effect).session(&mut *session).await?;
             lifecycle::append_owner_audit(&db_owned,session,&machine.owner_id,"machine_runtime_safety_pause",&machine.node_id,&operation_id).await?;
@@ -1246,6 +1383,10 @@ pub async fn finalize_never_submitted(
             let result:AppResult<()>=async{
                 let touched=db_owned.collection::<Document>(MACHINES).update_one(doc!{"_id":&snapshot.node_id,"revision":snapshot.revision,"resource_state":{"$in":["stopping","deleting"]}},doc!{"$inc":{"never_submitted_evidence_fence":1_i64}}).session(&mut *session).await?;
                 if touched.matched_count!=1{return Err(AppError::Conflict("unsubmitted_runtime_raced".into()));}
+                if snapshot.resource_state == ResourceState::Deleting
+                    && !super::remote_machine_operation_service::delete_creation_responsibilities_terminal_in_session(&db_owned,session,&snapshot).await? {
+                    return Err(AppError::Conflict("creation_result_unknown".into()));
+                }
                 let current=db_owned.collection::<MachineRuntimeRun>(RUN_COLLECTION).find_one(doc!{"_id":&run.id}).session(&mut *session).await?.ok_or(AppError::MachineNotAllowed)?;
                 if current.stop_ns.is_none(){billing_tx.prove_machine_stopped_in_session(session,&run.id,run.runtime_generation,Utc::now(),&format!("never-submitted:{}:{}",snapshot.node_id,run.id)).await?;}
                 for _ in 0..8{if billing_tx.finalize_machine_interval_in_session(session,&run.id).await?.is_none(){break;}}

@@ -460,6 +460,65 @@ The initial broken deploy of this feature created a `unique` variant of the `(co
 The [Aurinko email adapter](./AURINKO_INTEGRATION.md) uses the channel callback and reply protocol while owning its bounded inline ingress. Aurinko supplies redelivery; NyxID persists only subscription bindings, batch digest/cursor, stable message receipts, and irreversible send barriers. No message bodies, queue, or periodic worker are added. Active claims produce retryable failures, completed items stay deduplicated across partial batches and log expiration, and callback retries retain their UUID-v4 so runtimes can suppress duplicate work after a lost acknowledgement. Device and legacy chat adapters keep their existing protocols.
 
 
+## NyxBot gateway creator authorization and recovery
+
+Gateway management uses a **creator credential** distinct from the channel's
+provider/event-tool credential. NyxID mints the linking person's delegated
+`account:read` access JWT with reserved actor `nyxid:nyxbot-gateway-creator`
+and a 120-second lifetime. It stays server-only, is never logged or stored, and
+is sent through a redirect-disabled HTTP client. The separate channel agent key
+authenticates provider callbacks and event tools; it is never a creator bearer.
+The dedicated JWT mint owns the reserved actor, which neither catalog nor
+user-service slugs can represent; generic delegation mints reject it. The TTL
+remains a separate defense in depth.
+
+Gateway requests have a five-second connect timeout, a 20-second request timeout,
+and a streamed 2 MiB response limit. Platform-entry setup retains its dispatch
+deadline and streamed 64 KiB limit. Successful calls that require JSON or binding
+identities reject malformed responses rather than treating them as completed setup.
+
+Both gateway validators are supported: legacy gateways resolve the person with
+`GET /api/v1/users/me`; RFC 7662 gateways call `/oauth/introspect` with their own
+confidential OAuth client and require per-method permissions. For the exact
+server-side creator mint, NyxID adds only `cma-eg:channels:read`,
+`cma-eg:channels:create`, `cma-eg:channels:update`, and `cma-eg:channels:delete`
+when the authenticated, active confidential client is registered in the active
+`cmaeg` catalog row's `introspection_client_ids`. These are effective permissions
+for that caller, not stored user roles or assignments; the response's `roles`
+and `groups` and its field set stay as for any other token. Ordinary personal access tokens,
+other delegation mints and unrelated introspecting clients receive no extra grant.
+Missing, inactive, misconfigured or unreadable gateway configuration returns
+`oauth_authority_unavailable` (503), so a provisioning/read outage is not reported
+as an inactive token. A resolved configuration that does not associate the caller
+returns ordinary introspection without the creator grant; an RFC 7662 gateway
+then refuses NyxBot management with HTTP 403, surfaced as
+`gateway_permission_required`. The gateway's confidential OAuth client must be
+listed by its **full client ID**, verified against the actual configured
+introspection caller and matching NyxID client record. A display name, shortened
+ID, catalog slug or resource URI is not a client ID.
+
+The grant covers **owner-scoped CMA channel operations**; it is not bound to one
+channel ID. CMA still checks the creator subject against the profile owner and
+scopes channel reads/updates/deletes to that owner. It includes neither channel
+testing nor gateway administration. This covers connect, transport moves, group
+policy, thread/mention discovery, platform-entry setup/recovery/inspection, and
+platform cleanup without granting the person direct gateway access.
+
+A failed connection displays **Reconnect**, using its selected live agent and
+showing the returned owner-link instructions after success. Changing the agent
+on a failed row also reconnects; live rows retain their existing agent-link flow
+and account-link controls. Reconnect is disabled without a live target or while
+a mutation is pending. Disconnect remains available. Known errors have readable
+explanations and a secondary stable code; a gateway 401 means authentication
+failed and a 403 means gateway permission is missing. Remote response bodies are
+never displayed. There is **no automatic reconnect** of failed rows.
+
+REST and NyxBot tools list one current row per owner/bot. A pending/active row
+wins over failed attempts, even newer ones. Without a live row the latest record
+wins; a newer disconnection suppresses older failures. Creation time and then ID
+break ties, and the newest 50 winning, non-disconnected rows are returned. History
+is retained.
+
 ## NyxBot org bots and transport flags
 
 NyxID's CMAEG `nyxbot` provider supports personal and organization-owned bots.
@@ -486,10 +545,19 @@ channel and route key. A busy bot answers first and retries in ten minutes.
 Returning releases the gateway channel and deletes its agent key and old route
 key. Telegram always uses the gateway and is excluded from flag-off returns.
 
-Lark and Feishu gateway input remains **text-only**, including org bots;
-media handling is unchanged. These changes require no gateway-side implementation
-or new environment variables. See the [NyxBot transport contract](chat/09-nyxbot-orchestrator.md)
-for private-chat continuity, refusal handling and rolling metadata compatibility.
+Lark and Feishu owner images, files and rich posts can reach NyxBot through the
+gateway when the per-person `assistant:channel-media` flag is enabled (default
+off), including org-owned bots whose linking person remains an org admin. This
+requires CMA at least `a570be21` with `CMAEG_MEDIA_ENABLED=true`. Upgrade all
+NyxID replicas and drain old workers before enabling it. Admission does no
+downloads, preserving CMA's default 30-second provider header budget
+(`CMAEG_PROVIDER_REQUEST_TIMEOUT_MS`). NyxID ingests the media at run start using
+its own stored source selectors and live authority, never gateway-supplied
+provider handles. Audio/video activities keep CMA's existing rendered input;
+text-only and native Telegram input are unchanged. See
+[inbound channel media](chat/10-uploads.md#inbound-channel-media) for limits,
+guest handling, receipts and rollback, and the
+[NyxBot transport contract](chat/09-nyxbot-orchestrator.md) for private-chat continuity.
 
 Deploy the provider authority check to all replicas before enabling org gateway
 cohorts. If gateway flags are already enabled for linking admins, drain older
@@ -503,12 +571,30 @@ existing assistant history owns answer content; additive `nyxbot_events.delivery
 metadata arbitrates streamed versus delayed answers. The implementation contract
 is in [NyxBot channel delivery](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
 
+With `assistant:channel-media` enabled, a Lark/Feishu media activity whose source
+ID names an existing row outside its authorized owner/chat/sender/route returns
+HTTP **403** with problem code `media_source_refused`. This refusal is terminal
+and must not be retried. Database failures still return **503**
+`provider_unavailable`; a missing source row produces the fixed unavailable-media
+note in the turn. Source presence does not authorize a provider download.
+
 Verified against CMA `develop`, `docs/CMAEG_Protocol.md` §§8–10 and
 `api/crates/cmaeg/src/{turns,tools/reply_targets}`:
 
-- Committed `response.output_item.done` messages and a terminal
-  `response.completed` can express both a continuing-work notice and an
-  incomplete answer as text. No CMA change is necessary for those messages.
+- Committed `response.output_item.done` messages can express partial/failure
+  output. Output-free `response.completed` finishes without text. NyxID uses
+  that terminal form for successful silence and detaching long-running work.
+- CMA `develop` pinned at `37547e73aebfc8335b38f914f3ff1db4fcbf950d` was
+  checked locally on 2026-10-19 (`delivery/step.rs` and the channel protocol).
+  `reply.ack_after_ms = 0` disables the Accepted working acknowledgement;
+  heartbeat output requires that acknowledgement to have been sent. NyxID
+  provisions and reconciles this policy through versioned channel updates,
+  verifying the returned policy before marking it supported. Missing or refused
+  policy evidence is a blocked capability, not confirmed quiet support. Proof is
+  invalidated before a policy replacement, on unconfirmed accepted write/readback,
+  and on transport/binding teardown or replacement. Only an authenticated complete
+  echo for the same fenced binding restores it; rebinding cannot inherit proof.
+  An empty global acknowledgement string is not a supported substitute.
 - `createReplyTarget` and `replyToTarget` already support the original relay
   destination, current channel/binding/key checks, a 24-hour sealed target, and
   durable payload-bound idempotency. They deliberately return `unknown` for an
@@ -528,9 +614,28 @@ reconcilable without a second send. This would close the crash/timeout window
 between claiming the stream and the platform delivering it. Without it, NyxID
 can guarantee one chosen delivery attempt across replicas, **not exactly-once
 external delivery**. Platform sends with ambiguous outcomes may still be lost.
-The earlier 570-second notice is best effort: CMA starts its 600-second clock at
-ingress, so a long admission delay or a shorter operator timeout can close the
-stream first; the durable late-answer path still runs.
+NyxID emits neither a queue acknowledgement nor a 570-second continuing-work
+notice. At the local deadline it detaches silently and retains the durable
+original-source answer path. CMA starts its own clock at ingress, so an earlier
+provider timeout can still close the stream first. Source and fixture checks
+establish protocol behavior; they do not claim a deployed gateway or live
+provider delivery test.
+
+NyxBot accepted work is stored in its existing assistant event queue, bounded at
+twenty; it is not a generic gateway body queue. Accepted destinations bind to
+original source records transactionally, one message question per Event turn.
+Generic sources capture their original managed route and API key. Admission
+revalidates and write-fences the exact active route, owner, bot, platform and key;
+a deleted, inactive, transferred or rebound route cannot start queued tool work.
+Each coalesced destination is checked independently. Legacy generic queue records
+without captured route/key authority are refused rather than adopting a new route.
+The sweep mints original reply targets within the event window even before a
+turn starts, and independently expires/refuses ineligible destinations. Silent
+completion is atomically fenced without reclaiming `sending`, `streamed` or
+`unknown`. Drain and upgrade every old queue writer before promising retention:
+old `$slice: -20` writers can still evict accepted sources. Unanchored generic
+legacy questions are unavailable; native legacy questions retain their exact
+thread origin. Neither path guesses the latest message.
 
 ## Agent gateway group-thread parity
 
@@ -545,7 +650,7 @@ Event Gateway remains distinct from NyxID's device HTTP Event Gateway.
 | Follow admission | NyxID follows child threads and applies live sender/settings policy | **Both:** gateway admits mentions/replies by default; NyxID disables gateway follow | Negotiate the contract, admit unmentioned events for selected follow-enabled group chats, and reuse NyxID's follow selection. |
 | Lark / Feishu reply target | Native reply endpoint with `reply_in_thread=true` | **Both:** CMA uses the legacy relay reply API without a bound thread request | Seal the thread-reply decision with the source event; explicitly request server-resolved targeting in NyxID for immediate and delayed sends. Never fall back to the parent. |
 | Mentions | Real bot mentions address; other-user-only mentions stay quiet in a followed child; broadcasts retain ordinary followed behavior | **CMA:** Lark requires pinned bot identity for exact evidence; no other-user boolean | Carry only address evidence and `mentions_others`, never mentioned names/IDs. Broadcasts do not become bot mentions. |
-| Lark / Feishu inbound media | Native adapter normalizes supported attachments | **CMA:** text-only verifier rejects attachments | Follow-up: verified bounded attachment references, authenticated fetch, and provider input support. No media change here. |
+| Lark / Feishu inbound media | Native adapter stores image/file selectors and ordered embedded post selectors | CMA ≥ `a570be21`, `CMAEG_MEDIA_ENABLED=true`, NyxID `assistant:channel-media` on | Owner media is late-bound to encrypted assistant uploads after admission; guests receive a fixed note with no download. See [limits and rollout](chat/10-uploads.md#inbound-channel-media). |
 | Lark / Feishu outbound media | Native adapter uploads supported attachments | **CMA:** renderer reduces attachments to safe link text | NyxID delivers NyxBot tool images itself through existing adapters before text, retaining exact thread targets. A CMA attachment-block renderer is **not required**. |
 | Edits | Adapter-specific edit hooks and authenticated outbound receipts | **CMA:** Lark/Feishu edits unsupported; only confirmed Telegram interactive cards edit | Follow-up: platform capabilities plus opaque receipt-bound edits through NyxID. Inbound edits need explicit replacement/dedup policy before they can affect an agent. |
 | Slack | `thread_ts`, structured mentions, native bound replies and bounded history | **CMA:** no raw verifier; `trust_normalized` gives unknown actors and no address/thread evidence; NyxID does not opt in | Follow-up: verify Slack raw events and correlate channel/sender/message, then enable the same contract. |
@@ -558,7 +663,8 @@ Event Gateway remains distinct from NyxID's device HTTP Event Gateway.
 
 The implementation contract and validation results are recorded below as the two
 sides are completed. Until negotiation succeeds, existing gateway channels keep
-legacy admission and follow remains unavailable. Lark/Feishu input stays text-only; NyxID sends tool images directly.
+legacy admission and follow remains unavailable. Inbound Lark/Feishu owner media
+has its own flag and CMA prerequisites above; NyxID sends tool images directly.
 
 The concrete wire contract is [thread contract 1](CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md).
 It replaces the earlier generic handoff proposal: `activity.thread` carries
@@ -573,14 +679,16 @@ The remaining platform surfaces need explicit parity before moving all traffic:
 
 | Platform | Mention / broadcast gap | Media into / out of gateway | Edits and proposed owner work |
 | --- | --- | --- | --- |
-| Lark / Feishu | Contract 1 carries exact pinned-bot evidence and the other-user boolean; `@_all` is not a bot mention | Incoming attachments rejected; outgoing attachments degrade to link text | **CMA:** enable receipt-bound edits through NyxID's existing edit API; add verified media references and delivery. |
+| Lark / Feishu | Contract 1 carries exact pinned-bot evidence and the other-user boolean; `@_all` is not a bot mention | Owner image/file/post ingress supported under the media flag and CMA prerequisites; NyxID sends NyxBot tool images directly; generic outgoing attachments remain link text | **CMA:** enable receipt-bound edits through NyxID's existing edit API. |
 | Slack | **CMA:** verify `app_mention`, structured bot/other-user mentions and broadcast tokens with native `thread_ts` | Incoming attachments rejected by generic verifier; outgoing link text only | **CMA:** use existing NyxID edit/upload APIs after implementing the raw verifier and target binding. |
 | Discord | **CMA:** verify `mentions`, bot ID, everyone/here and role broadcasts; preserve channel/thread parent evidence | Incoming attachments rejected; outgoing link text only | **CMA:** receipt-bound edits and uploads; keep interaction tokens out of thread facts. NyxID's bound thread service handles native replies separately from legacy sends. |
 | Telegram / telegram-new | Bot mention/reply evidence exists, but **CMA** lacks the full other-user boolean and topic/chain contract | Text-only message ingress; outgoing attachments are link text | Native Telegram supports ordinary message edits; relay edits are limited to confirmed interactive cards. **CMA:** extend verified attachment transport and receipt-bound relay edits while retaining the forum topic. |
 | WhatsApp | **CMA:** normalized-only unknown actor/address; no follow capability | Incoming attachments rejected; outgoing link text only | Neither side advertises edits. **CMA:** verify raw sender/quote evidence and bridge NyxID's media/receipt support. |
 | X / Aurinko | **CMA:** no platform source; do not claim addressing or follow parity | Unsupported in gateway | **Both:** design verified sources and credential/receipt boundaries before migration; preserve email single-recipient barriers and keep X public follow excluded. |
 
-No row in this follow-up table is implemented by the Lark/Feishu thread PR.
+The thread PR did not implement media or edits. Owner Lark/Feishu inbound media
+is supplied separately by the flagged channel-media path above; the other gaps
+remain follow-up work.
 
 ### Review validation
 
@@ -603,3 +711,81 @@ CMA responses fixture was not run locally. TypeScript SDK: 2,833 tests passed.
 Gateway/core and Rust SDK all-target/all-feature Clippy on Rust 1.96.1, formatting,
 SDK lint/typecheck/build/docs, OpenAPI/schema coverage and source-size checks
 passed. No media/edit or additional-platform thread capability was added.
+
+## NyxBot gateway retirement and recovery
+
+NyxBot records cleanup responsibility before dispatching a gateway create and
+before removing local references. This is lifecycle cleanup; it adds no message
+or event delivery retries. Creation reserves a UUID record ID and its deterministic
+provider binding in `nyxbot_gateway_releases`, with a fixed 30-minute provisional
+deadline. Each acknowledged channel identity and positive version is persisted
+before the next external operation. Activation consumes the provisional record in
+the same transaction as adoption; it leaves no cleanup obligation for a healthy
+connection.
+
+Disconnect, org access loss, fallback, transport changes and abandoned setup
+commit local retirement, key revocation, route retirement and cleanup responsibility
+together. Local retirement completes even when the gateway is unavailable. The
+existing `gateway_released` response reports confirmed remote release; a queued
+obligation alone does not make it true. Explicit preservation leaves it false.
+CMA deletes in this order: authenticate the creator, check owner/version,
+unbind the provider, delete the remote record. A
+retained primary provider key can acknowledge only DELETE of its exact retired
+binding, without restoring key or provider authority. Other provider operations
+continue to require live authority. Platform-conversion cleanup and native entry
+retirement retain their own exact proofs and remain responsible for their resources.
+
+| Release state | Meaning |
+| --- | --- |
+| `provisional` | Setup owns a reserved identity until adoption or its deadline. |
+| `due` | Local authority is retired; exact remote cleanup is queued or leased. |
+| `review_required` | Automatic effects stopped because authority, identity or outcome needs review. |
+| `settled` | Confirmed release/absence, cancelled undispatched setup, or explicit preservation. Retained for deduplication and unbind acknowledgement. |
+
+An independent worker runs every 30 seconds, handles at most ten obligations per
+pass with two concurrent operations per replica, and uses 120-second database-time
+leases. Retries back off from 30 seconds to one hour. Every completion is fenced
+by claim, revision, state and lease. Recovery reads `/channel-records/{record_id}`
+and validates owner, provider, binding and relay source. It never creates a record
+or replaces the captured deletion version with an observed version. Destination
+drift, version changes, malformed identity and live-reference conflicts require
+review. An uncertain POST that remains unobserved for 24 hours requires review:
+that deadline is not proof that creation never happened.
+
+Administrators use the [release review API](API.md#nyxbot-gateway-release-review)
+to inspect a sanitized observation and resolve its exact revision. `retry_original`
+requeues the original authority for a matching identity, or resumes record-ID
+recovery for an unknown identity observed as missing. `preserve_changed` accepts
+any observation other than `matching` or `missing`, including a changed record,
+live reference, changed destination, unavailable owner or malformed identity.
+It settles as `preserved` without deleting anything, records the observation status
+in audit metadata, and leaves `gateway_released` false. `confirm_missing` settles
+confirmed absence; an uncertain create also requires 24 hours since dispatch and
+explicit attestation that the original dispatch has drained. There is no operation
+to delete an observed replacement version.
+
+Filter audit events by `nyxbot_gateway_release_queued`,
+`nyxbot_gateway_release_settled`, `nyxbot_gateway_release_review_required`,
+`nyxbot_gateway_release_reviewed`, `nyxbot_channel_continuity_restored` and
+`nyxbot_gateway_release_reconcile_pass_completed`. These metadata events commit
+with their transitions. Retries do not add audit events. Review transition logs
+contain only obligation ID, local channel ID and a stable reason.
+
+An hourly, resumable keyset scan processes at most 100 retained-identity retired
+rows per step. It excludes live adoptions and platform-conversion resources;
+settled obligations prevent repeated release. It does not enumerate remote
+inventory or guess identities missing from local history. The creator bearer
+retains its PR1 owner-wide channel management scope; CMA still enforces owner
+identity, and cleanup additionally pins destination, record and acknowledged
+version. It is not a token restricted to one channel.
+
+### Deployment and rollback
+
+Startup creates release and reconciliation indexes before workers start. Deploy
+normally across replicas; no global mutation freeze is needed.
+**Retained-identity orphans converge automatically, including retirements
+during rollout. Complete obligation coverage begins once all old lifecycle writers
+and their in-flight operations have drained**. Old transport-return, fallback,
+uncertain-create and stale pending-move paths can erase or never store remote
+identity. Before rollback to PR1, drain release workers; retain release records
+and continuity lineage fields.

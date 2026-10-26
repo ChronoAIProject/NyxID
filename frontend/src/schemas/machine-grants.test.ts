@@ -7,19 +7,19 @@ const assignment = () => ({ capabilities: { shell: true, files: true, browser: f
 function token(payload: object) { return `header.${btoa(JSON.stringify(payload)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_")}.signature`; }
 describe("Machine grant contracts", () => {
   it("requires a selected real Machine and explicit bounded roots", () => {
-    expect(machineGrantSelectionSchema.safeParse({ assignments: {} }).success).toBe(false);
-    expect(machineGrantSelectionSchema.safeParse({ assignments: { [nodeId]: assignment() } }).success).toBe(true);
+    expect(machineGrantSelectionSchema.safeParse({ separation: "shared_legacy", legacy_warning_acknowledged: true, assignments: {} }).success).toBe(false);
+    expect(machineGrantSelectionSchema.safeParse({ separation: "shared_legacy", legacy_warning_acknowledged: true, assignments: { [nodeId]: assignment() } }).success).toBe(true);
     for (const root of ["workspace", "/workspace/", "/workspace/../etc", "/workspace//tmp", "/workspace/./tmp", "/workspace\\tmp", "/workspace\0tmp"]) {
-      expect(machineGrantSelectionSchema.safeParse({ assignments: { [nodeId]: { ...assignment(), file_roots: [root] } } }).success, root).toBe(false);
+      expect(machineGrantSelectionSchema.safeParse({ separation: "shared_legacy", legacy_warning_acknowledged: true, assignments: { [nodeId]: { ...assignment(), file_roots: [root] } } }).success, root).toBe(false);
     }
   });
   it("rejects external browser/computer permissions and service grants without shell", () => {
     for (const capability of ["browser", "computer", "developer_browser"] as const) {
       const row = assignment(); row.capabilities[capability] = true;
-      expect(machineGrantSelectionSchema.safeParse({ assignments: { [nodeId]: row } }).success).toBe(false);
+      expect(machineGrantSelectionSchema.safeParse({ separation: "shared_legacy", legacy_warning_acknowledged: true, assignments: { [nodeId]: row } }).success).toBe(false);
     }
     const row = assignment(); row.capabilities.shell = false; row.service_ids = [serviceId];
-    expect(machineGrantSelectionSchema.safeParse({ assignments: { [nodeId]: row } }).success).toBe(false);
+    expect(machineGrantSelectionSchema.safeParse({ separation: "shared_legacy", legacy_warning_acknowledged: true, assignments: { [nodeId]: row } }).success).toBe(false);
   });
   it("derives Machine scope display from the protected payload, never a URL label", () => {
     expect(readMachineConsentScope(token({ token_type: "oauth_consent_request", client_id: "client", scope: "openid machine", exp: 1000 }))).toEqual({ scope: "openid machine", clientId: "client", expiresAt: 1000000 });
@@ -69,4 +69,15 @@ describe("Machine grant contracts", () => {
       { ...full, grant_valid: false, source_and_grant_valid: false },
     ]) expect(machineGrantReadSchema.safeParse(row).success).toBe(false);
   });
+});
+
+it("requires informed external legacy consent and refuses automatic or required contexts", () => {
+  const selection = { assignments: { [nodeId]: assignment() } };
+  for (const separation of [undefined, "automatic", "require_separated", "shared_legacy"]) {
+    expect(machineGrantSelectionSchema.safeParse({ ...selection, separation, legacy_warning_acknowledged: false }).success).toBe(false);
+  }
+  for (const separation of [undefined, "automatic", "require_separated"]) {
+    expect(machineGrantSelectionSchema.safeParse({ ...selection, separation, legacy_warning_acknowledged: true }).success).toBe(false);
+  }
+  expect(machineGrantSelectionSchema.safeParse({ ...selection, separation: "shared_legacy", legacy_warning_acknowledged: true }).success).toBe(true);
 });

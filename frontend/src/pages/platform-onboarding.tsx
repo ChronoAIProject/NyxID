@@ -1,5 +1,13 @@
 import { pendingSetupRequest } from "@/lib/platform-onboarding";
-import { useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
+import { CopyableField } from "@/components/shared/copyable-field";
+import {
+  captureOnboardingLink,
+  readOnboardingLink,
+  subscribeOnboardingLink,
+  clearOnboardingLink,
+  onboardingConfirmationUrl,
+} from "@/lib/platform-onboarding-handoff";
 import { useRouterState, Link } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAuthStore } from "@/stores/auth-store";
@@ -101,11 +109,19 @@ export function PlatformOnboardingPage() {
 }
 
 export function PlatformBindingReviewPage() {
-  const search = useRouterState({ select: (s) => s.location.search });
-  const code = onboardingSearch(search).code ?? "";
+  const location = useRouterState({ select: (s) => s.location.href });
+  const [handoff, setHandoff] = useState(readOnboardingLink);
+  useLayoutEffect(() => {
+    const unsubscribe = subscribeOnboardingLink(setHandoff);
+    captureOnboardingLink();
+    return unsubscribe;
+  }, [location]);
   const user = useAuthStore((s) => s.user);
   return (
-    <BindingReview key={`${user?.id ?? "anonymous"}:${code}`} code={code} />
+    <BindingReview
+      key={`${user?.id ?? "anonymous"}:${handoff?.id ?? "missing"}`}
+      code={handoff?.code ?? ""}
+    />
   );
 }
 
@@ -113,33 +129,49 @@ function BindingReview({ code }: { code: string }) {
   const user = useAuthStore((s) => s.user);
   const preview = useBindingPreview(code);
   const decision = useBindingDecision(code);
-  const [matchedCode, setMatchedCode] = useState("");
   const [replace, setReplace] = useState(false);
-  const returnTo = `${window.location.origin}/onboarding/link?code=${encodeURIComponent(code)}`;
+  const [now, setNow] = useState(Date.now);
+  const state = preview.data?.state;
+  const expired = !!preview.data && Date.parse(preview.data.expires_at) <= now;
+  const command = decision.data?.confirmation_command;
+  const telegramReturn = onboardingConfirmationUrl(
+    command,
+    preview.data?.manager_username,
+  );
+  const returnTo = `${window.location.origin}/onboarding/link`;
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    if (state === "bound" || state === "denied" || expired)
+      clearOnboardingLink();
+  }, [state, expired]);
   return (
-    <main className="mx-auto max-w-lg space-y-6 px-4 py-10">
+    <main className="mx-auto max-w-lg space-y-6 px-4 py-10" data-sensitive>
       <meta name="referrer" content="no-referrer" />
       <PageHeader
         title="Review Telegram account linking"
-        description="Only continue if you requested this code in the manager's private chat."
+        description="Continue only if you requested this in the manager's private chat."
       />
-      {!code && (
-        <ErrorBanner message="This link has no valid code. Return to the manager and send /link." />
+      {(!code || expired || preview.error) && (
+        <ErrorBanner message="This link is unavailable or expired. Return to the manager's private chat and use /help to start a new onboarding request." />
       )}
       {preview.isPending && code && (
         <p role="status" className="text-12 text-muted-foreground">
           Checking your request…
         </p>
       )}
-      {preview.error && (
-        <ErrorBanner message="This link is unavailable or expired. Return to the manager and send /link to start again." />
-      )}
-      {preview.data && (
+      {preview.data && !expired && (
         <DetailSection title="What you are linking">
           <div className="space-y-3 p-4 text-12">
             <p>
               Manager:{" "}
-              <span className="font-mono">{preview.data.manager_bot_id}</span>
+              <span className="font-mono">
+                {preview.data.manager_username
+                  ? `@${preview.data.manager_username}`
+                  : preview.data.manager_bot_id}
+              </span>
             </p>
             <p>
               Telegram sender:{" "}
@@ -149,83 +181,101 @@ function BindingReview({ code }: { code: string }) {
             </p>
             <p className="text-muted-foreground">{preview.data.scope}</p>
             <p>Expires: {new Date(preview.data.expires_at).toLocaleString()}</p>
-            {preview.data.state === "bound" ? (
-              <p role="status">
-                This request is already linked. Manage or revoke it in your
-                saved setups.
-              </p>
-            ) : preview.data.state === "awaiting_chat_confirmation" ? (
-              <p role="status">
-                Browser review complete. Return to the same Telegram private
-                chat and send <code>/confirm {code}</code>.
-              </p>
-            ) : (
+            {state === "bound" ? (
               <>
-                {user ? (
+                <p role="status">Telegram account linked.</p>
+                <Button variant="primary" asChild>
+                  <Link to="/onboarding/setups">Open your saved setups</Link>
+                </Button>
+              </>
+            ) : state === "denied" || decision.data?.state === "denied" ? (
+              <p role="status">Linking was cancelled. No access was granted.</p>
+            ) : state === "awaiting_chat_confirmation" || command ? (
+              <div className="space-y-3">
+                <p role="status">
+                  Browser review complete. Confirm from the same Telegram
+                  private chat to finish linking.
+                </p>
+                {command ? (
                   <>
-                    <p>
-                      Linking to <strong>{user.email}</strong>. To use another
-                      account, sign out before continuing.
-                    </p>
-                    <label className="block space-y-2">
-                      Type the code displayed in the initiating Telegram chat
-                      <Input
-                        data-sensitive
-                        autoComplete="off"
-                        value={matchedCode}
-                        onChange={(event) => setMatchedCode(event.target.value)}
-                        maxLength={32}
-                      />
-                    </label>
-                    <label className="flex items-start gap-2">
-                      <Checkbox
-                        checked={replace}
-                        onCheckedChange={(value) => setReplace(value === true)}
-                      />
-                      <span>
-                        Replace this chat's existing account binding, if it has
-                        one. The previous account's setups remain theirs.
-                      </span>
-                    </label>
-                    <div className="flex flex-wrap justify-end gap-2">
-                      <Button
-                        disabled={!matchedCode || decision.isPending}
-                        onClick={() =>
-                          decision.mutate({
-                            approve: false,
-                            matched_code: matchedCode,
-                            replace_existing: false,
-                          })
-                        }
-                      >
-                        Deny
+                    {telegramReturn && (
+                      <Button variant="primary" asChild>
+                        <a
+                          href={telegramReturn}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Open Telegram to finish
+                        </a>
                       </Button>
-                      <Button
-                        variant="primary"
-                        disabled={!matchedCode || decision.isPending}
-                        isLoading={decision.isPending}
-                        onClick={() =>
-                          decision.mutate({
-                            approve: true,
-                            matched_code: matchedCode,
-                            replace_existing: replace,
-                          })
-                        }
-                      >
-                        Approve account linking
-                      </Button>
-                    </div>
+                    )}
+                    <CopyableField
+                      label="Confirmation command"
+                      value={command}
+                    />
                   </>
                 ) : (
-                  <Button variant="primary" asChild>
-                    <a
-                      href={`/login?return_to=${encodeURIComponent(returnTo)}`}
-                    >
-                      Sign in or register to review
-                    </a>
-                  </Button>
+                  <p>
+                    The confirmation is shown only after approval. If this page
+                    was reloaded or the account changed, start a new onboarding
+                    request in Telegram.
+                  </p>
                 )}
+                <Button
+                  onClick={() => void preview.refetch()}
+                  disabled={preview.isFetching}
+                >
+                  Refresh status
+                </Button>
+              </div>
+            ) : user ? (
+              <>
+                <p>
+                  Linking to <strong>{user.email}</strong>. To use another
+                  account, sign out before continuing.
+                </p>
+                <label className="flex items-start gap-2">
+                  <Checkbox
+                    checked={replace}
+                    onCheckedChange={(value) => setReplace(value === true)}
+                  />
+                  <span>
+                    Replace this chat's existing account binding, if it has one.
+                    The previous account's setups remain theirs.
+                  </span>
+                </label>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button
+                    disabled={decision.isPending}
+                    onClick={() =>
+                      decision.mutate({
+                        approve: false,
+                        replace_existing: false,
+                      })
+                    }
+                  >
+                    Deny
+                  </Button>
+                  <Button
+                    variant="primary"
+                    isLoading={decision.isPending}
+                    onClick={() =>
+                      decision.mutate({
+                        approve: true,
+                        replace_existing: replace,
+                      })
+                    }
+                  >
+                    Approve account linking
+                  </Button>
+                </div>
               </>
+            ) : (
+              <Button variant="primary" asChild>
+                <a href={`/login?return_to=${encodeURIComponent(returnTo)}`}>
+                  Sign in or register to review
+                </a>
+              </Button>
             )}
           </div>
         </DetailSection>
@@ -259,8 +309,8 @@ function OwnedBindings() {
         )}
         {bindings.data?.length === 0 && (
           <p className="text-muted-foreground">
-            No active onboarding bindings. Use /link in the manager's private
-            chat to connect your account.
+            No active onboarding bindings. Use /help in the manager's private
+            chat to start onboarding.
           </p>
         )}
         {bindings.data?.map((binding) => (

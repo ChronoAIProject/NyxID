@@ -1,10 +1,15 @@
+vi.mock("@/components/platform-help-editor", () => ({
+  PlatformHelpEditor: () => <div>Shared help editor</div>,
+  PlatformHelpAssignment: () => <div>Help assignment</div>,
+}));
+vi.mock("@/components/telegram-managers", () => ({
+  TelegramManagers: () => <div>Telegram managers</div>,
+}));
+vi.mock("@/components/native-platform-entry-setup", () => ({
+  NativePlatformEntrySetup: () => <div>Native shared entry setup</div>,
+}));
 import { beforeEach, expect, it, vi } from "vitest";
-import {
-  act,
-  render,
-  screen,
-  fireEvent,
-} from "@testing-library/react";
+import { act, render, screen, fireEvent } from "@testing-library/react";
 import {
   AdminPlatformBotsPage,
   GatewayCleanupControls,
@@ -40,6 +45,7 @@ vi.mock("@/hooks/use-platform-onboarding", () => ({
   useGatewayCleanup: () => ({ data: cleanup }),
   useGatewayCleanupAction: () => ({ mutate, isPending: false }),
   useAdminPlatformTargets: () => ({ data: { bots: [], orgs: [] } }),
+  useAdminPlatformProfile: () => ({ data: undefined }),
   useAdminPlatformProfiles: () => ({
     data: { profiles: [{ ...profile }], next_before_id: null },
   }),
@@ -49,9 +55,16 @@ vi.mock("@/hooks/use-platform-onboarding", () => ({
   }),
   useAdminGuideMutation: () => ({ mutate: guideMutate, isPending: false }),
 }));
-vi.mock("@/components/platform-manager-runtime", () => ({ ManagerRuntimeSettings: () => <div>Bot access controls</div> }));
+vi.mock("@/components/platform-manager-runtime", () => ({
+  ManagerRuntimeSettings: () => <div>Bot access controls</div>,
+}));
 beforeEach(() => {
   cleanup.splice(0);
+  Object.assign(profile, {
+    execution_profile: "platform_onboarding",
+    enabled: false,
+    deleted_at: null,
+  });
   profile.generation = 1;
   profile.guide = null;
   mutate.mockClear();
@@ -59,6 +72,7 @@ beforeEach(() => {
 });
 it("requires rereview if retirement generation changes during confirmation", () => {
   const view = render(<AdminPlatformBotsPage />);
+  fireEvent.click(screen.getByText("Identifiers, cleanup and retirement"));
   fireEvent.click(screen.getByRole("button", { name: "Review retirement" }));
   profile.generation = 2;
   view.rerender(<AdminPlatformBotsPage />);
@@ -104,5 +118,46 @@ it("requires exact gateway review and resets confirmation on profile drift", () 
   page.rerender(<GatewayCleanupControls profile={profile} />);
   expect(
     screen.queryByRole("button", { name: "Keep changed remote binding" }),
+  ).not.toBeInTheDocument();
+});
+it("native entry does not label the legacy guide flag as its paused runtime", () => {
+  Object.assign(profile, {
+    execution_profile: "native_entry",
+    platform: "discord",
+    transport: "direct",
+  });
+  render(<AdminPlatformBotsPage />);
+  expect(screen.getByText("Bot access controls")).toBeInTheDocument();
+  expect(screen.queryByText(/^Paused$/)).not.toBeInTheDocument();
+});
+
+it("native entry avoids Telegram child and native-creation repair guidance", () => {
+  Object.assign(profile, {
+    execution_profile: "native_entry",
+    platform: "discord",
+    transport: "direct",
+  });
+  render(<AdminPlatformBotsPage />);
+  expect(
+    screen.queryByText(
+      /Changing this profile pauses replies from existing client bots/,
+    ),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(/Repair retains the shared native creation webhook/),
+  ).not.toBeInTheDocument();
+});
+
+it("retired native entry shows retirement and no active controls or Telegram repair", () => {
+  Object.assign(profile, {
+    execution_profile: "native_entry",
+    platform: "discord",
+    deleted_at: "2026-10-17T00:00:00Z",
+  });
+  render(<AdminPlatformBotsPage />);
+  expect(screen.getByText("Retired")).toBeInTheDocument();
+  expect(screen.queryByText("Bot access controls")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Repair webhook" }),
   ).not.toBeInTheDocument();
 });

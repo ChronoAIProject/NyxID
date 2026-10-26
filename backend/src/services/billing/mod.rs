@@ -1,5 +1,6 @@
 pub mod allowances;
 pub mod amounts;
+pub mod bill;
 pub mod config;
 pub mod funding;
 pub mod grants;
@@ -20,6 +21,7 @@ pub mod route_context;
 pub mod route_inventory;
 pub mod schedules;
 mod targets;
+pub mod taxes;
 pub mod topup_expiry;
 pub mod usage_rollup;
 pub mod webhook;
@@ -172,6 +174,8 @@ pub struct BillingService {
     lago: Option<Arc<dyn LagoApi>>,
     #[cfg(test)]
     pub(crate) settlement_gate: Option<Arc<SettlementGate>>,
+    #[cfg(test)]
+    pub(crate) before_send_gate: Option<Arc<SettlementGate>>,
 }
 
 #[cfg(test)]
@@ -220,6 +224,8 @@ impl BillingService {
             lago,
             #[cfg(test)]
             settlement_gate: None,
+            #[cfg(test)]
+            before_send_gate: None,
         }
     }
 
@@ -235,6 +241,7 @@ impl BillingService {
             owner_resolver: BillingOwnerResolver::new(db),
             lago: Some(lago),
             settlement_gate: None,
+            before_send_gate: None,
         }
     }
 
@@ -577,14 +584,18 @@ impl BillingService {
         }
 
         let reservation = if self.config.billing_enabled {
-            reservation::gate_and_reserve(
+            let result = reservation::gate_and_reserve(
                 &self.db,
                 self.lago.as_deref(),
                 &ctx,
                 self.config.billing_fail_closed,
                 self.config.billing_rate_cache_ttl_secs,
             )
-            .await?
+            .await;
+            if result.is_err() && meter::has_complete_meter(&self.db, &ctx).await? {
+                return Ok(MeteredProxyContext::from_route(&ctx));
+            }
+            result?
         } else {
             None
         };
@@ -602,29 +613,12 @@ impl BillingService {
                 .into(),
             ));
         }
-        if (ctx.pool_attempt.is_some() || ctx.public_admission.is_some() || managed)
-            && reservation.is_some()
-        {
-            // Pool funding and meter rows committed together; cancellation at
-            // any later await can recover from the durable attempt lease.
+        if reservation.is_some() {
+            // All funded admission holds and meter rows committed together.
+            // Recovery owns their durable usage intent after this handoff.
             return Ok(MeteredProxyContext::from_route(&ctx));
         }
-        match meter::open(&self.db, &ctx, reservation.as_ref()).await {
-            Ok(metered) => Ok(metered),
-            Err(error) => {
-                if let Some(reservation) = reservation.as_ref()
-                    && let Err(release_error) =
-                        reservation::release_billing_reservation(&self.db, reservation).await
-                {
-                    tracing::error!(
-                        billing_request_id = %ctx.billing_request_id,
-                        error = %release_error,
-                        "failed to release billing reservation after meter setup failed"
-                    );
-                }
-                Err(error)
-            }
-        }
+        meter::open(&self.db, &ctx, None).await
     }
 
     async fn ensure_wallet_for_charging(&self, owner_id: &str) -> AppResult<()> {
@@ -657,7 +651,12 @@ impl BillingService {
     }
 
     pub async fn mark_forwarded(&self, metered: &MeteredProxyContext) -> AppResult<()> {
-        meter::mark_forwarded(&self.db, metered).await
+        meter::mark_forwarded(&self.db, metered).await?;
+        #[cfg(test)]
+        if let Some(gate) = &self.before_send_gate {
+            gate.wait().await?;
+        }
+        Ok(())
     }
 
     pub async fn settle(
@@ -710,6 +709,23 @@ impl BillingService {
 
     pub async fn fail(&self, metered: &MeteredProxyContext, reason: &str) -> AppResult<()> {
         meter::fail(&self.db, metered, reason).await
+    }
+
+    /// A private sender fence proved that the operation was never sent. Undo
+    /// pre-send bookkeeping before releasing its reservation; transport errors
+    /// and cancellation after dispatch must use the ordinary settlement path.
+    pub(crate) fn reject_before_send<'a>(
+        &'a self,
+        metered: &'a MeteredProxyContext,
+        reason: &'a str,
+        previously_dispatched: bool,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(async move {
+            if previously_dispatched {
+                return self.fail(metered, reason).await;
+            }
+            meter::reject_before_send(&self.db, metered, reason).await
+        })
     }
 }
 
@@ -1550,6 +1566,9 @@ mod tests {
         let mut config = test_app_config();
         config.billing_enabled = true;
         let billing = BillingService::new_with_lago(db.clone(), Arc::new(config), lago);
+        // Price sync invalidates profiles. Supply the reconcile result before
+        // this benefit-only estimate spills into wallet funding at settlement.
+        super::taxes::seed_test_profiles(&db).await;
         for credential in [
             CredentialClass::UserOwned,
             CredentialClass::NyxidManagedMaster,
@@ -1594,6 +1613,7 @@ mod tests {
                         token_breakdown: None,
                         audio_tokens: None,
                         image_tokens: None,
+                        reported_model: None,
                     },
                     None,
                     None,
@@ -1723,6 +1743,9 @@ mod tests {
         grants::issue_grants(
             &db,
             grants::IssueCreditGrantInput {
+                amount: None,
+                service_limits: Vec::new(),
+                request_id: None,
                 amount_credits: 1,
                 target_kind: BillingTargetKind::SelectedUsers,
                 target_user_ids: vec![owner.clone()],
@@ -1740,6 +1763,8 @@ mod tests {
         let mut config = test_app_config();
         config.billing_enabled = true;
         let billing = BillingService::new_with_lago(db.clone(), Arc::new(config), lago.clone());
+        // Recovery runs after the regular sweep refreshes invalidated profiles.
+        super::taxes::seed_test_profiles(&db).await;
         let ctx = BillingRouteContext::new(
             BillingIngress::Proxy,
             Uuid::new_v4().to_string(),
@@ -2107,6 +2132,14 @@ mod tests {
 
     #[async_trait]
     impl crate::services::billing::lago_client::LagoApi for FakeLago {
+        async fn tax_config(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig>
+        {
+            Ok(crate::services::billing::taxes::zero_config())
+        }
         async fn sync_standard_charge(
             &self,
             _plan: &str,
@@ -2330,6 +2363,7 @@ mod tests {
             })
             .await
             .expect("insert wallet");
+        crate::services::billing::taxes::seed_test_profiles(db).await;
     }
 }
 
@@ -2348,3 +2382,10 @@ mod legacy_v1_fixture;
 mod operation_pricing_tests;
 
 pub mod voice;
+
+pub mod service_limits;
+mod submissions;
+pub mod summaries;
+
+#[cfg(test)]
+mod allocation_policy_tests;

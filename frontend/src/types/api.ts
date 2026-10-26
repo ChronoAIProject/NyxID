@@ -22,11 +22,10 @@ export interface User {
   readonly avatar_url: string | null;
   readonly email_verified: boolean;
   readonly mfa_enabled: boolean;
-  /// Whether a password credential is set. Older backends omit this field.
-  readonly has_password?: boolean;
   /// Linked social provider ("google", "github", ...) or null when absent.
   /// Password availability is independent. Older backends omit this field.
   readonly social_provider?: string | null;
+  readonly has_password?: boolean;
   readonly is_admin: boolean;
   /// Read-only platform admin. Defaults to false. When true (and `is_admin`
   /// is false) the user can hit admin GET endpoints but no writes.
@@ -258,6 +257,7 @@ export interface ApiKeyCreateResponse {
   readonly key_prefix: string;
   readonly scopes: string;
   readonly created_at: string;
+  readonly expires_at: string | null;
 }
 
 export interface ApiKeyUsageService {
@@ -421,6 +421,19 @@ export interface DownstreamService {
    * (UI offers a "manage in AI Services" link).
    */
   readonly your_binding_count?: number;
+  /**
+   * Whether the viewer may resync connection identity for this service.
+   * Sent only by `GET /services/{id}`; absent means not allowed.
+   */
+  readonly can_resync_identity?: boolean;
+}
+
+export interface ResyncIdentityResponse {
+  readonly catalog_service_id: string;
+  /** Connections to this service that were checked. */
+  readonly matched_count: number;
+  /** Connections whose identity settings differed and were rewritten. */
+  readonly changed_count: number;
 }
 
 export interface DefaultRequestHeader {
@@ -756,7 +769,7 @@ export interface MfaRequiredError {
 
 export interface MfaVerifyRequest {
   readonly code: string;
-  readonly mfa_token: string;
+  readonly mfa_token?: string;
 }
 
 export interface PublicConfig {
@@ -794,6 +807,7 @@ export interface ProviderConfig {
   readonly default_scopes: readonly string[] | null;
   readonly supports_oauth_scopes?: boolean;
   readonly supports_pkce: boolean;
+  readonly authorization_nonce_required?: boolean;
   readonly device_code_url: string | null;
   readonly device_token_url: string | null;
   readonly device_verification_url: string | null;
@@ -820,6 +834,7 @@ export interface ProviderRevocationConfig {
   readonly url: string;
   readonly auth: "inherit" | "none" | "client_id" | "basic" | "post";
   readonly revokes_grant: boolean;
+  readonly effect_scope?: "token_only" | "grant_wide" | "request_scoped" | null;
 }
 
 export interface UserProviderCredentials {

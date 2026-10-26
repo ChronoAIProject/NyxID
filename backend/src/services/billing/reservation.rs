@@ -8,7 +8,7 @@ use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
 use crate::errors::{AppError, AppResult};
 use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as BILLING_RATE_CACHE};
-use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET, PlanKind};
+use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET};
 use crate::models::service_billing::BillingMetric;
 use crate::models::usage_meter::{
     AllowanceReservationAllocation, BillingLayer, COLLECTION_NAME as USAGE_METER,
@@ -51,6 +51,8 @@ pub struct LayerReservation {
     pub reserved_credits: Credits,
     pub allowance_reservations: Vec<AllowanceReservationAllocation>,
     pub grant_reservations: Vec<GrantReservationAllocation>,
+    pub tax_cache_ttl_secs: u64,
+    pub applied_tax: Option<crate::models::billing_tax_profile::AppliedUsageTax>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,90 +115,24 @@ pub async fn gate_and_reserve(
         ));
     }
 
-    let mut layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
-    if ctx.managed_admission.is_some() {
+    let layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
+    // Best effort before the transaction: benefit-only admissions must survive
+    // tax provider outages. Wallet funding checks freshness in the transaction.
+    let _ = super::taxes::ensure_fresh(db, lago, &wallet, rate_cache_ttl_secs).await;
+    let result = if ctx.managed_admission.is_some() {
         crate::services::managed_execution_service::validate_reserved_rates(ctx, &layers)?;
-        return super::funding::reserve_and_open_managed(db, ctx, &wallet, layers)
-            .await
-            .map(Some);
-    }
-    if ctx.public_admission.is_some() {
-        return super::funding::reserve_and_open_public(db, ctx, &wallet, layers)
-            .await
-            .map(Some);
-    }
-    if ctx.pool_attempt.is_some() {
-        return super::funding::reserve_and_open_pool(db, ctx, &wallet, layers)
-            .await
-            .map(Some);
-    }
-    super::funding::reserve_estimated_funding(db, ctx, &mut layers).await?;
-    let total_reserved_credits = layers
-        .iter()
-        .map(|reservation| reservation.reserved_credits)
-        .try_fold(Credits::ZERO, Credits::checked_add)?;
-
-    if total_reserved_credits == Credits::ZERO {
-        return Ok(Some(BillingReservation {
-            owner_id: wallet.owner_id,
-            wallet_id: wallet.id,
-            total_reserved_credits,
-            layers,
-        }));
-    }
-
-    if wallet.available_with_overdraft_credits()? <= Credits::ZERO
-        && wallet.plan_kind != PlanKind::Prepaid
-    {
-        super::funding::release_layer_reservations(db, &layers).await?;
-        suspend_wallet(db, &wallet.owner_id).await?;
-        return Err(AppError::WalletSuspended);
-    }
-    if wallet.available_credits()? <= Credits::ZERO && wallet.plan_kind == PlanKind::Prepaid {
-        super::funding::release_layer_reservations(db, &layers).await?;
-        return Err(AppError::InsufficientCredits);
-    }
-
-    if try_reserve_prepaid(db, &wallet.owner_id, total_reserved_credits)
-        .await?
-        .is_some()
-    {
-        return Ok(Some(BillingReservation {
-            owner_id: wallet.owner_id,
-            wallet_id: wallet.id,
-            total_reserved_credits,
-            layers,
-        }));
-    }
-
-    if wallet.plan_kind == PlanKind::Prepaid {
-        super::funding::release_layer_reservations(db, &layers).await?;
-        return Err(AppError::InsufficientCredits);
-    }
-
-    if wallet.has_payment_instrument
-        && try_reserve_overdraft(db, &wallet.owner_id, total_reserved_credits)
-            .await?
-            .is_some()
-    {
-        return Ok(Some(BillingReservation {
-            owner_id: wallet.owner_id,
-            wallet_id: wallet.id,
-            total_reserved_credits,
-            layers,
-        }));
-    }
-
-    if wallet.has_payment_instrument {
-        super::funding::release_layer_reservations(db, &layers).await?;
-        suspend_wallet(db, &wallet.owner_id).await?;
-        return Err(AppError::WalletSuspended);
-    }
-
-    super::funding::release_layer_reservations(db, &layers).await?;
-    Err(AppError::InsufficientCredits)
+        super::funding::reserve_and_open_managed(db, ctx, &wallet, layers).await
+    } else if ctx.public_admission.is_some() {
+        super::funding::reserve_and_open_public(db, ctx, &wallet, layers).await
+    } else if ctx.pool_attempt.is_some() {
+        super::funding::reserve_and_open_pool(db, ctx, &wallet, layers).await
+    } else {
+        super::funding::reserve_and_open_ordinary(db, ctx, &wallet, layers).await
+    };
+    result.map(Some)
 }
 
+#[cfg(test)]
 pub async fn try_reserve_prepaid(
     db: &mongodb::Database,
     owner_id: &str,
@@ -255,66 +191,6 @@ pub async fn try_reserve_prepaid(
         .map_err(Into::into)
 }
 
-pub async fn try_reserve_overdraft(
-    db: &mongodb::Database,
-    owner_id: &str,
-    credits: Credits,
-) -> AppResult<Option<BillingWallet>> {
-    if credits <= Credits::ZERO {
-        return try_reserve_prepaid(db, owner_id, credits).await;
-    }
-
-    let now = Utc::now();
-    let maximum_existing_hold =
-        Credits::from_pico(crate::models::credits::MAX_PICO)?.checked_sub(credits)?;
-    db.collection::<BillingWallet>(BILLING_WALLET)
-        .find_one_and_update(
-            doc! {
-                "owner_id": owner_id,
-                "suspended": false,
-                "has_payment_instrument": true,
-                "reserved_credits": { "$lte": maximum_existing_hold },
-                "$expr": {
-                    "$gte": [
-                        {
-                            "$subtract": [
-                                {
-                                    "$add": [
-                                        "$balance_credits",
-                                        "$overdraft_cap_credits"
-                                    ]
-                                },
-                                {
-                                    "$add": [
-                                        "$reserved_credits",
-                                        {
-                                            "$add": [
-                                                "$pending_lago_debits",
-                                                { "$ifNull": ["$pending_topup_expiry_credits", 0_i64] }
-                                            ]
-                                        }
-                                    ]
-                                }
-                            ]
-                        },
-                        credits
-                    ]
-                },
-            },
-            doc! {
-                "$inc": { "reserved_credits": credits },
-                "$set": { "updated_at": bson::DateTime::from_chrono(now) },
-            },
-        )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await
-        .map_err(Into::into)
-}
-
 pub async fn release_wallet_hold(
     db: &mongodb::Database,
     owner_id: &str,
@@ -337,26 +213,6 @@ pub async fn release_wallet_hold(
         )
         .await?;
     Ok(())
-}
-
-pub async fn release_billing_reservation(
-    db: &mongodb::Database,
-    reservation: &BillingReservation,
-) -> AppResult<()> {
-    if reservation.layers.iter().any(|layer| {
-        layer.metric == crate::models::service_billing::BillingMetric::MachineRunningSeconds
-    }) {
-        return Err(AppError::BillingProviderUnavailable(
-            "Machine holds require evidence-backed settlement".into(),
-        ));
-    }
-    release_wallet_hold(
-        db,
-        &reservation.owner_id,
-        reservation.total_reserved_credits,
-    )
-    .await?;
-    super::funding::release_layer_reservations(db, &reservation.layers).await
 }
 
 pub async fn apply_settlement_for_row(
@@ -528,6 +384,19 @@ async fn ensure_wallet_settlement_lock(
     Err(AppError::Internal(format!(
         "billing wallet settlement lock busy for wallet {wallet_id}"
     )))
+}
+
+/// Finish only the admission owner's durable wallet operation. Call outside
+/// admission transactions so the retry sees its committed exact counters.
+pub(super) async fn finish_wallet_settlement(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    owner_id: &str,
+) -> AppResult<()> {
+    if let Some(lock) = load_wallet_settlement_lock(db, wallet_id, owner_id).await? {
+        complete_wallet_settlement_lock(db, wallet_id, owner_id, &lock).await?;
+    }
+    Ok(())
 }
 
 async fn complete_wallet_settlement_lock(
@@ -1161,6 +1030,8 @@ pub(crate) async fn estimate_layer_reservations(
             reserved_credits: super::amounts::cost(rate_pico, estimated_quantity)?,
             allowance_reservations: Vec::new(),
             grant_reservations: Vec::new(),
+            tax_cache_ttl_secs: rate_cache_ttl_secs,
+            applied_tax: None,
         });
     }
 
@@ -1332,6 +1203,14 @@ mod tests {
 
     #[async_trait]
     impl LagoApi for EntitledLago {
+        async fn tax_config(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig>
+        {
+            Ok(crate::services::billing::taxes::zero_config())
+        }
         async fn ensure_customer(
             &self,
             owner: &OwnerProvisionInput,

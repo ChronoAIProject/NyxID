@@ -42,6 +42,9 @@ impl Fixture {
             .expect("MongoDB required");
         let state = test_app_state(db.clone());
         let owner = uuid::Uuid::new_v4().to_string();
+        // Transport/delegation fixtures declare the owner preference explicitly; per-service true still wins.
+        crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+
         db.collection::<User>(USERS)
             .insert_one(test_user(&owner, UserType::Person))
             .await
@@ -300,6 +303,7 @@ async fn mcp_delegation_relay_and_delegated_restrictions_match_rest() {
     )
     .unwrap();
     let restrictions = TokenRestrictionClaims {
+        oauth_lineage: None,
         resources: Some(vec![format!("{}/mcp", f.state.config.base_url)]),
         allowed_service_ids: Some(vec![f.service.clone()]),
         allowed_node_ids: Some(vec![f.node.clone()]),

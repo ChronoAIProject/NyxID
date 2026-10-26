@@ -4,6 +4,7 @@ import { useAssistantContextStore } from "./assistant-context-store";
 import { useAssistantDraftStore } from "./assistant-draft-store";
 import { useAssistantWireLogStore } from "./assistant-wire-log-store";
 import { useServiceCardView } from "./service-card-view-store";
+import { useConsentStore } from "./consent-store";
 import { ApiError } from "@/lib/api-client";
 import {
   identify as telemetryIdentify,
@@ -340,6 +341,7 @@ describe("checkAuth", () => {
   it("only clears loading on non-401 errors", async () => {
     const apiMock = await getApiMock();
     useAuthStore.getState().setUser(previousAccount);
+    vi.mocked(telemetryReset).mockClear();
     apiMock.get.mockRejectedValueOnce(
       new ApiError(500, {
         error: "server_error",
@@ -393,6 +395,7 @@ describe("scoped QR session restoration", () => {
       });
       expect(useAssistantWireLogStore.getState().entries).toHaveLength(1);
       vi.mocked(telemetryIdentify).mockClear();
+      vi.mocked(telemetryReset).mockClear();
       let finishProfile!: (response: Response) => void;
       const response = new Promise<Response>((resolve) => {
         finishProfile = resolve;
@@ -412,6 +415,8 @@ describe("scoped QR session restoration", () => {
       expect(telemetryReset).toHaveBeenCalledOnce();
       expect(telemetryIdentify).not.toHaveBeenCalled();
       expect(getAssistantIdentityUserId()).toBeNull();
+      expect(useConsentStore.getState().accountId).toBeNull();
+      expect(useConsentStore.getState().enabled).toBe(false);
       expect(useServiceCardView.getState()).toMatchObject({
         accountId: undefined,
         filters: undefined,
@@ -462,7 +467,10 @@ describe("scoped QR session restoration", () => {
         mfaRequired: status !== 200,
         mfaToken: status === 200 ? null : "pending-password-mfa",
       });
-      expect(telemetryReset).toHaveBeenCalledOnce();
+      expect(telemetryReset).toHaveBeenCalledTimes(status === 503 ? 1 : 2);
+      expect(useConsentStore.getState().accountId).toBe(
+        status === 200 ? nextAccount.id : null,
+      );
       if (status === 200) {
         expect(telemetryIdentify).toHaveBeenCalledExactlyOnceWith(
           nextAccount.id,
@@ -482,8 +490,11 @@ describe("scoped QR session restoration", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     vi.mocked(telemetryIdentify).mockClear();
+    vi.mocked(telemetryReset).mockClear();
+    const consent = useConsentStore.getState();
     expect(await state.checkAuth({ isCurrent: () => false })).toBe(false);
     expect(useAuthStore.getState()).toBe(state);
+    expect(useConsentStore.getState()).toBe(consent);
     expect(getAssistantIdentityUserId()).toBe(previousAccount.id);
     expect(telemetryReset).not.toHaveBeenCalled();
     expect(telemetryIdentify).not.toHaveBeenCalled();
@@ -503,6 +514,7 @@ describe("ephemeral profile restoration", () => {
         .recordScreen(previousAccount.id, "/keys");
       const accountContext = useAssistantContextStore.getState();
       vi.mocked(telemetryIdentify).mockClear();
+      vi.mocked(telemetryReset).mockClear();
       let finishProfile!: (response: Response) => void;
       const response = new Promise<Response>((resolve) => {
         finishProfile = resolve;
@@ -543,4 +555,20 @@ describe("ephemeral profile restoration", () => {
       expect(telemetryIdentify).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("required session restoration", () => {
+  it("rethrows a failed fresh profile for MFA completion", async () => {
+    const apiMock = await getApiMock();
+    const error = new ApiError(503, {
+      error: "unavailable",
+      error_code: 1001,
+      message: "Unavailable",
+    });
+    apiMock.get.mockRejectedValueOnce(error);
+    await expect(
+      useAuthStore.getState().checkAuth({ requireSession: true }),
+    ).rejects.toBe(error);
+    expect(useAuthStore.getState().isLoading).toBe(false);
+  });
 });

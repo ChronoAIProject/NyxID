@@ -151,6 +151,7 @@ impl Fixture {
         (Self::with_db(db).await, memberships, reads)
     }
     async fn with_db(db: mongodb::Database) -> Self {
+        super::security_readiness_service::ready_test_replica(&db).await;
         engine::ensure_indexes(&db).await.unwrap();
         let ids: Vec<_> = (0..5).map(|_| Uuid::new_v4().to_string()).collect();
         for (i, id) in ids.iter().enumerate() {
@@ -244,7 +245,7 @@ impl Fixture {
         .unwrap()
         .unwrap()
     }
-    async fn service(&self, owner: &str, slug: &str) -> String {
+    pub(crate) async fn service(&self, owner: &str, slug: &str) -> String {
         let endpoint = Uuid::new_v4().to_string();
         let id = Uuid::new_v4().to_string();
         self.state
@@ -268,7 +269,7 @@ impl Fixture {
             .unwrap();
         id
     }
-    async fn key(&self, row: &AssistantConversation) -> ApiKey {
+    pub(crate) async fn key(&self, row: &AssistantConversation) -> ApiKey {
         self.state
             .db
             .collection(crate::models::api_key::COLLECTION_NAME)
@@ -1823,8 +1824,9 @@ async fn org_agent_machine_gateway_checks_member_and_node_owner_live() {
     let row = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
         .await
         .unwrap();
-    let (_, token, _) = super::node_service::create_registration_token(
+    let (_, token, _) = super::node_service::create_registration_token_for_actor(
         &f.state.db,
+        &f.admin,
         &f.org,
         "org-machine",
         100,
@@ -2082,6 +2084,22 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
         .insert_one(&catalog)
         .await
         .unwrap();
+    // Isolate skill pinning/organization authority from the separate generic
+    // service-approval policy. Native Ornn reads still traverse the real proxy.
+    for actor in [&f.member, &f.admin] {
+        super::approval_service::set_service_approval_config(
+            &f.state.db,
+            actor,
+            &catalog.id,
+            &catalog.name,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     zip.start_file("SKILL.md", zip::write::SimpleFileOptions::default())
         .unwrap();
@@ -2453,6 +2471,19 @@ async fn org_specialist_access_request_is_denied_by_default_and_routed_when_allo
             .unwrap(),
         0
     );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {
+                "event_type": "mcp_tool_call",
+                "event_data.service_id": &service,
+            })
+            .await
+            .unwrap(),
+        0,
+        "a service-gate refusal must not reach upstream execution or MCP audit"
+    );
     let audit = f
         .state
         .db
@@ -2473,4 +2504,122 @@ async fn org_specialist_access_request_is_denied_by_default_and_routed_when_allo
         .unwrap();
     assert_eq!(value["error"], "acknowledgement_required");
     assert_eq!(card.unwrap().decider, "orchestrator");
+}
+
+#[tokio::test]
+async fn delegation_bare_names_filter_use_acl_before_ambiguity() {
+    use crate::errors::AppError;
+    let f = Fixture::new("org_delegation_admission").await;
+    let (first, _) = f.create().await;
+    let second_org = Uuid::new_v4().to_string();
+    let mut org = test_user(&second_org, UserType::Org);
+    org.slug = Some("second-team".into());
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(org)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection(crate::models::org_membership::COLLECTION_NAME)
+        .insert_one(test_membership(
+            &second_org,
+            &f.member,
+            OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (second, _) = team::create_specialist_for(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &second_org,
+        f.request("researcher"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let memberships = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME);
+    assert!(matches!(
+        team::delegable_specialist(&f.state.db, &f.member, "researcher").await,
+        Err(AppError::ValidationError(ref message))
+            if message == "Agent name is ambiguous; use one of: org-agent-team/researcher, second-team/researcher"
+    ));
+    memberships
+        .update_one(
+            doc! {"org_user_id": &second_org, "member_user_id": &f.member},
+            doc! {"$set": {"role": "viewer"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        team::delegable_specialist(&f.state.db, &f.member, "researcher")
+            .await
+            .unwrap()
+            .id,
+        first.id
+    );
+    // Read admission includes both readable profiles, even though one is unusable.
+    assert!(
+        team::names_readable_organization_specialist(&f.state.db, &f.member, "researcher")
+            .await
+            .unwrap()
+    );
+    // With only the Viewer candidate left, delegation must conceal its existence.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .delete_one(doc! {"_id": &first.id})
+        .await
+        .unwrap();
+    assert!(
+        matches!(team::delegable_specialist(&f.state.db, &f.member, "researcher").await,
+        Err(AppError::NotFound(ref message)) if message == "Agent not found")
+    );
+    assert!(
+        team::names_readable_organization_specialist(&f.state.db, &f.member, "researcher")
+            .await
+            .unwrap()
+    );
+    // Read admission rechecks membership and excludes unreadable names and IDs.
+    memberships
+        .update_one(
+            doc! {"org_user_id": &second_org, "member_user_id": &f.member},
+            doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    for selector in [second.id.as_str(), "researcher", "second-team/researcher"] {
+        assert!(matches!(
+            team::delegable_specialist(&f.state.db, &f.member, selector).await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+    for selector in ["researcher", "second-team/researcher"] {
+        assert!(
+            !team::names_readable_organization_specialist(&f.state.db, &f.member, selector)
+                .await
+                .unwrap()
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delegation_qualified_flag_error_precedes_org_selector_resolution() {
+    use crate::errors::AppError;
+    let f = Fixture::new("org_delegation_flag_order").await;
+    f.flag(false).await;
+    for selector in ["org-agent-team/researcher", "invisible-org/researcher"] {
+        assert!(
+            matches!(team::delegable_specialist(&f.state.db, &f.member, selector).await,
+            Err(AppError::ValidationError(ref message)) if message == "Organization agents are not enabled yet")
+        );
+    }
+    f.state.db.drop().await.unwrap();
 }

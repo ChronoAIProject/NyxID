@@ -132,6 +132,7 @@ async fn first_use_resolves_real_nyxbot_and_emits_only_durable_reply_reference()
             &db,
             &admitted,
             contract::TurnInput {
+                channel_uploads: Vec::new(),
                 text: "hello".into(),
             },
             sender,
@@ -206,6 +207,7 @@ async fn revoked_admission_cannot_claim_thread_key_turn_or_receipt() {
                 &db,
                 &admitted,
                 contract::TurnInput {
+                    channel_uploads: Vec::new(),
                     text: "old admission".into()
                 },
                 sender
@@ -509,6 +511,7 @@ async fn execution_factory_resumes_exact_input_once_across_competing_workers() {
                 db,
                 authority.clone(),
                 contract::TurnInput {
+                    channel_uploads: Vec::new(),
                     text: "changed".into()
                 },
                 sender.clone(),
@@ -530,6 +533,7 @@ async fn execution_factory_resumes_exact_input_once_across_competing_workers() {
                 db,
                 wrong,
                 contract::TurnInput {
+                    channel_uploads: Vec::new(),
                     text: "work".into()
                 },
                 sender.clone(),
@@ -550,6 +554,7 @@ async fn execution_factory_resumes_exact_input_once_across_competing_workers() {
             db,
             authority.clone(),
             contract::TurnInput {
+                channel_uploads: Vec::new(),
                 text: "work".into()
             },
             sender.clone()
@@ -558,6 +563,7 @@ async fn execution_factory_resumes_exact_input_once_across_competing_workers() {
             db,
             authority,
             contract::TurnInput {
+                channel_uploads: Vec::new(),
                 text: "work".into()
             },
             sender
@@ -593,10 +599,10 @@ async fn execution_factory_resumes_exact_input_once_across_competing_workers() {
 
 #[tokio::test]
 async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_before_owner_io() {
-    let db = mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=25")
-        .await
-        .unwrap()
-        .database("no_owner_io");
+    // Public readiness is now a scoped transactional lookup. Use a real DB to
+    // distinguish missing public authority from a failed connection, then
+    // assert neither branch creates owner history, credentials or public work.
+    let db = crate::test_utils::connect_transaction_test_database("public_execution_factory").await;
     let state = crate::test_utils::test_app_state(db.clone());
     let egress = Arc::new(CountingEgress(std::sync::atomic::AtomicUsize::new(0)));
     let execution = runtime::producer(
@@ -618,6 +624,7 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
                 platform_origin: None,
             },
             contract::TurnInput {
+                channel_uploads: Vec::new(),
                 text: "work".into(),
             },
             sender.clone(),
@@ -625,6 +632,7 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
         .await;
     assert!(matches!(result, Err(AppError::AssistantTurnRequired)));
     let public = contract::PublicExecutionContext {
+        proof_record_id: "test-proof".into(),
         ingress: contract::PublicIngress {
             ingress: contract::IngressClaim {
                 receipt_id: uuid::Uuid::new_v4().to_string(),
@@ -633,11 +641,15 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
             manager: contract::ManagerAuthority {
                 profile_id: "manager".into(),
                 manager_bot_id: "bot".into(),
-                telegram_bot_id: 1,
+                entry: crate::models::platform_entry_projection::StoredEntryIdentity::TelegramV1 {
+                    telegram_bot_id: 1,
+                },
                 manager_authority_epoch: 1,
             },
-            sender_id: 1,
-            chat_id: 1,
+            sender: crate::models::platform_entry_projection::StoredSenderIdentity::TelegramV1 {
+                telegram_sender_id: 1,
+                telegram_chat_id: 1,
+            },
             public_policy_revision: 1,
         },
         public_session_id: "public".into(),
@@ -664,13 +676,33 @@ async fn execution_factory_selects_public_prepare_and_rejects_ordinary_context_b
             &db,
             contract::NyxAgentExecutionContext::Public(public),
             contract::TurnInput {
+                channel_uploads: Vec::new(),
                 text: "work".into(),
             },
             sender,
         )
         .await;
-    assert!(matches!(result, Err(AppError::Conflict(_))));
+    assert!(matches!(
+        result,
+        Err(AppError::Conflict(message)) if message == "Public runtime unavailable; validate the deployed public contract before enabling"
+    ));
     assert_eq!(egress.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    for collection in [
+        CONVERSATIONS,
+        CREDENTIALS,
+        crate::models::assistant_message::COLLECTION_NAME,
+        crate::models::platform_public_turn::COLLECTION_NAME,
+    ] {
+        assert_eq!(
+            db.collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+            "rejected execution must leave {collection} empty"
+        );
+    }
+    db.drop().await.unwrap();
 }
 
 async fn claimed_input(
@@ -929,13 +961,14 @@ async fn admitted_command(
     let update = contract::VerifiedManagerUpdate {
         profile_id: authority.manager.profile_id.clone(),
         manager_bot_id: authority.manager.manager_bot_id.clone(),
-        telegram_bot_id: authority.manager.telegram_bot_id,
+        entry: authority.manager.entry.clone(),
         observation_id: profile.observation_id,
-        sender_id: authority.sender_id,
-        chat_id: authority.chat_id,
+        sender: authority.sender.clone(),
         chat_kind: contract::ManagerChatKind::Private,
-        update_id: 100,
-        message_id: 100,
+        event: crate::models::platform_entry_projection::StoredEventIdentity::TelegramV1 {
+            update_id: 100,
+            message_id: 100,
+        },
         command_eligibility: contract::ManagerCommandEligibility::OriginalPrivateMessage,
     };
     let contract::IngressAdmission::Claimed {
@@ -951,9 +984,14 @@ async fn admitted_command(
     else {
         panic!("original private command must be personally admitted");
     };
-    let command =
-        contract::OriginalManagerCommand::from_verified(update, contract::TurnInput { text })
-            .unwrap();
+    let command = contract::OriginalManagerCommand::from_verified(
+        update,
+        contract::TurnInput {
+            channel_uploads: Vec::new(),
+            text,
+        },
+    )
+    .unwrap();
     (admitted, command)
 }
 
@@ -1002,6 +1040,7 @@ async fn personal_card_decision_queues_one_durable_continuation_that_survives_un
         let replay = contract::OriginalManagerCommand::from_verified(
             command.update().clone(),
             contract::TurnInput {
+                channel_uploads: Vec::new(),
                 text: command.text().to_owned(),
             },
         )
@@ -1130,6 +1169,8 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
         }
         let now = chrono::Utc::now();
         let watch = AsyncServiceOperation {
+            secret_context_versions: Default::default(),
+            cma: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: row.user_id.clone(),
             conversation_id: row.id.clone(),
@@ -1139,6 +1180,7 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
             service_id: "test-service".into(),
             submit_endpoint_id: "submit".into(),
             contract: AsyncOperationContract {
+                presentation: None,
                 status_operation: "status".into(),
                 result_operation: "result".into(),
                 cancel_operation: None,
@@ -1150,6 +1192,7 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
                 error_field: None,
             },
             delivery: DeliveryBinding {
+                invocation_id: None,
                 platform_reply: destination.clone(),
                 platform_origin: proof.clone(),
                 origin: model::TurnOrigin::User,
@@ -1163,6 +1206,9 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
                 report_provenance: model::REPORT_PROVENANCE_V1,
             },
             operation_id: Some(uuid::Uuid::new_v4().to_string()),
+            execution_binding: None,
+            authority_version: 0,
+            contract_binding: None,
             state: "queued".into(),
             reason: Some("done".into()),
             attempts: 0,

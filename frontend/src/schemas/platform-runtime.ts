@@ -16,7 +16,7 @@ export const publicCreditsSchema = z
 export const publicSetupSchema = z
   .object({
     source: z.literal("nyxagent"),
-    profile: z.string().min(1).max(128),
+    profile: z.string().max(128),
     total_daily_credits: publicCreditsSchema,
     sender_daily_credits: publicCreditsSchema,
     sponsor_owner_user_id: z.uuid(),
@@ -39,9 +39,12 @@ export const publicSetupSchema = z
 export type PublicSetup = z.infer<typeof publicSetupSchema>;
 export const publicReadinessSchema = z
   .object({
-    status: z.enum(["ready", "unavailable"]),
+    status: z.enum(["ready", "faq_ready", "unavailable"]),
     reason: z
       .enum([
+        "confirmation_rejected",
+        "control_invalid",
+        "control_rate_limited",
         "mode_disabled",
         "manager_unavailable",
         "emergency_stopped",
@@ -51,19 +54,24 @@ export const publicReadinessSchema = z
         "transport_unavailable",
         "origin_revoked",
         "engine_unavailable",
+        "unsupported_input",
         "insufficient_funds",
         "capacity_limited",
         "public_not_ready",
         "public_quota_limited",
+        "public_turn_failed",
         "runtime_uninitialized",
         "sponsor_unavailable",
         "profile_unavailable",
         "proof_expired",
+        "public_contract_unsupported",
+        "public_authority_rejected",
       ])
       .nullable(),
     checked_at: z.iso.datetime({ offset: true }).nullable(),
     expires_at: z.iso.datetime({ offset: true }).nullable(),
     evidence_digest: z.string().nullable(),
+    policy_digest: z.string().nullable().optional(),
   })
   .superRefine((value, ctx) => {
     if (
@@ -91,14 +99,26 @@ export const managerRuntimeSchema = z
   .object({
     contract_version: z.literal(1),
     supported: z.boolean(),
+    state: z
+      .enum([
+        "setup_incomplete",
+        "connection_repair_required",
+        "paused",
+        "active",
+        "retired",
+      ])
+      .optional(),
     runtime: z
       .object({
+        activated_policy_digest: z.string().nullable().optional(),
         manager_authority_epoch: version,
         personal_control_revision: version,
         public_policy_revision: version,
         personal_enabled: z.boolean(),
         public_enabled: z.boolean(),
         emergency_stopped: z.boolean(),
+        remembered_personal_enabled: z.boolean().nullable().optional(),
+        remembered_public_enabled: z.boolean().nullable().optional(),
         public_policy: publicSetupSchema.nullable(),
       })
       .nullable(),

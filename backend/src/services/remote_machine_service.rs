@@ -105,7 +105,7 @@ async fn supersede_operation(
     Ok(())
 }
 
-fn owner_ineligibility(user: Option<&Document>) -> Option<&'static str> {
+pub(crate) fn owner_ineligibility(user: Option<&Document>) -> Option<&'static str> {
     let Some(user) = user else {
         return Some("owner_not_found");
     };
@@ -224,6 +224,9 @@ impl CreateMachineInput {
             native_pv_reclaim_policy: None,
             native_run_not_after: None,
             runtime_submission_started_at: None,
+            delete_recovery: None,
+            delete_suspension_generation: None,
+            delete_suspension_operation_id: None,
             cleanup_state: CleanupState::NotRequired.as_str().into(),
             stop_reason: None,
             cleanup_evidence_digest: None,
@@ -308,6 +311,13 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         .create_index(
             IndexModel::builder()
                 .keys(doc! {"owner_id": 1, "resource_state": 1})
+                .build(),
+        )
+        .await?;
+    machines
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"resource_state":1,"manager_observed_at":1,"_id":1})
                 .build(),
         )
         .await?;
@@ -559,6 +569,7 @@ pub fn safe_view(machine: &ManagedMachine) -> SafeManagedMachineView {
 }
 
 pub fn safe_operation_view(operation: &MachineOperation) -> SafeMachineOperationView {
+    let retry_stopped = super::remote_machine_delete_retry::stopped(operation, Utc::now());
     let safe_code = operation.error_code.as_deref().map(|code| match code {
         "sandbox_effect_pending"
         | "runtime_evidence_pending"
@@ -572,6 +583,21 @@ pub fn safe_operation_view(operation: &MachineOperation) -> SafeMachineOperation
         | "runtime_funding_expired"
         | "expansion_deadline_exceeded"
         | "cleanup_overdue" => code,
+        "delete_kubernetes_authentication_failed"
+        | "delete_kubernetes_access_denied"
+        | "delete_kubernetes_observation_timed_out"
+        | "delete_kubernetes_credentials_unavailable"
+        | "delete_kubernetes_transport_failed"
+        | "delete_kubernetes_http_failed"
+        | "delete_kubernetes_response_invalid"
+        | "delete_kubernetes_inventory_incomplete"
+        | "delete_kubernetes_inventory_limit_exceeded"
+        | "delete_resource_observation_unknown"
+        | "delete_attempt_timed_out"
+            if operation.action == LifecycleAction::Delete =>
+        {
+            code
+        }
         _ => "operation_reconciling",
     });
     SafeMachineOperationView {
@@ -581,15 +607,25 @@ pub fn safe_operation_view(operation: &MachineOperation) -> SafeMachineOperation
         state: operation.state,
         cleanup_state: operation.cleanup_state,
         retry_count: operation.retry_count,
+        delete_retry_attempts: (operation.action == LifecycleAction::Delete)
+            .then(|| super::remote_machine_delete_retry::attempts(operation).min(super::remote_machine_delete_retry::LIMIT)),
+        delete_retry_limit: (operation.action == LifecycleAction::Delete)
+            .then_some(super::remote_machine_delete_retry::LIMIT),
+        delete_retry_stopped: retry_stopped,
         error_code: safe_code.map(str::to_string),
         error_message: safe_code.map(|code| match code {
+            "delete_kubernetes_authentication_failed" | "delete_kubernetes_credentials_unavailable" => "Deletion is waiting for platform Kubernetes credentials. Ask a platform operator to restore access; cleanup and slot release remain pending.",
+            "delete_kubernetes_access_denied" => "Kubernetes denied access required to verify deletion. Ask a platform operator to check the required cleanup permissions; cleanup and slot release remain pending.",
+            "delete_kubernetes_observation_timed_out" | "delete_attempt_timed_out" => "Deletion observation timed out. Cleanup and slot release remain pending until verification succeeds.",
+            "delete_kubernetes_transport_failed" | "delete_kubernetes_http_failed" => "Kubernetes is unavailable for deletion verification. Cleanup and slot release remain pending until access recovers.",
+            "delete_kubernetes_response_invalid" | "delete_kubernetes_inventory_incomplete" | "delete_kubernetes_inventory_limit_exceeded" | "delete_resource_observation_unknown" => "Deletion could not verify a complete Kubernetes resource inventory. Ask a platform operator to investigate; cleanup and slot release remain pending.",
             "runtime_funding_unavailable" | "runtime_funding_expired" => "Runtime funding could not be renewed. Your workspace is retained; restore available funds or billing availability, then review a new quote and resume manually.",
             "expansion_deadline_exceeded" => "Provisioning exceeded its deadline and was stopped. Your existing workspace is retained; review the platform status before resuming.",
             "cleanup_overdue" => "Deletion remains pending beyond the 24-hour target. Platform operators have been notified; physical cleanup and accounting must finish before completion.",
             _ => "The operation requires reconciliation. Check its cleanup and resource state before retrying.",
         }.into()),
         evidence_digest: operation.evidence_digest.as_ref().map(|reference| hex::encode(Sha256::digest(reference.as_bytes()))),
-        next_attempt_at: operation.next_attempt_at,
+        next_attempt_at: if retry_stopped { None } else { operation.next_attempt_at },
         deadline_at: operation.deadline_at,
         created_at: operation.created_at,
         updated_at: operation.updated_at,
@@ -728,6 +764,7 @@ async fn create_machine_inner(
         error_message: None,
         evidence_digest: None,
         retry_count: 0,
+        delete_retry: None,
         next_attempt_at: Some(now),
         deadline_at: Some(now + chrono::Duration::minutes(15)),
         created_at: now,
@@ -747,9 +784,11 @@ async fn create_machine_inner(
         state: EffectState::Pending,
         attempts: 0,
         claim_id: None,
+        undispatched_claim_id: None,
         claimed_until: None,
         last_error: None,
         available_at: Some(now),
+        submission: None,
         created_at: now,
         updated_at: now,
     };
@@ -850,6 +889,7 @@ async fn create_machine_inner(
                     status: crate::models::node::NodeStatus::Offline,
                     auth_token_hash: hash_token(&reservation_secret),
                     signing_secret_encrypted: None,
+                    signing_secret_context_version: None,
                     signing_secret_hash: hash_token(&reservation_signing),
                     last_heartbeat_at: None,
                     connected_at: None,
@@ -1151,7 +1191,7 @@ async fn request_action_inner(
                     error_code: None,
                     error_message: None,
                     evidence_digest: None,
-                    retry_count: 0,
+                    retry_count: 0, delete_retry: None,
                     next_attempt_at: Some(now),
                     deadline_at: Some(now + if input_owned.action == LifecycleAction::Delete { chrono::Duration::hours(24) } else { chrono::Duration::minutes(15) }),
                     created_at: now,
@@ -1171,10 +1211,11 @@ async fn request_action_inner(
                     desired_mode: if matches!(input_owned.action, LifecycleAction::Pause | LifecycleAction::Delete | LifecycleAction::Rekey) { "suspended".into() } else { "running".into() },
                     state: EffectState::Pending,
                     attempts: 0,
-                    claim_id: None,
+                    claim_id: None, undispatched_claim_id: None,
                     claimed_until: None,
                     last_error: None,
                     available_at: Some(now),
+                    submission: None,
                     created_at: now,
                     updated_at: now,
                 };
@@ -1608,11 +1649,15 @@ pub async fn finalize_unallocated_delete(
             let machine = db_owned.collection::<ManagedMachine>(MACHINES).find_one(doc! {
                 "_id": &machine_id, "resource_state": "deleting", "runtime_generation": 0,
                 "sandbox_uid": bson::Bson::Null, "pod_uid": bson::Bson::Null, "pvc_uid": bson::Bson::Null,
+                "pvc_name": bson::Bson::Null, "native_pv_name": bson::Bson::Null, "native_pv_uid": bson::Bson::Null,
+                "runtime_submission_started_at": bson::Bson::Null, "bootstrap_delivery_id": bson::Bson::Null,
+                "native_uncertainty": bson::Bson::Null, "writer_admitted": false,
             }).session(&mut *session).await?;
             let Some(machine) = machine else { return Ok(None) };
             if !deletion_authorized_in_session(&db_owned, session, &machine_id).await? {
                 return Err(AppError::Conflict("machine_owner_deletion_basis_required".into()));
             }
+            if !super::remote_machine_operation_service::delete_creation_responsibilities_terminal_in_session(&db_owned,session,&machine).await? {return Ok(None);}
             super::remote_machine_runtime::require_accounting_final_in_session(&db_owned,session,&machine).await?;
             let node = db_owned.collection::<Document>(crate::models::node::COLLECTION_NAME).find_one(doc! {"_id": &machine_id, "is_active": false, "signing_secret_encrypted": bson::Bson::Null}).session(&mut *session).await?;
             if node.is_none() { return Ok(None); }
@@ -1748,6 +1793,42 @@ pub async fn entitlement(db: &Database, owner_id: &str) -> AppResult<MachineEnti
     })
 }
 
+/// Immutable account-safety provenance is shared by the producer and the
+/// first-claim cancellation validator. Progress may replace the error code.
+pub(crate) struct AccountSafetyIdentity {
+    pub idempotency_key_hash: String,
+    pub request_digest: String,
+    pub effect_digest: String,
+}
+
+pub(crate) fn account_safety_identity(
+    machine: &ManagedMachine,
+    action: LifecycleAction,
+    retained_recovery_operation: Option<&str>,
+) -> AccountSafetyIdentity {
+    let key = if let Some(operation) = retained_recovery_operation {
+        format!(
+            "account-safety:retained-recovery:{}:{operation}",
+            machine.runtime_generation
+        )
+    } else {
+        format!(
+            "account-safety:{}:{}",
+            action.as_str(),
+            machine.runtime_generation
+        )
+    };
+    AccountSafetyIdentity {
+        idempotency_key_hash: format!("system:{}", idempotency_key_hash(&key)),
+        request_digest: request_digest(
+            &json!({"source":"account_safety","generation":machine.runtime_generation}),
+        ),
+        effect_digest: request_digest(
+            &json!({"machine_id":machine.node_id,"safety_generation":machine.runtime_generation}),
+        ),
+    }
+}
+
 /// Bounded, fair account-safety sweep. A lost account qualification closes
 /// authority and queues a physical pause. Only a durable, policy-bound owner
 /// deletion basis permits irreversible cleanup, including already paused disks.
@@ -1760,9 +1841,31 @@ pub async fn suspend_ineligible_with_billing(
     db: &Database,
     billing: Option<Arc<super::billing::BillingService>>,
 ) -> AppResult<u64> {
+    suspend_ineligible_filtered(db, billing, None).await
+}
+
+/// Same lifecycle and signed outbox as the ordinary safety sweep, restricted
+/// to one accepted personal owner; it never grants deletion authority.
+pub(crate) async fn suspend_erasing_owner(
+    db: &Database,
+    billing: Arc<super::billing::BillingService>,
+    owner: &str,
+) -> AppResult<u64> {
+    suspend_ineligible_filtered(db, Some(billing), Some(owner)).await
+}
+
+async fn suspend_ineligible_filtered(
+    db: &Database,
+    billing: Option<Arc<super::billing::BillingService>>,
+    owner: Option<&str>,
+) -> AppResult<u64> {
+    let mut filter = doc! {"resource_state": {"$ne": "deleted"}};
+    if let Some(owner) = owner {
+        filter.insert("owner_id", owner);
+    }
     let machines: Vec<ManagedMachine> = db
         .collection::<ManagedMachine>(MACHINES)
-        .find(doc! {"resource_state": {"$ne": "deleted"}})
+        .find(filter)
         .sort(doc! {"eligibility_checked_at": 1, "_id": 1})
         .limit(64)
         .await?
@@ -1834,22 +1937,24 @@ pub async fn suspend_ineligible_with_billing(
                     if touched.matched_count!=1{return Err(AppError::Conflict("owner_safety_state_changed".into()));}
                 }
                 let action=if deletion {LifecycleAction::Delete} else {LifecycleAction::Pause};
+                let identity=account_safety_identity(&current,action,unauthorized_replay.then(||current.active_operation_id.as_deref().unwrap_or("unbound")));
                 let now = Utc::now();
                 let operation = MachineOperation {
                     id: operation_id.clone(), owner_id: current.owner_id.clone(), machine_id: Some(current.node_id.clone()),
                     action,
-                    idempotency_key_hash: format!("system:{}", idempotency_key_hash(&if unauthorized_replay {format!("account-safety:retained-recovery:{}:{}",current.runtime_generation,current.active_operation_id.as_deref().unwrap_or("unbound"))} else {format!("account-safety:{}:{}",action.as_str(),current.runtime_generation)})),
-                    request_digest: request_digest(&json!({"source":"account_safety","generation":current.runtime_generation})),
+                    idempotency_key_hash: identity.idempotency_key_hash,
+                    request_digest: identity.request_digest,
                     expected_revision: Some(current.revision), desired_runtime_generation: Some(current.runtime_generation),
                     state: OperationState::Accepted, cleanup_state: CleanupState::Pending, effect_id: Some(effect_id.clone()),
-                    error_code: Some(reason.into()), error_message: None, evidence_digest: None, retry_count: 0,
+                    error_code: Some(reason.into()), error_message: None, evidence_digest: None, retry_count: 0, delete_retry: None,
                     next_attempt_at: Some(now), deadline_at: Some(now+chrono::Duration::hours(24)), created_at: now, updated_at: now, terminal_at: None,
                 };
                 let outbox = MachineEffectOutbox {
                     id: effect_id.clone(), operation_id: operation_id.clone(), machine_id: current.node_id.clone(), owner_id: current.owner_id.clone(),
-                    kind: EffectKind::for_action(action), effect_digest: request_digest(&json!({"machine_id":current.node_id,"safety_generation":current.runtime_generation})),
+                    kind: EffectKind::for_action(action), effect_digest: identity.effect_digest,
                     namespace: current.sandbox_namespace.clone(), sandbox_name: current.sandbox_name.clone(), desired_mode: "suspended".into(),
-                    state: EffectState::Pending, attempts: 0, claim_id: None, claimed_until: None, last_error: None, available_at: Some(now), created_at: now, updated_at: now,
+                    state: EffectState::Pending, attempts: 0, claim_id: None, undispatched_claim_id: None, claimed_until: None, last_error: None, available_at: Some(now),
+                    submission: None, created_at: now, updated_at: now,
                 };
                 let updated = db_owned.collection::<Document>(MACHINES)
                     .update_one(doc! {"_id": &current.node_id, "revision": current.revision}, doc! {"$set": {"resource_state":if deletion {"deleting"} else {"stopping"}, "stop_reason": reason, "authorization_state": "revoked", "writer_admitted": false, "active_operation_id": &operation_id, "cleanup_state": "pending", "eligibility_checked_at": bson::DateTime::from_chrono(now), "updated_at": bson::DateTime::from_chrono(now)}, "$inc": {"revision": 1}})
@@ -1916,7 +2021,7 @@ pub(super) async fn deletion_authorized_in_session(
     Ok(has_owner_deletion_basis(&machine))
 }
 
-fn has_owner_deletion_basis(machine: &ManagedMachine) -> bool {
+pub(crate) fn has_owner_deletion_basis(machine: &ManagedMachine) -> bool {
     use crate::models::remote_machine::MachineDeletionSource;
     machine.deletion_basis.as_ref().is_some_and(|basis| {
         basis.owner_id == machine.owner_id

@@ -22,6 +22,7 @@ pub struct CodeInput {
 #[serde(deny_unknown_fields)]
 pub struct DecisionInput {
     pub code: Zeroizing<String>,
+    #[serde(default)]
     pub matched_code: Zeroizing<String>,
     #[serde(default)]
     pub replace_existing: bool,
@@ -40,16 +41,29 @@ pub struct PreviewResponse {
     pub state: BindingRequestState,
     pub expires_at: String,
     pub scope: &'static str,
+    pub manager_username: Option<String>,
+    pub confirmation_command: Option<Zeroizing<String>>,
 }
-fn projected(row: crate::models::platform_binding::PlatformBindingRequest) -> PreviewResponse {
-    PreviewResponse {
+async fn projected(
+    db: &mongodb::Database,
+    row: crate::models::platform_binding::PlatformBindingRequest,
+) -> AppResult<PreviewResponse> {
+    let manager = crate::services::platform_personal_binding_service::manager_display(
+        db,
+        &row.platform_config_id,
+        &row.manager_bot_id,
+    )
+    .await?;
+    Ok(PreviewResponse {
         request_id: row.id,
         manager_bot_id: row.manager_bot_id,
         requesting_sender_id: row.telegram_sender_id,
         state: row.state,
         expires_at: row.expires_at.to_rfc3339(),
         scope: "Onboarding status and reviewed setup drafts only; no account credentials or general account access",
-    }
+        manager_username: manager.map(|value| value.username),
+        confirmation_command: None,
+    })
 }
 fn headers() -> HeaderMap {
     HeaderMap::from_iter([
@@ -70,9 +84,13 @@ pub async fn preview(
     ingress_limit(&state, &headers_in, peer, "platform_binding_preview_ip", 30).await?;
     Ok((
         headers(),
-        Json(projected(
-            bindings::preview(&state.db, key(&state), &body.code).await?,
-        )),
+        Json(
+            projected(
+                &state.db,
+                bindings::preview(&state.db, key(&state), &body.code).await?,
+            )
+            .await?,
+        ),
     ))
 }
 
@@ -116,16 +134,21 @@ async fn decide(
     {
         return Err(AppError::RateLimited);
     }
-    let row = bindings::decide(
+    let result = bindings::decide(
         &state.db,
         key(state),
         &actor,
         &body.code,
-        &body.matched_code,
+        if body.matched_code.is_empty() {
+            &body.code
+        } else {
+            &body.matched_code
+        },
         approve,
         body.replace_existing,
     )
     .await?;
+    let row = result.request;
     audit_service::log_for_user(
         state.db.clone(),
         auth,
@@ -138,7 +161,11 @@ async fn decide(
             serde_json::json!({"binding_request_id": row.id, "platform_config_id": row.platform_config_id}),
         ),
     );
-    Ok((headers(), Json(projected(row))))
+    let mut response = projected(&state.db, row).await?;
+    response.confirmation_command = result
+        .confirmation_code
+        .map(|code| Zeroizing::new(format!("/confirm {}", code.as_str())));
+    Ok((headers(), Json(response)))
 }
 pub async fn approve(
     State(state): State<AppState>,
@@ -248,14 +275,16 @@ pub async fn revoke(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-fn command_error_reply(error: &AppError) -> Option<&'static str> {
+fn command_error_reply(error: &AppError, link_command: &str) -> Option<String> {
     match error {
         AppError::RateLimited | AppError::ConnectLinkRateLimited => {
-            Some("Too many linking attempts. Wait before trying again.")
+            Some("Too many linking attempts. Wait before trying again.".into())
         }
-        AppError::NotFound(_) | AppError::ValidationError(_) | AppError::Conflict(_) => Some(
-            "This linking request is unavailable or expired. Send /link to start again, review the same code in your browser, then return here to confirm.",
-        ),
+        AppError::NotFound(_) | AppError::ValidationError(_) | AppError::Conflict(_) => {
+            Some(format!(
+                "This linking request is unavailable or expired. Send {link_command} to start again, approve in your browser, then use its fresh confirmation command here."
+            ))
+        }
         _ => None,
     }
 }
@@ -273,18 +302,24 @@ pub(crate) async fn handle_command(
         .collection::<crate::models::platform_bot_config::PlatformBotConfig>(
             crate::models::platform_bot_config::COLLECTION_NAME,
         )
-        .find_one(bson::doc! {"manager_bot_id": &bot.platform_bot_id})
+        .find_one(
+            bson::doc! {"manager_bot_id": &bot.platform_bot_id, "native_entry": bson::Bson::Null},
+        )
         .await?;
     let Some(profile) = profile else {
         return Ok(false);
     };
+    let link_command = bindings::link_command(&state.db, &profile.id).await?;
     let message = &update["message"];
     let text = message["text"].as_str().unwrap_or("");
     let Some(command) = text.split_whitespace().next() else {
         return Ok(false);
     };
     let base = command.split('@').next().unwrap_or("");
-    if !matches!(base, "/link" | "/confirm" | "/unlink" | "/setups") {
+    if !matches!(
+        base,
+        "/link" | "/confirm" | "/unlink" | "/setups" | "/check" | "/status"
+    ) {
         return Ok(false);
     }
     let (_, username, values) = service.manager().await?;
@@ -299,8 +334,7 @@ pub(crate) async fn handle_command(
     let private = message["chat"]["type"] == "private"
         && sender.is_some()
         && sender == chat
-        && message["from"]["is_bot"] == false
-        && message.get("forward_origin").is_none();
+        && crate::services::platform_pairing_link::original_message(update);
     let target = message["chat"]["id"]
         .as_i64()
         .ok_or_else(|| AppError::ValidationError("Missing Telegram chat".into()))?;
@@ -329,11 +363,9 @@ pub(crate) async fn handle_command(
                     .map_err(|_| AppError::Internal("Frontend origin is invalid".into()))?;
                 url.set_path("/onboarding/link");
                 url.set_query(None);
-                url.set_fragment(None);
-                url.query_pairs_mut().append_pair("code", &code);
-                let code = code.as_str();
+                url.set_fragment(Some(&format!("code={}", code.as_str())));
                 format!(
-                    "Review your NyxID account at {url}\nMatch code {code} with this chat. Linking grants onboarding progress only. After browser approval, return here and send /confirm {code}. Never enter a password or bot token here."
+                    "Review your NyxID account at {url}\nLinking grants onboarding progress only. Approve on the website, then tap Open Telegram to finish or copy its fresh confirmation command back here. Never enter a password or bot token here."
                 )
             }
             "/confirm" => {
@@ -345,6 +377,13 @@ pub(crate) async fn handle_command(
             "/unlink" => {
                 bindings::unlink_sender(&state.db, &profile, &sender, &chat).await?;
                 "This chat is unlinked. Existing setups remain owned by their original NyxID account.".into()
+            }
+            "/check" | "/status" => {
+                if text.split_whitespace().count() != 1 {
+                    "Send /check without any arguments to check onboarding link status.".into()
+                } else {
+                    bindings::chat_status(&state.db, &profile, &sender, &chat).await?
+                }
             }
             "/setups" => {
                 if let Some(binding) =
@@ -372,7 +411,7 @@ pub(crate) async fn handle_command(
                     }
                     reply
                 } else {
-                    "Link your own account first with /link. No account credentials are delivered to this bot.".into()
+                    format!("Link your own account first with {link_command}. No account credentials are delivered to this bot.")
                 }
             }
             _ => unreachable!(),
@@ -380,11 +419,11 @@ pub(crate) async fn handle_command(
         match prepared {
             Ok(reply) => reply,
             Err(error) => {
-                let Some(reply) = command_error_reply(&error) else {
+                let Some(reply) = command_error_reply(&error, link_command) else {
                     return Err(error);
                 };
                 reply_binding = None;
-                reply.into()
+                reply
             }
         }
     };
@@ -440,17 +479,21 @@ mod tests {
             AppError::ValidationError("private code details".into()),
             AppError::Conflict("private account binding".into()),
         ] {
-            let reply = command_error_reply(&error).unwrap();
+            let reply = command_error_reply(&error, "/link").unwrap();
             assert!(reply.contains("/link"));
             assert!(!reply.contains("private"));
         }
         assert!(
-            command_error_reply(&AppError::RateLimited)
+            command_error_reply(&AppError::RateLimited, "/onboarding")
                 .unwrap()
                 .contains("Wait")
         );
         assert!(
-            command_error_reply(&AppError::Internal("secret provider response".into())).is_none()
+            command_error_reply(
+                &AppError::Internal("secret provider response".into()),
+                "/link"
+            )
+            .is_none()
         );
     }
 }

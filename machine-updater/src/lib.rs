@@ -2,6 +2,9 @@
 #[allow(dead_code)]
 #[path = "../../cli/src/tls.rs"]
 mod tls;
+#[cfg(unix)]
+#[path = "../../cli/src/commands/update_attestation/trusted_directory.rs"]
+mod trusted_directory;
 #[allow(dead_code)]
 #[path = "../../cli/src/commands/update_attestation.rs"]
 mod update_attestation;
@@ -17,6 +20,8 @@ pub mod runtime_provider;
 /// through Kubernetes. The Agent Sandbox controller remains the sole
 /// reconciler for those resources.
 pub mod sandbox;
+/// Payload-free diagnostics for Kubernetes deletion observations.
+pub mod sandbox_observation;
 
 /// Backend-only Kubernetes request credentials, distinct from Pod identity.
 pub mod kubernetes_credentials;

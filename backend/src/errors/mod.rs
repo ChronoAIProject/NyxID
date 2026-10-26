@@ -37,8 +37,30 @@ pub struct GrantCascadePayload {
     pub token_scope_available: bool,
 }
 
+/// Diagnostics for secret-bearing DTOs expose only the type, never fields.
+macro_rules! redacted_debug {
+    ($($kind:ty),+ $(,)?) => {$(
+        impl std::fmt::Debug for $kind {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($kind), " { [REDACTED] }"))
+            }
+        }
+    )+};
+}
+pub(crate) use redacted_debug;
+
+impl std::fmt::Debug for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppError")
+            .field("kind", &self.error_key())
+            .field("code", &self.error_code())
+            .finish_non_exhaustive()
+    }
+}
+redacted_debug!(ErrorResponse);
+
 /// Structured JSON error response returned by all API error paths.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 pub struct ErrorResponse {
     /// Machine-readable error category (e.g. "unauthorized")
     pub error: String,
@@ -86,7 +108,7 @@ pub enum PoolAttemptTransportKind {
 
 /// Application-level error variants.
 /// Each variant maps to a specific HTTP status code and error payload.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum AppError {
     #[error("Bad request: {0}")]
     BadRequest(String),
@@ -101,6 +123,9 @@ pub enum AppError {
 
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
+
+    #[error("OAuth authority is temporarily unavailable; retry the request")]
+    OAuthAuthorityUnavailable,
 
     #[error("Forbidden: {0}")]
     Forbidden(String),
@@ -151,8 +176,15 @@ pub enum AppError {
     #[error("Rate limited")]
     RateLimited,
 
+    /// A confirmed provider refusal with a bounded retry delay; preserves 1005.
+    #[error("Rate limited")]
+    RateLimitedWithRetry { retry_after: u64 },
+
     #[error("Service concurrency limit reached; retry after an in-flight request completes")]
     ServiceConcurrencyLimited,
+
+    #[error("Security rollout is not ready; inspect admin security readiness")]
+    SecurityReadinessUnavailable,
 
     #[error("Internal server error: {0}")]
     Internal(String),
@@ -178,6 +210,11 @@ pub enum AppError {
 
     #[error("MFA required")]
     MfaRequired { session_token: String },
+
+    #[error(
+        "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."
+    )]
+    MfaStepUpRequired,
 
     #[error("PKCE verification failed")]
     PkceVerificationFailed,
@@ -719,6 +756,18 @@ pub enum AppError {
 
     #[error("Installation credential expired; enroll with a fresh credential")]
     OracleWorkerCredentialRenewalRequired,
+    #[error(
+        "Oracle pool deletion requires settling active tasks or worker commands, or retrying DELETE to continue bounded command expiry"
+    )]
+    OraclePoolActiveWork,
+
+    /// NyxID's built-in oracle relay is retired for good. Every route under
+    /// `/api/v1/oracle` and every `nyx__oracle_*` MCP tool answers with this
+    /// so a caller, an AI agent above all, learns there is nothing to retry.
+    #[error(
+        "NyxID's built-in oracle is permanently deprecated and no longer serves requests. Do not retry this call."
+    )]
+    OracleRetired,
 
     #[error("Service pool not found: {0}")]
     ServicePoolNotFound(String),
@@ -761,6 +810,11 @@ pub enum AppError {
     )]
     ManagedExecutionPending(String),
 
+    #[error(
+        "Credential dependency preparation is running; retry deletion while your account remains usable"
+    )]
+    ErasurePreparing,
+
     #[error("Plan entitlement required: {0}")]
     PlanEntitlementRequired(String),
 
@@ -794,21 +848,23 @@ impl AppError {
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
+            Self::OAuthAuthorityUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Forbidden(_)
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
-            Self::AssistantTurnActive => StatusCode::CONFLICT,
+            Self::AssistantTurnActive | Self::ErasurePreparing => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
+            Self::SecurityReadinessUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
-            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
-            Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
+            Self::RateLimited | Self::RateLimitedWithRetry { .. } => StatusCode::TOO_MANY_REQUESTS,
+            Self::MfaRequired { .. } | Self::MfaStepUpRequired => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
             | Self::InvalidDpopProof(_)
             | Self::InvalidRedirectUri
@@ -989,6 +1045,8 @@ impl AppError {
             Self::OracleWorkerLabelUnavailable(_) => StatusCode::CONFLICT,
             Self::OracleLoginSnapshotNotFound(_) => StatusCode::NOT_FOUND,
             Self::OracleWorkerCredentialRenewalRequired => StatusCode::CONFLICT,
+            Self::OraclePoolActiveWork => StatusCode::CONFLICT,
+            Self::OracleRetired => StatusCode::GONE,
             Self::ServicePoolInfrastructureUnavailable | Self::ServicePoolCoolingDown => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
@@ -1018,6 +1076,7 @@ impl AppError {
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
+            Self::OAuthAuthorityUnavailable => 12900,
             Self::Forbidden(_)
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => 1002,
@@ -1025,15 +1084,17 @@ impl AppError {
             Self::Conflict(_) => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
+            Self::SecurityReadinessUnavailable => 12900,
             Self::VoiceProviderUnavailable => 12501,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
+            Self::ErasurePreparing => 12801,
             // 12101 is already the public upload-retention code.
             Self::AssistantTurnRequired => 12102,
             Self::AssistantModelUnavailable => 12103,
             Self::AssistantAttachmentExpired => 12101,
             Self::ServiceConcurrencyLimited => 12600,
-            Self::RateLimited => 1005,
+            Self::RateLimited | Self::RateLimitedWithRetry { .. } => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
             Self::DatabaseError(_) => 1007,
             Self::ValidationError(_) | Self::SkillDraftValidation(_) => 1008,
@@ -1046,6 +1107,7 @@ impl AppError {
             Self::AuthenticationFailed(_) => 2000,
             Self::TokenExpired => 2001,
             Self::MfaRequired { .. } => 2002,
+            Self::MfaStepUpRequired => 2003,
             Self::PkceVerificationFailed => 3000,
             Self::InvalidRedirectUri => 3001,
             Self::InvalidScope(_) => 3002,
@@ -1224,6 +1286,8 @@ impl AppError {
             Self::OracleWorkerLabelUnavailable(_) => 11014,
             Self::OracleLoginSnapshotNotFound(_) => 11015,
             Self::OracleWorkerCredentialRenewalRequired => 11016,
+            Self::OraclePoolActiveWork => 11017,
+            Self::OracleRetired => 11099,
             Self::ServicePoolUpstreamEncodingUnsupported => 11407,
             Self::ServicePoolInfrastructureUnavailable => 11404,
             Self::ServicePoolCoolingDown => 11405,
@@ -1246,6 +1310,9 @@ impl AppError {
     /// Each variant maps to a standard OAuth error string — no string matching.
     pub(crate) fn oauth_error_code(&self) -> &'static str {
         match self {
+            Self::MfaRequired { .. } => "mfa_required",
+            Self::MfaStepUpRequired => "mfa_step_up_required",
+            Self::OAuthAuthorityUnavailable => "temporarily_unavailable",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::PkceVerificationFailed | Self::InvalidRedirectUri => "invalid_grant",
             Self::InvalidDpopProof(_) => "invalid_dpop_proof",
@@ -1266,6 +1333,7 @@ impl AppError {
     /// HTTP status to use when emitting an RFC 6749 §5.2 error response.
     pub(crate) fn oauth_status(&self) -> StatusCode {
         match self {
+            Self::OAuthAuthorityUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unauthorized(_)
             | Self::AuthenticationFailed(_)
             | Self::ServiceAccountNotFound(_)
@@ -1283,12 +1351,15 @@ impl AppError {
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
+            Self::OAuthAuthorityUnavailable => "oauth_authority_unavailable",
             Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
             Self::AssistantMissingAccess(_) => "missing_access",
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
             Self::AssistantTurnActive => "turn_active",
+            Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
+            Self::SecurityReadinessUnavailable => "security_readiness_unavailable",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
@@ -1296,7 +1367,7 @@ impl AppError {
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::ServiceConcurrencyLimited => "service_concurrency_limited",
-            Self::RateLimited => "rate_limited",
+            Self::RateLimited | Self::RateLimitedWithRetry { .. } => "rate_limited",
             Self::Internal(_) | Self::PoolAttemptTransport(_) => "internal_error",
             Self::DatabaseError(_) => "database_error",
             Self::ValidationError(_) | Self::SkillDraftValidation(_) => "validation_error",
@@ -1311,6 +1382,7 @@ impl AppError {
             Self::AuthenticationFailed(_) => "authentication_failed",
             Self::TokenExpired => "token_expired",
             Self::MfaRequired { .. } => "mfa_required",
+            Self::MfaStepUpRequired => "mfa_step_up_required",
             Self::PkceVerificationFailed => "pkce_verification_failed",
             Self::InvalidDpopProof(_) => "invalid_dpop_proof",
             Self::InvalidRedirectUri => "invalid_redirect_uri",
@@ -1488,6 +1560,8 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => "oracle_worker_command_not_found",
             Self::OracleWorkerLabelUnavailable(_) => "oracle_worker_label_unavailable",
             Self::OracleLoginSnapshotNotFound(_) => "oracle_login_snapshot_not_found",
+            Self::OraclePoolActiveWork => "oracle_pool_active_work",
+            Self::OracleRetired => "oracle_retired",
             Self::OracleWorkerCredentialRenewalRequired => {
                 "oracle_worker_credential_renewal_required"
             }
@@ -1515,6 +1589,14 @@ impl AppError {
 }
 
 impl AppError {
+    pub fn retry_after_seconds(&self) -> Option<u64> {
+        match self {
+            Self::RateLimited => Some(1),
+            Self::RateLimitedWithRetry { retry_after } => Some((*retry_after).clamp(1, 86400)),
+            _ => None,
+        }
+    }
+
     /// The same client-safe payload for JSON responses and streaming errors.
     pub fn response_body(&self) -> ErrorResponse {
         if let Self::VoiceStartFailed(failure) = self {
@@ -1574,7 +1656,7 @@ impl AppError {
                     "Consent required. Complete authorization in browser flow.".to_string()
                 }
                 AppError::ApprovalRequired { .. } => {
-                    "Approval required. A notification has been sent to the resource owner."
+                    "Approval required. Review the pending request in Approval History; configured notifications are attempted."
                         .to_string()
                 }
                 AppError::ApprovalFailed {
@@ -1614,10 +1696,19 @@ impl IntoResponse for AppError {
             _ => tracing::warn!(error = %self, "Client error"),
         }
         let mut response = (self.status_code(), axum::Json(self.response_body())).into_response();
-        if self.error_key() == Self::ServiceConcurrencyLimited.error_key() {
+        if self.error_key() == Self::ServiceConcurrencyLimited.error_key()
+            || matches!(self, Self::OAuthAuthorityUnavailable)
+        {
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
                 axum::http::HeaderValue::from_static("1"),
+            );
+        }
+        if let Some(retry_after) = self.retry_after_seconds() {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_str(&retry_after.to_string())
+                    .expect("bounded numeric retry delay"),
             );
         }
         response
@@ -1635,9 +1726,65 @@ impl From<crate::models::credits::CreditsError> for AppError {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn mfa_step_up_error_preserves_typed_403_with_actionable_message() {
+        let response = AppError::MfaStepUpRequired.into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !response
+                .headers()
+                .contains_key(axum::http::header::SET_COOKIE)
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error_code"], 2003);
+        assert_eq!(body["error"], "mfa_step_up_required");
+        assert_eq!(
+            body["message"],
+            "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."
+        );
+    }
+
+    #[test]
+    fn rate_refusal_preserves_bounded_retry_after_without_changing_the_error_contract() {
+        use axum::response::IntoResponse;
+        for (delay, expected) in [(0, "1"), (23, "23"), (u64::MAX, "86400")] {
+            let error = super::AppError::RateLimitedWithRetry { retry_after: delay };
+            assert_eq!(
+                error.error_code(),
+                super::AppError::RateLimited.error_code()
+            );
+            assert_eq!(error.error_key(), "rate_limited");
+            let response = error.into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(
+                response.headers()[axum::http::header::RETRY_AFTER],
+                expected
+            );
+        }
+    }
     use super::*;
     use axum::body::to_bytes;
     use serde_json::Value;
+
+    #[tokio::test]
+    async fn oauth_authority_unavailability_is_retryable_in_app_and_oauth_responses() {
+        let error = AppError::OAuthAuthorityUnavailable;
+        assert_eq!(error.error_code(), 12900);
+        assert_eq!(error.error_key(), "oauth_authority_unavailable");
+        assert_eq!(error.oauth_status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.oauth_error_code(), "temporarily_unavailable");
+        assert!(!error.to_string().contains("authorize again"));
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(body["error_code"], 12900);
+        assert_eq!(body["error"], "oauth_authority_unavailable");
+    }
 
     #[test]
     fn assistant_missing_access_is_forbidden_class_with_contextual_details() {
@@ -1747,6 +1894,22 @@ mod tests {
         assert_eq!(payload["error_code"], 1000);
         assert_eq!(payload["error"], "bad_request");
         assert_eq!(payload["message"], "Bad request: API key is failed");
+    }
+
+    /// The retirement answer is a contract with callers that still have the
+    /// old routes or tools wired in: 410 Gone, a stable key, and a message
+    /// that says the feature is gone for good so nobody retries.
+    #[tokio::test]
+    async fn oracle_retired_is_a_permanent_410() {
+        let response = AppError::OracleRetired.into_response();
+        assert_eq!(response.status(), StatusCode::GONE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"], "oracle_retired");
+        assert_eq!(payload["error_code"], 11099);
+        let message = payload["message"].as_str().unwrap();
+        assert!(message.contains("permanently deprecated"), "{message}");
+        assert!(message.contains("Do not retry"), "{message}");
     }
 
     #[test]
@@ -2060,6 +2223,7 @@ mod tests {
     fn error_codes_unique() {
         let codes = vec![
             AppError::ManagedExecutionPending("".into()).error_code(),
+            AppError::ErasurePreparing.error_code(),
             AppError::AssistantTurnActive.error_code(),
             AppError::AssistantTurnRequired.error_code(),
             AppError::AssistantModelUnavailable.error_code(),
@@ -2073,6 +2237,7 @@ mod tests {
             }
             .error_code(),
             AppError::Unauthorized("".into()).error_code(),
+            AppError::OAuthAuthorityUnavailable.error_code(),
             AppError::Forbidden("".into()).error_code(),
             AppError::NotFound("".into()).error_code(),
             AppError::Conflict("".into()).error_code(),
@@ -2194,6 +2359,7 @@ mod tests {
             AppError::OracleWorkerLabelUnavailable("".into()).error_code(),
             AppError::OracleLoginSnapshotNotFound("".into()).error_code(),
             AppError::OracleWorkerCredentialRenewalRequired.error_code(),
+            AppError::OracleRetired.error_code(),
             AppError::GrantCascadeConfirmationRequired(Box::new(GrantCascadePayload {
                 provider_slug: "github".into(),
                 provider_name: "GitHub".into(),
@@ -3178,4 +3344,34 @@ mod tests {
         );
         assert_eq!(json["details"]["token_scope_available"], true);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn error_debug_redacts_challenges_and_untrusted_message_details() {
+    let secret = "distinctive-error-secret-c731";
+    for error in [
+        AppError::MfaRequired {
+            session_token: secret.into(),
+        },
+        AppError::Internal(secret.into()),
+        AppError::AuthenticationFailed(secret.into()),
+    ] {
+        assert!(!format!("{error:?}").contains(secret));
+    }
+    let response = ErrorResponse {
+        error: "mfa_required".into(),
+        error_code: 2002,
+        message: secret.into(),
+        session_token: Some(secret.into()),
+        consent_url: None,
+        request_id: None,
+        approve_url: None,
+        details: None,
+    };
+    assert!(!format!("{response:?}").contains(secret));
+    assert_eq!(
+        serde_json::to_value(response).unwrap()["session_token"],
+        secret
+    );
 }

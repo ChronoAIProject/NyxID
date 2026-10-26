@@ -42,6 +42,23 @@ export function RemoteMachineBilling({
     offsets.at(-1) ?? 0,
   );
   const data = query.data;
+  // The mounted API has two explicit missing-contract responses: the owner
+  // handler returns 404 before a run exists; the detail service returns 400
+  // for an absent selected run. AppError prefixes its wire messages; retain
+  // compatibility with unprefixed responses without treating generic 404s as empty.
+  const noContract =
+    query.error instanceof ApiError &&
+    ((query.error.status === 404 &&
+      [
+        "runtime billing contract not found",
+        "Not found: runtime billing contract not found",
+      ].includes(query.error.message)) ||
+      (query.error.status === 400 &&
+        query.error.errorCode === 1008 &&
+        [
+          "runtime contract not found",
+          "Validation error: runtime contract not found",
+        ].includes(query.error.message)));
   const missing =
     query.error instanceof ApiError &&
     [404, 405, 501].includes(query.error.status);
@@ -78,6 +95,10 @@ export function RemoteMachineBilling({
               accepted rate version.
             </p>
           )}
+          <p className="text-12 text-muted-foreground">
+            Historical summaries contain accepted rates and state. Open a
+            contract to read its settled and reserved amounts separately.
+          </p>
           {runs.isPending && (
             <p role="status" className="text-12">
               Loading historical contracts…
@@ -153,7 +174,15 @@ export function RemoteMachineBilling({
       )}
       {query.error && (
         <div role="status" className="space-y-3">
-          {missing ? (
+          {noContract ? (
+            <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
+              {selectedRunId
+                ? "Selected historical contract was not found. Refresh the contract list or view the current contract; its amounts remain unknown."
+                : billingState === "free"
+                  ? "No current paid runtime contract. This is expected for free runtime; downstream service usage remains separate. Historical contracts can still be reviewed above."
+                  : "No current runtime contract was found. Current billing amounts remain unknown; this does not establish zero cost or completed settlement."}
+            </p>
+          ) : missing ? (
             <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
               Runtime billing details are unavailable on this server. Accepted
               rates, exact settled/reserved amounts, pending liability, and
@@ -165,14 +194,25 @@ export function RemoteMachineBilling({
               onRetry={() => void query.refetch()}
             />
           )}
-          <Button onClick={() => void query.refetch()}>
-            Check billing availability
+          <Button
+            onClick={() => {
+              void query.refetch();
+              if (noContract) void runs.refetch();
+            }}
+          >
+            {noContract ? "Refresh contracts" : "Check billing availability"}
           </Button>
         </div>
       )}
       {data && (
         <>
-          <DetailSection title="Accepted runtime contract">
+          <DetailSection
+            title={
+              selectedRunId
+                ? "Historical runtime contract"
+                : "Current runtime contract"
+            }
+          >
             <DetailRow label="Run ID" value={data.run_id} mono copyable />
             <DetailRow
               label="Contract state"
@@ -197,7 +237,7 @@ export function RemoteMachineBilling({
               value={`${data.settled_credits} Credits`}
             />
             <DetailRow
-              label="Reserved"
+              label="Reserved (includes pending)"
               value={`${data.reserved_credits} Credits`}
             />
             <DetailRow

@@ -10,8 +10,14 @@ use super::Manager;
 use crate::{
     models::{
         machine_free_slot::{FreeSlotState, MachineFreeSlot},
-        remote_machine::{COLLECTION_NAME as MACHINES, ManagedMachine, ResourceState},
-        remote_machine_operation::LifecycleAction,
+        remote_machine::{
+            AuthorizationState, BillingState, COLLECTION_NAME as MACHINES, ManagedMachine,
+            ResourceState,
+        },
+        remote_machine_operation::{
+            COLLECTION_NAME as OPERATIONS, CleanupState, LifecycleAction, MachineOperation,
+            OperationState,
+        },
         remote_machine_outbox::{COLLECTION_NAME as OUTBOX, MachineEffectOutbox},
         user::UserType,
     },
@@ -43,6 +49,7 @@ struct Cluster {
     revision: i64,
     node_ready: bool,
     node_stale: bool,
+    resource_list_pages: std::collections::HashMap<String, Vec<Value>>,
     delete_requested: bool,
 }
 impl Cluster {
@@ -59,6 +66,37 @@ impl Cluster {
         let sandbox_item = path.contains("/sandboxes/");
         if request.method.as_str() == "PATCH" && sandbox_item {
             let mut next: Value = serde_json::from_slice(&request.body).unwrap();
+            if let Some(patch) = next.as_array() {
+                let mut original = self
+                    .sandbox
+                    .clone()
+                    .expect("patch requires original Sandbox");
+                for operation in patch {
+                    let path = operation["path"].as_str().unwrap();
+                    match operation["op"].as_str().unwrap() {
+                        "test" => {
+                            if original.pointer(path) != Some(&operation["value"]) {
+                                return ResponseTemplate::new(409);
+                            }
+                        }
+                        "add" => {
+                            *original
+                                .pointer_mut(path)
+                                .expect("known minimal stop patch path") =
+                                operation["value"].clone()
+                        }
+                        "remove" => {
+                            assert_eq!(path, "/spec/shutdownTime");
+                            original["spec"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("shutdownTime");
+                        }
+                        other => panic!("unexpected stop patch operation {other}"),
+                    }
+                }
+                next = original;
+            }
             if self.sandbox.as_ref().is_some_and(|old| {
                 next["metadata"]["uid"] != old["metadata"]["uid"]
                     || next["metadata"]["resourceVersion"] != old["metadata"]["resourceVersion"]
@@ -101,21 +139,36 @@ impl Cluster {
         if request.method.as_str() != "GET" {
             return ResponseTemplate::new(405);
         }
+        if let Some(pages) = self.resource_list_pages.get(path) {
+            let page = usize::from(request.url.query_pairs().any(|(key, _)| key == "continue"));
+            return ResponseTemplate::new(200).set_body_json(pages[page].clone());
+        }
         if path == "/apis/storage.k8s.io/v1/storageclasses/existing-fixture-storage" {
             return ResponseTemplate::new(200).set_body_json(json!({"kind":"StorageClass","apiVersion":"storage.k8s.io/v1","metadata":{"name":"existing-fixture-storage","uid":"storage-fixture"},"provisioner":"fixture.csi.example"}));
+        }
+        if path == "/api/v1/pods" {
+            return ResponseTemplate::new(403);
         }
         let object = if sandbox_item {
             self.sandbox.clone()
         } else if path.ends_with("/sandboxes") {
-            return Self::list(self.sandbox.clone());
+            return Self::list(
+                "SandboxList",
+                "agents.x-k8s.io/v1beta1",
+                self.sandbox.clone(),
+            );
         } else if path.ends_with("/pods") {
-            return Self::list(self.pod.clone());
+            return Self::list("PodList", "v1", self.pod.clone());
         } else if path.ends_with("/persistentvolumeclaims") {
-            return Self::list(self.pvc.clone());
+            return Self::list("PersistentVolumeClaimList", "v1", self.pvc.clone());
         } else if path.ends_with("/pods/native-pod") {
             self.pod.clone()
         } else if path.ends_with("/persistentvolumeclaims/workspace") {
             self.pvc.clone()
+        } else if path == "/api/v1/persistentvolumes" {
+            return Self::list("PersistentVolumeList", "v1", self.pv.clone());
+        } else if path == "/apis/storage.k8s.io/v1/volumeattachments" {
+            return Self::list("VolumeAttachmentList", "storage.k8s.io/v1", None);
         } else if path == "/api/v1/persistentvolumes/native-pv" {
             self.pv.clone()
         } else if path == "/api/v1/nodes/native-node" {
@@ -131,9 +184,18 @@ impl Cluster {
             None => ResponseTemplate::new(404),
         }
     }
-    fn list(object: Option<Value>) -> ResponseTemplate {
+    fn list(kind: &str, version: &str, mut object: Option<Value>) -> ResponseTemplate {
+        if kind != "SandboxList"
+            && let Some(value) = &mut object
+            && value["kind"].as_str() == kind.strip_suffix("List")
+            && value["apiVersion"] == version
+        {
+            let fields = value.as_object_mut().unwrap();
+            fields.remove("kind");
+            fields.remove("apiVersion");
+        }
         ResponseTemplate::new(200)
-            .set_body_json(json!({"metadata":{},"items":object.into_iter().collect::<Vec<_>>()}))
+            .set_body_json(json!({"kind":kind,"apiVersion":version,"metadata":{"resourceVersion":"complete-fixture-snapshot"},"items":object.into_iter().collect::<Vec<_>>()}))
     }
     /// The fixture controller alone creates/removes Pod/PVC objects. The tested
     /// Manager only writes the Sandbox API, matching the selected ownership.
@@ -233,6 +295,164 @@ impl Fixture {
             expected_revision:Some(machine.revision),idempotency_key:Uuid::new_v4().to_string(),
             request_body:json!({"action":action.as_str(),"policy_version":crate::models::remote_machine::POLICY_VERSION,"data_policy_version":crate::models::remote_machine::DATA_POLICY_VERSION,"acknowledge_shared_environment":true,"acknowledge_data_loss":true}),now:None,
         })).await.unwrap().machine
+    }
+    async fn apply_delete_until_controller_progress(&self) {
+        let deleting = self.current().await;
+        let operation_id = deleting.active_operation_id.clone().unwrap();
+        let original = self.cluster.lock().unwrap().sandbox.clone().unwrap();
+        let original_pod = self.cluster.lock().unwrap().pod.clone();
+        let result = Box::pin(self.manager.apply_effect(&self.effect().await)).await;
+        if deleting.sandbox_uid.is_none() {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(error, crate::errors::AppError::Conflict(ref reason) if reason == "delete_current_suspension_unconfirmed"),
+                "lost-create recovery still awaits the current controller generation: {error}"
+            );
+        } else {
+            // Applying the minimal stop intent may succeed before the fixture
+            // controller has observed its new generation.
+            result.unwrap();
+        }
+        let suspended = self.cluster.lock().unwrap().sandbox.clone().unwrap();
+        assert_eq!(suspended["metadata"]["uid"], original["metadata"]["uid"]);
+        assert_eq!(suspended["spec"]["operatingMode"], "Suspended");
+        assert_eq!(suspended["status"], original["status"]);
+        assert_ne!(
+            suspended["status"]["conditions"][1]["observedGeneration"],
+            suspended["metadata"]["generation"],
+            "PATCH acceptance does not advance the fixture controller"
+        );
+        assert_eq!(self.cluster.lock().unwrap().pod, original_pod);
+        for template in ["podTemplate", "volumeClaimTemplates"] {
+            assert_eq!(
+                suspended["spec"][template], original["spec"][template],
+                "suspension preserves the original {template}"
+            );
+        }
+        self.assert_delete_pending_before_destructive_effects(
+            &operation_id,
+            deleting.authorization_state,
+        )
+        .await;
+        // Prove the actual pending gate on a fresh due pass. An accepted stop
+        // PATCH alone is neither a controller stop nor permission to delete.
+        self.make_original_delete_due().await;
+        let error = self
+            .manager
+            .observe(&self.current().await)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::errors::AppError::Conflict(ref reason) if reason == "delete_current_suspension_unconfirmed"),
+            "the controller has not yet observed the current suspended generation: {error}"
+        );
+        self.assert_delete_pending_before_destructive_effects(
+            &operation_id,
+            deleting.authorization_state,
+        )
+        .await;
+    }
+    async fn assert_delete_pending_before_destructive_effects(
+        &self,
+        operation_id: &str,
+        accepted_authorization: AuthorizationState,
+    ) {
+        let machine = self.current().await;
+        assert_eq!(machine.resource_state, ResourceState::Deleting);
+        assert_eq!(machine.active_operation_id.as_deref(), Some(operation_id));
+        assert!(!machine.writer_admitted);
+        assert_eq!(machine.authorization_state, accepted_authorization);
+        assert!(!lifecycle::runtime_fence_allows_bootstrap(&machine));
+        assert!(!lifecycle::has_current_verified_runtime_evidence(&machine));
+        assert!(
+            !lifecycle::runtime_fence_allows_writer(
+                &self.db,
+                &machine.node_id,
+                machine.runtime_generation,
+                machine.credential_epoch,
+                &machine.writer_fence,
+            )
+            .await
+            .unwrap()
+        );
+        let node = self
+            .db
+            .collection::<Document>(crate::models::node::COLLECTION_NAME)
+            .find_one(doc! {"_id":&machine.node_id,"user_id":&machine.owner_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(node.get_bool("is_active"), Ok(false));
+        assert_eq!(node.get_str("status"), Ok("offline"));
+        assert_eq!(machine.cleanup_state, "pending");
+        assert_ne!(machine.billing_state, BillingState::Closed);
+        let operation = self
+            .db
+            .collection::<MachineOperation>(OPERATIONS)
+            .find_one(doc! {"_id":operation_id,"owner_id":&machine.owner_id,"machine_id":&machine.node_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(operation.action, LifecycleAction::Delete);
+        assert!(matches!(
+            operation.state,
+            OperationState::Accepted | OperationState::Applying | OperationState::Reconciling
+        ));
+        assert_ne!(operation.cleanup_state, CleanupState::Complete);
+        assert!(operation.terminal_at.is_none());
+        assert!(!self.cluster.lock().unwrap().delete_requested);
+        assert!(
+            self._server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method.as_str() != "DELETE"),
+            "no destructive request precedes confirmed controller and storage observations"
+        );
+        self.slot_retained().await;
+    }
+    fn reconcile_delete_suspension(&self) {
+        let mut cluster = self.cluster.lock().unwrap();
+        cluster.reconcile();
+        let sandbox = cluster.sandbox.as_ref().unwrap();
+        assert_eq!(sandbox["spec"]["operatingMode"], "Suspended");
+        assert_eq!(sandbox["status"]["conditions"][1]["status"], "True");
+        assert_eq!(
+            sandbox["status"]["conditions"][1]["observedGeneration"],
+            sandbox["metadata"]["generation"]
+        );
+        assert!(cluster.pod.is_none());
+        assert!(!cluster.delete_requested);
+    }
+    fn cleanup_inventory_path(&self, resource: &str) -> String {
+        match resource {
+            // Recovery also finds original UID/claim users outside owner-label
+            // selectors, so Pods are inventoried through the cluster API.
+            "pods" => "/api/v1/namespaces/nyxid-machine/pods".into(),
+            "persistentvolumeclaims" => format!(
+                "/api/v1/namespaces/{}/{resource}",
+                self.machine.sandbox_namespace
+            ),
+            _ => panic!("unsupported cleanup inventory fixture"),
+        }
+    }
+    async fn make_original_delete_due(&self) {
+        let machine = self.current().await;
+        assert_eq!(machine.resource_state, ResourceState::Deleting);
+        // Controller/GC progress is explicit in this fixture. Advance only the
+        // accepted original delete's retry time, without changing its evidence.
+        let result = self
+            .db
+            .collection::<Document>(OPERATIONS)
+            .update_one(
+                doc! {"_id":&machine.active_operation_id,"owner_id":&machine.owner_id,
+                "machine_id":&machine.node_id,"action":"delete","terminal_at":bson::Bson::Null},
+                doc! {"$set":{"next_attempt_at":bson::Bson::Null}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.matched_count, 1);
     }
     async fn observation(&self) -> SandboxObservation {
         self.manager
@@ -447,10 +667,9 @@ async fn native_free_lifecycle_uses_applied_observations_same_pvc_and_fresh_boot
         "new generation must retrieve fresh bootstrap credentials"
     );
     f.action(LifecycleAction::Delete).await;
-    Box::pin(f.manager.apply_effect(&f.effect().await))
-        .await
-        .unwrap();
-    f.cluster.lock().unwrap().reconcile();
+    f.apply_delete_until_controller_progress().await;
+    f.reconcile_delete_suspension();
+    f.make_original_delete_due().await;
     assert!(
         Box::pin(f.manager.observe(&f.current().await))
             .await
@@ -459,10 +678,15 @@ async fn native_free_lifecycle_uses_applied_observations_same_pvc_and_fresh_boot
     assert_eq!(f.current().await.resource_state, ResourceState::Deleting);
     f.slot_retained().await;
     f.cluster.lock().unwrap().finish_delete(true);
+    f.make_original_delete_due().await;
     Box::pin(f.manager.observe(&f.current().await))
         .await
         .unwrap();
     assert_eq!(f.current().await.resource_state, ResourceState::Deleted);
+    assert_eq!(
+        f.current().await.authorization_state,
+        AuthorizationState::Revoked
+    );
     let slot =
         f.db.collection::<MachineFreeSlot>(lifecycle::FREE_SLOTS)
             .find_one(doc! {"_id":&f.machine.owner_id})
@@ -676,7 +900,7 @@ async fn native_node_uncertainty_and_replacement_are_latched_before_new_bootstra
 }
 
 #[tokio::test]
-async fn native_delete_present_finalizers_and_retained_pv_keep_cleanup_and_quota_pending() {
+async fn native_delete_waits_for_object_gc_without_observing_retained_pv() {
     let f = fixture("native_delete_retained").await;
     f.start().await;
     {
@@ -685,37 +909,51 @@ async fn native_delete_present_finalizers_and_retained_pv_keep_cleanup_and_quota
         c.pv.as_mut().unwrap()["metadata"]["finalizers"] = json!(["kubernetes.io/pv-protection"]);
     }
     f.record().await.unwrap();
-    f.action(LifecycleAction::Delete).await;
-    Box::pin(f.manager.apply_effect(&f.effect().await))
-        .await
-        .unwrap();
-    f.cluster.lock().unwrap().reconcile();
-    assert!(
-        Box::pin(f.manager.observe(&f.current().await))
-            .await
-            .is_err()
-    );
-    assert!(f.cluster.lock().unwrap().delete_requested);
-    f.slot_retained().await;
+    let original_pvc = f.cluster.lock().unwrap().pvc.clone().unwrap();
+    let original_pv = f.cluster.lock().unwrap().pv.clone().unwrap();
+    // Setup/running observation may GET the known PV. The narrowed contract
+    // below applies to the actual delete/retry path, after that setup.
+    let requests_before_delete = f._server.received_requests().await.unwrap().len();
+    let deleting = f.action(LifecycleAction::Delete).await;
+    f.apply_delete_until_controller_progress().await;
+    f.reconcile_delete_suspension();
+    for _ in 0..2 {
+        f.make_original_delete_due().await;
+        assert!(matches!(f.manager.observe(&f.current().await).await,
+            Err(crate::errors::AppError::Conflict(reason)) if reason == "delete_sandbox_gc_pending"));
+        let current = f.current().await;
+        assert_eq!(current.active_operation_id, deleting.active_operation_id);
+        assert!(!current.writer_admitted);
+        assert_eq!(current.authorization_state, deleting.authorization_state);
+        assert_eq!(current.cleanup_state, "pending");
+        f.slot_retained().await;
+        let cluster = f.cluster.lock().unwrap();
+        assert!(cluster.delete_requested);
+        assert_eq!(cluster.pvc.as_ref(), Some(&original_pvc));
+        assert_eq!(cluster.pv.as_ref(), Some(&original_pv));
+        assert!(cluster.sandbox.as_ref().unwrap()["metadata"]["deletionTimestamp"].is_string());
+    }
+    // Independent GC removes Sandbox/Pod/PVC. The retained PV is unqueried and
+    // remains present; success describes only the v2 object cascade.
     f.cluster.lock().unwrap().finish_delete(false);
-    assert!(
-        Box::pin(f.manager.observe(&f.current().await))
-            .await
-            .is_err()
+    f.make_original_delete_due().await;
+    f.manager.observe(&f.current().await).await.unwrap();
+    let deleted = f.current().await;
+    assert_eq!(deleted.resource_state, ResourceState::Deleted);
+    assert_eq!(deleted.billing_state, BillingState::Closed);
+    assert_eq!(
+        deleted.delete_recovery.as_ref().unwrap().storage,
+        crate::models::remote_machine::DeleteStorageDisposition::SandboxCascadeObserved
     );
-    assert_eq!(f.current().await.resource_state, ResourceState::Deleting);
-    assert_ne!(f.current().await.cleanup_state, "complete");
-    f.slot_retained().await;
-    // Even PV NotFound cannot silently turn selected Retain semantics into
-    // Delete reclamation. Manual/operator handling remains necessary.
-    f.cluster.lock().unwrap().pv = None;
-    assert!(
-        Box::pin(f.manager.observe(&f.current().await))
-            .await
-            .is_err()
-    );
-    assert_ne!(f.current().await.resource_state, ResourceState::Deleted);
-    f.slot_retained().await;
+    assert_eq!(f.cluster.lock().unwrap().pv.as_ref(), Some(&original_pv));
+    let requests = f._server.received_requests().await.unwrap();
+    assert!(requests.iter().skip(requests_before_delete).all(|request| {
+        let path = request.url.path();
+        !path.contains("/persistentvolumes")
+            && !path.contains("/volumeattachments")
+            && path != "/api/v1/pods"
+            && (request.method.as_str() != "DELETE" || path.contains("/sandboxes/"))
+    }));
     f.db.drop().await.unwrap();
 }
 
@@ -903,9 +1141,7 @@ async fn native_delete_recovers_lost_create_response_only_under_original_allocat
     );
     let deleting = f.action(LifecycleAction::Delete).await;
     let requests_before = f._server.received_requests().await.unwrap().len();
-    Box::pin(f.manager.apply_effect(&f.effect().await))
-        .await
-        .unwrap();
+    f.apply_delete_until_controller_progress().await;
     let recovered = f.current().await;
     assert_eq!(
         recovered.sandbox_uid.as_deref(),
@@ -937,16 +1173,163 @@ async fn native_delete_recovers_lost_create_response_only_under_original_allocat
         );
         if request.method.as_str() == "PATCH" {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
-            assert_eq!(
-                body["metadata"]["uid"], original_uid,
+            let patch = body.as_array().expect("minimal JSON Patch suspension");
+            assert!(
+                patch.contains(&json!({"op":"test","path":"/metadata/uid","value":original_uid})),
                 "recovery patches only the original UID"
             );
-            assert_eq!(
-                body["spec"]["operatingMode"], "Suspended",
+            assert!(
+                patch.contains(&json!({"op":"test","path":"/metadata/resourceVersion","value":allocated["metadata"]["resourceVersion"]})),
+                "recovery tests the original resourceVersion"
+            );
+            assert!(
+                patch.contains(
+                    &json!({"op":"add","path":"/spec/operatingMode","value":"Suspended"})
+                ),
                 "lost response cannot resurrect running intent"
             );
+            assert!(patch.iter().all(|operation| {
+                let path = operation["path"].as_str().unwrap();
+                !path.starts_with("/spec/podTemplate")
+                    && !path.starts_with("/spec/volumeClaimTemplates")
+            }));
         }
     }
     f.slot_retained().await;
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_delete_rejects_incomplete_owned_lists_before_finality() {
+    for resource in ["pods", "persistentvolumeclaims"] {
+        for defect in ["continue_type", "missing_continue", "malformed_owner"] {
+            let f = fixture("native_delete_strict_inventory").await;
+            f.start().await;
+            f.action(LifecycleAction::Delete).await;
+            f.apply_delete_until_controller_progress().await;
+            f.reconcile_delete_suspension();
+            f.make_original_delete_due().await;
+            assert!(f.manager.observe(&f.current().await).await.is_err());
+            assert!(f.cluster.lock().unwrap().delete_requested);
+            f.cluster.lock().unwrap().finish_delete(true);
+            let kind = if resource == "pods" {
+                "PodList"
+            } else {
+                "PersistentVolumeClaimList"
+            };
+            let inventory_path = f.cleanup_inventory_path(resource);
+            let mut page = json!({"kind":kind,"apiVersion":"v1","metadata":{"resourceVersion":"strict-snapshot"},"items":[]});
+            match defect {
+                "continue_type" => page["metadata"]["continue"] = json!(123),
+                "missing_continue" => page["metadata"]["remainingItemCount"] = json!(1),
+                _ => {
+                    page["items"] = json!([{"kind":kind.trim_end_matches("List"),"apiVersion":"v1",
+                    "metadata":{"name":"untrusted","namespace":"nyxid-machine","uid":Uuid::new_v4().to_string(),"resourceVersion":"1","ownerReferences":[{"uid":123}]}}]);
+                    if resource == "pods" {
+                        page["items"][0]["spec"] = json!({});
+                    }
+                }
+            }
+            f.cluster
+                .lock()
+                .unwrap()
+                .resource_list_pages
+                .insert(inventory_path.clone(), vec![page]);
+            let requests_before_inventory = f._server.received_requests().await.unwrap().len();
+            f.make_original_delete_due().await;
+            let error = f.manager.observe(&f.current().await).await.unwrap_err();
+            let expected = if defect == "malformed_owner" {
+                "delete_kubernetes_response_invalid"
+            } else {
+                "delete_kubernetes_inventory_incomplete"
+            };
+            assert!(
+                matches!(error, crate::errors::AppError::Conflict(ref reason) if reason == expected),
+                "{resource}/{defect} must retain its classified inventory error: {error}"
+            );
+            assert!(
+                f._server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .skip(requests_before_inventory)
+                    .any(|request| request.method.as_str() == "GET"
+                        && request.url.path() == inventory_path.as_str()),
+                "{resource}/{defect} reaches its actual post-controller inventory"
+            );
+            assert_ne!(f.current().await.cleanup_state, "complete");
+            f.slot_retained().await;
+            f.cluster.lock().unwrap().resource_list_pages.clear();
+            f.make_original_delete_due().await;
+            f.manager.observe(&f.current().await).await.unwrap();
+            assert_eq!(f.current().await.resource_state, ResourceState::Deleted);
+            assert_eq!(
+                f.current().await.authorization_state,
+                AuthorizationState::Revoked
+            );
+            f.db.drop().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_delete_accepts_complete_multipage_owned_inventories() {
+    let f = fixture("native_delete_multipage_inventory").await;
+    f.start().await;
+    f.action(LifecycleAction::Delete).await;
+    f.apply_delete_until_controller_progress().await;
+    f.reconcile_delete_suspension();
+    f.make_original_delete_due().await;
+    assert!(f.manager.observe(&f.current().await).await.is_err());
+    f.cluster.lock().unwrap().finish_delete(true);
+    let inventories = [
+        ("pods", "Pod", f.cleanup_inventory_path("pods")),
+        (
+            "persistentvolumeclaims",
+            "PersistentVolumeClaim",
+            f.cleanup_inventory_path("persistentvolumeclaims"),
+        ),
+    ];
+    for (resource, kind, inventory_path) in &inventories {
+        let mut unrelated = json!({"kind":kind,"apiVersion":"v1","metadata":{
+            "name":"unrelated","namespace":"nyxid-machine","uid":Uuid::new_v4().to_string(),"resourceVersion":"1",
+            "ownerReferences":[{"apiVersion":"agents.x-k8s.io/v1beta1","kind":"Sandbox","name":"another","uid":Uuid::new_v4().to_string(),"controller":true}]}});
+        if *resource == "pods" {
+            unrelated["spec"] = json!({});
+        }
+        f.cluster.lock().unwrap().resource_list_pages.insert(inventory_path.clone(),vec![
+            json!({"kind":format!("{kind}List"),"apiVersion":"v1","metadata":{"resourceVersion":"stable","continue":"second","remainingItemCount":1},"items":[]}),
+            json!({"kind":format!("{kind}List"),"apiVersion":"v1","metadata":{"resourceVersion":"stable","remainingItemCount":0},"items":[unrelated]}),
+        ]);
+    }
+    let requests_before_inventory = f._server.received_requests().await.unwrap().len();
+    f.make_original_delete_due().await;
+    f.manager.observe(&f.current().await).await.unwrap();
+    let inventory_requests = f._server.received_requests().await.unwrap();
+    for (resource, _, inventory_path) in &inventories {
+        for continued in [false, true] {
+            assert!(
+                inventory_requests
+                    .iter()
+                    .skip(requests_before_inventory)
+                    .any(|request| {
+                        let has_continuation = request
+                            .url
+                            .query_pairs()
+                            .any(|(key, value)| key == "continue" && value == "second");
+                        request.method.as_str() == "GET"
+                            && request.url.path() == inventory_path.as_str()
+                            && has_continuation == continued
+                    }),
+                "the complete {resource} inventory reads its continued={continued} page"
+            );
+        }
+    }
+    assert_eq!(f.current().await.resource_state, ResourceState::Deleted);
+    assert_eq!(
+        f.current().await.authorization_state,
+        AuthorizationState::Revoked
+    );
     f.db.drop().await.unwrap();
 }

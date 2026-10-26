@@ -11,11 +11,13 @@ export default defineConfig({
     baseURL: "http://localhost:4627",
     ...devices["Desktop Chrome"],
     channel: process.env.P4_E2E_CHANNEL ?? "chrome",
+    serviceWorkers: "block",
     trace: "off",
     screenshot: "off",
   },
   webServer: {
-    command: "npm run dev -- --mode test --port 4627 --strictPort",
+    command:
+      "BACKEND_URL=http://127.0.0.1:9 npm run dev -- --mode test --host localhost --port 4627 --strictPort",
     url: "http://localhost:4627",
     reuseExistingServer: false,
     timeout: 60000,

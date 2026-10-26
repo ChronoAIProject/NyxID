@@ -161,13 +161,15 @@ pub async fn get_usage(
 
 pub async fn run(command: BillingCommands) -> Result<()> {
     match command {
+        BillingCommands::Executions { command } => super::billing_executions::run(command).await,
         BillingCommands::Wallet {
             provision,
             owner_id,
             auth,
         } => {
+            super::billing_support::require_human(&auth)?;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let wallet: BillingWalletResponse = if provision {
+            let wallet: BillingWalletResponse = if provision || owner_id.is_some() {
                 api.post(
                     "/billing/wallet",
                     &ProvisionWalletRequest {
@@ -181,7 +183,7 @@ pub async fn run(command: BillingCommands) -> Result<()> {
             print_wallet(&wallet, auth.output)
         }
         BillingCommands::Usage { period, auth } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let mut api = super::billing_support::human_api(&auth).await?;
             let usage = get_usage(&mut api, period).await?;
             print_usage(&usage, auth.output)
         }
@@ -192,6 +194,7 @@ pub async fn run(command: BillingCommands) -> Result<()> {
             open,
             auth,
         } => {
+            super::billing_support::require_human(&auth)?;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let key =
                 idempotency_key.unwrap_or_else(|| format!("nyxid-cli-topup-{}", Uuid::new_v4()));
@@ -219,6 +222,7 @@ pub async fn run(command: BillingCommands) -> Result<()> {
             poll_interval_secs,
             auth,
         } => {
+            super::billing_support::require_human(&auth)?;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let response = verify_topup_flow(
                 &mut api,
@@ -1117,5 +1121,26 @@ mod tests {
             "updated_at": "2026-06-26T00:00:00Z",
             "created": false
         })
+    }
+
+    #[tokio::test]
+    async fn wallet_owner_scope_posts_even_without_provision() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/billing/wallet"))
+            .and(wiremock::matchers::body_json(
+                serde_json::json!({"owner_id":"org-owner"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(wallet_json(false)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run(BillingCommands::Wallet {
+            provision: false,
+            owner_id: Some("org-owner".into()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
     }
 }

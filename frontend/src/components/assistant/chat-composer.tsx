@@ -26,6 +26,8 @@ import {
   type AttachmentMention,
 } from "@/lib/assistant/attachment-mentions";
 import { isAdmittedSendError } from "@/lib/assistant/send-admission";
+import { useComposerDictation } from "./composer-dictation";
+import type { AudioActivity } from "@/lib/microphone-capture";
 import { cn } from "@/lib/utils";
 import type { AssistantAgentKind } from "@/schemas/assistant-nyxagent";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
@@ -34,8 +36,25 @@ const DRAFT_DEBOUNCE_MS = 300;
 const MAX_ROWS = 4;
 const MIN_TEXT_HEIGHT = 64;
 
-function composerHeightLimit(): number {
-  return Math.max(MIN_TEXT_HEIGHT, Math.min(480, Math.floor((window.visualViewport?.height ?? window.innerHeight) / 2)));
+function composerHeightLimit(
+  surface: HTMLElement | null,
+  editor: HTMLElement | undefined,
+): number {
+  const viewport = window.visualViewport;
+  const viewportHeight = viewport?.height ?? window.innerHeight;
+  const chromeHeight = surface && editor
+    ? surface.offsetHeight - editor.offsetHeight
+    : 0;
+  // Keep the grip below the chat header, including on short/mobile viewports.
+  const visibleTop = Math.max(
+    viewport?.offsetTop ?? 0,
+    surface?.closest("main")?.getBoundingClientRect().top ?? 0,
+  );
+  const bottom = surface?.getBoundingClientRect().bottom;
+  const availableHeight = bottom ? bottom - visibleTop - 8 : viewportHeight;
+  return Math.max(32, Math.floor(
+    Math.min(viewportHeight * 0.9, availableHeight) - chromeHeight,
+  ));
 }
 const PASTED_EXTENSIONS: Record<string, string> = {
   "image/png": "png",
@@ -191,7 +210,12 @@ interface ChatComposerProps {
   readonly onSend: (content: string) => Promise<void>;
   readonly onContentChange?: (content: string) => void;
   readonly onStop: () => Promise<void>;
-  readonly onVoice?: () => void;
+  readonly onVoice?: (configureOnly?: boolean) => void;
+  readonly getDictationThread?: () => Promise<string>;
+  readonly dictationThreadId?: string;
+  readonly voiceControls?: React.ReactNode;
+  readonly voiceActive?: boolean;
+  readonly voiceActivity?: AudioActivity;
 }
 
 interface PendingDraftTransition {
@@ -232,6 +256,11 @@ function DraftedChatComposer({
   onContentChange,
   onStop,
   onVoice,
+  getDictationThread,
+  dictationThreadId,
+  voiceControls,
+  voiceActive = false,
+  voiceActivity,
 }: ChatComposerProps) {
   const tokens: ComposerToken[] = [
     ...(mentions ?? []).map((agent) => ({ id: agent.id, handle: agent.name, label: agent.display_name?.trim() || agent.name, kind: "agent" as const })),
@@ -276,12 +305,17 @@ function DraftedChatComposer({
     readOwnedDraft(ownerUserId, draftKey),
   );
   const [multiline, setMultiline] = useState(false);
-  const [maxTextHeight, setMaxTextHeight] = useState<number>();
+  const [resizedTextHeight, setResizedTextHeight] = useState<number>();
   const [resizing, setResizing] = useState(false);
-  const [heightRange, setHeightRange] = useState({ current: 92, max: 480 });
+  const [heightRange, setHeightRange] = useState({ current: 92, min: MIN_TEXT_HEIGHT, max: 480 });
   const resizeStartRef = useRef<{ y: number; height: number } | null>(null);
   const expanded = multiline;
-  const showVoice = Boolean(onVoice && !active && !content.trim() && !hasAttachments && !uploadBlocked);
+  const hasDraftContent = Boolean(
+    content.trim() || hasAttachments || attachmentMentions?.length,
+  );
+  const showVoice = Boolean(
+    onVoice && !hasDraftContent && (voiceActive || (!active && !uploadBlocked)),
+  );
   const [scrollEdges, setScrollEdges] = useState<ScrollEdges>({
     top: false,
     bottom: false,
@@ -294,6 +328,61 @@ function DraftedChatComposer({
   const renderedDraftKeyRef = useRef(draftKey);
   const draftTimerRef = useRef<number | null>(null);
   const editorRef = useRef<ComposerEditorHandle>(null);
+  const dictationSelection = useRef<ComposerSelection | null>(null);
+  const reviewFocus = useRef<{ start: number; end: number } | null>(null);
+  const dictation = useComposerDictation({
+    scope: `${ownerUserId}:${draftKey}`,
+    enabled: Boolean(getDictationThread),
+    disabled: disabled || locked || sending || voiceActive,
+    getThread: getDictationThread,
+    configureVoice: () => {
+      dictation.releaseMicrophone();
+      flushDraft();
+      onVoice?.(true);
+    },
+    threadId: dictationThreadId,
+    begin: () => {
+      const editor = editorRef.current;
+      if (editor)
+        dictationSelection.current = {
+          value: editor.value,
+          selectionStart: editor.selectionStart,
+          selectionEnd: editor.selectionEnd,
+        };
+    },
+    insert: (text) => {
+      const selection = dictationSelection.current;
+      if (!selection || !editorRef.current?.insertDictation(text, selection))
+        return false;
+      dictationSelection.current = {
+        ...selection,
+        selectionStart: selection.selectionStart + text.length,
+        selectionEnd: selection.selectionStart + text.length,
+      };
+      scheduleDraftSave();
+      return true;
+    },
+    reviewClosed: () => {
+      const selection = dictationSelection.current;
+      if (selection)
+        reviewFocus.current = {
+          start: selection.selectionStart,
+          end: selection.selectionEnd,
+        };
+    },
+  });
+  useLayoutEffect(() => {
+    if (dictation.active || disabled || locked || !reviewFocus.current) return;
+    const selection = reviewFocus.current;
+    reviewFocus.current = null;
+    editorRef.current?.focus();
+    editorRef.current?.setSelectionRange(selection.start, selection.end);
+  });
+  const audioLevel = Math.max(
+    dictation.activity.input,
+    voiceActivity?.input ?? 0,
+    voiceActivity?.output ?? 0,
+  );
   /** Where the caret goes once an inserted mention is committed. */
   const pendingCaretRef = useRef<number | null>(null);
   useLayoutEffect(() => {
@@ -305,6 +394,8 @@ function DraftedChatComposer({
     element.setSelectionRange(caret, caret);
   });
   const composerRef = useRef<HTMLDivElement>(null);
+  const bandRef = useRef<HTMLDivElement>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
   const controlsRef = useRef<HTMLDivElement>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
   const attachmentRef = useRef<HTMLDivElement>(null);
@@ -319,6 +410,8 @@ function DraftedChatComposer({
     renderedOwnerUserIdRef.current !== ownerUserId ||
     renderedDraftKeyRef.current !== draftKey
   ) {
+    reviewFocus.current = null;
+    dictationSelection.current = null;
     const previousUserId = ownerUserIdRef.current;
     const previousKey = draftKeyRef.current;
     const liveContent = contentRef.current;
@@ -481,7 +574,8 @@ function DraftedChatComposer({
     return () => { observer.disconnect(); cancelAnimationFrame(frame); };
   }, [syncComposerLayout]);
 
-  // Grow to the draft, bounded by the chosen maximum and available viewport.
+  // Auto-size until the user resizes. A multiline draft then follows the chosen
+  // visible height, including empty space; single-line drafts remain compact.
   const syncEditorHeight = useCallback(() => {
     const element = editorRef.current?.element;
     if (!element) return;
@@ -492,10 +586,11 @@ function DraftedChatComposer({
       Number.parseFloat(styles.paddingTop) +
       Number.parseFloat(styles.paddingBottom);
     const oneRow = lineHeight + padding;
-    const limit = composerHeightLimit();
-    const maxHeight = Math.max(oneRow, Math.min(maxTextHeight ?? lineHeight * MAX_ROWS + padding, limit));
-    setHeightRange((current) => current.current === Math.round(maxHeight) && current.max === limit ? current : { current: Math.round(maxHeight), max: limit });
-
+    const limit = composerHeightLimit(surfaceRef.current, element);
+    if (bandRef.current) {
+      // Extra height overlays the transcript instead of growing its bottom inset.
+      bandRef.current.style.maxHeight = `${Math.min(480, (window.visualViewport?.height ?? window.innerHeight) / 2)}px`;
+    }
     // Restore the old height before writing the target so the transition has
     // a stable before-change value instead of snapping to the natural height.
     const previous = element.style.height;
@@ -504,10 +599,18 @@ function DraftedChatComposer({
     element.style.height = previous;
     void element.offsetHeight;
 
-    element.style.height = `${String(Math.max(Math.min(natural, maxHeight), oneRow))}px`;
-    element.style.overflowY = natural > maxHeight ? "scroll" : "hidden";
+    const minHeight = Math.min(MIN_TEXT_HEIGHT, Math.max(natural, oneRow), limit);
+    const maxHeight = Math.max(oneRow, Math.min(resizedTextHeight ?? lineHeight * MAX_ROWS + padding, limit));
+    const height = resizedTextHeight !== undefined && expanded
+      ? Math.max(minHeight, maxHeight)
+      : Math.max(Math.min(natural, maxHeight), oneRow);
+    setHeightRange((current) => current.current === Math.round(height) && current.min === minHeight && current.max === limit
+      ? current
+      : { current: Math.round(height), min: minHeight, max: limit });
+    element.style.height = `${String(height)}px`;
+    element.style.overflowY = natural > height ? "scroll" : "hidden";
     setScrollEdges(getScrollEdges(element));
-  }, [maxTextHeight]);
+  }, [resizedTextHeight, expanded]);
 
   useLayoutEffect(() => {
     syncComposerLayout(content);
@@ -527,20 +630,29 @@ function DraftedChatComposer({
     const element = editorRef.current?.element;
     if (!element || typeof ResizeObserver === "undefined") return;
     let width = element.getBoundingClientRect().width;
+    let chromeHeight = (surfaceRef.current?.offsetHeight ?? 0) - element.offsetHeight;
+    let heightLimit = composerHeightLimit(surfaceRef.current, element);
     let frame = 0;
     const observer = new ResizeObserver(() => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
-      const nextWidth = element.getBoundingClientRect().width;
-      if (nextWidth === width) {
-        setScrollEdges(getScrollEdges(element));
-        return;
-      }
-      width = nextWidth;
-      syncEditorHeight();
+        const nextWidth = element.getBoundingClientRect().width;
+        const nextChromeHeight = (surfaceRef.current?.offsetHeight ?? 0) - element.offsetHeight;
+        const nextHeightLimit = composerHeightLimit(surfaceRef.current, element);
+        if (nextWidth === width && nextChromeHeight === chromeHeight && nextHeightLimit === heightLimit) {
+          setScrollEdges(getScrollEdges(element));
+          return;
+        }
+        width = nextWidth;
+        chromeHeight = nextChromeHeight;
+        heightLimit = nextHeightLimit;
+        syncEditorHeight();
       });
     });
     observer.observe(element);
+    if (surfaceRef.current) observer.observe(surfaceRef.current);
+    const chatSurface = surfaceRef.current?.closest("main");
+    if (chatSurface) observer.observe(chatSurface);
     return () => { observer.disconnect(); cancelAnimationFrame(frame); };
   }, [syncEditorHeight, draftKey, ownerUserId]);
 
@@ -749,7 +861,15 @@ function DraftedChatComposer({
 
   async function submit() {
     const message = content.trim();
-    if ((!message && !hasAttachments) || uploadBlocked || locked || disabled || sending) return;
+    if (
+      (!message && !hasAttachments) ||
+      uploadBlocked ||
+      locked ||
+      disabled ||
+      sending ||
+      dictation.active
+    )
+      return;
     cancelScheduledSave();
     const userId = ownerUserIdRef.current;
     const key = draftKeyRef.current;
@@ -824,337 +944,532 @@ function DraftedChatComposer({
       // Opaque: the transcript scrolls underneath the composer, so its band
       // must hide it instead of showing text around and below the input.
       data-composer-band
-      className="relative shrink-0 bg-background"
+      ref={bandRef}
+      className="relative flex shrink-0 flex-col justify-end bg-background"
       style={{
         width: "calc(100% - var(--assistant-scrollbar-width, 0px))",
+        maxHeight: "min(50dvh, 480px)",
       }}
     >
-      <div
-        aria-hidden="true"
-        data-composer-fade
-        className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-gradient-to-t from-background to-transparent"
-      />
-      <div
-        className="mx-auto w-full max-w-[758px] px-3 pt-2 sm:px-6"
-        style={{ paddingBottom: "max(1rem, var(--sab))" }}
-      >
-        {controls}
-        {active && allowActiveInput ? (
-          <p data-steering-hint className="mb-1.5 text-11 text-muted-foreground sm:ml-[30px]">
-            Still replying. What you send now steers this reply; Stop ends it.
-          </p>
-        ) : null}
+      <div ref={surfaceRef} data-composer-surface className="relative shrink-0 bg-background">
         <div
-          data-composer-input
-          onDragEnter={(event) => {
-            if (!onFiles || !event.dataTransfer.types.includes("Files")) return;
-            event.preventDefault();
-            dragDepth.current += 1;
-            if (!locked && !disabled && !sending) setDragging(true);
-          }}
-          onDragLeave={(event) => {
-            event.preventDefault();
-            dragDepth.current = Math.max(0, dragDepth.current - 1);
-            if (!dragDepth.current) setDragging(false);
-          }}
-          onDragOver={(event) => {
-            if (onFiles && event.dataTransfer.types.includes("Files")) {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = locked || disabled || sending ? "none" : "copy";
-            }
-          }}
-          onDrop={(event) => {
-            dragDepth.current = 0;
-            setDragging(false);
-            if (onFiles && event.dataTransfer.files.length) {
-              event.preventDefault();
-              if (!locked && !disabled && !sending) onFiles(Array.from(event.dataTransfer.files));
-            }
-          }}
-          onPasteCapture={(event) => {
-            const files = event.clipboardData.files.length
-              ? Array.from(event.clipboardData.files)
-              : Array.from(event.clipboardData.items)
-                  .map((item) => item.getAsFile())
-                  .filter((file): file is File => Boolean(file));
-            // A wall of text is attached as a file and referenced at the caret.
-            if (onLongText && !files.length && !locked && !disabled && !sending) {
-              const pastedText = event.clipboardData.getData("text/plain");
-              const handle = isLongPaste(pastedText) ? onLongText(pastedText) : undefined;
-              if (handle) {
-                event.preventDefault();
-                insertAtCaret(`@${handle} `);
-                return;
-              }
-            }
-            if (onFiles && files.length) {
-              event.preventDefault();
-              if (!locked && !disabled && !sending) {
-                onFiles(files.map((file) => {
-                  if (!isGenericPasteName(file.name)) return file;
-                  pastedImages.current += 1;
-                  const type = file.type || "image/png";
-                  return new File([file], `pasted-image-${pastedImages.current}.${pastedExtension(type)}`, { type });
-                }));
-              }
-            }
-          }}
-          className={cn("relative sm:ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong", dragging ? "border-primary ring-1 ring-primary" : "border-hairline")}
+          aria-hidden="true"
+          data-composer-fade
+          className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-gradient-to-t from-background to-transparent"
+        />
+        <div
+          className="mx-auto w-full max-w-[758px] px-3 pt-2 sm:px-6"
+          style={{ paddingBottom: "max(1rem, var(--sab))" }}
         >
-          {expanded && (
-            <div
-              role="separator"
-              aria-label="Resize composer"
-              aria-orientation="horizontal"
-              aria-valuemin={MIN_TEXT_HEIGHT}
-              aria-valuemax={heightRange.max}
-              aria-valuenow={heightRange.current}
-              tabIndex={0}
-              title="Drag up to show more text. Double-click to reset."
-              className="group absolute -top-1.5 left-1/2 z-20 flex h-3 w-12 -translate-x-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onPointerDown={(event) => {
-                if (event.button !== 0) return;
-                event.preventDefault();
-                resizeStartRef.current = { y: event.clientY, height: editorRef.current?.element.getBoundingClientRect().height ?? MIN_TEXT_HEIGHT };
-                event.currentTarget.setPointerCapture(event.pointerId);
-                setResizing(true);
-              }}
-              onPointerMove={(event) => {
-                const start = resizeStartRef.current;
-                if (!start || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-                setMaxTextHeight(Math.max(MIN_TEXT_HEIGHT, Math.min(composerHeightLimit(), start.height + start.y - event.clientY)));
-              }}
-              onLostPointerCapture={() => {
-                resizeStartRef.current = null;
-                setResizing(false);
-              }}
-              onPointerUp={(event) => {
-                if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-              }}
-              onDoubleClick={() => setMaxTextHeight(undefined)}
-              onKeyDown={(event) => {
-                if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
-                event.preventDefault();
-                const current = heightRange.current;
-                const next = event.key === "Home" ? MIN_TEXT_HEIGHT : event.key === "End" ? composerHeightLimit() : current + (event.key === "ArrowUp" ? 24 : -24);
-                setMaxTextHeight(Math.max(MIN_TEXT_HEIGHT, Math.min(composerHeightLimit(), next)));
-              }}
+          {controls}
+          {active && allowActiveInput ? (
+            <p
+              data-steering-hint
+              className="mb-1.5 text-11 text-muted-foreground sm:ml-[30px]"
             >
-              <span aria-hidden className="h-1 w-7 rounded-full bg-border transition-colors group-hover:bg-muted-foreground/60 group-focus-visible:bg-muted-foreground/60" />
-            </div>
-          )}
-          {dragging && <div role="status" className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-12 font-medium">Drop files to attach</div>}
-          {attachments}
-          {recipients}
-          <div className="flex items-start gap-1.5">
-          {!expanded && attachmentButton && <div ref={attachmentRef} className="shrink-0">{attachmentButton}</div>}
-          <div
-          ref={composerRef}
-          data-composer-editor
-          className={`relative flex min-w-0 flex-1 gap-x-1.5 gap-y-0.5 ${
-            expanded ? "flex-col items-stretch" : "items-start"
-          }`}
-        >
-          {mentionOpen ? (
-            <ul
-              id={mentionListId}
-              role="listbox"
-              aria-label={attachmentMentions?.length ? "Mention an agent or attachment" : "Mention an agent"}
-              className="absolute bottom-full left-0 z-20 mb-2 w-64 max-w-full space-y-0.5 rounded-xl border border-border bg-popover p-1.5 shadow-lg shadow-primary/5"
-            >
-              {mentionOptions.map((option) => {
-                const selected = option.id === selectedMention?.id;
-                return (
-                  <li
-                    key={option.id}
-                    id={`${mentionListId}-${option.id}`}
-                    role="option"
-                    aria-selected={selected}
-                    // Keep focus (and the caret) in the textarea.
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => chooseMention(option.name)}
-                    className={cn(
-                      "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-12 text-foreground",
-                      selected ? "bg-overlay-strong" : "hover:bg-overlay",
-                    )}
-                  >
-                    {option.type === "agent" ? (
-                      <>
-                        <AgentAvatar agent={option.agent} size="sm" />
-                        <span className="min-w-0 flex-1 truncate">
-                          {option.agent.display_name?.trim() || option.name}
-                          {option.agent.display_name?.trim() ? (
-                            <span className="ml-1.5 text-11 text-text-tertiary">@{option.name}</span>
-                          ) : null}
-                        </span>
-                        <span className="shrink-0 text-10 text-text-tertiary">
-                          {option.agent.kind === "nyxbot" ? "Personal agent" : "Specialist"}
-                        </span>
-                      </>
-                    ) : (
-                      <>
-                        {option.attachment.kind === "image" ? (
-                          <ImageIcon aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground" />
-                        ) : (
-                          <FileText aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground" />
-                        )}
-                        <span className="min-w-0 flex-1 truncate">
-                          <span className="font-mono">@{option.name}</span>
-                          <span className="ml-1.5 text-11 text-text-tertiary">{option.attachment.label}</span>
-                        </span>
-                      </>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+              Still replying. What you send now steers this reply; Stop ends it.
+            </p>
           ) : null}
-          <span
-            ref={textMeasureRef}
-            data-composer-text-measure
-            aria-hidden
-            className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-base sm:text-13 leading-relaxed"
-          >
-            {tokenSegments(content, tokens).map((part, index) => part.token
-              ? <span key={index} className="composer-mention" data-composer-mention={part.token.kind}>{part.token.kind === "agent" ? "@" : ""}{part.token.label}</span>
-              : part.text)}
-          </span>
-          <div className="relative min-w-0 flex-1">
-            <ComposerEditor
-              key={`${ownerUserId ?? ""}:${draftKey ?? ""}`}
-              ref={editorRef}
-              value={content}
-              tokens={tokens}
-              expanded={expanded}
-              {...(mentions
-                ? {
-                    role: "combobox",
-                    "aria-autocomplete": "list" as const,
-                    "aria-expanded": mentionOpen,
-                    "aria-controls": mentionListId,
-                    "aria-activedescendant": selectedMention
-                      ? `${mentionListId}-${selectedMention.id}`
-                      : undefined,
-                    "aria-label": placeholder ?? "Message",
-                  }
-                : {})}
-              onChange={(value) => {
-                updateContent(value);
-                if (editorRef.current) syncMention(editorRef.current);
-                if (!composingRef.current) scheduleDraftSave();
-              }}
-              onSelectionChange={syncMention}
-              onBlur={() => setMention(undefined)}
-              onKeyDown={handleKeyDown}
-              onCompositionStart={() => {
-                composingRef.current = true;
-                cancelScheduledSave();
-              }}
-              onCompositionEnd={() => {
-                composingRef.current = false;
-                updateContent(editorRef.current?.value ?? contentRef.current);
-                scheduleDraftSave();
-              }}
-              onScroll={handleScroll}
-              disabled={locked || disabled}
-              style={{ transitionDuration: resizing ? "0ms" : undefined }}
-              placeholder={
-                locked
-                  ? "Assistant is working..."
-                  : disabled
-                    ? "This conversation is read-only."
-                    : allowActiveInput
-                     ? (activePlaceholder ?? "Steer active task...")
-                     : (placeholder ?? "Message NyxID Assistant...")
+          <div
+            data-composer-input
+            onDragEnter={(event) => {
+              if (!onFiles || !event.dataTransfer.types.includes("Files")) return;
+              event.preventDefault();
+              dragDepth.current += 1;
+              if (!locked && !disabled && !sending) setDragging(true);
+            }}
+            onDragLeave={(event) => {
+              event.preventDefault();
+              dragDepth.current = Math.max(0, dragDepth.current - 1);
+              if (!dragDepth.current) setDragging(false);
+            }}
+            onDragOver={(event) => {
+              if (onFiles && event.dataTransfer.types.includes("Files")) {
+                event.preventDefault();
+                event.dataTransfer.dropEffect =
+                  locked || disabled || sending ? "none" : "copy";
               }
-              className="assistant-scrollbar composer-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-base sm:text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
-            />
-            <div
-              aria-hidden
-              className={`pointer-events-none absolute inset-x-0 top-0 h-3 bg-gradient-to-b from-card to-transparent transition-opacity duration-150 motion-reduce:transition-none ${
-                scrollEdges.top ? "opacity-100" : "opacity-0"
-              }`}
-            />
-            <div
-              aria-hidden
-              className={`pointer-events-none absolute inset-x-0 bottom-0 h-3 bg-gradient-to-t from-card to-transparent transition-opacity duration-150 motion-reduce:transition-none ${
-                scrollEdges.bottom ? "opacity-100" : "opacity-0"
-              }`}
-            />
-            {scrollEdges.thumb && (
-              <div
-                data-composer-scrollbar
-                aria-hidden="true"
-                className="absolute -right-2 top-1 bottom-1 w-1.5 touch-none cursor-default rounded-full"
-                onPointerDown={(event) => {
+            }}
+            onDrop={(event) => {
+              dragDepth.current = 0;
+              setDragging(false);
+              if (onFiles && event.dataTransfer.files.length) {
+                event.preventDefault();
+                if (!locked && !disabled && !sending)
+                  onFiles(Array.from(event.dataTransfer.files));
+              }
+            }}
+            onPasteCapture={(event) => {
+              const files = event.clipboardData.files.length
+                ? Array.from(event.clipboardData.files)
+                : Array.from(event.clipboardData.items)
+                    .map((item) => item.getAsFile())
+                    .filter((file): file is File => Boolean(file));
+              // A wall of text is attached as a file and referenced at the caret.
+              if (
+                onLongText &&
+                !files.length &&
+                !locked &&
+                !disabled &&
+                !sending
+              ) {
+                const pastedText = event.clipboardData.getData("text/plain");
+                const handle = isLongPaste(pastedText)
+                  ? onLongText(pastedText)
+                  : undefined;
+                if (handle) {
                   event.preventDefault();
+                  insertAtCaret(`@${handle} `);
+                  return;
+                }
+              }
+              if (onFiles && files.length) {
+                event.preventDefault();
+                if (!locked && !disabled && !sending) {
+                  onFiles(
+                    files.map((file) => {
+                      if (!isGenericPasteName(file.name)) return file;
+                      pastedImages.current += 1;
+                      const type = file.type || "image/png";
+                      return new File(
+                        [file],
+                        `pasted-image-${pastedImages.current}.${pastedExtension(type)}`,
+                        { type },
+                      );
+                    }),
+                  );
+                }
+              }
+            }}
+            style={
+              { "--composer-audio-level": audioLevel } as React.CSSProperties
+            }
+            data-audio-active={
+              voiceActive || dictation.captureActive || undefined
+            }
+            data-audio-input={voiceActivity?.input ?? dictation.activity.input}
+            data-audio-output={voiceActivity?.output ?? 0}
+            className={cn(
+              "composer-audio-surface relative sm:ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong",
+              dragging ? "border-primary ring-1 ring-primary" : "border-hairline",
+            )}
+          >
+            {voiceControls}
+            {expanded && (
+              <div
+                role="separator"
+                aria-label="Resize composer"
+                aria-orientation="horizontal"
+                aria-valuemin={heightRange.min}
+                aria-valuemax={heightRange.max}
+                aria-valuenow={heightRange.current}
+                tabIndex={0}
+                title="Drag up to show more text. Double-click to reset."
+                className="group absolute -top-1.5 left-1/2 z-20 flex h-3 w-12 -translate-x-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  event.preventDefault();
+                  resizeStartRef.current = {
+                    y: event.clientY,
+                    height:
+                      editorRef.current?.element.getBoundingClientRect().height ??
+                      MIN_TEXT_HEIGHT,
+                  };
                   event.currentTarget.setPointerCapture(event.pointerId);
-                  scrubDraft(event);
+                  setResizing(true);
                 }}
                 onPointerMove={(event) => {
-                  if (event.currentTarget.hasPointerCapture(event.pointerId)) scrubDraft(event);
+                  const start = resizeStartRef.current;
+                  if (
+                    !start ||
+                    !event.currentTarget.hasPointerCapture(event.pointerId)
+                  )
+                    return;
+                  setResizedTextHeight(
+                    Math.max(
+                      heightRange.min,
+                      Math.min(
+                        composerHeightLimit(surfaceRef.current, editorRef.current?.element),
+                        start.height + start.y - event.clientY,
+                      ),
+                    ),
+                  );
+                }}
+                onLostPointerCapture={() => {
+                  resizeStartRef.current = null;
+                  setResizing(false);
                 }}
                 onPointerUp={(event) => {
-                if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-              }}
+                  if (event.currentTarget.hasPointerCapture(event.pointerId))
+                    event.currentTarget.releasePointerCapture(event.pointerId);
+                }}
+                onDoubleClick={() => setResizedTextHeight(undefined)}
+                onKeyDown={(event) => {
+                  if (
+                    !["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)
+                  )
+                    return;
+                  event.preventDefault();
+                  const current = heightRange.current;
+                  const next =
+                    event.key === "Home"
+                      ? heightRange.min
+                      : event.key === "End"
+                        ? composerHeightLimit(surfaceRef.current, editorRef.current?.element)
+                        : current + (event.key === "ArrowUp" ? 24 : -24);
+                  setResizedTextHeight(
+                    Math.max(
+                      heightRange.min,
+                      Math.min(composerHeightLimit(surfaceRef.current, editorRef.current?.element), next),
+                    ),
+                  );
+                }}
               >
-                <div className="absolute inset-x-0 rounded-full bg-muted-foreground/50" style={{ height: `${scrollEdges.thumb.size}%`, top: `${scrollEdges.thumb.top}%` }} />
+                <span
+                  aria-hidden
+                  className="h-1 w-7 rounded-full bg-border transition-colors group-hover:bg-muted-foreground/60 group-focus-visible:bg-muted-foreground/60"
+                />
               </div>
             )}
-          </div>
-          <div data-composer-footer className={cn("flex shrink-0 items-center gap-1.5", expanded && "w-full")}>
-            {expanded && attachmentButton && <div ref={attachmentRef} className="shrink-0">{attachmentButton}</div>}
-            {expanded && <div className="min-w-0 flex-1" />}
-            {footerControls && <div ref={settingsRef} className={cn("min-w-0", active && allowActiveInput ? "max-w-[104px] sm:max-w-[160px]" : "max-w-[160px]")}>{footerControls}</div>}
-          <div
-            ref={controlsRef}
-            className={`flex shrink-0 items-center gap-1.5 ${expanded ? "self-end" : ""}`}
-          >
-            {active && allowActiveInput && (
-              <Button type="button" variant="outline" size="icon" onClick={() => void onStop()}
-                disabled={stopDisabled} aria-label="Stop assistant turn" title="Stop this reply">
-                <Square className="fill-current" />
-              </Button>
-            )}
-            {locked ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                onClick={() => void onStop()}
-                disabled={stopDisabled}
-                aria-label="Stop assistant turn"
+            {dragging && (
+              <div
+                role="status"
+                className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-12 font-medium"
               >
-                <Square className="fill-current" />
-              </Button>
-            ) : showVoice ? (
-              <Button type="button" variant="ghost" size="icon" disabled={sending || disabled}
-                className="[&_svg]:size-5" onClick={onVoice} aria-label="Open voice call">
-                <AudioLines />
-              </Button>
-            ) : (
-              <Button
-                type="button"
-                variant="primary"
-                // While a reply runs, sending steers it: say so on the button.
-                size={active && allowActiveInput ? "default" : "icon"}
-                className={active && allowActiveInput ? "gap-1.5" : undefined}
-                title={active && allowActiveInput ? "Steer this reply" : undefined}
-                disabled={(!content.trim() && !hasAttachments) || uploadBlocked || sending || disabled}
-                onClick={() => void submit()}
-                aria-label={
-                  sendLabel ?? (allowActiveInput
-                    ? "Send steering instruction"
-                    : "Send message")
-                }
-              >
-                <ArrowUp />
-                {active && allowActiveInput ? "Steer" : null}
-              </Button>
+                Drop files to attach
+              </div>
             )}
-          </div>
-          </div>
-        </div>
+            {attachments}
+            {dictation.review}
+            {recipients}
+            <div className="flex items-start gap-1.5">
+              <div
+                ref={composerRef}
+                data-composer-editor
+                className={`relative flex min-w-0 flex-1 gap-x-1.5 gap-y-0.5 ${
+                  expanded
+                    ? "flex-col items-stretch"
+                    : "composer-compact items-start"
+                }`}
+              >
+                {!expanded && attachmentButton && (
+                  <div
+                    data-composer-attachment
+                    ref={attachmentRef}
+                    className="shrink-0"
+                  >
+                    {attachmentButton}
+                  </div>
+                )}
+                {mentionOpen ? (
+                  <ul
+                    id={mentionListId}
+                    role="listbox"
+                    aria-label={
+                      attachmentMentions?.length
+                        ? "Mention an agent or attachment"
+                        : "Mention an agent"
+                    }
+                    className="absolute bottom-full left-0 z-20 mb-2 w-64 max-w-full space-y-0.5 rounded-xl border border-border bg-popover p-1.5 shadow-lg shadow-primary/5"
+                  >
+                    {mentionOptions.map((option) => {
+                      const selected = option.id === selectedMention?.id;
+                      return (
+                        <li
+                          key={option.id}
+                          id={`${mentionListId}-${option.id}`}
+                          role="option"
+                          aria-selected={selected}
+                          // Keep focus (and the caret) in the textarea.
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => chooseMention(option.name)}
+                          className={cn(
+                            "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-12 text-foreground",
+                            selected ? "bg-overlay-strong" : "hover:bg-overlay",
+                          )}
+                        >
+                          {option.type === "agent" ? (
+                            <>
+                              <AgentAvatar agent={option.agent} size="sm" />
+                              <span className="min-w-0 flex-1 truncate">
+                                {option.agent.display_name?.trim() || option.name}
+                                {option.agent.display_name?.trim() ? (
+                                  <span className="ml-1.5 text-11 text-text-tertiary">
+                                    @{option.name}
+                                  </span>
+                                ) : null}
+                              </span>
+                              <span className="shrink-0 text-10 text-text-tertiary">
+                                {option.agent.kind === "nyxbot"
+                                  ? "Personal agent"
+                                  : "Specialist"}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              {option.attachment.kind === "image" ? (
+                                <ImageIcon
+                                  aria-hidden
+                                  className="h-4 w-4 shrink-0 text-muted-foreground"
+                                />
+                              ) : (
+                                <FileText
+                                  aria-hidden
+                                  className="h-4 w-4 shrink-0 text-muted-foreground"
+                                />
+                              )}
+                              <span className="min-w-0 flex-1 truncate">
+                                <span className="font-mono">@{option.name}</span>
+                                <span className="ml-1.5 text-11 text-text-tertiary">
+                                  {option.attachment.label}
+                                </span>
+                              </span>
+                            </>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : null}
+                <span
+                  ref={textMeasureRef}
+                  data-composer-text-measure
+                  aria-hidden
+                  className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-base sm:text-13 leading-relaxed"
+                >
+                  {tokenSegments(content, tokens).map((part, index) =>
+                    part.token ? (
+                      <span
+                        key={index}
+                        className="composer-mention"
+                        data-composer-mention={part.token.kind}
+                      >
+                        {part.token.kind === "agent" ? "@" : ""}
+                        {part.token.label}
+                      </span>
+                    ) : (
+                      part.text
+                    ),
+                  )}
+                </span>
+                <div
+                  className={cn(
+                    "composer-text-region relative min-w-0 flex-1",
+                    dictation.active && "hidden",
+                  )}
+                >
+                  <ComposerEditor
+                    key={`${ownerUserId ?? ""}:${draftKey ?? ""}`}
+                    ref={editorRef}
+                    value={content}
+                    tokens={tokens}
+                    expanded={expanded}
+                    {...(mentions
+                      ? {
+                          role: "combobox",
+                          "aria-autocomplete": "list" as const,
+                          "aria-expanded": mentionOpen,
+                          "aria-controls": mentionListId,
+                          "aria-activedescendant": selectedMention
+                            ? `${mentionListId}-${selectedMention.id}`
+                            : undefined,
+                          "aria-label": placeholder ?? "Message",
+                        }
+                      : {})}
+                    onChange={(value) => {
+                      updateContent(value);
+                      if (editorRef.current) syncMention(editorRef.current);
+                      if (!composingRef.current) scheduleDraftSave();
+                    }}
+                    onSelectionChange={syncMention}
+                    onBlur={() => setMention(undefined)}
+                    onKeyDown={handleKeyDown}
+                    onCompositionStart={() => {
+                      composingRef.current = true;
+                      cancelScheduledSave();
+                    }}
+                    onCompositionEnd={() => {
+                      composingRef.current = false;
+                      updateContent(
+                        editorRef.current?.value ?? contentRef.current,
+                      );
+                      scheduleDraftSave();
+                    }}
+                    onScroll={handleScroll}
+                    disabled={locked || disabled || dictation.active}
+                    style={{ transitionDuration: resizing ? "0ms" : undefined }}
+                    placeholder={
+                      locked
+                        ? "Assistant is working..."
+                        : disabled
+                          ? "This conversation is read-only."
+                          : allowActiveInput
+                            ? (activePlaceholder ?? "Steer active task...")
+                            : (placeholder ?? "Message NyxID Assistant...")
+                    }
+                    className="assistant-scrollbar composer-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-base sm:text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
+                  />
+                  <div
+                    aria-hidden
+                    className={`pointer-events-none absolute inset-x-0 top-0 h-3 bg-gradient-to-b from-card to-transparent transition-opacity duration-150 motion-reduce:transition-none ${
+                      scrollEdges.top ? "opacity-100" : "opacity-0"
+                    }`}
+                  />
+                  <div
+                    aria-hidden
+                    className={`pointer-events-none absolute inset-x-0 bottom-0 h-3 bg-gradient-to-t from-card to-transparent transition-opacity duration-150 motion-reduce:transition-none ${
+                      scrollEdges.bottom ? "opacity-100" : "opacity-0"
+                    }`}
+                  />
+                  {scrollEdges.thumb && (
+                    <div
+                      data-composer-scrollbar
+                      aria-hidden="true"
+                      className="absolute -right-2 top-1 bottom-1 w-1.5 touch-none cursor-default rounded-full"
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        scrubDraft(event);
+                      }}
+                      onPointerMove={(event) => {
+                        if (
+                          event.currentTarget.hasPointerCapture(event.pointerId)
+                        )
+                          scrubDraft(event);
+                      }}
+                      onPointerUp={(event) => {
+                        if (
+                          event.currentTarget.hasPointerCapture(event.pointerId)
+                        )
+                          event.currentTarget.releasePointerCapture(
+                            event.pointerId,
+                          );
+                      }}
+                    >
+                      <div
+                        className="absolute inset-x-0 rounded-full bg-muted-foreground/50"
+                        style={{
+                          height: `${scrollEdges.thumb.size}%`,
+                          top: `${scrollEdges.thumb.top}%`,
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+                <div
+                  data-composer-footer
+                  className={cn(
+                    "flex shrink-0 items-center gap-1.5",
+                    expanded && "w-full",
+                  )}
+                >
+                  {expanded && attachmentButton && (
+                    <div ref={attachmentRef} className="shrink-0">
+                      {attachmentButton}
+                    </div>
+                  )}
+                  {expanded && <div className="min-w-0 flex-1" />}
+                  {footerControls && (
+                    <div
+                      data-composer-settings
+                      ref={settingsRef}
+                      className="min-w-0 max-w-[72px] sm:max-w-[160px]"
+                    >
+                      {footerControls}
+                    </div>
+                  )}
+                  <div
+                    ref={controlsRef}
+                    className={`flex shrink-0 items-center gap-1.5 ${expanded ? "self-end" : ""}`}
+                  >
+                    {dictation.button}
+                    {showVoice && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        disabled={
+                          (!voiceActive && sending) ||
+                          disabled ||
+                          dictation.active
+                        }
+                        className={cn(
+                          "[&_svg]:size-5",
+                          voiceActive &&
+                            "text-primary hover:text-primary focus-visible:text-primary active:text-primary",
+                        )}
+                        onClick={() => {
+                          dictation.releaseMicrophone();
+                          flushDraft();
+                          onVoice?.();
+                        }}
+                        aria-label="Open voice call"
+                        aria-pressed={voiceActive}
+                      >
+                        <AudioLines />
+                      </Button>
+                    )}
+                    {active && allowActiveInput && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => void onStop()}
+                        disabled={stopDisabled}
+                        aria-label="Stop assistant turn"
+                        title="Stop this reply"
+                      >
+                        <Square className="fill-current" />
+                      </Button>
+                    )}
+                    {locked ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => void onStop()}
+                        disabled={stopDisabled}
+                        aria-label="Stop assistant turn"
+                      >
+                        <Square className="fill-current" />
+                      </Button>
+                    ) : hasDraftContent ? (
+                      <Button
+                        type="button"
+                        variant="primary"
+                        // While a reply runs, sending steers it: say so on the button.
+                        size={active && allowActiveInput ? "default" : "icon"}
+                        className={
+                          active && allowActiveInput ? "gap-1.5" : undefined
+                        }
+                        title={
+                          active && allowActiveInput
+                            ? "Steer this reply"
+                            : undefined
+                        }
+                        disabled={
+                          (!content.trim() && !hasAttachments) ||
+                          uploadBlocked ||
+                          sending ||
+                          disabled ||
+                          dictation.active
+                        }
+                        onClick={() => void submit()}
+                        aria-label={
+                          sendLabel ??
+                          (allowActiveInput
+                            ? "Send steering instruction"
+                            : "Send message")
+                        }
+                      >
+                        <ArrowUp />
+                        {active && allowActiveInput ? "Steer" : null}
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>

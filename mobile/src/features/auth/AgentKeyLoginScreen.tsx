@@ -1,3 +1,4 @@
+import { useMfaStepUp } from "./useMfaStepUp";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   KeyboardAvoidingView,
@@ -88,6 +89,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
   const [pending, setPending] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const stepUp = useMfaStepUp(`${flow}:${mint}:${code}:${isAuthenticated}:${step}`);
   const lastAction = useRef(0);
   const generation = useRef(0);
   const previousMode = useRef({flow, mint});
@@ -139,8 +141,8 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
     }, 1000);
     return () => clearInterval(timer);
   }, [deadline, pending, finish]);
-  async function act(action: () => Promise<void>) {
-    if (pending || Date.now() - lastAction.current < 750) return;
+  async function act(action: () => Promise<void>, verifiedRetry = false) {
+    if (pending || (!verifiedRetry && Date.now() - lastAction.current < 750)) return;
     lastAction.current = Date.now();
     setPending(true);
     setError(null);
@@ -148,6 +150,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
     try {
       await action();
     } catch (failure) {
+      if (await stepUp.handle(failure, () => act(action, true))) return;
       if (current === generation.current) setError(agentKeyLoginError(failure));
     } finally {
       if (current === generation.current) setPending(false);
@@ -253,6 +256,9 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
         preview.initiating_origin,
       )
     : null;
+  if (stepUp.prompt) {
+    return <ScreenContainer><ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">{stepUp.prompt}</ScrollView></ScreenContainer>;
+  }
   return (
     <ScreenContainer>
       <KeyboardAvoidingView
@@ -458,7 +464,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     {issuanceNotice(selection?.kind === "existing")}
                   </Text>
                   <Text style={styles.inputLabel}>
-                    Credential expiry (optional)
+                    Credential expiry (blank: 90 days, bounded by key expiry)
                   </Text>
                   <TextInput
                     accessibilityLabel="Credential expiry"

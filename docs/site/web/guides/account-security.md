@@ -18,20 +18,39 @@ NyxID supports TOTP-based MFA (Time-based One-Time Password) using any authentic
 5. Enter the 6-digit code from your app to confirm the setup.
 6. Save the **backup codes** shown on the confirmation screen. These are single-use emergency codes for when your authenticator is unavailable.
 
+After confirmation, NyxID keeps the device you used for setup signed in and
+signs out other browser sessions, refresh tokens, and session-backed MCP
+connections. Sign those devices in again with MFA.
+
 :::warning
 Store your backup codes in a secure location (password manager, printed and locked away). If you lose access to your authenticator and have no backup codes, account recovery requires manual admin intervention.
 :::
 
 ### Sign in with MFA enabled
 
-After entering your email and password on the login page, NyxID prompts for a 6-digit TOTP code. Enter the current code from your authenticator app.
+After entering your email and password on the login page, NyxID prompts for a
+6-digit TOTP code. Social sign-in (Google, GitHub, or Apple) prompts for the
+same MFA form before creating a session. Mobile social sign-in follows a staged rollout: when enabled for your account,
+the app keeps the challenge in the deep-link fragment and verifies your code
+before storing a session. During the rollout, mobile social sign-in can continue
+without this second step. Email/password sign-in on mobile still requires MFA. Choose **Use a recovery code** when your authenticator is
+unavailable; each recovery code is single-use.
+
+Devices signed in before the MFA enforcement rollout keep working until their
+normal session expiry or revocation. A new sign-in on another device still needs
+MFA: when approving a device, issuing a login code, or connecting the CLI, an
+older session may ask you to **Verify this session**. Enter your authenticator
+or a single-use recovery code; NyxID then retries the action without signing
+you out. The mobile app offers this prompt only after MFA rollout is enabled
+for your account; otherwise it shows the verification requirement.
 
 ### Sign in with the NyxID mobile app
 
 Choose **Continue with the NyxID app** on the login page, then scan the QR code
 with a phone that is already signed in to NyxID and approve the request.
-That approval completes verification, so NyxID does not ask for another
-authenticator code, even when TOTP MFA is enabled. Scanning the QR code alone
+An older or mobile-exempt session may need **Verify this session** before it can
+approve. The approved browser session inherits that verified authority, so
+NyxID does not ask for a second authenticator code after approval. Scanning the QR code alone
 does not approve a sign-in.
 
 If approval succeeds but your account cannot load, choose **Retry loading
@@ -47,7 +66,9 @@ your identity while you approve another device's login request.
 
 1. Go to **Settings → Security**.
 2. Turn off the **Two-Factor Authentication** switch.
-3. Enter your current password in the confirmation dialog, then click **Disable MFA**.
+3. Enter an authenticator code or a single-use recovery code in the confirmation dialog.
+4. If your account has a password, enter the current password too.
+5. Click **Disable MFA**.
 
 :::note
 MFA setup is idempotent on the backend — calling setup again while a factor is unverified replaces the pending factor without error. A verified factor must be explicitly disabled before setup can be repeated.
@@ -70,7 +91,8 @@ for this action. Reusing the current password is allowed, matching password rese
 Your current password is required, so this action cannot add a password to a
 passwordless account.
 
-Successful changes invalidate pending password-reset links. Existing browser,
+Successful changes invalidate pending password-reset links, unfinished MFA
+challenges, and request-only login approval proofs. Completed browser,
 access-token, and refresh-token sessions remain valid, including the current
 session. Use **Sessions** to revoke any session you no longer trust.
 
@@ -80,7 +102,7 @@ shows an inline error and keeps you signed in.
 
 ### Reset a forgotten password
 
-On the login page, click **Forgot password**. Enter your email address. NyxID sends a single-use reset link valid for 1 hour. Click the link, set a new password, and sign in.
+On the login page, click **Forgot password**. Enter your email address. NyxID sends a single-use reset link valid for 1 hour. Click the link, set a new password, and sign in. A successful reset revokes existing sessions, refresh tokens, and pending login proofs.
 
 :::note
 If your account uses social sign-in (Google / GitHub / Apple) and you never set a password, the forgot-password flow creates a password credential in addition to the existing social login.
@@ -88,7 +110,8 @@ If your account uses social sign-in (Google / GitHub / Apple) and you never set 
 
 ## Sessions
 
-Every sign-in creates a session. Sessions expire after 7 days of inactivity (refresh token TTL). Active sessions stay alive with automatic token refresh on every page load.
+Every sign-in creates a session with a fixed 30-day expiry. Refresh tokens rotate
+automatically while that session is live; refresh does not extend the session expiry.
 
 ### View active sessions
 

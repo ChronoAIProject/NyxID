@@ -36,6 +36,427 @@ struct Fixture {
     effect: MachineEffectOutbox,
 }
 
+#[tokio::test]
+async fn delete_recovery_observation_honors_original_next_attempt_at() {
+    let f = fixture("delete_recovery_due").await;
+    let deleting = delete_request(&f, &f.machine).await;
+    f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME)
+        .update_one(doc! {"_id": &deleting.active_operation_id}, doc! {"$set": {"next_attempt_at": mongodb::bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(1))}})
+        .await.unwrap();
+    f.manager.observe(&deleting).await.unwrap();
+    assert_eq!(
+        current(&f).await.resource_state,
+        ResourceState::Deleting,
+        "an observation scan must honor the accepted operation retry deadline"
+    );
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_recovery_generic_progress_preserves_specific_blocker_and_retry_deadline() {
+    let f = fixture("mgr_delete_specific_progress").await;
+    let deleting = delete_request(&f, &f.machine).await;
+    let operation = deleting.active_operation_id.as_deref().unwrap();
+    let due = mongodb::bson::DateTime::from_chrono(Utc::now() + chrono::Duration::hours(1));
+    f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":operation},
+            doc! {"$set":{
+            "error_code":"delete_runtime_history_source_unavailable",
+            "error_message":"Trusted runtime history is unavailable",
+            "retry_count":17_i64,"next_attempt_at":due}},
+        )
+        .await
+        .unwrap();
+    f.manager
+        .progress(operation, "sandbox_effect_pending")
+        .await
+        .unwrap();
+    f.manager
+        .progress(operation, "runtime_evidence_pending")
+        .await
+        .unwrap();
+    let saved =
+        f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME)
+            .find_one(doc! {"_id":operation})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        saved.get_str("error_code").unwrap(),
+        "delete_runtime_history_source_unavailable"
+    );
+    assert_eq!(
+        saved.get_str("error_message").unwrap(),
+        "Trusted runtime history is unavailable"
+    );
+    assert_eq!(saved.get_datetime("next_attempt_at").unwrap(), &due);
+    assert_eq!(saved.get_i64("retry_count").unwrap(), 17);
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn manager_running_repair_journals_unresolved_external_request() {
+    let f = fixture("mgr_running_repair_journal").await;
+    let bound = bind_runtime(&f).await;
+    mount_bound_resources(&f, &bound, true).await;
+    Mock::given(method("PATCH"))
+        .and(path(sandbox_path(&bound)))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&f.server)
+        .await;
+    assert!(f.manager.observe_resource(&bound).await.is_err());
+    let effect =
+        f.db.collection::<MachineEffectOutbox>(OUTBOX)
+            .find_one(doc! {"_id":&f.effect.id})
+            .await
+            .unwrap()
+            .unwrap();
+    let submission = effect
+        .submission
+        .expect("Running repair must journal its original request before HTTP");
+    assert_eq!(submission.request_id, effect.id);
+    assert_eq!(submission.runtime_generation, bound.runtime_generation);
+    assert_eq!(submission.credential_epoch, bound.credential_epoch);
+    assert_eq!(submission.writer_fence, bound.writer_fence);
+    assert_eq!(submission.dispatches.len(), 2);
+    assert!(
+        submission.dispatches[1].completed_at.is_none(),
+        "HTTP failure cannot certify request terminality"
+    );
+    let deleting = delete_request(&f, &current(&f).await).await;
+    assert_eq!(deleting.resource_state, ResourceState::Deleting);
+    assert_slot_retained(&f).await;
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn manager_running_repair_retains_late_result_after_owner_delete_wins() {
+    let f = fixture("mgr_running_repair_late_result").await;
+    let bound = bind_runtime(&f).await;
+    mount_bound_resources(&f, &bound, true).await;
+    Mock::given(method("PATCH"))
+        .and(path(sandbox_path(&bound)))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(sandbox(&bound, bound.sandbox_uid.as_deref().unwrap()))
+                .set_delay(std::time::Duration::from_millis(600)),
+        )
+        .expect(1)
+        .mount(&f.server)
+        .await;
+    let manager = f.manager.clone();
+    let snapshot = bound.clone();
+    let repair = tokio::spawn(async move { manager.observe_resource(&snapshot).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if f.server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.method.as_str() == "PATCH")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("repair never submitted its Running mutation");
+    let deleting = delete_request(&f, &current(&f).await).await;
+    assert!(
+        repair.await.unwrap().is_err(),
+        "late success cannot authorize the deleting lifecycle"
+    );
+    let effect =
+        f.db.collection::<MachineEffectOutbox>(OUTBOX)
+            .find_one(doc! {"_id":&f.effect.id})
+            .await
+            .unwrap()
+            .unwrap();
+    let submission = effect
+        .submission
+        .expect("late result must remain bound to the original effect");
+    assert_eq!(submission.dispatches.len(), 2);
+    assert!(submission.dispatches[1].completed_at.is_some());
+    assert_eq!(
+        submission.dispatches[1].result_sandbox_uid,
+        deleting.sandbox_uid
+    );
+    let after = current(&f).await;
+    assert_eq!(after.resource_state, ResourceState::Deleting);
+    assert_eq!(after.active_operation_id, deleting.active_operation_id);
+    assert!(!after.writer_admitted);
+    assert_slot_retained(&f).await;
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn manager_metadata_only_delete_relabel_cannot_fabricate_current_stop() {
+    let f = fixture("mgr_delete_relabel_old_condition").await;
+    let bound = bind_runtime(&f).await;
+    let deleting = delete_request(&f, &bound).await;
+    mount_owned_resources(&f, &deleting, true).await;
+    let mut object = sandbox(&deleting, deleting.sandbox_uid.as_deref().unwrap());
+    object["spec"]["operatingMode"] = json!("Suspended");
+    object["spec"]
+        .as_object_mut()
+        .unwrap()
+        .remove("shutdownTime");
+    object["status"]["conditions"][0]["status"] = json!("False");
+    object["status"]["conditions"][1]["status"] = json!("True");
+    object["status"]["conditions"][1]["reason"] = json!("PodTerminated");
+    let observed =
+        nyxid_machine_updater::sandbox::SandboxObservation::from_object(&object).unwrap();
+    f.manager
+        .record_observation(&deleting, &observed)
+        .await
+        .unwrap();
+    let after = current(&f).await;
+    assert!(
+        !after.native_observation.as_ref().unwrap().stop_confirmed,
+        "unchanged spec generation cannot relabel the old controller stop into this delete"
+    );
+    assert_eq!(after.resource_state, ResourceState::Deleting);
+    assert!(after.delete_suspension_generation.is_none());
+    assert_slot_retained(&f).await;
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_recovery_due_original_operation_is_not_starved_by_regular_scan() {
+    let f = fixture("mgr_delete_scan_fairness").await;
+    let deleting = delete_request(&f, &f.machine).await;
+    f.db.collection::<Document>(OUTBOX)
+        .update_many(
+            doc! {"kind":"delete_sandbox"},
+            doc! {"$set":{"state":"applied"}},
+        )
+        .await
+        .unwrap();
+    let collection =
+        f.db.collection::<ManagedMachine>(crate::models::remote_machine::COLLECTION_NAME);
+    for _ in 0..65 {
+        let mut ordinary = f.machine.clone();
+        ordinary.node_id = uuid::Uuid::new_v4().to_string();
+        ordinary.sandbox_name = format!("machine-{}", ordinary.node_id.replace('-', ""));
+        ordinary.resource_state = ResourceState::Paused;
+        ordinary.active_operation_id = None;
+        collection.insert_one(ordinary).await.unwrap();
+    }
+    f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&deleting.node_id},
+            doc! {"$set":{"manager_observed_at":mongodb::bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    // Inventory has no fixture in this test; its later read failure does not
+    // change whether the bounded recovery pass reached the original delete.
+    let _ = f.manager.tick().await;
+    assert_eq!(
+        current(&f).await.resource_state,
+        ResourceState::Deleted,
+        "due original deletes need a fair share independent of regular machine observations"
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_recovery_scan_selects_only_due_live_original_operations() {
+    let f = fixture("mgr_delete_scan_original_states").await;
+    let deleting = delete_request(&f, &f.machine).await;
+    let operation = deleting.active_operation_id.as_deref().unwrap();
+    let operations =
+        f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME);
+    for state in ["accepted", "applying", "reconciling"] {
+        operations.update_one(doc! {"_id":operation}, doc! {"$set":{"state":state,
+            "created_at":mongodb::bson::DateTime::from_chrono(Utc::now()-chrono::Duration::days(90)),
+            "next_attempt_at":mongodb::bson::DateTime::from_chrono(Utc::now()-chrono::Duration::hours(1))}})
+            .await.unwrap();
+        let candidates = f.manager.observation_candidates().await.unwrap();
+        assert_eq!(
+            candidates.len(),
+            1,
+            "old {state} original delete must remain automatically recoverable"
+        );
+        assert_eq!(
+            candidates[0].active_operation_id.as_deref(),
+            Some(operation)
+        );
+    }
+    for change in [
+        doc! {"retry_count":10_i64},
+        doc! {"retry_count":15_639_i64},
+        doc! {"retry_count":1_i64,"delete_retry":{"attempts":1_i64,
+        "claim_until":mongodb::bson::DateTime::from_chrono(Utc::now()+chrono::Duration::seconds(60))}},
+    ] {
+        operations
+            .update_one(doc! {"_id":operation}, doc! {"$set":change})
+            .await
+            .unwrap();
+        assert!(f.manager.observation_candidates().await.unwrap().is_empty());
+    }
+    operations
+        .update_one(
+            doc! {"_id":operation},
+            doc! {"$set":{"retry_count":15_639_i64,
+            "delete_retry":{"attempts":0_i64}}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        f.manager.observation_candidates().await.unwrap().len(),
+        1,
+        "a manually renewed round is due regardless of its lifetime count"
+    );
+    operations.update_one(doc! {"_id":operation}, doc! {"$set":{
+        "next_attempt_at":mongodb::bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(1))}})
+        .await.unwrap();
+    assert!(f.manager.observation_candidates().await.unwrap().is_empty());
+    operations
+        .update_one(
+            doc! {"_id":operation},
+            doc! {"$set":{"next_attempt_at":mongodb::bson::Bson::Null,
+            "state":"succeeded"}},
+        )
+        .await
+        .unwrap();
+    assert!(f.manager.observation_candidates().await.unwrap().is_empty());
+    operations
+        .update_one(
+            doc! {"_id":operation},
+            doc! {"$set":{"state":"reconciling"}},
+        )
+        .await
+        .unwrap();
+    f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&deleting.node_id},
+            doc! {"$set":{"active_operation_id":&f.effect.operation_id}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        f.manager.observation_candidates().await.unwrap().is_empty(),
+        "superseded delete rows cannot acquire recovery authority"
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn finalized_delete_scan_is_bounded_and_rotates_blocked_tombstones_independently() {
+    use crate::models::remote_machine::{
+        AuthorizationState, BillingState, DeleteRecoveryProgress, DeleteStopEvidence,
+        DeleteStopKind, DeleteStorageDisposition,
+    };
+    let f = fixture("mgr_finalized_cleanup_fairness").await;
+    let bound = bind_runtime(&f).await;
+    let deleting = delete_request(&f, &bound).await;
+    let collection =
+        f.db.collection::<ManagedMachine>(crate::models::remote_machine::COLLECTION_NAME);
+    let oldest = Utc::now() - chrono::Duration::days(1);
+    let mut ids = Vec::new();
+    for index in 0..10 {
+        let mut tombstone = deleting.clone();
+        tombstone.node_id = uuid::Uuid::new_v4().to_string();
+        tombstone.sandbox_name = format!("machine-{}", tombstone.node_id.replace('-', ""));
+        tombstone.resource_state = ResourceState::Deleted;
+        tombstone.billing_state = BillingState::Closed;
+        tombstone.authorization_state = AuthorizationState::Revoked;
+        let evidence_id = uuid::Uuid::new_v4().to_string();
+        tombstone.cleanup_evidence_digest = Some(evidence_id.clone());
+        tombstone.delete_recovery = Some(DeleteRecoveryProgress {
+            // Old successful rows must enter the same fair, read-only scan
+            // so the versioned object contract can be freshly observed.
+            evidence_version: if index % 2 == 0 {
+                1
+            } else {
+                crate::services::remote_machine_delete_recovery::EVIDENCE_VERSION
+            },
+            evidence_id,
+            operation_id: tombstone.active_operation_id.clone().unwrap(),
+            owner_id: tombstone.owner_id.clone(),
+            runtime_generation: tombstone.runtime_generation,
+            credential_epoch: tombstone.credential_epoch,
+            writer_fence: tombstone.writer_fence.clone(),
+            deletion_basis_digest: crate::services::remote_machine_delete_recovery::basis_digest(
+                &tombstone,
+            )
+            .unwrap(),
+            evaluated_revision: tombstone.revision,
+            original_uncertainty: tombstone.native_uncertainty.clone(),
+            sandbox_uid: tombstone.sandbox_uid.clone(),
+            pod_uid: tombstone.pod_uid.clone(),
+            node_uid: tombstone.native_node_uid.clone(),
+            pvc_uid: tombstone.pvc_uid.clone(),
+            provisioning_request_id: None,
+            provisioning_terminal: None,
+            volume: None,
+            stop: Some(DeleteStopEvidence {
+                kind: DeleteStopKind::ControlPlaneWorkloadAbsent,
+                source_operation_id: tombstone.active_operation_id.clone(),
+                evidence_ref: uuid::Uuid::new_v4().to_string(),
+                source: "sandbox-kubernetes-control-plane".into(),
+                observed_at: oldest,
+                sandbox_generation: 0,
+                sandbox_resource_version: String::new(),
+            }),
+            storage: DeleteStorageDisposition::SandboxCascadeObserved,
+            creation_terminal: true,
+            resources_complete: true,
+            blocker: None,
+            observed_at: oldest,
+        });
+        let tombstone_id = tombstone.node_id.clone();
+        ids.push(tombstone_id.clone());
+        collection.insert_one(tombstone).await.unwrap();
+        f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+            .update_one(doc! {"_id":&tombstone_id}, doc! {"$set":{"manager_observed_at":mongodb::bson::DateTime::from_chrono(oldest + chrono::Duration::seconds(index))}})
+            .await.unwrap();
+    }
+    let first = f.manager.finalized_cleanup_candidates().await.unwrap();
+    assert_eq!(
+        first.iter().map(|m| &m.node_id).collect::<Vec<_>>(),
+        ids[..8].iter().collect::<Vec<_>>()
+    );
+    // The cloned scopes deliberately fail the original successful-operation
+    // gate. Each still rotates, so one blocked authority cannot occupy a batch
+    // forever and no remote mutation is attempted for it.
+    f.manager.reconcile_finalized_cleanup().await.unwrap();
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    let next = f.manager.finalized_cleanup_candidates().await.unwrap();
+    assert_eq!(next.len(), 8);
+    assert_eq!(next[0].node_id, ids[8]);
+    assert_eq!(next[1].node_id, ids[9]);
+    for id in &ids[..8] {
+        let observed = collection.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+        let row =
+            f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+                .find_one(doc! {"_id":id})
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(
+            row.get_datetime("manager_observed_at").unwrap().to_chrono()
+                > oldest + chrono::Duration::hours(1)
+        );
+        assert_eq!(observed.resource_state, ResourceState::Deleted);
+        assert!(!observed.writer_admitted);
+    }
+    let due = f.manager.observation_candidates().await.unwrap();
+    assert_eq!(
+        due.len(),
+        1,
+        "finalized cleanup has a share independent of due original deletes"
+    );
+    assert_eq!(due[0].node_id, deleting.node_id);
+    f.db.drop().await.unwrap();
+}
+
 async fn fixture(label: &str) -> Fixture {
     fixture_with_rollout(label, false).await
 }
@@ -196,6 +617,18 @@ async fn bind_runtime(f: &Fixture) -> ManagedMachine {
     )
     .await
     .unwrap();
+    // This fixture represents a successful allocation response. Delivery
+    // state alone is deliberately insufficient to discharge its request.
+    let at = mongodb::bson::DateTime::now();
+    f.db.collection::<Document>(OUTBOX).update_one(doc! {"_id":&f.effect.id},doc! {"$set":{
+        "submission":{"request_id":&f.effect.id,"runtime_generation":machine.runtime_generation,
+            "credential_epoch":machine.credential_epoch,"writer_fence":&machine.writer_fence,
+            "started_at":at,"completed_at":at,"cancelled_before_dispatch":false,
+            "result_sandbox_uid":&machine.sandbox_uid,"result_resource_version":"fixture-allocation-response",
+            "dispatches":[{"id":"fixture-original-allocation","started_at":at,"completed_at":at,
+                "cancelled_before_dispatch":false,"result_sandbox_uid":&machine.sandbox_uid,
+                "result_resource_version":"fixture-allocation-response"}]},
+    }}).await.unwrap();
     f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
         .update_one(
             doc! {"_id":&machine.node_id},
@@ -337,21 +770,93 @@ async fn manager_native_stop_without_storage_cleanup_retains_the_free_slot() {
     let f = fixture("mgr_native_stop_pending_cleanup").await;
     let bound = bind_runtime(&f).await;
     let deleting = delete_request(&f, &bound).await;
+    // Represent the spec-changing suspension submitted for this delete. A
+    // metadata-only relabel of generation 1 cannot create a current stop fact.
+    f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&deleting.node_id,"revision":deleting.revision},
+            doc! {"$set":{"delete_suspension_generation":2_i64,
+            "delete_suspension_operation_id":&deleting.active_operation_id}},
+        )
+        .await
+        .unwrap();
+    let deleting = current(&f).await;
     mount_bound_resources(&f, &deleting, true).await;
     Mock::given(method("DELETE"))
         .and(path(sandbox_path(&deleting)))
         .respond_with(ResponseTemplate::new(202))
+        .expect(1..)
         .mount(&f.server)
         .await;
     assert!(f.manager.observe(&deleting).await.is_err());
     let stopped = current(&f).await;
-    assert!(stopped.native_observation.as_ref().unwrap().stop_confirmed);
+    assert!(super::super::remote_machine_delete_recovery::stop_is_valid(
+        &stopped,
+        stopped.delete_recovery.as_ref().unwrap()
+    ));
     assert_eq!(stopped.resource_state, ResourceState::Deleting);
     assert_ne!(stopped.cleanup_state, "complete");
     assert_slot_retained(&f).await;
-    // Repeated accepted Sandbox DELETE is still submission, never storage closure.
-    assert!(f.manager.observe(&stopped).await.is_err());
+    // A future retry deadline is a no-op, not cleanup completion. Preserve the
+    // exact original pending operation and evidence while no HTTP is issued.
+    let operations =
+        f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME);
+    let operation_id = stopped.active_operation_id.as_deref().unwrap();
+    let pending_operation = operations
+        .find_one(doc! {"_id":operation_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        pending_operation
+            .get_datetime("next_attempt_at")
+            .unwrap()
+            .to_chrono()
+            > Utc::now()
+    );
+    let request_count = f.server.received_requests().await.unwrap().len();
+    f.manager.observe(&stopped).await.unwrap();
+    assert_eq!(
+        f.server.received_requests().await.unwrap().len(),
+        request_count
+    );
+    assert_eq!(
+        operations
+            .find_one(doc! {"_id":operation_id})
+            .await
+            .unwrap()
+            .unwrap(),
+        pending_operation
+    );
+    let deferred = current(&f).await;
+    assert_eq!(deferred.delete_recovery, stopped.delete_recovery);
+    assert_eq!(deferred.resource_state, ResourceState::Deleting);
+    assert_eq!(deferred.cleanup_state, stopped.cleanup_state);
+    assert_eq!(deferred.billing_state, stopped.billing_state);
+    assert_eq!(deferred.active_operation_id, stopped.active_operation_id);
+    assert_eq!(deferred.runtime_generation, stopped.runtime_generation);
+    assert_eq!(deferred.credential_epoch, stopped.credential_epoch);
+    assert_eq!(deferred.writer_fence, stopped.writer_fence);
+    assert!(!deferred.writer_admitted);
+    assert_slot_retained(&f).await;
+    // Once the original operation is due, another accepted Sandbox DELETE is
+    // still submission, never storage closure.
+    operations.update_one(doc! {"_id":operation_id,"machine_id":&stopped.node_id,"terminal_at":mongodb::bson::Bson::Null},
+        doc! {"$set":{"next_attempt_at":mongodb::bson::Bson::Null}}).await.unwrap();
+    assert!(f.manager.observe(&deferred).await.is_err());
     assert_eq!(current(&f).await.pvc_uid, bound.pvc_uid);
+    let requests = f.server.received_requests().await.unwrap();
+    let deletion = requests
+        .iter()
+        .find(|request| {
+            request.method.as_str() == "DELETE" && request.url.path() == sandbox_path(&deleting)
+        })
+        .expect("storage-pending cleanup must reach the original Sandbox DELETE");
+    assert_eq!(
+        deletion.body_json::<Value>().unwrap()["preconditions"]["uid"],
+        json!(bound.sandbox_uid),
+        "cleanup must retain the original Sandbox identity"
+    );
     assert_slot_retained(&f).await;
 }
 
@@ -431,7 +936,7 @@ fn controlled_allocation(machine: &ManagedMachine, kind: &str, sandbox_uid: &str
     object["apiVersion"] = json!("v1");
     object["metadata"]["name"] = json!(name);
     object["metadata"]["uid"] = json!(uid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()));
-    object["metadata"]["ownerReferences"] = json!([{"apiVersion":"agents.x-k8s.io/v1beta1","kind":"Sandbox","controller":true,"uid":sandbox_uid}]);
+    object["metadata"]["ownerReferences"] = json!([{"apiVersion":"agents.x-k8s.io/v1beta1","kind":"Sandbox","name":machine.sandbox_name,"controller":true,"uid":sandbox_uid}]);
     // An unrelated secret-bearing field must never enter an investigation DTO.
     object["spec"] = json!({"containers":[{"env":[{"name":"TOKEN","value":"fixture-secret-not-in-diagnostics"}]}]});
     object
@@ -896,7 +1401,7 @@ async fn manager_overdue_cleanup_notifies_once_and_preserves_pending_resources()
         .unwrap()
         .unwrap();
     assert!(operation.terminal_at.is_none());
-    assert_eq!(operation.error_code.as_deref(), Some("cleanup_overdue"));
+    assert!(operation.error_code.is_none());
     assert_eq!(f.db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
         .count_documents(doc!{"event_type":"machine_cleanup_overdue_operator_action","event_data.operation_id":operation_id})
         .await.unwrap(),1);
@@ -1072,6 +1577,14 @@ async fn mount_bound_resources_with_readiness(
 ) {
     let uid = machine.sandbox_uid.as_deref().unwrap();
     let mut object = sandbox(machine, uid);
+    if machine.delete_suspension_operation_id == machine.active_operation_id
+        && let Some(generation) = machine.delete_suspension_generation
+    {
+        object["metadata"]["generation"] = json!(generation);
+        for condition in object["status"]["conditions"].as_array_mut().unwrap() {
+            condition["observedGeneration"] = json!(generation);
+        }
+    }
     object["status"]["conditions"][0]["status"] =
         json!(if ready && !suspended { "True" } else { "False" });
     object["status"]["conditions"][0]["reason"] = json!(if suspended {
@@ -1136,10 +1649,26 @@ async fn mount_owned_resources(f: &Fixture, machine: &ManagedMachine, suspended:
             object["status"] = json!({"phase":if resource == "pods" {"Running"} else {"Bound"}});
             object
         });
-        let items: Vec<_> = object.iter().cloned().collect();
+        let items: Vec<_> = object
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                let fields = item.as_object_mut().unwrap();
+                fields.remove("kind");
+                fields.remove("apiVersion");
+                item
+            })
+            .collect();
+        if resource == "pods" {
+            Mock::given(method("GET"))
+                .and(path("/api/v1/pods"))
+                .respond_with(ResponseTemplate::new(403))
+                .mount(&f.server)
+                .await;
+        }
         Mock::given(method("GET"))
             .and(path(format!("/api/v1/namespaces/nyxid-machine/{resource}")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":items})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"kind":format!("{kind}List"),"apiVersion":"v1","metadata":{"resourceVersion":"17"},"items":items})))
             .mount(&f.server)
             .await;
         let response = object.map_or_else(
@@ -1160,6 +1689,16 @@ async fn mount_owned_resources(f: &Fixture, machine: &ManagedMachine, suspended:
             "status":{"conditions":[{"type":"Ready","status":"True","lastHeartbeatTime":Utc::now().to_rfc3339()}],
                 "nodeInfo":{"containerRuntimeVersion":"containerd://2.0-fixture"}}
         }))).mount(&f.server).await;
+    Mock::given(method("GET")).and(path("/api/v1/persistentvolumes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind":"PersistentVolumeList","apiVersion":"v1","metadata":{"resourceVersion":"17"},"items":[{
+                "metadata":{"name":pv_name,"uid":machine.native_pv_uid.as_deref().unwrap_or(&machine.node_id),"resourceVersion":"13"},
+                "spec":{"claimRef":{"uid":machine.pvc_uid,"name":pvc_name,"namespace":machine.sandbox_namespace},"persistentVolumeReclaimPolicy":"Delete"},"status":{"phase":"Bound"}
+            }]
+        }))).mount(&f.server).await;
+    Mock::given(method("GET")).and(path("/apis/storage.k8s.io/v1/volumeattachments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"kind":"VolumeAttachmentList","apiVersion":"storage.k8s.io/v1","metadata":{"resourceVersion":"17"},"items":[]})))
+        .mount(&f.server).await;
     Mock::given(method("GET")).and(path(format!("/api/v1/persistentvolumes/{pv_name}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "metadata":{"name":pv_name,"uid":machine.native_pv_uid.as_deref().unwrap_or(&machine.node_id),"resourceVersion":"13"},
@@ -1621,4 +2160,1227 @@ fn hosted_profile_accepts_only_the_selected_capability_ceiling() {
     profile.browser = Some(true);
     profile.commands_isolated = Some(false);
     assert!(!super::accepts_selected_profile(&machine, &profile));
+}
+
+#[tokio::test]
+async fn manager_tick_cancels_owner_superseded_create_before_any_dispatch() {
+    let f = fixture("mgr_delete_before_dispatch_tick").await;
+    let deleting = delete_request(&f, &f.machine).await;
+    let _ = f.manager.tick().await; // diagnostic inventory may be unavailable
+    let after = current(&f).await;
+    assert_eq!(after.resource_state, ResourceState::Deleted);
+    assert_eq!(after.active_operation_id, deleting.active_operation_id);
+    let creation =
+        f.db.collection::<MachineEffectOutbox>(OUTBOX)
+            .find_one(doc! {"_id":&f.effect.id})
+            .await
+            .unwrap()
+            .unwrap();
+    let cancellation = creation
+        .submission
+        .expect("a durable non-dispatch decision is required");
+    assert!(cancellation.cancelled_before_dispatch);
+    assert!(cancellation.completed_at.is_some());
+    assert!(cancellation.dispatches.is_empty());
+    assert_eq!(creation.attempts, 0);
+    assert!(
+        f.server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method.as_str() == "GET"),
+        "neither create nor delete may issue an external mutation for an undispatched allocation"
+    );
+    let slot =
+        f.db.collection::<MachineFreeSlot>(lifecycle::FREE_SLOTS)
+            .find_one(doc! {"_id":&f.machine.owner_id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(slot.state, FreeSlotState::Released);
+    let op = crate::services::remote_machine_operation_service::get_operation(
+        &f.db,
+        &after.owner_id,
+        after.active_operation_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        op.state,
+        crate::models::remote_machine_operation::OperationState::Succeeded
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn manager_tick_applied_bookkeeping_never_discharges_legacy_unknown_creation() {
+    let f = fixture("mgr_delete_legacy_unknown_tick").await;
+    let bound = bind_runtime(&f).await;
+    f.db.collection::<Document>(OUTBOX).update_one(doc! {"_id":&f.effect.id},
+        doc! {"$set":{"state":"retry","attempts":1_i64,"submission":mongodb::bson::Bson::Null,
+        "available_at":mongodb::bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}})
+        .await.unwrap();
+    let deleting = delete_request(&f, &bound).await;
+    let _ = f.manager.tick().await;
+    let after = current(&f).await;
+    let effect =
+        f.db.collection::<MachineEffectOutbox>(OUTBOX)
+            .find_one(doc! {"_id":&f.effect.id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        effect.state,
+        crate::models::remote_machine_outbox::EffectState::Applied
+    );
+    assert!(effect.submission.is_none());
+    assert!(effect.undispatched_claim_id.is_none());
+    assert!(
+        !crate::services::remote_machine_operation_service::creation_responsibilities_terminal(
+            &f.db, &after
+        )
+        .await
+        .unwrap(),
+        "delivery claim/ack cannot create missing request evidence"
+    );
+    assert_eq!(after.resource_state, ResourceState::Deleting);
+    assert_eq!(after.active_operation_id, deleting.active_operation_id);
+    assert!(!after.writer_admitted);
+    assert_slot_retained(&f).await;
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn manager_async_stage_entries_have_bounded_inline_futures() {
+    let f = fixture("mgr_stage_future_sizes").await;
+    let observed = nyxid_machine_updater::sandbox::SandboxObservation::from_object(&sandbox(
+        &f.machine,
+        "size-fixture-sandbox",
+    ))
+    .unwrap();
+    let mut delete_snapshot = f.machine.clone();
+    let sizes = [
+        std::mem::size_of_val(&f.manager.observe_delete_resource(&mut delete_snapshot)),
+        std::mem::size_of_val(&f.manager.observe(&f.machine)),
+        std::mem::size_of_val(&f.manager.observe_resource(&f.machine)),
+        std::mem::size_of_val(&f.manager.record_observation(&f.machine, &observed)),
+        std::mem::size_of_val(&f.manager.apply_effect(&f.effect)),
+        std::mem::size_of_val(&crate::services::remote_machine_delete_recovery::advance(
+            &f.manager, &f.machine,
+        )),
+    ];
+    assert!(
+        sizes.into_iter().all(|size| size <= 128),
+        "production stage futures grew inline: {sizes:?}"
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn manager_delete_cancels_a_fresh_claim_before_its_first_remote_dispatch() {
+    let f = fixture("mgr_delete_claimed_before_dispatch").await;
+    let claimed = crate::services::remote_machine_operation_service::claim_effect(
+        &f.db,
+        Utc::now(),
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(claimed.id, f.effect.id);
+    assert_eq!(claimed.undispatched_claim_id, claimed.claim_id);
+    assert!(claimed.undispatched_claim_id.is_some());
+    let deleting = delete_request(&f, &f.machine).await;
+    f.manager.apply_effect(&claimed).await.unwrap();
+    let sealed =
+        f.db.collection::<MachineEffectOutbox>(OUTBOX)
+            .find_one(doc! {"_id":&claimed.id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(
+        sealed
+            .submission
+            .as_ref()
+            .unwrap()
+            .cancelled_before_dispatch
+    );
+    assert!(sealed.undispatched_claim_id.is_none());
+    assert_eq!(sealed.attempts, 1);
+    assert_eq!(
+        current(&f).await.active_operation_id,
+        deleting.active_operation_id
+    );
+    let _ = f.manager.tick().await;
+    assert_eq!(current(&f).await.resource_state, ResourceState::Deleted);
+    assert!(
+        f.server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method.as_str() == "GET")
+    );
+    f.db.drop().await.unwrap();
+}
+
+// Resume remediation uses actual lifecycle acceptance and native stop fixtures;
+// only Kubernetes is mocked. Every fixture owns a fresh transactional database.
+async fn pending_resume_after_old_cutoff(f: &Fixture) -> ManagedMachine {
+    let bound = Box::pin(bind_runtime(f)).await;
+    f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&bound.node_id},
+            doc! {"$set":{"resource_state":"stopping"}},
+        )
+        .await
+        .unwrap();
+    let stopping = current(f).await;
+    mount_bound_resources(f, &stopping, true).await;
+    f.manager.observe(&stopping).await.unwrap();
+    let paused = current(f).await;
+    assert_eq!(paused.resource_state, ResourceState::Paused);
+    f.db.collection::<Document>(OUTBOX)
+        .update_many(
+            doc! {"machine_id":&paused.node_id},
+            doc! {"$set":{"state":"applied"}},
+        )
+        .await
+        .unwrap();
+    f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .update_one(doc! {"_id":&paused.node_id}, doc! {"$set":{
+            "native_run_not_after":mongodb::bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(30))}})
+        .await.unwrap();
+    let resuming = Box::pin(action_request(
+        f,
+        &current(f).await,
+        LifecycleAction::Resume,
+    ))
+    .await;
+    f.server.reset().await;
+    resuming
+}
+
+async fn resume_effect(f: &Fixture, machine: &ManagedMachine) -> MachineEffectOutbox {
+    f.db.collection::<MachineEffectOutbox>(OUTBOX)
+        .find_one(doc! {"operation_id":&machine.active_operation_id,"kind":"resume_sandbox"})
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn resume_remediation_old_cutoff_defers_only_until_generation_initialization() {
+    let f = fixture("resume_remediation_old_cutoff").await;
+    let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+    Box::pin(f.manager.funding_tick()).await.unwrap();
+    let deferred = current(&f).await;
+    assert_eq!(
+        deferred.active_operation_id, resuming.active_operation_id,
+        "maintenance must not apply the stopped predecessor deadline to the accepted resume"
+    );
+    assert_eq!(deferred.runtime_generation, resuming.runtime_generation);
+    assert_eq!(deferred.native_run_not_after, resuming.native_run_not_after);
+    assert!(!deferred.writer_admitted);
+    let effect = resume_effect(&f, &deferred).await;
+    // Workspace validation deliberately fails after allocation: it still proves
+    // the real worker's generation CAS happens once, before any external resume.
+    assert!(f.manager.apply_effect(&effect).await.is_err());
+    let next = current(&f).await;
+    assert_eq!(next.runtime_generation, resuming.runtime_generation + 1);
+    assert_eq!(next.credential_epoch, resuming.credential_epoch + 1);
+    assert_eq!(next.pvc_uid, resuming.pvc_uid);
+    assert_eq!(next.sandbox_uid, resuming.sandbox_uid);
+    assert_eq!(next.profile, resuming.profile);
+    assert!(f.manager.apply_effect(&effect).await.is_err());
+    assert_eq!(
+        current(&f).await.runtime_generation,
+        next.runtime_generation
+    );
+    Box::pin(f.manager.funding_tick()).await.unwrap();
+    assert_eq!(
+        current(&f).await.active_operation_id,
+        next.active_operation_id
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_remediation_safety_pause_seals_fresh_claim_atomically() {
+    use crate::services::{
+        remote_machine_operation_service as operations, remote_machine_runtime as runtime,
+    };
+    for phase in ["accepted", "progress", "completed"] {
+        let f = fixture("resume_remediation_pause_cancel").await;
+        let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+        let claim = operations::claim_effect(&f.db, Utc::now(), std::time::Duration::from_secs(60))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            claim.operation_id,
+            resuming.active_operation_id.as_deref().unwrap()
+        );
+        Box::pin(runtime::safety_pause(
+            &f.db,
+            None,
+            &resuming,
+            "expansion_deadline_exceeded",
+        ))
+        .await
+        .unwrap();
+        if phase == "progress" {
+            Box::pin(f.manager.progress(
+                current(&f).await.active_operation_id.as_deref().unwrap(),
+                "runtime_evidence_pending",
+            ))
+            .await
+            .unwrap();
+        } else if phase == "completed" {
+            let stopping = current(&f).await;
+            mount_bound_resources(&f, &stopping, true).await;
+            f.manager.observe(&stopping).await.unwrap();
+            let paused = current(&f).await;
+            assert_eq!(paused.resource_state, ResourceState::Paused);
+            let successor = operations::get_operation(
+                &f.db,
+                &paused.owner_id,
+                paused.active_operation_id.as_deref().unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                successor.state,
+                crate::models::remote_machine_operation::OperationState::Succeeded
+            );
+            assert!(successor.error_code.is_none());
+            f.server.reset().await;
+        }
+        f.manager.apply_effect(&claim).await.unwrap();
+        let sealed = resume_effect(&f, &resuming).await;
+        assert_eq!(
+            sealed.state,
+            crate::models::remote_machine_outbox::EffectState::Applied
+        );
+        let proof = sealed
+            .submission
+            .expect("safety supersession must durably seal non-dispatch");
+        assert!(proof.cancelled_before_dispatch && proof.completed_at.is_some());
+        assert!(proof.dispatches.is_empty());
+        assert!(sealed.claim_id.is_none() && sealed.undispatched_claim_id.is_none());
+        assert!(
+            Box::pin(operations::creation_responsibilities_terminal(
+                &f.db,
+                &current(&f).await
+            ))
+            .await
+            .unwrap()
+        );
+        assert!(f.server.received_requests().await.unwrap().is_empty());
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn resume_remediation_worker_error_after_safety_pause_retains_non_dispatch() {
+    let f = fixture("resume_remediation_error_cancel").await;
+    let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+    f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME)
+        .update_one(doc! {"_id":&resuming.active_operation_id},doc! {"$set":{
+            "deadline_at":mongodb::bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}})
+        .await.unwrap();
+    let _ = Box::pin(f.manager.tick()).await;
+    let saved = resume_effect(&f, &resuming).await;
+    assert!(
+        saved
+            .submission
+            .as_ref()
+            .is_some_and(|s| s.cancelled_before_dispatch && s.completed_at.is_some()),
+        "worker error after safety_pause must seal the same fresh claim before acknowledgement"
+    );
+    assert_eq!(
+        saved.state,
+        crate::models::remote_machine_outbox::EffectState::Applied
+    );
+    assert!(
+        f.server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method.as_str() == "GET")
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_remediation_acknowledgement_preserves_last_fresh_proof_on_both_exits() {
+    use crate::services::remote_machine_operation_service as operations;
+    for applied in [true, false] {
+        let f = fixture("resume_remediation_ack_guard").await;
+        let claim = operations::claim_effect(&f.db, Utc::now(), std::time::Duration::from_secs(60))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !operations::acknowledge_effect(
+                &f.db,
+                &claim.id,
+                claim.claim_id.as_deref().unwrap(),
+                applied,
+                None,
+                Utc::now()
+            )
+            .await
+            .unwrap(),
+            "ordinary acknowledgement cannot discard fresh non-dispatch proof ({applied})"
+        );
+        let saved =
+            f.db.collection::<MachineEffectOutbox>(OUTBOX)
+                .find_one(doc! {"_id":&claim.id})
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(saved.claim_id, claim.claim_id);
+        assert_eq!(saved.undispatched_claim_id, claim.claim_id);
+        assert!(saved.submission.is_none());
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn resume_remediation_stale_maintenance_cannot_write_a_new_runtime_tuple() {
+    use crate::services::remote_machine_runtime as runtime;
+    let f = fixture("resume_remediation_stale_maintenance").await;
+    let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+    let next = Box::pin(lifecycle::advance_runtime_generation(
+        &f.db,
+        &resuming.node_id,
+        resuming.revision,
+        resuming.runtime_generation,
+        None,
+        None,
+    ))
+    .await
+    .unwrap();
+    assert!(
+        Box::pin(runtime::safety_pause(
+            &f.db,
+            None,
+            &resuming,
+            "runtime_safety_deadline_expired"
+        ))
+        .await
+        .is_err()
+    );
+    assert!(
+        Box::pin(runtime::ensure_native_deadline(&f.db, &resuming, false))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        current(&f).await.active_operation_id,
+        next.active_operation_id
+    );
+    // A revision-only change is also a stale decision, even if generation and
+    // operation remain the same. Maintenance must not reload the new revision.
+    f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .update_one(doc! {"_id":&next.node_id}, doc! {"$inc":{"revision":1_i64}})
+        .await
+        .unwrap();
+    assert!(
+        Box::pin(runtime::ensure_native_deadline(&f.db, &next, false))
+            .await
+            .is_err(),
+        "deadline maintenance must bind the revision it actually evaluated"
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_remediation_invalid_or_expired_transitions_still_safety_pause() {
+    for invalid in [
+        "missing",
+        "terminal",
+        "target",
+        "owner",
+        "stop",
+        "uncertain",
+        "expired",
+        "fallback_expired",
+    ] {
+        let f = fixture("resume_remediation_invalid").await;
+        let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+        let machines =
+            f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME);
+        let operations =
+            f.db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME);
+        match invalid {
+            "missing" => {
+                operations
+                    .delete_one(doc! {"_id":&resuming.active_operation_id})
+                    .await
+                    .unwrap();
+            }
+            "terminal" => {
+                operations.update_one(doc! {"_id":&resuming.active_operation_id},doc! {"$set":{"state":"succeeded","terminal_at":mongodb::bson::DateTime::now()}}).await.unwrap();
+            }
+            "target" => {
+                operations
+                    .update_one(
+                        doc! {"_id":&resuming.active_operation_id},
+                        doc! {"$set":{"desired_runtime_generation":resuming.runtime_generation+2}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "owner" => {
+                f.db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id":&resuming.owner_id},
+                        doc! {"$set":{"is_active":false}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "stop" => {
+                machines
+                    .update_one(
+                        doc! {"_id":&resuming.node_id},
+                        doc! {"$unset":{"native_observation":""}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "uncertain" => {
+                machines
+                    .update_one(
+                        doc! {"_id":&resuming.node_id},
+                        doc! {"$set":{"native_uncertainty":"unexpected_pod_replacement"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "expired" => {
+                operations.update_one(doc! {"_id":&resuming.active_operation_id},doc! {"$set":{"deadline_at":mongodb::bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}}).await.unwrap();
+            }
+            "fallback_expired" => {
+                operations.update_one(doc! {"_id":&resuming.active_operation_id},doc! {"$set":{"deadline_at":mongodb::bson::Bson::Null,"created_at":mongodb::bson::DateTime::from_chrono(Utc::now()-chrono::Duration::minutes(16))}}).await.unwrap();
+            }
+            _ => unreachable!(),
+        }
+        Box::pin(f.manager.funding_tick()).await.unwrap();
+        let stopped = current(&f).await;
+        assert_eq!(
+            stopped.resource_state,
+            ResourceState::Stopping,
+            "invalid {invalid} cannot defer a real cutoff"
+        );
+        assert!(!stopped.writer_admitted);
+        assert_eq!(stopped.runtime_generation, resuming.runtime_generation);
+        assert_eq!(stopped.pvc_uid, resuming.pvc_uid);
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn resume_remediation_arbitrary_operation_mismatch_is_not_cancellation_authority() {
+    use crate::services::remote_machine_operation_service as operations;
+    let f = fixture("resume_remediation_false_cancel").await;
+    let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+    let claim = operations::claim_effect(&f.db, Utc::now(), std::time::Duration::from_secs(60))
+        .await
+        .unwrap()
+        .unwrap();
+    f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .update_one(doc! {"_id":&resuming.node_id},doc! {"$set":{"resource_state":"stopping","active_operation_id":uuid::Uuid::new_v4().to_string()},"$inc":{"revision":1_i64}}).await.unwrap();
+    assert!(
+        f.manager.apply_effect(&claim).await.is_err(),
+        "false cancellation cannot report successful processing of a fresh claim"
+    );
+    assert!(
+        !operations::acknowledge_effect(
+            &f.db,
+            &claim.id,
+            claim.claim_id.as_deref().unwrap(),
+            false,
+            Some("pending"),
+            Utc::now()
+        )
+        .await
+        .unwrap()
+    );
+    let saved = resume_effect(&f, &resuming).await;
+    assert_eq!(saved.undispatched_claim_id, claim.claim_id);
+    assert!(saved.submission.is_none());
+    assert!(
+        !Box::pin(operations::creation_responsibilities_terminal(
+            &f.db,
+            &current(&f).await
+        ))
+        .await
+        .unwrap()
+    );
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_remediation_reclaimed_claim_cannot_journal_or_cancel_as_original_worker() {
+    use crate::services::{
+        remote_machine_operation_service as operations, remote_machine_runtime as runtime,
+    };
+    let f = fixture("resume_remediation_reclaimed").await;
+    let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+    let old = operations::claim_effect(&f.db, Utc::now(), std::time::Duration::from_secs(60))
+        .await
+        .unwrap()
+        .unwrap();
+    let new = operations::claim_effect(
+        &f.db,
+        Utc::now() + chrono::Duration::seconds(61),
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_ne!(old.claim_id, new.claim_id);
+    assert!(new.undispatched_claim_id.is_none());
+    assert!(
+        Box::pin(operations::begin_submission(&f.db, &resuming, &old))
+            .await
+            .is_err(),
+        "a stale claim must not append a new dispatch journal entry"
+    );
+    Box::pin(runtime::safety_pause(
+        &f.db,
+        None,
+        &resuming,
+        "runtime_funding_unavailable",
+    ))
+    .await
+    .unwrap();
+    let stopped = current(&f).await;
+    assert!(
+        !Box::pin(operations::cancel_undispatched_claim(&f.db, &stopped, &old))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !Box::pin(operations::cancel_undispatched_claim(&f.db, &stopped, &new))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !Box::pin(operations::creation_responsibilities_terminal(
+            &f.db, &stopped
+        ))
+        .await
+        .unwrap()
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_remediation_cancel_transaction_write_failure_preserves_claim_and_machine_fence() {
+    use crate::services::{
+        remote_machine_operation_service as operations, remote_machine_runtime as runtime,
+    };
+    let f = fixture("resume_remediation_cancel_abort").await;
+    let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+    let claim = operations::claim_effect(&f.db, Utc::now(), std::time::Duration::from_secs(60))
+        .await
+        .unwrap()
+        .unwrap();
+    Box::pin(runtime::safety_pause(
+        &f.db,
+        None,
+        &resuming,
+        "runtime_funding_unavailable",
+    ))
+    .await
+    .unwrap();
+    let stopped = current(&f).await;
+    let before =
+        f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+            .find_one(doc! {"_id":&resuming.node_id})
+            .await
+            .unwrap()
+            .unwrap();
+    // Fail the outbox write after the machine fence write inside the transaction.
+    f.db.run_command(doc! {"collMod":OUTBOX,"validator":{"submission.cancelled_before_dispatch":{"$ne":true}},"validationLevel":"strict"}).await.unwrap();
+    assert!(
+        Box::pin(operations::cancel_undispatched_claim(
+            &f.db, &stopped, &claim
+        ))
+        .await
+        .is_err()
+    );
+    let saved = resume_effect(&f, &resuming).await;
+    assert_eq!(saved.claim_id, claim.claim_id);
+    assert_eq!(saved.undispatched_claim_id, claim.claim_id);
+    assert!(saved.submission.is_none());
+    let after =
+        f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+            .find_one(doc! {"_id":&resuming.node_id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        before.get("submission_evidence_fence"),
+        after.get("submission_evidence_fence")
+    );
+    f.db.run_command(doc! {"collMod":OUTBOX,"validator":{}})
+        .await
+        .unwrap();
+    assert!(
+        Box::pin(operations::cancel_undispatched_claim(
+            &f.db, &stopped, &claim
+        ))
+        .await
+        .unwrap()
+    );
+    assert!(
+        Box::pin(operations::begin_submission(&f.db, &stopped, &claim))
+            .await
+            .is_err()
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_remediation_new_dispatch_cannot_hide_legacy_unknown_submission() {
+    use crate::services::remote_machine_operation_service as operations;
+    let f = fixture("resume_remediation_legacy_journal").await;
+    let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+    let effect = resume_effect(&f, &resuming).await;
+    f.db.collection::<Document>(OUTBOX)
+        .update_one(
+            doc! {"_id":&effect.id},
+            doc! {"$set":{"state":"applied","attempts":1_i64}},
+        )
+        .await
+        .unwrap();
+    let legacy = resume_effect(&f, &resuming).await;
+    let dispatch = Box::pin(operations::begin_submission(&f.db, &resuming, &legacy))
+        .await
+        .unwrap();
+    operations::finish_submission(&f.db, &legacy.id, &dispatch, None)
+        .await
+        .unwrap();
+    assert!(
+        !Box::pin(operations::creation_responsibilities_terminal(
+            &f.db, &resuming
+        ))
+        .await
+        .unwrap(),
+        "the latest known non-dispatch cannot erase an older applied/null responsibility"
+    );
+    let saved = resume_effect(&f, &resuming).await;
+    assert_eq!(saved.submission.as_ref().unwrap().dispatches.len(), 2);
+    assert!(
+        saved.submission.unwrap().dispatches[0]
+            .completed_at
+            .is_none()
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_remediation_dispatch_and_safety_cancel_share_one_transaction_fence() {
+    use crate::services::{
+        remote_machine_operation_service as operations, remote_machine_runtime as runtime,
+    };
+    let f = fixture("resume_remediation_dispatch_race").await;
+    let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+    let claim = operations::claim_effect(&f.db, Utc::now(), std::time::Duration::from_secs(60))
+        .await
+        .unwrap()
+        .unwrap();
+    let (dispatch, cancelled) = tokio::join!(
+        Box::pin(operations::begin_submission(&f.db, &resuming, &claim)),
+        Box::pin(async {
+            Box::pin(runtime::safety_pause(
+                &f.db,
+                None,
+                &resuming,
+                "runtime_funding_unavailable",
+            ))
+            .await
+            .unwrap();
+            Box::pin(operations::cancel_undispatched_claim(
+                &f.db,
+                &current(&f).await,
+                &claim,
+            ))
+            .await
+            .unwrap()
+        }),
+    );
+    let saved = resume_effect(&f, &resuming).await;
+    let proof = saved.submission.as_ref().unwrap();
+    assert_ne!(
+        dispatch.is_ok(),
+        cancelled,
+        "dispatch journal and cancellation are mutually exclusive"
+    );
+    if cancelled {
+        assert!(proof.cancelled_before_dispatch && proof.completed_at.is_some());
+        assert!(proof.dispatches.is_empty());
+        assert_eq!(
+            saved.state,
+            crate::models::remote_machine_outbox::EffectState::Applied
+        );
+    } else {
+        assert_eq!(proof.dispatches.len(), 1);
+        assert!(proof.dispatches[0].completed_at.is_none());
+        assert!(
+            !Box::pin(operations::creation_responsibilities_terminal(
+                &f.db,
+                &current(&f).await
+            ))
+            .await
+            .unwrap()
+        );
+    }
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.db.drop().await.unwrap();
+}
+
+async fn account_safety_pause(f: &Fixture) -> ManagedMachine {
+    f.db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.machine.owner_id},
+            doc! {"$set":{"is_active":false}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        Box::pin(lifecycle::suspend_ineligible_with_billing(&f.db, None))
+            .await
+            .unwrap(),
+        1
+    );
+    current(f).await
+}
+
+#[tokio::test]
+async fn resume_remediation_account_safety_tick_seals_resume_before_first_dispatch() {
+    use crate::services::remote_machine_operation_service as operations;
+    let f = fixture("resume_remediation_account_tick").await;
+    let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+    f.db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&resuming.owner_id},
+            doc! {"$set":{"is_active":false}},
+        )
+        .await
+        .unwrap();
+    // Exercise the ordinary tick: the account-safety pass must supersede Resume
+    // before its first claim. Missing Kubernetes fixtures can leave stop pending.
+    let _ = Box::pin(f.manager.tick()).await;
+    let stopped = current(&f).await;
+    assert_ne!(stopped.active_operation_id, resuming.active_operation_id);
+    let prior = operations::get_operation(
+        &f.db,
+        &resuming.owner_id,
+        resuming.active_operation_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(prior.error_code.as_deref(), Some("operation_superseded"));
+    let successor = operations::get_operation(
+        &f.db,
+        &stopped.owner_id,
+        stopped.active_operation_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(successor.action, LifecycleAction::Pause);
+    assert_eq!(stopped.stop_reason.as_deref(), Some("account_inactive"));
+    let sealed = resume_effect(&f, &resuming).await;
+    assert_eq!(sealed.attempts, 1);
+    assert_eq!(
+        sealed.state,
+        crate::models::remote_machine_outbox::EffectState::Applied
+    );
+    let proof = sealed
+        .submission
+        .as_ref()
+        .expect("ordinary account-safety supersession must seal the fresh Resume claim");
+    assert!(proof.cancelled_before_dispatch && proof.completed_at.is_some());
+    assert_eq!(proof.request_id, sealed.id);
+    assert!(proof.dispatches.is_empty());
+    assert!(sealed.claim_id.is_none() && sealed.undispatched_claim_id.is_none());
+    assert!(sealed.claimed_until.is_none() && sealed.available_at.is_none());
+    assert!(
+        Box::pin(operations::creation_responsibilities_terminal(
+            &f.db, &stopped
+        ))
+        .await
+        .unwrap()
+    );
+    assert!(!stopped.writer_admitted);
+    assert_eq!(stopped.runtime_generation, resuming.runtime_generation);
+    assert_eq!(stopped.pvc_uid, resuming.pvc_uid);
+    assert_slot_retained(&f).await;
+    assert!(
+        f.server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method.as_str() == "GET")
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_remediation_account_safety_provenance_survives_progress_and_completion() {
+    use crate::services::remote_machine_operation_service as operations;
+    use sha2::{Digest, Sha256};
+    for phase in ["progress", "completed", "retained_recovery"] {
+        let f = fixture("resume_remediation_account_provenance").await;
+        let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+        if phase == "retained_recovery" {
+            // Existing unconsented deleting-state recovery uses a distinct
+            // account-safety identity. Let its real producer create the Pause.
+            f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":&resuming.node_id},
+                    doc! {"$set":{"resource_state":"deleting"}},
+                )
+                .await
+                .unwrap();
+        }
+        let stopping = Box::pin(account_safety_pause(&f)).await;
+        let successor = operations::get_operation(
+            &f.db,
+            &stopping.owner_id,
+            stopping.active_operation_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // Pin the pre-existing persisted contract independently of the shared
+        // production helper, including its different request/stop digests.
+        let key = if phase == "retained_recovery" {
+            format!(
+                "account-safety:retained-recovery:{}:{}",
+                resuming.runtime_generation,
+                resuming.active_operation_id.as_deref().unwrap()
+            )
+        } else {
+            format!("account-safety:pause:{}", resuming.runtime_generation)
+        };
+        assert!(
+            successor.idempotency_key_hash
+                == format!("system:{}", hex::encode(Sha256::digest(key.as_bytes())))
+        );
+        let request = format!(
+            r#"{{"generation":{},"source":"account_safety"}}"#,
+            resuming.runtime_generation
+        );
+        assert!(successor.request_digest == hex::encode(Sha256::digest(request.as_bytes())));
+        let stop_effect =
+            f.db.collection::<MachineEffectOutbox>(OUTBOX)
+                .find_one(doc! {"_id":&successor.effect_id})
+                .await
+                .unwrap()
+                .unwrap();
+        let stop = format!(
+            r#"{{"machine_id":"{}","safety_generation":{}}}"#,
+            resuming.node_id, resuming.runtime_generation
+        );
+        assert!(stop_effect.effect_digest == hex::encode(Sha256::digest(stop.as_bytes())));
+        let claim = operations::claim_effect(&f.db, Utc::now(), std::time::Duration::from_secs(60))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            claim.operation_id,
+            resuming.active_operation_id.as_deref().unwrap()
+        );
+        if phase == "completed" {
+            mount_bound_resources(&f, &stopping, true).await;
+            f.manager.observe(&stopping).await.unwrap();
+            assert_eq!(current(&f).await.resource_state, ResourceState::Paused);
+            f.server.reset().await;
+        } else {
+            f.manager
+                .progress(
+                    stopping.active_operation_id.as_deref().unwrap(),
+                    "runtime_evidence_pending",
+                )
+                .await
+                .unwrap();
+        }
+        f.manager.apply_effect(&claim).await.unwrap();
+        let sealed = resume_effect(&f, &resuming).await;
+        assert_eq!(
+            sealed.state,
+            crate::models::remote_machine_outbox::EffectState::Applied
+        );
+        let proof = sealed.submission.as_ref().unwrap();
+        assert!(proof.cancelled_before_dispatch && proof.completed_at.is_some());
+        assert!(proof.dispatches.is_empty());
+        assert!(sealed.claim_id.is_none() && sealed.undispatched_claim_id.is_none());
+        for applied in [true, false] {
+            assert!(
+                !operations::acknowledge_effect(
+                    &f.db,
+                    &claim.id,
+                    claim.claim_id.as_deref().unwrap(),
+                    applied,
+                    Some("pending"),
+                    Utc::now()
+                )
+                .await
+                .unwrap()
+            );
+        }
+        assert!(
+            Box::pin(operations::creation_responsibilities_terminal(
+                &f.db,
+                &current(&f).await
+            ))
+            .await
+            .unwrap()
+        );
+        assert!(f.server.received_requests().await.unwrap().is_empty());
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn resume_remediation_account_safety_rejects_user_pause_and_incomplete_provenance() {
+    use crate::services::remote_machine_operation_service as operations;
+    for invalid in [
+        "user_pause",
+        "system_key",
+        "request_digest",
+        "effect_digest",
+        "effect_scope",
+    ] {
+        let f = fixture("resume_remediation_account_invalid").await;
+        let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+        let stopped = if invalid == "user_pause" {
+            // Human Pause admission requires Ready. Only this negative fixture
+            // adjusts that state; the successor comes from the real user API.
+            f.db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":&resuming.node_id},
+                    doc! {"$set":{"resource_state":"ready"}},
+                )
+                .await
+                .unwrap();
+            Box::pin(action_request(&f, &resuming, LifecycleAction::Pause)).await
+        } else {
+            Box::pin(account_safety_pause(&f)).await
+        };
+        let claim = operations::claim_effect(&f.db, Utc::now(), std::time::Duration::from_secs(60))
+            .await
+            .unwrap()
+            .unwrap();
+        let (collection, filter, change) = match invalid {
+            "user_pause" => (
+                crate::models::remote_machine_operation::COLLECTION_NAME,
+                doc! {"_id":&stopped.active_operation_id},
+                doc! {"$set":{"error_code":"account_inactive"}},
+            ),
+            "system_key" => (
+                crate::models::remote_machine_operation::COLLECTION_NAME,
+                doc! {"_id":&stopped.active_operation_id},
+                doc! {"$set":{"idempotency_key_hash":"system:unrelated"}},
+            ),
+            "request_digest" => (
+                crate::models::remote_machine_operation::COLLECTION_NAME,
+                doc! {"_id":&stopped.active_operation_id},
+                doc! {"$set":{"request_digest":"unrelated"}},
+            ),
+            "effect_digest" => (
+                OUTBOX,
+                doc! {"operation_id":&stopped.active_operation_id},
+                doc! {"$set":{"effect_digest":"unrelated"}},
+            ),
+            "effect_scope" => (
+                OUTBOX,
+                doc! {"operation_id":&stopped.active_operation_id},
+                doc! {"$set":{"sandbox_name":"another-sandbox"}},
+            ),
+            _ => unreachable!(),
+        };
+        f.db.collection::<Document>(collection)
+            .update_one(filter, change)
+            .await
+            .unwrap();
+        assert!(
+            !Box::pin(operations::cancel_undispatched_claim(
+                &f.db, &stopped, &claim
+            ))
+            .await
+            .unwrap(),
+            "invalid {invalid} must not authorize cancellation"
+        );
+        assert!(f.manager.apply_effect(&claim).await.is_err());
+        let saved = resume_effect(&f, &resuming).await;
+        assert!(saved.submission.is_none());
+        assert!(saved.claim_id == claim.claim_id && saved.undispatched_claim_id == claim.claim_id);
+        assert!(
+            !Box::pin(operations::creation_responsibilities_terminal(
+                &f.db,
+                &current(&f).await
+            ))
+            .await
+            .unwrap()
+        );
+        assert!(f.server.received_requests().await.unwrap().is_empty());
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn resume_remediation_account_safety_keeps_machine_and_claim_fences() {
+    use crate::services::remote_machine_operation_service as operations;
+    for changed in [
+        "owner",
+        "revision",
+        "operation",
+        "generation",
+        "epoch",
+        "writer",
+        "admission",
+        "uncertainty",
+        "lease",
+    ] {
+        let f = fixture("resume_remediation_account_fence").await;
+        let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+        let stopped = Box::pin(account_safety_pause(&f)).await;
+        let claim = operations::claim_effect(&f.db, Utc::now(), std::time::Duration::from_secs(60))
+            .await
+            .unwrap()
+            .unwrap();
+        let change = match changed {
+            "owner" => doc! {"$set":{"owner_id":uuid::Uuid::new_v4().to_string()}},
+            "revision" => doc! {"$inc":{"revision":1_i64}},
+            "operation" => doc! {"$set":{"active_operation_id":uuid::Uuid::new_v4().to_string()}},
+            "generation" => doc! {"$inc":{"runtime_generation":1_i64}},
+            "epoch" => doc! {"$inc":{"credential_epoch":1_i64}},
+            "writer" => doc! {"$set":{"writer_fence":uuid::Uuid::new_v4().to_string()}},
+            "admission" => doc! {"$set":{"writer_admitted":true}},
+            "uncertainty" => doc! {"$set":{"native_uncertainty":"unexpected_pod_replacement"}},
+            "lease" => {
+                doc! {"$set":{"claimed_until":mongodb::bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}}
+            }
+            _ => unreachable!(),
+        };
+        let (collection, id) = if changed == "lease" {
+            (OUTBOX, &claim.id)
+        } else {
+            (
+                crate::models::remote_machine::COLLECTION_NAME,
+                &stopped.node_id,
+            )
+        };
+        f.db.collection::<Document>(collection)
+            .update_one(doc! {"_id":id}, change)
+            .await
+            .unwrap();
+        assert!(
+            !Box::pin(operations::cancel_undispatched_claim(
+                &f.db, &stopped, &claim
+            ))
+            .await
+            .unwrap(),
+            "stale {changed} must fence cancellation"
+        );
+        let saved = resume_effect(&f, &resuming).await;
+        assert!(saved.submission.is_none());
+        assert!(saved.claim_id == claim.claim_id && saved.undispatched_claim_id == claim.claim_id);
+        assert!(f.server.received_requests().await.unwrap().is_empty());
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn resume_remediation_account_safety_cannot_seal_uncertain_history() {
+    use crate::services::remote_machine_operation_service as operations;
+    for history in [
+        "reclaimed",
+        "dispatched",
+        "legacy_applied",
+        "partial_unknown",
+    ] {
+        let f = fixture("resume_remediation_account_unknown").await;
+        let resuming = Box::pin(pending_resume_after_old_cutoff(&f)).await;
+        let original =
+            operations::claim_effect(&f.db, Utc::now(), std::time::Duration::from_secs(60))
+                .await
+                .unwrap()
+                .unwrap();
+        let claim = if history == "reclaimed" {
+            operations::claim_effect(
+                &f.db,
+                Utc::now() + chrono::Duration::seconds(61),
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        } else if history == "legacy_applied" {
+            f.db.collection::<Document>(OUTBOX).update_one(doc! {"_id":&original.id}, doc! {"$set":{"state":"applied","claim_id":mongodb::bson::Bson::Null,"undispatched_claim_id":mongodb::bson::Bson::Null,"claimed_until":mongodb::bson::Bson::Null}}).await.unwrap();
+            resume_effect(&f, &resuming).await
+        } else {
+            Box::pin(operations::begin_submission(&f.db, &resuming, &original))
+                .await
+                .unwrap();
+            if history == "partial_unknown" {
+                let next = Box::pin(operations::begin_submission(&f.db, &resuming, &original))
+                    .await
+                    .unwrap();
+                operations::finish_submission(&f.db, &original.id, &next, None)
+                    .await
+                    .unwrap();
+            }
+            resume_effect(&f, &resuming).await
+        };
+        let stopped = Box::pin(account_safety_pause(&f)).await;
+        assert!(
+            !Box::pin(operations::cancel_undispatched_claim(
+                &f.db, &stopped, &claim
+            ))
+            .await
+            .unwrap()
+        );
+        assert!(
+            !Box::pin(operations::cancel_undispatched_claim(
+                &f.db, &stopped, &original
+            ))
+            .await
+            .unwrap()
+        );
+        f.manager.apply_effect(&claim).await.unwrap();
+        let saved = resume_effect(&f, &resuming).await;
+        assert!(
+            !saved
+                .submission
+                .as_ref()
+                .is_some_and(|s| s.cancelled_before_dispatch)
+        );
+        assert!(
+            !Box::pin(operations::creation_responsibilities_terminal(
+                &f.db, &stopped
+            ))
+            .await
+            .unwrap()
+        );
+        assert_slot_retained(&f).await;
+        assert!(f.server.received_requests().await.unwrap().is_empty());
+        f.db.drop().await.unwrap();
+    }
 }

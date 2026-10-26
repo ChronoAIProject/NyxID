@@ -14,6 +14,9 @@ use crate::errors::AppError;
 use super::key_provider::{KeyProvider, WrappedKey, derive_key_id};
 use super::local_key_provider::LocalKeyProvider;
 
+mod record;
+pub use record::RecordContext;
+
 /// Nonce size for AES-256-GCM (96 bits / 12 bytes).
 const NONCE_SIZE: usize = 12;
 
@@ -46,7 +49,7 @@ const V2_HEADER_SIZE: usize = 4;
 /// LocalKeyProvider produces 60-byte wrapped DEKs; KMS providers ~170-200 bytes.
 /// This upper bound guards against corrupted headers or unexpectedly large KMS
 /// responses causing unbounded allocations.
-const MAX_WRAPPED_DEK_SIZE: usize = 1024;
+pub(crate) const MAX_WRAPPED_DEK_SIZE: usize = 1024;
 
 /// Minimum v2 ciphertext: header(4) + wrapped_dek(1+) + data_nonce(12) + tag(16).
 const V2_MIN_SIZE: usize = V2_HEADER_SIZE + 1 + NONCE_SIZE + TAG_SIZE;
@@ -113,14 +116,10 @@ impl LegacyKeys {
             .encryption_key
             .as_deref()
             .expect("ENCRYPTION_KEY must be set when KEY_PROVIDER=local");
-        let current_bytes: Zeroizing<[u8; 32]> = Zeroizing::new(
-            hex::decode(current_hex)
-                .expect(
-                    "ENCRYPTION_KEY is not valid hex (should have been caught by validate_encryption_key)",
-                )
-                .try_into()
-                .expect("ENCRYPTION_KEY must decode to 32 bytes"),
-        );
+        let mut current_bytes = Zeroizing::new([0u8; 32]);
+        hex::decode_to_slice(current_hex, current_bytes.as_mut())
+            .unwrap_or_else(|_| panic!("ENCRYPTION_KEY must be exactly 32 hexadecimal bytes"));
+
         let current_id = derive_key_id(current_bytes.as_ref());
 
         let previous = config
@@ -128,14 +127,10 @@ impl LegacyKeys {
             .as_ref()
             .filter(|prev| prev.as_str() != current_hex)
             .map(|hex_str| {
-                let bytes: Zeroizing<[u8; 32]> = Zeroizing::new(
-                    hex::decode(hex_str)
-                        .expect(
-                            "ENCRYPTION_KEY_PREVIOUS is not valid hex (should have been caught by validate_encryption_key)",
-                        )
-                        .try_into()
-                        .expect("ENCRYPTION_KEY_PREVIOUS must decode to 32 bytes"),
-                );
+                let mut bytes = Zeroizing::new([0u8; 32]);
+                hex::decode_to_slice(hex_str, bytes.as_mut()).unwrap_or_else(|_| {
+                    panic!("ENCRYPTION_KEY_PREVIOUS must be exactly 32 hexadecimal bytes")
+                });
                 let id = derive_key_id(bytes.as_ref());
                 (bytes, id)
             });
@@ -144,9 +139,7 @@ impl LegacyKeys {
             && current_id == *previous_id
         {
             panic!(
-                "ENCRYPTION_KEY and ENCRYPTION_KEY_PREVIOUS produce the same key id (0x{:02x}). \
-                 This is a 1-in-256 hash collision. Generate a different key with: openssl rand -hex 32",
-                current_id
+                "ENCRYPTION_KEY and ENCRYPTION_KEY_PREVIOUS produce the same key id. Generate different key material"
             );
         }
 
@@ -170,6 +163,8 @@ impl LegacyKeys {
 /// or a KMS backend in Phase 4+). Optional raw legacy keys are retained only
 /// for v0/v1 decryption fallback.
 pub struct EncryptionKeys {
+    allow_legacy_record_reads: bool,
+    contextual_record_writes: bool,
     /// KeyProvider for v2 envelope DEK wrap/unwrap operations.
     provider: Arc<dyn KeyProvider>,
     /// Optional fallback provider for v2 DEKs wrapped by a previous provider
@@ -211,6 +206,8 @@ impl EncryptionKeys {
     /// available unless legacy raw keys are attached separately.
     pub fn with_provider(provider: Arc<dyn KeyProvider>) -> Self {
         Self {
+            allow_legacy_record_reads: true,
+            contextual_record_writes: cfg!(test),
             provider,
             fallback_provider: None,
             legacy: None,
@@ -225,6 +222,8 @@ impl EncryptionKeys {
         fallback: Option<Arc<dyn KeyProvider>>,
     ) -> Self {
         Self {
+            allow_legacy_record_reads: true,
+            contextual_record_writes: cfg!(test),
             provider,
             fallback_provider: fallback,
             legacy: None,
@@ -240,6 +239,8 @@ impl EncryptionKeys {
         let provider = Arc::new(LocalKeyProvider::from_config(config));
         let legacy = LegacyKeys::from_config(config);
         let mut keys = Self::with_provider(provider);
+        keys.allow_legacy_record_reads = config.allow_legacy_record_reads;
+        keys.contextual_record_writes = config.contextual_record_writes;
         keys.legacy = Some(legacy);
         keys
     }
@@ -247,6 +248,22 @@ impl EncryptionKeys {
     /// Attach legacy keys for v0/v1 decrypt fallback.
     pub(crate) fn set_legacy(&mut self, legacy: LegacyKeys) {
         self.legacy = Some(legacy);
+    }
+
+    pub(crate) fn set_allow_legacy_record_reads(&mut self, allow: bool) {
+        self.allow_legacy_record_reads = allow;
+    }
+
+    pub(crate) fn set_contextual_record_writes(&mut self, enabled: bool) {
+        self.contextual_record_writes = enabled;
+    }
+
+    pub(crate) fn contextual_record_writes(&self) -> bool {
+        self.contextual_record_writes
+    }
+
+    pub(crate) fn allow_legacy_record_reads(&self) -> bool {
+        self.allow_legacy_record_reads
     }
 
     /// Returns true if a previous key is configured.
@@ -519,15 +536,13 @@ impl EncryptionKeys {
             }
         }
 
-        if let Some(key_id) = unknown_key_id {
+        if unknown_key_id.is_some() {
             self.counters
                 .unknown_key_id_failures
                 .fetch_add(1, Ordering::Relaxed);
             self.log_once(
                 &self.counters.logged_unknown_key_id,
-                &format!(
-                    "Encountered versioned ciphertext with unknown key id 0x{key_id:02x}; the data was likely encrypted with a key that is no longer configured"
-                ),
+                "Encountered versioned ciphertext requiring an unavailable wrapping key",
             );
         }
 
@@ -696,15 +711,13 @@ impl EncryptionKeys {
             }
         }
 
-        if let Some(key_id) = unknown_key_id {
+        if unknown_key_id.is_some() {
             self.counters
                 .unknown_key_id_failures
                 .fetch_add(1, Ordering::Relaxed);
             self.log_once(
                 &self.counters.logged_unknown_key_id,
-                &format!(
-                    "Encountered versioned ciphertext with unknown key id 0x{key_id:02x}; the data was likely encrypted with a key that is no longer configured"
-                ),
+                "Encountered versioned ciphertext requiring an unavailable wrapping key",
             );
         }
 
@@ -719,9 +732,21 @@ impl EncryptionKeys {
     /// Re-wrap a v2 ciphertext's DEK from the previous KEK to the current KEK.
     ///
     /// Only the wrapped DEK portion changes; the encrypted data is untouched.
-    /// Returns the original ciphertext unchanged if it is already wrapped with
-    /// the current KEK.
+    /// Authenticates the data before returning, including when already wrapped
+    /// with the current KEK. For an AAD-bound legacy field use
+    /// `rewrap_with_aad` with its original binding.
     pub async fn rewrap(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
+        self.rewrap_with_aad(ciphertext, &[]).await
+    }
+
+    /// Rewrap a legacy v2 envelope after authenticating its original AAD.
+    /// This method does not change the field's binding contract or convert it
+    /// to a contextual envelope; readiness requires successful authentication.
+    pub async fn rewrap_with_aad(
+        &self,
+        ciphertext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, AppError> {
         if !looks_like_v2(ciphertext) {
             return Err(AppError::Internal(
                 "rewrap() only supports v2 envelope format".to_string(),
@@ -731,15 +756,11 @@ impl EncryptionKeys {
         let kek_id = ciphertext[1];
         let wrapped_dek_len = u16::from_be_bytes([ciphertext[2], ciphertext[3]]) as usize;
         let required_len = V2_HEADER_SIZE + wrapped_dek_len + NONCE_SIZE + TAG_SIZE;
-        if wrapped_dek_len == 0 || ciphertext.len() < required_len {
-            return Err(AppError::Internal(
-                "Malformed v2 ciphertext: too short".to_string(),
-            ));
-        }
-
-        // Already wrapped with current KEK -- return as-is.
-        if kek_id == self.provider.current_key_id() {
-            return Ok(ciphertext.to_vec());
+        if wrapped_dek_len == 0
+            || wrapped_dek_len > MAX_WRAPPED_DEK_SIZE
+            || ciphertext.len() < required_len
+        {
+            return Err(AppError::Internal("Malformed v2 ciphertext".to_string()));
         }
 
         let wrapped_dek = &ciphertext[V2_HEADER_SIZE..V2_HEADER_SIZE + wrapped_dek_len];
@@ -750,23 +771,40 @@ impl EncryptionKeys {
             key_id: kek_id,
             ciphertext: Zeroizing::new(wrapped_dek.to_vec()),
         };
-        let plaintext_dek = match self.provider.unwrap_dek(&old_wrapped).await {
-            Ok(dek) => dek,
+        let (plaintext_dek, primary_unwrapped) = match self.provider.unwrap_dek(&old_wrapped).await
+        {
+            Ok(dek) => (dek, true),
             Err(_) => {
                 // Try fallback for migration rewrap
-                self.fallback_provider
+                let dek = self
+                    .fallback_provider
                     .as_ref()
                     .ok_or_else(|| {
                         AppError::Internal("No provider could unwrap DEK for rewrap".into())
                     })?
                     .unwrap_dek(&old_wrapped)
-                    .await?
+                    .await?;
+                (dek, false)
             }
         };
 
+        // Never count a recognizable header/current key selector as verified
+        // data. Authenticate the exact v2 payload, without a legacy fallback,
+        // before either the no-op or wrapping a new envelope.
+        let plaintext = Zeroizing::new(decrypt_raw_with_aad(data_portion, &plaintext_dek, aad)?);
+        drop(plaintext);
+        if primary_unwrapped && kek_id == self.provider.current_key_id() {
+            return Ok(ciphertext.to_vec());
+        }
+
         // Wrap with current key via provider (plaintext_dek is Zeroizing<Vec<u8>>).
         let new_wrapped = self.provider.wrap_dek(&plaintext_dek).await?;
-        let new_wrapped_len = new_wrapped.ciphertext.len() as u16;
+        if new_wrapped.ciphertext.is_empty() || new_wrapped.ciphertext.len() > MAX_WRAPPED_DEK_SIZE
+        {
+            return Err(AppError::Internal("Invalid wrapped DEK size".into()));
+        }
+        let new_wrapped_len = u16::try_from(new_wrapped.ciphertext.len())
+            .map_err(|_| AppError::Internal("Invalid wrapped DEK size".into()))?;
 
         // Assemble new v2 envelope with current KEK.
         let total = V2_HEADER_SIZE + new_wrapped_len as usize + data_portion.len();
@@ -949,6 +987,7 @@ mod tests {
         AppConfig {
             port: 3001,
             auth_device_eight_char_codes: false,
+            resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
@@ -956,6 +995,7 @@ mod tests {
             environment: "test".to_string(),
             jwt_private_key_path: "keys/private.pem".to_string(),
             jwt_public_key_path: "keys/public.pem".to_string(),
+            jwt_retained_public_key_paths: Vec::new(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
@@ -980,6 +1020,8 @@ mod tests {
             smtp_from_address: None,
             encryption_key: Some(key_hex.to_string()),
             encryption_key_previous: prev_hex.map(String::from),
+            allow_legacy_record_reads: true,
+            contextual_record_writes: cfg!(test),
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             platform_service_rate_limit_per_second: 2,
@@ -989,6 +1031,7 @@ mod tests {
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
+            hmac_keyset_path: None,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
@@ -1023,6 +1066,7 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             instance_name: "test-backend".to_string(),
+            security_rollout: Default::default(),
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
             internal_dispatch_hmac_key: None,
@@ -1082,6 +1126,7 @@ mod tests {
             cloud_response_cache_max_entry_bytes: 1024 * 1024,
             cloud_response_cache_max_entries: 256,
             billing_enabled: false,
+            billing_allocations_enabled: false,
             lago_api_url: None,
             lago_api_key: None,
             lago_plan_code: "starter".to_string(),
@@ -1769,6 +1814,99 @@ mod tests {
 
         // Should be identical (no-op)
         assert_eq!(encrypted, rewrapped);
+    }
+
+    #[tokio::test]
+    async fn v2_rewrap_authenticates_current_payload_and_original_aad() {
+        let keys = EncryptionKeys::from_config(&test_config(&"ab".repeat(32), None));
+        let encrypted = keys
+            .encrypt_with_aad(b"bound legacy plaintext", b"existing-binding")
+            .await
+            .unwrap();
+        assert!(keys.rewrap(&encrypted).await.is_err());
+        assert!(
+            keys.rewrap_with_aad(&encrypted, b"wrong-binding")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            keys.rewrap_with_aad(&encrypted, b"existing-binding")
+                .await
+                .unwrap(),
+            encrypted
+        );
+        let mut corrupt = encrypted.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(
+            keys.rewrap_with_aad(&corrupt, b"existing-binding")
+                .await
+                .is_err()
+        );
+        let mut malformed = encrypted;
+        malformed[2..4].copy_from_slice(&((MAX_WRAPPED_DEK_SIZE + 1) as u16).to_be_bytes());
+        assert!(keys.rewrap(&malformed).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn v2_rewrap_rejects_unbounded_provider_output_before_length_conversion() {
+        #[derive(Debug)]
+        struct InvalidWrapProvider {
+            size: usize,
+        }
+        #[async_trait]
+        impl KeyProvider for InvalidWrapProvider {
+            async fn wrap_dek(&self, _: &[u8]) -> Result<WrappedKey, AppError> {
+                Ok(WrappedKey {
+                    key_id: 0x22,
+                    ciphertext: Zeroizing::new(vec![0; self.size]),
+                })
+            }
+            async fn unwrap_dek(
+                &self,
+                wrapped: &WrappedKey,
+            ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+                MockKeyProvider::new(0x11, 0x33, None)
+                    .unwrap_dek(wrapped)
+                    .await
+            }
+            fn current_key_id(&self) -> u8 {
+                0x22
+            }
+            fn has_key_id(&self, key_id: u8) -> bool {
+                key_id == 0x11 || key_id == 0x22
+            }
+            fn has_previous_key(&self) -> bool {
+                true
+            }
+        }
+        let old = EncryptionKeys::with_provider(Arc::new(MockKeyProvider::new(0x11, 0x33, None)));
+        let encrypted = old.encrypt(b"legacy authentic payload").await.unwrap();
+        for size in [0, MAX_WRAPPED_DEK_SIZE + 1, u16::MAX as usize + 1] {
+            let rotated = EncryptionKeys::with_provider(Arc::new(InvalidWrapProvider { size }));
+            assert!(
+                rotated.rewrap(&encrypted).await.is_err(),
+                "invalid wrapped-DEK length {size} accepted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_rewrap_migrates_fallback_even_with_colliding_key_selectors() {
+        let old = Arc::new(MockKeyProvider::new(0x11, 0x33, None));
+        let primary = Arc::new(MockKeyProvider::new(0x11, 0x77, None));
+        let original = EncryptionKeys::with_provider(old.clone())
+            .encrypt(b"collision fixture")
+            .await
+            .unwrap();
+        let migrating = EncryptionKeys::with_provider_and_fallback(primary.clone(), Some(old));
+        let rewritten = migrating.rewrap(&original).await.unwrap();
+        assert_ne!(rewritten, original);
+        let primary_only = EncryptionKeys::with_provider(primary);
+        assert!(primary_only.decrypt(&original).await.is_err());
+        assert_eq!(
+            primary_only.decrypt(&rewritten).await.unwrap(),
+            b"collision fixture"
+        );
     }
 
     #[tokio::test]

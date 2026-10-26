@@ -492,7 +492,8 @@ pub async fn poll_auth_device_web(
             method: "device_code_web".to_string(),
             mfa_required: false,
         },
-    );
+    )
+    .await;
 
     tracing::info!(
         client_ip_hash = %client_ip_hash,
@@ -653,6 +654,7 @@ async fn approve_device_grant(
             input,
             selection,
             expiry,
+            user.derived_mfa_authority(),
         )
         .await?;
     } else {
@@ -668,6 +670,7 @@ async fn approve_device_grant(
             &state.encryption_keys,
             state.auth_device_hmac_key.as_slice(),
             input,
+            user.derived_mfa_authority(),
         )
         .await?;
     }
@@ -1157,8 +1160,32 @@ mod tests {
         assert_eq!(response.status, "pending");
     }
 
+    async fn assured_access_token(state: &AppState, user_id: &str) -> String {
+        let session =
+            crate::services::token_service::create_session_with_transaction_and_assurance(
+                &state.db, user_id, None, None, None, true,
+            )
+            .await
+            .unwrap();
+        crate::crypto::jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &Uuid::parse_str(user_id).unwrap(),
+            "",
+            None,
+            None,
+            None,
+            None,
+            Some(&session.session_id),
+        )
+        .unwrap()
+    }
+
     async fn request_and_approve(state: &AppState, server: &TestServer, user_id: &str) -> Value {
-        let token = access_token(state, user_id);
+        request_and_approve_with_token(server, &access_token(state, user_id)).await
+    }
+
+    async fn request_and_approve_with_token(server: &TestServer, token: &str) -> Value {
         let (status, request_json) = post_json(
             server,
             "/api/v1/auth/device/request",
@@ -1171,7 +1198,7 @@ mod tests {
         let (status, response) = post_json(
             server,
             "/api/v1/auth/device/approve",
-            Some(&token),
+            Some(token),
             serde_json::json!({ "user_code": request_json["user_code"] }),
         )
         .await;
@@ -1344,7 +1371,18 @@ mod tests {
             .await
             .expect("enable MFA");
         let server = spawn_test_server(state.clone()).await;
-        let request_json = request_and_approve(&state, &server, &user_id).await;
+        let (status, denied) = post_json(
+            &server,
+            "/api/v1/auth/device/approve",
+            Some(&access_token(&state, &user_id)),
+            serde_json::json!({"user_code":"ABCD-EFGH"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+        assert_eq!(denied["error_code"], 2003);
+        let request_json =
+            request_and_approve_with_token(&server, &assured_access_token(&state, &user_id).await)
+                .await;
 
         let device_row = state
             .db
@@ -1766,7 +1804,7 @@ mod tests {
                 .update_one(doc! {"_id": &actor}, doc! {"$set": {"mfa_enabled": true}})
                 .await
                 .unwrap();
-            let token = access_token(&state, &actor);
+            let token = assured_access_token(&state, &actor).await;
             let server = spawn_test_server(state.clone()).await;
             for (kind, ua) in [("cli", "nyxid-cli/0.20.0"), ("browser", "Mozilla/5.0")] {
                 let (status, request) = post_json(
@@ -2141,6 +2179,7 @@ mod tests {
                 approver_ip: Some("127.0.0.1".to_string()),
                 approver_user_agent: Some("nyxid-cli/0.8.0".to_string()),
             },
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false),
         )
         .await
         .expect("approve");

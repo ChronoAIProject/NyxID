@@ -199,6 +199,8 @@ pub struct AppConfig {
     pub frontend_url: String,
     /// Eight-character public codes; false retains the old v2 marker for rollout rollback.
     pub auth_device_eight_char_codes: bool,
+    /// Opt-in request-bound read identity proofs for registered resource servers.
+    pub resource_request_proof_enabled: bool,
     /// Additional CORS allowed origins (comma-separated, e.g. "http://localhost:5847,http://localhost:3000")
     pub cors_allowed_origins: Vec<String>,
     /// Additional origins trusted for browser CSRF (comma-separated).
@@ -221,6 +223,8 @@ pub struct AppConfig {
     pub jwt_private_key_path: String,
     /// Path to RSA public key PEM file for verifying JWTs
     pub jwt_public_key_path: String,
+    /// Verification-only PEMs retained during signing rotation; max 16.
+    pub jwt_retained_public_key_paths: Vec<String>,
     /// JWT issuer claim
     pub jwt_issuer: String,
     /// Access token TTL in seconds (default: 900 = 15 min)
@@ -280,6 +284,12 @@ pub struct AppConfig {
     /// Optional previous encryption key for key rotation (same format as
     /// `encryption_key`).
     pub encryption_key_previous: Option<String>,
+    /// Trusted rollout switch for converted contextual-field adapters. Disable
+    /// only after authenticated migration readiness and old-reader/writer drain.
+    /// Unconverted adapters and retained backups have separate retirement rules.
+    pub allow_legacy_record_reads: bool,
+    /// Explicit writer activation after every old writer/reader is drained.
+    pub contextual_record_writes: bool,
 
     // Rate limiting
     /// Max requests per second per IP for general endpoints
@@ -326,6 +336,8 @@ pub struct AppConfig {
     /// through `AppConfig` (rather than read via `std::env::var`
     /// at the call site) so ops can introspect the resolved value
     /// via the same path as every other env-backed setting.
+    /// Restricted local file containing the independently pinned HMAC keyset.
+    pub hmac_keyset_path: Option<String>,
     pub cli_pairing_hmac_key: Option<String>,
 
     /// Explicit HMAC key (64 hex chars = 32 bytes) used for audit-log
@@ -451,6 +463,7 @@ pub struct AppConfig {
     // Node Proxy
     /// Stable pod/host identity. The process generation is created at startup.
     pub instance_name: String,
+    pub security_rollout: crate::services::security_readiness_service::RolloutConfig,
     /// Dedicated private listener for inter-replica traffic.
     pub internal_bind_addr: String,
     /// Peer-reachable base URL for this exact replica.
@@ -572,6 +585,8 @@ pub struct AppConfig {
     /// Master billing switch. P1 uses this only as passive configuration;
     /// later phases wire the charging gate behind it.
     pub billing_enabled: bool,
+    /// Enable allocation policy authoring only after every billing writer is upgraded.
+    pub billing_allocations_enabled: bool,
     /// Lago API URL for later phases. Empty means no Lago sink configured.
     pub lago_api_url: Option<String>,
     /// Lago API key for later phases. Redacted from Debug.
@@ -1032,8 +1047,17 @@ impl AppConfig {
             hostname.as_deref(),
             detect_internal_advertise_ip,
         );
+        let (allow_legacy_record_reads, contextual_record_writes) = contextual_record_mode(
+            env::var("ALLOW_LEGACY_RECORD_READS").ok().as_deref(),
+            env::var("CONTEXTUAL_RECORD_WRITES").ok().as_deref(),
+            env::var("CONTEXTUAL_RECORD_WRITERS_DRAINED")
+                .ok()
+                .as_deref(),
+        )
+        .unwrap_or_else(|message| panic!("{message}"));
 
         Self {
+            resource_request_proof_enabled: parse_bool_env("NYXID_RESOURCE_REQUEST_PROOF_ENABLED", false),
             auth_device_eight_char_codes: env::var("AUTH_DEVICE_EIGHT_CHAR_CODES")
                 .map(|v| v.parse::<bool>().expect("AUTH_DEVICE_EIGHT_CHAR_CODES must be true or false"))
                 .unwrap_or(true),
@@ -1067,6 +1091,8 @@ impl AppConfig {
                 .unwrap_or_else(|_| "keys/private.pem".to_string()),
             jwt_public_key_path: env::var("JWT_PUBLIC_KEY_PATH")
                 .unwrap_or_else(|_| "keys/public.pem".to_string()),
+            jwt_retained_public_key_paths: env::var("JWT_RETAINED_PUBLIC_KEY_PATHS")
+                .unwrap_or_default().split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect(),
             jwt_issuer: env::var("JWT_ISSUER").unwrap_or_else(|_| base_url.clone()),
 
             base_url,
@@ -1126,6 +1152,8 @@ impl AppConfig {
             encryption_key_previous: env::var("ENCRYPTION_KEY_PREVIOUS")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            contextual_record_writes,
+            allow_legacy_record_reads,
 
             rate_limit_per_second: env::var("RATE_LIMIT_PER_SECOND")
                 .ok()
@@ -1165,6 +1193,7 @@ impl AppConfig {
                 "BROKER_REQUIRE_ADMIN_CAPABILITY",
                 false,
             ),
+            hmac_keyset_path: env::var("HMAC_KEYSET_PATH").ok().filter(|s| !s.trim().is_empty()),
             cli_pairing_hmac_key: env::var("CLI_PAIRING_HMAC_KEY")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
@@ -1272,6 +1301,10 @@ impl AppConfig {
                 .or_else(|_| env::var("POD_NAME"))
                 .or_else(|_| env::var("HOSTNAME"))
                 .unwrap_or_else(|_| "nyxid-backend".to_string()),
+            security_rollout: crate::services::security_readiness_service::RolloutConfig::parse(
+                &env::var("SECURITY_ROLLOUT_REPLICAS").unwrap_or_default(),
+                env::var("SECURITY_ROLLOUT_DRAINED").is_ok_and(|v| v == "true"),
+            ).expect("invalid security rollout configuration"),
             internal_bind_addr,
             internal_advertise_url,
             internal_dispatch_hmac_key: env::var("INTERNAL_DISPATCH_HMAC_KEY")
@@ -1487,6 +1520,7 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES),
             billing_enabled: parse_bool_env("BILLING_ENABLED", false),
+            billing_allocations_enabled: parse_bool_env("BILLING_ALLOCATIONS_ENABLED", false),
             lago_api_url: env::var("LAGO_API_URL")
                 .ok()
                 .map(|s| s.trim().to_string())
@@ -1902,6 +1936,7 @@ mod tests {
         AppConfig {
             port: 3001,
             auth_device_eight_char_codes: true,
+            resource_request_proof_enabled: false,
             base_url: base_url.to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
@@ -1911,6 +1946,7 @@ mod tests {
             environment: environment.to_string(),
             jwt_private_key_path: "keys/private.pem".to_string(),
             jwt_public_key_path: "keys/public.pem".to_string(),
+            jwt_retained_public_key_paths: Vec::new(),
             jwt_issuer: base_url.to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
@@ -1935,6 +1971,8 @@ mod tests {
             smtp_from_address: None,
             encryption_key: Some(encryption_key.to_string()),
             encryption_key_previous: None,
+            allow_legacy_record_reads: true,
+            contextual_record_writes: true,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             platform_service_rate_limit_per_second: 2,
@@ -1944,6 +1982,7 @@ mod tests {
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
+            hmac_keyset_path: None,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
@@ -1978,6 +2017,7 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             instance_name: "test-backend".to_string(),
+            security_rollout: Default::default(),
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
             internal_dispatch_hmac_key: None,
@@ -2037,6 +2077,7 @@ mod tests {
             cloud_response_cache_max_entries:
                 crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES,
             billing_enabled: false,
+            billing_allocations_enabled: false,
             lago_api_url: None,
             lago_api_key: None,
             lago_plan_code: "starter".to_string(),
@@ -2418,5 +2459,65 @@ mod tests {
         cfg.warn_if_non_url_issuer();
         cfg.jwt_issuer = "https://auth.example.com".to_string();
         cfg.warn_if_non_url_issuer();
+    }
+}
+
+/// Pure startup preflight; activating incompatible writes requires explicit
+/// deployment acknowledgement. This does not discover or stop other binaries.
+fn contextual_record_mode(
+    legacy_reads: Option<&str>,
+    enabled: Option<&str>,
+    drained: Option<&str>,
+) -> Result<(bool, bool), &'static str> {
+    let reads = match legacy_reads {
+        None | Some("true" | "1") => true,
+        Some("false" | "0") => false,
+        _ => return Err("ALLOW_LEGACY_RECORD_READS must be true, false, 1 or 0"),
+    };
+    let writes = match enabled {
+        None | Some("false" | "0") => false,
+        Some("true" | "1") if matches!(drained, Some("true" | "1")) => true,
+        Some("true" | "1") => {
+            return Err(
+                "CONTEXTUAL_RECORD_WRITES requires CONTEXTUAL_RECORD_WRITERS_DRAINED=true after old readers/writers are stopped",
+            );
+        }
+        _ => return Err("CONTEXTUAL_RECORD_WRITES must be true, false, 1 or 0"),
+    };
+    if !reads && !writes {
+        return Err(
+            "ALLOW_LEGACY_RECORD_READS=false requires CONTEXTUAL_RECORD_WRITES=true; compatible writers would produce unreadable records",
+        );
+    }
+    Ok((reads, writes))
+}
+#[cfg(test)]
+mod contextual_cutover_tests {
+    #[test]
+    fn record_mode_matrix_rejects_unreadable_writes_and_requires_drained_activation() {
+        use super::contextual_record_mode as mode;
+        assert_eq!(mode(None, None, None), Ok((true, false)));
+        for (reads, writes, expected) in [
+            ("true", "false", Some((true, false))),
+            ("true", "true", Some((true, true))),
+            ("false", "true", Some((false, true))),
+            ("false", "false", None),
+            ("1", "0", Some((true, false))),
+            ("1", "1", Some((true, true))),
+            ("0", "1", Some((false, true))),
+            ("0", "0", None),
+        ] {
+            let result = mode(Some(reads), Some(writes), Some("true"));
+            assert_eq!(result.ok(), expected, "reads={reads}, writes={writes}");
+        }
+        assert!(mode(Some("false"), None, Some("true")).is_err());
+        for reads in ["true", "false"] {
+            for drained in [None, Some("false"), Some("0"), Some("invalid")] {
+                assert!(mode(Some(reads), Some("true"), drained).is_err());
+            }
+            assert!(mode(Some(reads), Some("invalid"), Some("true")).is_err());
+        }
+        assert!(mode(Some("invalid"), Some("true"), Some("true")).is_err());
+        assert_eq!(mode(Some("false"), Some("1"), Some("1")), Ok((false, true)));
     }
 }

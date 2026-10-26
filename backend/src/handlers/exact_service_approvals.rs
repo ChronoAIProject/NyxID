@@ -141,6 +141,8 @@ mod tests {
 
     fn auth(method: AuthMethod) -> AuthUser {
         AuthUser {
+            mfa_assured: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -153,6 +155,7 @@ mod tests {
             acting_client_id: (method == AuthMethod::Delegated).then(|| "client-alpha".to_string()),
             oauth_client_id: None,
             token_jti: None,
+            oauth_lineage: None,
             approval_owner_user_id: None,
             auth_method: method,
             allow_all_services: true,

@@ -508,6 +508,17 @@ The admin page `/admin/billing` (tabs `?tab=overview|rates|settings`) and the AP
 - `PUT /admin/billing/services/{id}` accepts only `{"billing": {...}}` (unknown fields are rejected) and delegates to the `PUT /services/{id}` handler.
 - `POST /admin/billing/services/{id}/resync` reruns the Lago price sync and returns `{synced, service}`. Its `billing_service_resynced` audit row is best-effort: once Lago has applied the change the request does not fail.
 
+The native CLI exposes these routes through `nyxid admin billing config show|set`,
+`overview`, `rates [--service <slug|uuid>] [--include-retired]` and
+`service show|update|set-managed|resync|verify <slug|uuid>`. File updates accept
+`--file billing.json --dry-run`; the typed `set-managed` command validates the
+Telnyx contract and exact token prices. `service verify --managed` exits 2 until
+configuration and fresh exact cached rates are ready. Its checks can pass before
+platform access is enabled. `nyxid admin usage` shows exact funding splits and
+`nyxid admin billing ledger verify --all` checks the journal. All require a human
+profile; see [CLI billing reference](../skills/nyxid/references/billing.md) and
+[Telnyx walkthrough](TELNYX_PLATFORM_BILLING.md#cli-walkthrough-after-verification).
+
 ### Global defaults
 
 `PlatformSettings.billing` holds one value, `default_overdraft_cap_credits`. When it is set it wins over `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS`; otherwise the environment value applies. It is copied onto a wallet only when the wallet is first provisioned (first charge, top-up checkout or backfill). Existing wallets keep their cap. It accepts whole credits from 0 to 1,000,000,000,000.

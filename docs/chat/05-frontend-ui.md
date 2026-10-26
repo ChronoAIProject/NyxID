@@ -157,6 +157,33 @@ Media artifacts have an 8,000,000-character inline cap. Current history rows do
 not carry media, so an artifact is visible in the live local message but is not
 reconstructed after reload.
 
+### CMA delegation cards
+
+NyxBot and specialist threads render a `CmaOperationCard` beneath the assistant
+reply when an owner chat key actually invokes a supported CMA operation. The
+card comes from the durable MCP watch, never assistant text or a promised task
+plan. It shows the CMA identity, operation and agent IDs when available, a safe
+idempotency key, the invoking assistant's name, and the last observed status.
+Provisioning success is **Agent ready**; only a completed Responses operation is
+**Completed**. Progress stages describe submission, provisioning or activity,
+and readiness; they do not infer implementation or deployment milestones.
+
+History returns an owner/thread-scoped `cma_operations` metadata snapshot,
+including settled operations whose initiating turn is on an older message page.
+The transport attaches each card by `turn_id` after projecting stored and live
+messages. While a watch is submitting, waiting or cancelling, the selected
+thread refreshes history every five seconds, including after its assistant reply
+settles. Server polling continues independently of the page. Cards restore from
+history after reload and remain in the thread that made the call.
+
+Approval, connection, paused, failed, timeout and unavailable states remain
+distinct. A failed result download preserves an already confirmed CMA outcome.
+Stopping a watch says **Tracking stopped** and explains that CMA may still be
+running, since these adapters declare no upstream cancel operation. Card
+metadata is retained for 30 days; encrypted result retention stays at four hours.
+See [CMA operation contracts](../API_DISCOVERY.md#cma-operation-cards) for the
+supported endpoints and tracking limits.
+
 ## Long transcripts
 
 Rows re-render only when their message or the page's projection version changes,
@@ -188,7 +215,7 @@ send; the composer is freed without restoring duplicate text.
 
 ## Composer
 
-The composer is anchored at the bottom of the chat surface. The thread reserves its measured height and fades content behind it rather than clipping messages against a hard boundary.
+The composer is anchored at the bottom of the chat surface. The thread reserves its measured height up to half the visible viewport or 480px, whichever is smaller. Beyond that threshold, manual expansion overlays the chat without increasing its bottom inset. The opaque composer surface and fade move with the top edge.
 
 NyxAgent uses one settings menu in the composer footer. By default, it contains
 only **Thinking** (a toggle) and **Permissions**; the trigger shows the effective
@@ -215,14 +242,38 @@ upstream display names when present, with **Default model** for the legacy
 while a turn runs. New-chat selections are local to that composer, passed on the
 first send, and applied to any persisted upload draft before submission.
 
+Connection selection is separate from the permission/model menu. **Agent Details →
+Connections** groups accounts by service and identifies personal and organization
+ownership. NyxBot's Details lets the owner edit the existing saved connection
+order; this preference is account-wide and applies across agents. Eligible
+personal connections still precede organization connections. Specialist Details
+shows only granted connections; its Access section owns service grants and
+operation/resource limits. Choosing a connection does not impose folder/database
+restrictions or widen access.
+
+For a one-message exception, the composer's **Add context** (+) menu offers
+**Attach files** and **Use a connection**. The connection dialog is searchable
+by service, account, slug or organization and groups results by service. Selecting
+an account displays a removable chip naming the service, account, owner and
+**This message**, visible before sending. It clears after successful send and
+on navigation; a failed send retains it. If the selected connection becomes
+unavailable, sending is refused until the owner removes or replaces it. Voice
+is unavailable while a text-message connection is selected. Submission retains
+the leading `/service <UUID>` and actual newline; the server binds the choice
+to the admitted turn. Organization connections still require the existing action
+card in Auto and Ask every time.
+
 The composer stays in one row while empty or while its text fits alongside the
 controls. It expands only when text wraps or contains a newline, then collapses
 again when the text fits. In the expanded composer, the text occupies the full
 upper row. Attachments sit
 at the bottom left; the single settings trigger, optional voice action, and
 Send/Stop sit at the bottom right. When enabled by `assistant:voice`, the voice
-waveform occupies the send slot for an empty idle draft. Non-whitespace text or
-attachments switch that slot to the send arrow; an active turn keeps Stop available.
+waveform remains available for an empty idle draft. Send is absent for empty or
+whitespace-only drafts, regardless of voice availability. Non-whitespace text or
+attachments replace Voice with the send arrow in the same action slot; pending
+uploads keep Send disabled. Clearing the draft restores Voice. An active turn
+keeps Stop available, and an active voice call retains its in-composer call controls.
 The menu is bounded by the viewport and scrolls long model lists.
 
 For flagged users, the Reasoning row is visible but marked **Unavailable** and
@@ -239,7 +290,7 @@ supported effort field. Do not infer supported effort levels from model names.
 - Enter during IME composition does not send; both composition state and key code 229 are guarded.
 - The composer uses a minimal Tiptap/ProseMirror editor with atomic inline mention pills. Agent pills show display names; attachment pills show numbered handles: `image-1`, `file-1`, and `text-1` for long pasted text. Autocomplete, plain-text paste, copy, undo/redo, and Shift+Enter are supported. Serialization preserves the existing `@handle` text contract; attachment handles still resolve before sending. Draft storage remains plain text. Undo history resets across conversation/owner changes, after sending, and when removing an upload so deleted references cannot return. Formatting controls are not enabled in this first iteration.
 - Composer attachments occupy one horizontally scrollable row: square image previews and compact document cards with filename, type, and size. Long pastes show a text excerpt. Corner controls remove individual files; upload progress and errors remain within the fixed card height. Attachment mention handles remain available through autocomplete and card hover text. Adding attachments scrolls the row to the newest card; upload progress and removal preserve manual scrolling. Edge fades indicate additional cards offscreen.
-- The text editor grows from one through four rows by default, then scrolls internally. The expanded composer has a top-edge resize handle that changes the maximum text height (64px minimum, up to half the visible viewport or 480px). Short drafts still collapse to one row; the chosen maximum is retained within the mounted composer. Arrow keys adjust it, Home/End select its limits, and double-click resets it. A persistent, draggable thumb appears while text overflows, including after viewport resizing. Expanded controls sit 2px below the editor.
+- The text editor grows from one through four rows by default, then scrolls internally. Dragging the expanded composer’s top-edge handle changes its visible height even for short multiline drafts. The complete surface, including controls, attachments and padding, can reach 90% of the visible viewport, bounded below the chat header. Chat space stops growing at half the viewport or 480px; further expansion overlays the transcript. Shrinking below that threshold restores measured spacing. Short single-line drafts still collapse; the chosen height is retained within the mounted composer. Arrow keys adjust it, Home/End select its limits, and double-click resets it. Window and software-keyboard viewport changes recalculate the limit, keeping the grip and controls reachable. A persistent, draggable thumb appears while text overflows. Expanded controls sit 2px below the editor.
 - A long one-line draft switches controls to the multiline layout before text overlaps the button.
 
 The idle placeholder is `Message NyxID Assistant...`. During an active turn it is `Assistant is working...` and the textbox is disabled.
