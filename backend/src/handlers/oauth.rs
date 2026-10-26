@@ -2464,7 +2464,7 @@ fn authorization_code_grant_error(error: AppError) -> AppError {
 /// silently. A deactivated issuing client (`AuthenticationFailed`) stays
 /// `invalid_client` so the client re-registers.
 fn refresh_token_grant_error(error: AppError) -> AppError {
-    match error {
+    match error.into_refresh_source() {
         AppError::Unauthorized(message) | AppError::Conflict(message) => {
             AppError::ExternalTokenInvalid(message)
         }
