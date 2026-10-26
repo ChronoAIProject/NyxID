@@ -573,6 +573,35 @@ async fn automatic_receipts_require_clean_successful_completion() {
 }
 
 #[test]
+fn owner_selector_accepts_inline_requests_and_bounds_only_the_reference() {
+    for input in [
+        "/service connection continue the search",
+        "/service connection\nContinue the search",
+        "/service\tconnection\tcontinue the search",
+        "/service  connection \r\nContinue the search",
+    ] {
+        assert_eq!(owner_selector(input), Some("connection"), "{input:?}");
+    }
+    let longest = "a".repeat(128);
+    assert_eq!(
+        owner_selector(&format!("/service {longest} {}", "request ".repeat(100))),
+        Some(longest.as_str())
+    );
+    for input in [
+        "/service".to_owned(),
+        "/service \t".to_owned(),
+        "/service\nconnection".to_owned(),
+        "/service-other connection".to_owned(),
+        " /service connection".to_owned(),
+        "> /service connection".to_owned(),
+        "Quoted\n/service connection".to_owned(),
+        format!("/service {} continue", "a".repeat(129)),
+    ] {
+        assert_eq!(owner_selector(&input), None, "{input:?}");
+    }
+}
+
+#[test]
 fn selector_is_leading_exact_and_header_binding_excludes_only_control_metadata() {
     assert_eq!(
         owner_selector("/service connection\nDo work"),
