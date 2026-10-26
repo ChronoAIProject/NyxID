@@ -354,12 +354,33 @@ prices with `nyxid admin billing service show <slug>` and
 | `JWT_PUBLIC_KEY_PATH` | `keys/public.pem` | Path to RSA public key PEM file |
 | `JWT_ISSUER` | `nyxid` | JWT `iss` claim value |
 | `JWT_ACCESS_TTL_SECS` | `900` (15 min) | Access token lifetime in seconds |
-| `JWT_REFRESH_TTL_SECS` | `604800` (7 days) | Refresh token lifetime in seconds |
+| `JWT_REFRESH_TTL_SECS` | `604800` (7 days) | Rolling refresh-token lifetime; restarts on rotation. First-party account refreshes also require an unexpired session (see below) |
 | `JWT_RELAY_REPLY_TTL_SECS` | `1800` (30 min) | Lifetime of the per-callback reply token issued with channel-relay inbound callbacks (see [CHANNEL_BOT_RELAY.md](CHANNEL_BOT_RELAY.md#reply-token)). Tokens authorize one send, scoped to one inbound message + conversation + agent. Repeated attachment downloads do not consume the send; edits require the consumed send token. |
 | `JWT_RELAY_CALLBACK_TTL_SECS` | `300` (5 min) | Lifetime of the signed channel-relay callback JWT sent in `X-NyxID-Callback-Token`. |
 | `JWT_RELAY_ACCESS_TTL_SECS` | `300` (5 min) | Lifetime of the `X-NyxID-User-Token` relay access token shipped to a bot callback URL. Kept short (vs. the 900s general access token) because it is a first-party bearer credential that leaves NyxID's trust boundary. It is usable only on proxy/LLM surfaces (rejected elsewhere), inherits the originating agent key's service/node allowlist, and is invalidated when that agent key is revoked. |
 | `JWT_ASSISTANT_FORWARD_TTL_SECS` | `300` (5 min) | **LEGACY / tombstone.** Was the TTL of the retired `assistant_forward` marker token. Live assistant capability uses a standard delegated access token whose 300-second lifetime is the compile-time constant `crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS`; there is no environment variable for that lifetime, so setting this variable changes no live assistant token. See [Assistant Chat Architecture](chat/01-architecture.md#authorization-is-not-caller-passthrough). |
 | `SA_TOKEN_TTL_SECS` | `3600` (1 hour) | Service account token lifetime in seconds |
+
+First-party account sessions have a **fixed 30-day absolute lifetime** from login
+(`token_service::SESSION_TTL_SECS`, not an environment variable). Refresh rotation
+updates `last_active_at` and issues a new refresh token with a fresh rolling TTL;
+it does **not** extend the session's `expires_at`. Legacy first-party refresh tokens
+without a session binding receive a single fixed 30-day anchor at their first
+migration refresh. Neither ordinary activity nor `nyxid session refresh` bypasses
+this cap. `nyxid session status|list --output json` exposes `session_expires_at`
+and `refresh_expires_at`; status/list warn within three days of the absolute
+expiry. For unattended work, authorize `nyxid login --agent-key` with suitable
+scopes and key expiry: these credentials do not refresh, but remain subject to
+the key's expiry, revocation and live permissions.
+
+`POST /api/v1/auth/refresh` adds identifier-free `details.reason` values:
+`refresh_expired`, `refresh_reused`, `refresh_revoked`, `refresh_not_found`,
+`session_expired`, `session_revoked`, and `session_unavailable`. Status, error key,
+numeric code and message are unchanged. `session_unavailable` includes a parent
+removed by TTL cleanup; without its row the server cannot distinguish expiry
+from removal. Other authentication failures retain their existing generic reason.
+During rolling upgrades, clients must tolerate older replicas without these
+specific reasons and avoid treating "expired or revoked" as confirmed expiry.
 
 In development mode, RSA keys are auto-generated if the files do not exist. In production, you must provide pre-generated keys:
 

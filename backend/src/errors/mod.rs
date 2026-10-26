@@ -1,4 +1,5 @@
 pub mod access_denial;
+pub mod refresh;
 pub mod skill_draft;
 pub mod voice_start;
 use axum::http::StatusCode;
@@ -207,6 +208,13 @@ pub enum AppError {
 
     #[error("Token expired")]
     TokenExpired,
+
+    /// Additive /auth/refresh diagnostics, retaining the underlying contract.
+    #[error("{source}")]
+    RefreshRefused {
+        source: Box<AppError>,
+        reason: refresh::RefreshRefusalReason,
+    },
 
     #[error("MFA required")]
     MfaRequired { session_token: String },
@@ -839,6 +847,7 @@ impl AppError {
 
     fn status_code(&self) -> StatusCode {
         match self {
+            Self::RefreshRefused { source, .. } => source.status_code(),
             Self::VoiceStartFailed(failure) => failure.source.status_code(),
             Self::BadRequest(_)
             | Self::CredentialUnavailable(_)
@@ -1072,6 +1081,7 @@ impl AppError {
 
     pub(crate) fn error_code(&self) -> u32 {
         match self {
+            Self::RefreshRefused { source, .. } => source.error_code(),
             Self::VoiceStartFailed(failure) => failure.source.error_code(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
@@ -1310,6 +1320,7 @@ impl AppError {
     /// Each variant maps to a standard OAuth error string — no string matching.
     pub(crate) fn oauth_error_code(&self) -> &'static str {
         match self {
+            Self::RefreshRefused { source, .. } => source.oauth_error_code(),
             Self::MfaRequired { .. } => "mfa_required",
             Self::MfaStepUpRequired => "mfa_step_up_required",
             Self::OAuthAuthorityUnavailable => "temporarily_unavailable",
@@ -1333,6 +1344,7 @@ impl AppError {
     /// HTTP status to use when emitting an RFC 6749 §5.2 error response.
     pub(crate) fn oauth_status(&self) -> StatusCode {
         match self {
+            Self::RefreshRefused { source, .. } => source.oauth_status(),
             Self::OAuthAuthorityUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unauthorized(_)
             | Self::AuthenticationFailed(_)
@@ -1347,6 +1359,7 @@ impl AppError {
 
     pub(crate) fn error_key(&self) -> &str {
         match self {
+            Self::RefreshRefused { source, .. } => source.error_key(),
             Self::VoiceStartFailed(failure) => failure.source.error_key(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
@@ -1599,6 +1612,11 @@ impl AppError {
 
     /// The same client-safe payload for JSON responses and streaming errors.
     pub fn response_body(&self) -> ErrorResponse {
+        if let Self::RefreshRefused { source, reason } = self {
+            let mut response = source.response_body();
+            response.details = Some(serde_json::json!({"reason": reason}));
+            return response;
+        }
         if let Self::VoiceStartFailed(failure) = self {
             return failure.response();
         }
