@@ -888,6 +888,7 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         saved_login_ids: Vec::new(),
         created_by: "user".into(),
         model: "default".into(),
+        owner_model_route: None,
         access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),

@@ -633,6 +633,92 @@ fn held_execution_fingerprint_binds_credentials_within_the_process_and_preserves
     assert!(pool != execution_projection_digest(&target, false));
 }
 
+#[tokio::test]
+async fn guest_1995_route_binding_uses_durable_credential_identity() {
+    use crate::services::user_api_key_service::{CreateApiKeyParams, create_api_key};
+    let f = orchestrator_fixture("guest_1995_durable_route").await;
+    let id = connection(&f, &f.owner, "model-route", None).await;
+    let credential = create_api_key(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        CreateApiKeyParams {
+            label: "model route",
+            credential_type: "bearer",
+            credential: "test-only-model-key",
+            access_token: None,
+            refresh_token: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            status: "active",
+            source: None,
+            source_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    f.state.db.collection::<Document>("user_services").update_one(doc! {"_id":&id},
+        doc! {"$set":{"api_key_id":&credential.id,"auth_method":"bearer","credential_binding":"user"}}).await.unwrap();
+    let mut target = target(&f, &id).await;
+    let operation = json!({"kind":"raw_inference","model":"test","input_admission":"first-turn"});
+    let bound = guest_model::route(
+        &f.state.db,
+        &f.chat,
+        &f.row.model,
+        Some(&id),
+        &target,
+        &operation,
+    )
+    .await
+    .unwrap();
+    let mut next_chat = f.chat.clone();
+    next_chat.api_key_id = Uuid::new_v4().to_string();
+    let mut next_operation = operation.clone();
+    next_operation["input_admission"] = json!("next-turn");
+    // A different replica/turn must not depend on held credential MACs or
+    // ephemeral refreshed token bytes. Explicit replacement advances the epoch.
+    target.credential = "refreshed-token".to_owned().into();
+    let next = guest_model::route(
+        &f.state.db,
+        &next_chat,
+        &f.row.model,
+        Some(&id),
+        &target,
+        &next_operation,
+    )
+    .await
+    .unwrap();
+    assert!(bound == next);
+    f.state
+        .db
+        .collection::<Document>("user_api_keys")
+        .update_one(
+            doc! {"_id":&credential.id},
+            doc! {"$inc":{"credential_epoch":1_i64}},
+        )
+        .await
+        .unwrap();
+    let replaced = guest_model::route(
+        &f.state.db,
+        &next_chat,
+        &f.row.model,
+        Some(&id),
+        &target,
+        &next_operation,
+    )
+    .await
+    .unwrap();
+    assert!(
+        bound != replaced,
+        "credential replacement requires owner establishment"
+    );
+    f.state.db.drop().await.unwrap();
+}
+
 #[test]
 fn raw_inference_is_conservative_about_state_and_provider_effects() {
     let good = json!({"model":"test", "input":"hello", "store":false,

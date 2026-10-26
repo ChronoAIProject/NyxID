@@ -25,7 +25,15 @@ async fn callback_proxy(
 async fn guest_1995_model_callback_through_real_turn_pipeline() {
     Box::pin(guest_pipeline(
         false,
-        &["guest", "approval", "stateful", "concurrency", "catalog"],
+        &[
+            "owner",
+            "guest",
+            "approval",
+            "stateful",
+            "concurrency",
+            "owner_catalog",
+            "catalog",
+        ],
     ))
     .await;
 }
@@ -45,8 +53,36 @@ async fn guest_1995_nyxbot_model_works_but_guest_tool_calls_stay_refused() {
             "approval",
             "stateful",
             "concurrency",
+            "owner_catalog",
             "catalog",
         ],
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn guest_1995_route_binding_rejects_other_byok_models_and_unadmitted_input() {
+    Box::pin(guest_pipeline(
+        false,
+        &[
+            "owner",
+            "probes",
+            "guest_new_thread",
+            "missing_input",
+            "guest",
+            "catalog_unbound",
+            "owner_catalog",
+            "catalog",
+        ],
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn guest_1995_never_learns_a_route_from_a_guest() {
+    Box::pin(guest_pipeline(
+        false,
+        &["unbound", "unbound", "owner", "guest"],
     ))
     .await;
 }
@@ -94,11 +130,19 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         json!({"model":"test","store":false,"input":"test","stream":false}),
     ));
     let input_source = model_input.clone();
+    let scenario_source = Arc::new(Mutex::new(String::new()));
+    let current_scenario = scenario_source.clone();
+    let callback_db = f.state.db.clone();
+    let callback_conversation = f.row.id.clone();
     let agent = Router::new().route("/v1/responses", post(move |headers: HeaderMap, Json(body): Json<Value>| {
         let callbacks = callbacks.clone();
         let sink = sink.clone();
         let input_source = input_source.clone();
+        let scenario_source = scenario_source.clone();
+        let db = callback_db.clone();
+        let conversation = callback_conversation.clone();
         async move {
+            let scenario = scenario_source.lock().await.clone();
             let bearer = headers.get("authorization").unwrap().clone();
             // NyxAgent's nyxid::Auth uses X-API-Key for MCP and Bearer for
             // model proxy calls. Both carry this conversation's exact key.
@@ -113,12 +157,38 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                 let bytes = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024).await.unwrap();
                 observations.push(json!({"stage":method,"status":status,"body":serde_json::from_slice::<Value>(&bytes).unwrap()}));
             }
+            if scenario == "missing_input" {
+                db.collection::<bson::Document>("assistant_service_execution").delete_many(doc! {
+                    "conversation_id":&conversation,"kind":"input_admission"
+                }).await.unwrap();
+            }
             let response = callbacks.clone().oneshot(Request::builder().method("POST").uri("/api/v1/proxy/s/guest-model/v1/responses")
                 .header("authorization", bearer.clone()).header("content-type", "application/json")
                 .body(Body::from(input_source.lock().await.to_string())).unwrap()).await.unwrap();
             let status = response.status().as_u16();
             let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             observations.push(json!({"stage":"model","status":status,"body":serde_json::from_slice::<Value>(&bytes).unwrap()}));
+            if scenario == "probes" {
+                // The exact same authenticated key and live turn can use only
+                // the owner-established route, not another owner BYOK account.
+                for (slug, path, model, store, override_method) in [
+                    ("guest-unrelated", "v1/responses", "test", false, false),
+                    ("guest-expensive", "v1/responses", "test", false, false),
+                    ("guest-model", "v1/responses", "expensive-model", false, false),
+                    ("guest-model", "v1/responses", "", false, false),
+                    ("guest-model", "v1/models", "test", false, false),
+                    ("guest-model", "v1/responses", "test", true, false),
+                    ("guest-model", "v1/responses", "test", false, true),
+                ] {
+                    let mut request = Request::builder().method("POST").uri(format!("/api/v1/proxy/s/{slug}/{path}"))
+                        .header("authorization", bearer.clone()).header("content-type", "application/json");
+                    if override_method { request = request.header("x-http-method-override", "DELETE"); }
+                    let response = callbacks.clone().oneshot(request.body(Body::from(json!({
+                        "model":model,"store":store,"input":"unrelated generation","stream":false
+                    }).to_string())).unwrap()).await.unwrap();
+                    assert_eq!(response.status(), StatusCode::FORBIDDEN, "probe {slug}/{path}, model={model}, store={store}, override={override_method}");
+                }
+            }
             if nyxbot && body["instructions"].as_str().is_some_and(|text| text.contains("you use no tools or services")) {
                 let response = callbacks.oneshot(Request::builder().method("POST").uri("/mcp")
                     .header("x-api-key", thread_key).header("content-type", "application/json")
@@ -172,6 +242,71 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         )
         .await
         .unwrap();
+    if scenarios.contains(&"probes") {
+        let mut unrelated = model.clone();
+        unrelated.id = Uuid::new_v4().to_string();
+        unrelated.slug = "guest-unrelated".into();
+        unrelated.auth_method = "bearer".into();
+        unrelated.requires_user_credential = true;
+        f.state
+            .db
+            .collection::<DownstreamService>(SERVICES)
+            .insert_one(&unrelated)
+            .await
+            .unwrap();
+        for (slug, catalog) in [
+            ("guest-unrelated", &unrelated.id),
+            ("guest-expensive", &model.id),
+        ] {
+            let byok = connected(&f.state.db, &f.owner, slug, &provider.uri()).await;
+            use crate::services::user_api_key_service::{CreateApiKeyParams, create_api_key};
+            let credential = create_api_key(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.owner,
+                CreateApiKeyParams {
+                    label: "unrelated owner BYOK",
+                    credential_type: "bearer",
+                    credential: "test-only-byok",
+                    access_token: None,
+                    refresh_token: None,
+                    token_scopes: None,
+                    expires_at: None,
+                    provider_config_id: None,
+                    connection_id: None,
+                    oauth_client_id: None,
+                    oauth_client_secret: None,
+                    status: "active",
+                    source: None,
+                    source_id: None,
+                },
+            )
+            .await
+            .unwrap();
+            f.state
+                .db
+                .collection::<bson::Document>("user_services")
+                .update_one(
+                    doc! {"_id":byok},
+                    doc! {"$set":{"catalog_service_id":catalog,"api_key_id":credential.id,
+                    "auth_method":"bearer","credential_binding":"user"}},
+                )
+                .await
+                .unwrap();
+        }
+        // Establish the agent's intended model connection through the owner's
+        // saved order. An unordered same-catalog alternative otherwise triggers
+        // service_priority_required before the owner can establish any route.
+        f.state
+            .db
+            .collection::<bson::Document>("service_preferences")
+            .insert_one(doc! {
+                "_id":&f.owner,"ordered":[&connection],
+                "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+    }
     f.state
         .db
         .collection::<bson::Document>("assistant_conversations")
@@ -183,7 +318,18 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         .unwrap();
     for &scenario in scenarios {
         let provider_calls_before = provider.received_requests().await.unwrap().len();
-        let guest = scenario != "owner";
+        let guest = !scenario.starts_with("owner");
+        *current_scenario.lock().await = scenario.to_owned();
+        let route_before = f
+            .state
+            .db
+            .collection::<bson::Document>("assistant_agents")
+            .find_one(doc! {"_id":&f.chat.agent_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get("owner_model_route")
+            .cloned();
         *model_input.lock().await =
             json!({"model":"test","store": scenario == "stateful","input":"test","stream":false});
         f.state
@@ -208,11 +354,19 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
             .await
             .unwrap();
         }
-        if scenario == "catalog" {
+        if matches!(scenario, "catalog" | "catalog_unbound" | "owner_catalog") {
             f.state
                 .db
                 .collection::<bson::Document>("user_services")
                 .delete_one(doc! {"_id": &connection})
+                .await
+                .unwrap();
+            // Remove the unrelated same-catalog BYOK alternative as well: this
+            // scenario specifically tests the catalog-only path.
+            f.state
+                .db
+                .collection::<bson::Document>("user_services")
+                .delete_many(doc! {"catalog_service_id":&model.id})
                 .await
                 .unwrap();
         }
@@ -243,10 +397,13 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                 .await
                 .unwrap();
         }
-        let input: engine::TurnRequest = serde_json::from_value(
-            json!({"conversation_id":&f.row.id,"text":"Where is the shop?"}),
-        )
-        .unwrap();
+        let input: engine::TurnRequest =
+            serde_json::from_value(if scenario == "guest_new_thread" {
+                json!({"agent_id":&f.chat.agent_id,"text":"Where is the shop?"})
+            } else {
+                json!({"conversation_id":&f.row.id,"text":"Where is the shop?"})
+            })
+            .unwrap();
         let mut start = engine::TurnStart::from(&input);
         start.guest = guest;
         start.origin = crate::models::assistant_conversation::TurnOrigin::Channel;
@@ -275,6 +432,25 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         })
         .await
         .unwrap();
+        if guest {
+            let route_after = f
+                .state
+                .db
+                .collection::<bson::Document>("assistant_agents")
+                .find_one(doc! {"_id":&f.chat.agent_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get("owner_model_route")
+                .cloned();
+            assert_eq!(
+                route_before, route_after,
+                "guest may not establish or replace a model route"
+            );
+            assert_eq!(f.state.db.collection::<bson::Document>("assistant_service_execution")
+                .count_documents(doc! {"conversation_id":&row.id,"turn_id":completed["turn_id"].as_str(),"kind":"model_consent"})
+                .await.unwrap(), 0, "guest may not mint owner consent");
+        }
         let messages = engine::messages(&f.state.db, &f.owner, &row.id, 10, None)
             .await
             .unwrap();
@@ -311,7 +487,10 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
             );
         }
         let expected = match scenario {
-            "approval" | "stateful" => Some((403, "api_key_scope_forbidden", 9000)),
+            "approval" => Some((403, "api_key_scope_forbidden", 9000)),
+            "stateful" | "missing_input" | "unbound" | "catalog_unbound" => {
+                Some((403, "guest_model_route_required", 9000))
+            }
             "concurrency" => Some((429, "service_concurrency_limited", 12600)),
             _ => None,
         };
@@ -344,8 +523,8 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         } else {
             assert_eq!(
                 reply.status, "completed",
-                "scenario={scenario}; callbacks={calls}; error={:?}",
-                reply.error_code
+                "scenario={scenario}; model_callback={}; error={:?}",
+                calls[2], reply.error_code
             );
             assert_eq!(
                 provider.received_requests().await.unwrap().len(),

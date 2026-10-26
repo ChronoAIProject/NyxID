@@ -85,6 +85,17 @@ pub struct MemoryNote {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Server-established model transport from an admitted owner turn. Digests
+/// bind execution and request identity without retaining prompts or secrets.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerModelRoute {
+    pub profile: String,
+    pub catalog_service_id: String,
+    pub connection_id: Option<String>,
+    pub operation: String,
+    pub execution: String,
+}
+
 /// A persistent NyxBot agent. Conversations are its threads (web chats and
 /// channel chats); its identity, grants and memory are shared across them.
 #[derive(Clone, Serialize, Deserialize)]
@@ -134,6 +145,8 @@ pub struct AssistantAgent {
     pub created_by: String,
     /// NyxAgent profile for new threads.
     pub model: String,
+    #[serde(default)]
+    pub owner_model_route: Option<Box<OwnerModelRoute>>,
     /// Optional per-agent approval policy; absent inherits the owner's mode.
     #[serde(default)]
     pub access_mode_override: Option<super::assistant_settings::AccessMode>,
