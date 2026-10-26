@@ -36,11 +36,12 @@ const SESSION_SKEW_SECS: i64 = 60;
 
 const TOKEN_DIR_NAME: &str = ".nyxid";
 const PROFILES_DIR_NAME: &str = "profiles";
-const TOKEN_FILE_NAME: &str = "access_token";
-const REFRESH_TOKEN_FILE_NAME: &str = "refresh_token";
+pub(crate) const TOKEN_FILE_NAME: &str = "access_token";
+pub(crate) const REFRESH_TOKEN_FILE_NAME: &str = "refresh_token";
+pub(crate) const LOGIN_GENERATION_FILE_NAME: &str = "login_generation";
 const REFRESH_LOCK_FILE_NAME: &str = ".refresh.lock";
-const BASE_URL_FILE_NAME: &str = "base_url";
-const USER_ID_FILE_NAME: &str = "user_id";
+pub(crate) const BASE_URL_FILE_NAME: &str = "base_url";
+pub(crate) const USER_ID_FILE_NAME: &str = "user_id";
 const CALLBACK_TIMEOUT_SECS: u64 = 120;
 
 /// Extract the `sub` claim (NyxID user UUID) from a JWT access token.
@@ -59,10 +60,18 @@ pub fn jwt_claim_string_from_token(token: &str, claim: &str) -> Option<String> {
 }
 
 pub fn jwt_exp_from_token(token: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    jwt_timestamp_from_token(token, "exp")
+}
+
+pub(crate) fn jwt_iat_from_token(token: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    jwt_timestamp_from_token(token, "iat")
+}
+
+fn jwt_timestamp_from_token(token: &str, claim: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let payload_b64 = token.split('.').nth(1)?;
     let decoded = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
     let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-    let exp = json.get("exp")?.as_i64()?;
+    let exp = json.get(claim)?.as_i64()?;
     chrono::DateTime::from_timestamp(exp, 0)
 }
 
@@ -91,7 +100,7 @@ pub fn validate_profile_name(name: &str) -> Result<()> {
 /// Resolve the token directory for a given profile.
 /// `None` = default profile (`~/.nyxid/`)
 /// `Some(name)` = named profile (`~/.nyxid/profiles/{name}/`)
-fn token_dir_for_profile(profile: Option<&str>) -> Result<PathBuf> {
+pub(crate) fn token_dir_for_profile(profile: Option<&str>) -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
     let base = home.join(TOKEN_DIR_NAME);
     match profile {
@@ -119,6 +128,15 @@ fn user_id_file_path_for(profile: Option<&str>) -> Result<PathBuf> {
     Ok(token_dir_for_profile(profile)?.join(USER_ID_FILE_NAME))
 }
 
+fn read_profile_file(profile: Option<&str>, name: &str) -> Result<Option<String>> {
+    let path = token_dir_for_profile(profile)?.join(name);
+    match std::fs::read_to_string(&path) {
+        Ok(value) => Ok((!value.trim().is_empty()).then(|| value.trim().to_owned())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("Failed to read {}", path.display())),
+    }
+}
+
 pub fn read_saved_token_for(profile: Option<&str>) -> Option<String> {
     let path = if agent_key::is_agent_key_profile(profile) {
         token_dir_for_profile(profile)
@@ -137,6 +155,7 @@ pub fn read_saved_token() -> Option<String> {
     read_saved_token_for(None)
 }
 
+#[cfg(test)]
 pub fn read_saved_refresh_token_for(profile: Option<&str>) -> Option<String> {
     if agent_key::is_agent_key_profile(profile) {
         return None;
@@ -196,7 +215,7 @@ fn replace_login_files(profile: Option<&str>, write: impl FnOnce() -> Result<()>
     let _lock = acquire_refresh_lock(profile)?;
     clear_login_credentials(profile)?;
     write_token_file(
-        &token_dir_for_profile(profile)?.join("login_generation"),
+        &token_dir_for_profile(profile)?.join(LOGIN_GENERATION_FILE_NAME),
         &uuid::Uuid::new_v4().to_string(),
     )?;
     let result = write();
@@ -207,36 +226,119 @@ fn replace_login_files(profile: Option<&str>, write: impl FnOnce() -> Result<()>
 }
 
 pub(crate) fn login_generation(profile: Option<&str>) -> Option<String> {
-    std::fs::read_to_string(
-        token_dir_for_profile(profile)
-            .ok()?
-            .join("login_generation"),
-    )
-    .ok()
+    read_login_generation(profile).ok().flatten()
+}
+
+fn read_login_generation(profile: Option<&str>) -> Result<Option<String>> {
+    read_profile_file(profile, LOGIN_GENERATION_FILE_NAME)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProfileDestinationError {
+    #[error(
+        "Invalid profile destination; credential transport requires HTTPS (HTTP is allowed only on localhost, 127.0.0.1 or [::1])"
+    )]
+    Invalid,
+    #[error(
+        "Profile destination changed or differs from --base-url. Re-run the command with the intended profile."
+    )]
+    Mismatch,
 }
 
 pub(crate) fn validate_profile_destination(profile: Option<&str>, destination: &str) -> Result<()> {
-    if let Some(saved) = read_saved_base_url_for(profile)
-        && login_exchange::normalized_destination(&saved)?
-            != login_exchange::normalized_destination(destination)?
-    {
-        bail!(
-            "Profile destination changed or differs from --base-url. Re-run the command with the intended profile."
-        );
+    let destination = login_exchange::normalized_destination(destination)
+        .map_err(|_| ProfileDestinationError::Invalid)?;
+    if let Some(saved) = read_profile_file(profile, BASE_URL_FILE_NAME)? {
+        let saved = login_exchange::normalized_destination(&saved)
+            .map_err(|_| ProfileDestinationError::Invalid)?;
+        if saved != destination {
+            return Err(ProfileDestinationError::Mismatch.into());
+        }
     }
     Ok(())
+}
+
+pub(crate) struct SavedProfileSnapshot {
+    pub agent: bool,
+    pub access: Option<String>,
+    pub refresh: Option<String>,
+    pub destination: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ProfileSnapshotError {
+    pub code: &'static str,
+    pub exit: i32,
+    pub cause: anyhow::Error,
+}
+
+impl From<anyhow::Error> for ProfileSnapshotError {
+    fn from(cause: anyhow::Error) -> Self {
+        let (code, exit) = if cause.is::<ProfileLockTimeout>() {
+            ("profile_lock_timeout", 4)
+        } else if cause.is::<ProfileDestinationError>() {
+            ("profile_destination_mismatch", 1)
+        } else {
+            ("profile_storage_error", 1)
+        };
+        Self { code, exit, cause }
+    }
+}
+
+/// Capture only saved-profile authority while holding the same lock as renewal
+/// and login replacement. Credential overrides are intentionally not resolved.
+pub(crate) async fn snapshot_saved_profile(
+    auth: &AuthArgs,
+) -> std::result::Result<SavedProfileSnapshot, ProfileSnapshotError> {
+    let profile = auth.profile.as_deref();
+    let _lock = acquire_refresh_lock_async(profile).await?;
+    let agent = agent_key::read_auth_kind(profile)? == agent_key::AuthKind::AgentKey;
+    let access = read_profile_file(
+        profile,
+        if agent {
+            agent_key::TOKEN_FILE
+        } else {
+            TOKEN_FILE_NAME
+        },
+    )?;
+    let refresh = read_profile_file(profile, REFRESH_TOKEN_FILE_NAME)?;
+    let destination = auth
+        .base_url
+        .clone()
+        .or(read_profile_file(profile, BASE_URL_FILE_NAME)?);
+    if let Some(destination) = &destination {
+        validate_profile_destination(profile, destination)?;
+    }
+    Ok(SavedProfileSnapshot {
+        agent,
+        access,
+        refresh,
+        destination,
+    })
+}
+
+fn resolved_refresh_destination(auth: &AuthArgs) -> Result<String> {
+    let destination = auth.resolved_base_url()?;
+    validate_profile_destination(auth.profile.as_deref(), &destination).map_err(|error| {
+        if error.is::<ProfileDestinationError>() {
+            error
+        } else {
+            RefreshUnavailable(format!("Session storage is unavailable: {error}")).into()
+        }
+    })?;
+    Ok(destination)
 }
 
 fn clear_login_credentials(profile: Option<&str>) -> Result<()> {
     let dir = token_dir_for_profile(profile)?;
     let mut failure = None;
     for name in [
-        "token",
+        agent_key::TOKEN_FILE,
         TOKEN_FILE_NAME,
         REFRESH_TOKEN_FILE_NAME,
         USER_ID_FILE_NAME,
-        "agent_key.json",
-        "auth_kind",
+        agent_key::METADATA_FILE,
+        agent_key::AUTH_KIND_FILE,
     ] {
         if let Err(error) = std::fs::remove_file(dir.join(name))
             && error.kind() != std::io::ErrorKind::NotFound
@@ -248,6 +350,13 @@ fn clear_login_credentials(profile: Option<&str>) -> Result<()> {
 }
 
 fn write_token_file(path: &std::path::Path, token: &str) -> Result<()> {
+    #[cfg(test)]
+    if TOKEN_WRITE_FAILURE
+        .try_with(|failure| failure.as_deref() == Some(path))
+        .unwrap_or(false)
+    {
+        bail!("injected credential storage failure");
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
@@ -295,10 +404,10 @@ pub fn save_tokens_for(
     access_token: &str,
     refresh_token: Option<&str>,
 ) -> Result<()> {
-    write_token_file(&token_file_path_for(profile)?, access_token)?;
     if let Some(rt) = refresh_token {
         write_token_file(&refresh_token_file_path_for(profile)?, rt)?;
     }
+    write_token_file(&token_file_path_for(profile)?, access_token)?;
     let user_id_path = user_id_file_path_for(profile)?;
     match jwt_sub_from_token(access_token) {
         Some(user_id) => write_token_file(&user_id_path, &user_id)?,
@@ -476,6 +585,7 @@ enum SessionRefresh {
     /// connectivity message rather than prompt for a login that also needs
     /// the network.
     Network(anyhow::Error),
+    Configuration(anyhow::Error),
 }
 
 /// Validate the saved session BEFORE a command does any user-visible work
@@ -500,11 +610,16 @@ pub async fn ensure_session(auth: &AuthArgs) -> Result<()> {
 
     let profile = auth.profile.as_deref();
 
-    if agent_key::is_agent_key_profile(profile) {
+    if agent_key::read_auth_kind(profile)
+        .map_err(|error| RefreshUnavailable(format!("Session storage is unavailable: {error}")))?
+        == agent_key::AuthKind::AgentKey
+    {
         return Ok(());
     }
 
-    let Some(access_token) = read_saved_token_for(profile) else {
+    let Some(access_token) = read_profile_file(profile, TOKEN_FILE_NAME)
+        .map_err(|error| RefreshUnavailable(format!("Session storage is unavailable: {error}")))?
+    else {
         return handle_dead_session(auth, DeadSessionReason::NoToken).await;
     };
 
@@ -522,12 +637,12 @@ pub async fn ensure_session(auth: &AuthArgs) -> Result<()> {
     // Access token expired -> one silent refresh attempt.
     match refresh_saved_session(auth).await {
         SessionRefresh::Refreshed => Ok(()),
+        SessionRefresh::Configuration(error) => Err(error),
         SessionRefresh::Rejected(rejection) => {
             handle_dead_session(auth, DeadSessionReason::Rejected(rejection)).await
         }
         SessionRefresh::Network(e) => Err(anyhow::Error::new(RefreshUnavailable(format!(
-            "Couldn't reach NyxID to refresh your session ({e}). \
-             Check your connection and try again."
+            "Session renewal is unavailable: {e}"
         )))),
     }
 }
@@ -557,7 +672,9 @@ pub(crate) enum RefreshExchange {
 /// worth surfacing because it points at a token-sharing problem.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RefreshRejectionReason {
-    Expired,
+    TokenExpired,
+    SessionExpired,
+    SessionEnded,
     Revoked,
     NotFound,
     Other,
@@ -580,7 +697,9 @@ impl RefreshRejection {
     /// Stable machine-readable code for `--output json` and exit-code docs.
     pub fn code(&self) -> &'static str {
         match self.reason {
-            RefreshRejectionReason::Expired => "refresh_token_expired",
+            RefreshRejectionReason::TokenExpired => "refresh_token_expired",
+            RefreshRejectionReason::SessionExpired => "session_expired",
+            RefreshRejectionReason::SessionEnded => "session_ended",
             RefreshRejectionReason::Revoked => "refresh_token_revoked",
             RefreshRejectionReason::NotFound => "refresh_token_not_found",
             RefreshRejectionReason::Other => "refresh_rejected",
@@ -589,13 +708,23 @@ impl RefreshRejection {
 
     pub fn headline(&self) -> String {
         match self.reason {
-            RefreshRejectionReason::Expired => {
+            RefreshRejectionReason::TokenExpired => {
                 "Your session has expired (the refresh token reached its lifetime).".to_string()
             }
-            RefreshRejectionReason::Revoked => "Your session was revoked: the refresh token was \
-                 reused after rotation (a stale copy in another tool or profile) or the session \
-                 was logged out elsewhere."
-                .to_string(),
+            RefreshRejectionReason::SessionExpired => {
+                "Your session has expired on the server.".into()
+            }
+            RefreshRejectionReason::SessionEnded => concat!(
+                "Your session is no longer valid on the server (it ended for a reason ",
+                "the server did not report: expiry, revocation, or removal)."
+            )
+            .into(),
+            RefreshRejectionReason::Revoked => concat!(
+                "Your session was revoked on the server (for example a stale copy of ",
+                "the refresh token was reused, the session was signed out, or the ",
+                "account's sessions were reset)."
+            )
+            .into(),
             RefreshRejectionReason::NotFound => {
                 "Your session has expired and no usable refresh token is saved.".to_string()
             }
@@ -618,10 +747,24 @@ impl RefreshRejection {
             .unwrap_or("refresh rejected")
             .to_string();
         let lower = message.to_ascii_lowercase();
-        let reason = if error_key == "token_expired" || lower.contains("expired") {
-            RefreshRejectionReason::Expired
-        } else if lower.contains("revoked") {
+        let reason = if error_key == "token_expired" {
+            RefreshRejectionReason::TokenExpired
+        } else if lower.contains("session expired or revoked")
+            || lower.contains("refresh token has expired or been revoked")
+        {
+            RefreshRejectionReason::SessionEnded
+        } else if lower.contains("session has been revoked")
+            || lower.contains("refresh token has been revoked")
+        {
             RefreshRejectionReason::Revoked
+        } else if lower.contains("session has ended") {
+            RefreshRejectionReason::SessionEnded
+        } else if lower.contains("session has expired") {
+            RefreshRejectionReason::SessionExpired
+        } else if lower.contains("refresh token has expired")
+            || lower.contains("refresh token expired")
+        {
+            RefreshRejectionReason::TokenExpired
         } else if lower.contains("not found") {
             RefreshRejectionReason::NotFound
         } else {
@@ -668,57 +811,353 @@ impl std::error::Error for RefreshUnavailable {}
 /// `/api/v1` suffix; this function appends the path. Token I/O (reading the
 /// refresh token, persisting the result, updating any in-memory copy) is the
 /// caller's responsibility.
+pub(crate) const ROTATION_CONFLICT_MESSAGE: &str =
+    "Refresh token was concurrently rotated, please retry";
+
 pub(crate) async fn exchange_refresh_token(
     client: &reqwest::Client,
     base_url_root: &str,
     refresh_token: &str,
 ) -> RefreshExchange {
+    refresh_with_retry(
+        client,
+        base_url_root,
+        refresh_token,
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(20),
+    )
+    .await
+}
+
+/// Retry only indeterminate outcomes, always with the original credential.
+/// The monotonic budget covers sending, body decoding, and all backoff.
+pub(crate) async fn refresh_with_retry(
+    client: &reqwest::Client,
+    base_url_root: &str,
+    refresh_token: &str,
+    budget: std::time::Duration,
+    attempt_timeout: std::time::Duration,
+) -> RefreshExchange {
+    let deadline = tokio::time::Instant::now() + budget;
     let url = format!(
         "{}/api/v1/auth/refresh",
         base_url_root.trim_end_matches('/')
     );
-    let resp = match client
-        .post(&url)
-        .json(&serde_json::json!({ "refresh_token": refresh_token }))
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => return RefreshExchange::Network(anyhow!(e)),
+    let mut last = anyhow!("refresh retry budget exhausted");
+    for attempt in 0..3 {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let result = tokio::time::timeout(remaining.min(attempt_timeout), async {
+            let response = client
+                .post(&url)
+                .timeout(remaining.min(attempt_timeout))
+                .json(&serde_json::json!({"refresh_token": refresh_token}))
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() && !status.is_client_error() && !status.is_server_error() {
+                return Ok((
+                    RefreshExchange::Network(anyhow!("unexpected refresh status (HTTP {status})")),
+                    None,
+                    false,
+                ));
+            }
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    v.parse::<u64>()
+                        .ok()
+                        .map(std::time::Duration::from_secs)
+                        .or_else(|| {
+                            chrono::DateTime::parse_from_rfc2822(v)
+                                .ok()
+                                .and_then(|at| (at.with_timezone(&Utc) - Utc::now()).to_std().ok())
+                        })
+                });
+            // A terminal HTTP rejection remains terminal even when its error
+            // body is missing or malformed. Successful responses require a
+            // complete decoded pair; indeterminate bodies can use grace retry.
+            let body: serde_json::Value = match response.json().await {
+                Ok(body) => body,
+                Err(_) if status.is_client_error() && !matches!(status.as_u16(), 408 | 429) => {
+                    return Ok((
+                        RefreshExchange::Rejected(RefreshRejection::classify(None)),
+                        None,
+                        false,
+                    ));
+                }
+                Err(error) => {
+                    return Ok((RefreshExchange::Network(error.into()), retry_after, true));
+                }
+            };
+            let rotation_conflict = status == reqwest::StatusCode::CONFLICT
+                && body
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|message| {
+                        message.strip_prefix("Conflict: ").unwrap_or(message)
+                            == ROTATION_CONFLICT_MESSAGE
+                    });
+            let retry = status.is_server_error()
+                || status.as_u16() == 408
+                || status.as_u16() == 429
+                || rotation_conflict;
+            let outcome = if retry {
+                RefreshExchange::Network(anyhow!("refresh temporarily unavailable (HTTP {status})"))
+            } else if status.is_client_error() {
+                RefreshExchange::Rejected(RefreshRejection::classify(Some(&body)))
+            } else if status.is_success() {
+                match (
+                    body.get("access_token").and_then(|v| v.as_str()),
+                    body.get("refresh_token").and_then(|v| v.as_str()),
+                ) {
+                    (Some(access), Some(refresh))
+                        if !access.trim().is_empty() && !refresh.trim().is_empty() =>
+                    {
+                        RefreshExchange::Renewed {
+                            access_token: access.into(),
+                            refresh_token: refresh.into(),
+                        }
+                    }
+                    _ => RefreshExchange::Network(anyhow!("incomplete refresh response")),
+                }
+            } else {
+                RefreshExchange::Network(anyhow!("unexpected refresh status (HTTP {status})"))
+            };
+            let retryable = matches!(outcome, RefreshExchange::Network(_));
+            Ok::<_, reqwest::Error>((outcome, retry_after, retryable))
+        })
+        .await;
+        let (outcome, retry_after, retryable) = match result {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => (RefreshExchange::Network(error.into()), None, true),
+            Err(error) => (RefreshExchange::Network(error.into()), None, true),
+        };
+        match outcome {
+            RefreshExchange::Network(error) if !retryable => {
+                return RefreshExchange::Network(error);
+            }
+            RefreshExchange::Network(error) => last = error,
+            definitive => return definitive,
+        }
+        if attempt == 2 {
+            break;
+        }
+        let backoff = std::time::Duration::from_secs(if attempt == 0 { 1 } else { 3 });
+        let delay = retry_after.unwrap_or(backoff).max(backoff);
+        if delay >= deadline.saturating_duration_since(tokio::time::Instant::now()) {
+            break;
+        }
+        tokio::time::sleep(delay).await;
+    }
+    RefreshExchange::Network(last)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PersistenceStage {
+    Nothing,
+    Refresh,
+    Credentials,
+    Complete,
+}
+
+pub(crate) struct RefreshPersistence {
+    pub stage: PersistenceStage,
+    pub error: Option<anyhow::Error>,
+}
+
+/// Retry the same in-memory pair under the caller's profile lock. Never rotate
+/// again merely to retry a failed local write.
+pub(crate) async fn persist_refresh_pair(
+    profile: Option<&str>,
+    access: &str,
+    refresh: &str,
+) -> RefreshPersistence {
+    let mut stage = PersistenceStage::Nothing;
+    let mut error = None;
+    for attempt in 0..3 {
+        let result = (|| -> Result<()> {
+            write_token_file(&refresh_token_file_path_for(profile)?, refresh)?;
+            if stage == PersistenceStage::Nothing {
+                stage = PersistenceStage::Refresh;
+            }
+            write_token_file(&token_file_path_for(profile)?, access)?;
+            stage = PersistenceStage::Credentials;
+            let path = user_id_file_path_for(profile)?;
+            if let Some(user) = jwt_sub_from_token(access) {
+                write_token_file(&path, &user)?;
+            } else if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+            agent_key::clear_agent_files(profile)?;
+            stage = PersistenceStage::Complete;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => return RefreshPersistence { stage, error: None },
+            Err(cause) => error = Some(cause),
+        }
+        if attempt < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    RefreshPersistence { stage, error }
+}
+
+impl RefreshPersistence {
+    pub(crate) fn check(self, requires_saved_access: bool) -> Result<()> {
+        let Some(error) = self.error else {
+            return Ok(());
+        };
+        match self.stage {
+            PersistenceStage::Nothing => {
+                let message = format!(
+                    concat!(
+                        "The session renewed but its new refresh token could not be saved: {}. ",
+                        "Fix storage and immediately run `nyxid session refresh`; recovery is ",
+                        "best effort within the server's rotation grace window. Ordinary commands ",
+                        "will not repair this while the old access token is still fresh."
+                    ),
+                    error
+                );
+                Err(RefreshUnavailable(message).into())
+            }
+            PersistenceStage::Refresh if requires_saved_access => {
+                let message = format!(
+                    concat!(
+                        "The renewed refresh token was saved, but the new access token ",
+                        "could not be saved: {}"
+                    ),
+                    error
+                );
+                Err(RefreshUnavailable(message).into())
+            }
+            PersistenceStage::Refresh => {
+                eprintln!(
+                    concat!(
+                        "Warning: the renewed refresh token was saved, but the new access token ",
+                        "could not be saved: {}. This operation uses the in-memory access token."
+                    ),
+                    error
+                );
+                Ok(())
+            }
+            _ => {
+                eprintln!(
+                    concat!(
+                        "Warning: renewed credentials were saved, but profile metadata ",
+                        "could not be saved: {}"
+                    ),
+                    error
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
+pub(crate) enum InFlightRefreshOutcome {
+    Skipped(&'static str),
+    Adopted(String),
+    Refreshed(String),
+    Rejected(RefreshRejection),
+    Unavailable(anyhow::Error),
+    Configuration(anyhow::Error),
+}
+
+impl InFlightRefreshOutcome {
+    pub(crate) fn access_token(self) -> Result<Option<String>> {
+        match self {
+            Self::Skipped(reason) => {
+                tracing::debug!(reason, "Session refresh skipped");
+                Ok(None)
+            }
+            Self::Adopted(token) | Self::Refreshed(token) => Ok(Some(token)),
+            Self::Rejected(rejection) => Err(ReauthRequired {
+                code: rejection.code(),
+                message: format!("{} Run `nyxid login` to continue.", rejection.headline()),
+            }
+            .into()),
+            Self::Unavailable(error) => Err(RefreshUnavailable(error.to_string()).into()),
+            Self::Configuration(error) => Err(error),
+        }
+    }
+}
+
+/// Shared by API and wizard handlers; provenance is captured at construction.
+pub(crate) async fn refresh_captured_session(
+    client: &reqwest::Client,
+    profile: Option<&str>,
+    destination: &str,
+    generation: Option<&str>,
+    current_access: &str,
+    eligible: bool,
+) -> InFlightRefreshOutcome {
+    if !eligible {
+        return InFlightRefreshOutcome::Skipped("credential_source");
+    }
+    let _lock = match acquire_refresh_lock_async(profile).await {
+        Ok(lock) => lock,
+        Err(error) => return InFlightRefreshOutcome::Unavailable(error),
     };
-
-    let status = resp.status();
-    // 429 (rate limited) and 408 (request timeout) are transient, not "session
-    // dead" -- surface them as retryable connectivity-style failures so a
-    // logged-in user isn't pushed through a full re-login over a temporary blip.
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+    let current_generation = match read_login_generation(profile) {
+        Ok(generation) => generation,
+        Err(error) => return InFlightRefreshOutcome::Unavailable(error),
+    };
+    if let Err(error) = validate_profile_destination(profile, destination) {
+        return match error.downcast_ref::<ProfileDestinationError>() {
+            Some(ProfileDestinationError::Mismatch) => {
+                InFlightRefreshOutcome::Skipped("login_or_destination_changed")
+            }
+            Some(ProfileDestinationError::Invalid) => InFlightRefreshOutcome::Configuration(error),
+            None => InFlightRefreshOutcome::Unavailable(error),
+        };
+    }
+    if current_generation.as_deref() != generation {
+        return InFlightRefreshOutcome::Skipped("login_or_destination_changed");
+    }
+    match agent_key::read_auth_kind(profile) {
+        Ok(agent_key::AuthKind::AgentKey) => {
+            return InFlightRefreshOutcome::Skipped("agent_key");
+        }
+        Err(error) => return InFlightRefreshOutcome::Unavailable(error),
+        _ => {}
+    }
+    let fresh_access = match fresh_access_token_on_disk(profile) {
+        Ok(token) => token,
+        Err(error) => return InFlightRefreshOutcome::Unavailable(error),
+    };
+    if let Some(token) = fresh_access
+        && token != current_access
     {
-        return RefreshExchange::Network(anyhow!(
-            "refresh temporarily unavailable (HTTP {status})"
-        ));
+        return InFlightRefreshOutcome::Adopted(token);
     }
-    if status.is_client_error() {
-        // 401/403/400 etc. -> the refresh token is genuinely not renewable.
-        // Read the error envelope so the caller can say why.
-        let body = resp.json::<serde_json::Value>().await.ok();
-        return RefreshExchange::Rejected(RefreshRejection::classify(body.as_ref()));
-    }
-    if !status.is_success() {
-        return RefreshExchange::Network(anyhow!("refresh failed (HTTP {status})"));
-    }
-
-    #[derive(Deserialize)]
-    struct RefreshBody {
-        access_token: String,
-        refresh_token: String,
-    }
-    match resp.json::<RefreshBody>().await {
-        Ok(b) => RefreshExchange::Renewed {
-            access_token: b.access_token,
-            refresh_token: b.refresh_token,
-        },
-        Err(e) => RefreshExchange::Network(anyhow!(e)),
+    let refresh = match read_profile_file(profile, REFRESH_TOKEN_FILE_NAME) {
+        Ok(token) => token,
+        Err(error) => return InFlightRefreshOutcome::Unavailable(error),
+    };
+    let Some(refresh) = refresh else {
+        return InFlightRefreshOutcome::Skipped("no_saved_refresh_token");
+    };
+    match exchange_refresh_token(client, destination, &refresh).await {
+        RefreshExchange::Renewed {
+            access_token,
+            refresh_token,
+        } => {
+            match persist_refresh_pair(profile, &access_token, &refresh_token)
+                .await
+                .check(false)
+            {
+                Ok(()) => InFlightRefreshOutcome::Refreshed(access_token),
+                Err(error) => InFlightRefreshOutcome::Unavailable(error),
+            }
+        }
+        RefreshExchange::Rejected(reason) => InFlightRefreshOutcome::Rejected(reason),
+        RefreshExchange::Network(error) => InFlightRefreshOutcome::Unavailable(error),
     }
 }
 
@@ -733,26 +1172,34 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
     // first rotates; everyone else finds the fresh access token already on
     // disk and never presents the now-stale refresh token to the server,
     // which would otherwise trip reuse detection and revoke the session.
-    let _lock = match acquire_refresh_lock(profile) {
+    let _lock = match acquire_refresh_lock_async(profile).await {
         Ok(lock) => lock,
         Err(error) => return SessionRefresh::Network(error),
     };
-    let base_url = match auth.resolved_base_url().and_then(|base| {
-        validate_profile_destination(profile, &base)?;
-        Ok(base)
-    }) {
+    let base_url = match resolved_refresh_destination(auth) {
         Ok(base) => base,
+        Err(error) if error.is::<RefreshUnavailable>() => return SessionRefresh::Network(error),
+        Err(error) => return SessionRefresh::Configuration(error),
+    };
+    match agent_key::read_auth_kind(profile) {
+        Ok(agent_key::AuthKind::AgentKey) => return SessionRefresh::Refreshed,
+        Err(error) => return SessionRefresh::Network(error),
+        _ => {}
+    }
+    let fresh_access = match fresh_access_token_on_disk(profile) {
+        Ok(token) => token,
         Err(error) => return SessionRefresh::Network(error),
     };
-    if agent_key::is_agent_key_profile(profile) {
-        return SessionRefresh::Refreshed;
-    }
-    if let Some(access_token) = fresh_access_token_on_disk(profile) {
+    if let Some(access_token) = fresh_access {
         let _ = access_token;
         return SessionRefresh::Refreshed;
     }
 
-    let Some(refresh_token) = read_saved_refresh_token_for(profile) else {
+    let refresh_token = match read_profile_file(profile, REFRESH_TOKEN_FILE_NAME) {
+        Ok(token) => token,
+        Err(error) => return SessionRefresh::Network(error),
+    };
+    let Some(refresh_token) = refresh_token else {
         return SessionRefresh::Rejected(RefreshRejection::local(
             RefreshRejectionReason::NotFound,
             "no refresh token is saved for this profile",
@@ -766,14 +1213,14 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
         && exp <= Utc::now()
     {
         return SessionRefresh::Rejected(RefreshRejection::local(
-            RefreshRejectionReason::Expired,
+            RefreshRejectionReason::TokenExpired,
             "the saved refresh token has passed its expiry",
         ));
     }
 
     let client = match build_credential_http_client_for_url(profile, &base_url) {
         Ok(c) => c,
-        Err(e) => return SessionRefresh::Network(e),
+        Err(e) => return SessionRefresh::Configuration(e),
     };
 
     match exchange_refresh_token(&client, &base_url, &refresh_token).await {
@@ -781,8 +1228,11 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
             access_token,
             refresh_token,
         } => {
-            if save_tokens_for(profile, &access_token, Some(&refresh_token)).is_err() {
-                return SessionRefresh::Network(anyhow!("failed to persist refreshed tokens"));
+            if let Err(error) = persist_refresh_pair(profile, &access_token, &refresh_token)
+                .await
+                .check(true)
+            {
+                return SessionRefresh::Network(error);
             }
             SessionRefresh::Refreshed
         }
@@ -797,15 +1247,21 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
 /// branch on the exit code: `ReauthRequired` (3) vs `RefreshUnavailable` (4).
 pub async fn force_refresh_session(auth: &AuthArgs) -> Result<RefreshReport> {
     let profile = auth.profile.as_deref();
-    let _lock = acquire_refresh_lock(profile)
+    let _lock = acquire_refresh_lock_async(profile)
+        .await
         .map_err(|_| RefreshUnavailable("Cannot lock this profile; retry later".into()))?;
-    if agent_key::is_agent_key_profile(profile) {
+    if agent_key::read_auth_kind(profile)
+        .map_err(|error| RefreshUnavailable(format!("Session storage is unavailable: {error}")))?
+        == agent_key::AuthKind::AgentKey
+    {
         return Err(anyhow::Error::new(ReauthRequired {
             code: "agent_key_does_not_refresh",
             message: "Agent Key sessions do not refresh. Run `nyxid login --agent-key` to authorize again.".into(),
         }));
     }
-    let Some(refresh_token) = read_saved_refresh_token_for(profile) else {
+    let Some(refresh_token) = read_profile_file(profile, REFRESH_TOKEN_FILE_NAME)
+        .map_err(|error| RefreshUnavailable(format!("Session storage is unavailable: {error}")))?
+    else {
         return Err(anyhow::Error::new(ReauthRequired {
             code: "refresh_token_not_found",
             message: "No refresh token is saved for this profile. Run `nyxid login` to continue."
@@ -821,19 +1277,25 @@ pub async fn force_refresh_session(auth: &AuthArgs) -> Result<RefreshReport> {
                 .to_string(),
         }));
     }
-    let base_url = auth.resolved_base_url()?;
-    validate_profile_destination(profile, &base_url)?;
+    let base_url = resolved_refresh_destination(auth)?;
     let client = build_credential_http_client_for_url(profile, &base_url)?;
     match exchange_refresh_token(&client, &base_url, &refresh_token).await {
         RefreshExchange::Renewed {
             access_token,
             refresh_token,
         } => {
-            save_tokens_for(profile, &access_token, Some(&refresh_token))
-                .context("failed to persist refreshed tokens")?;
+            persist_refresh_pair(profile, &access_token, &refresh_token)
+                .await
+                .check(false)?;
             Ok(RefreshReport {
                 access_expires_at: jwt_exp_from_token(&access_token),
                 refresh_expires_at: jwt_exp_from_token(&refresh_token),
+                session_expires_at: crate::commands::session::lookup_current_session_expiry(
+                    &client,
+                    &base_url,
+                    &access_token,
+                )
+                .await,
             })
         }
         RefreshExchange::Rejected(rejection) => Err(anyhow::Error::new(ReauthRequired {
@@ -850,12 +1312,68 @@ pub async fn force_refresh_session(auth: &AuthArgs) -> Result<RefreshReport> {
 pub struct RefreshReport {
     pub access_expires_at: Option<chrono::DateTime<Utc>>,
     pub refresh_expires_at: Option<chrono::DateTime<Utc>>,
+    pub session_expires_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// Cross-process advisory lock for token rotation on one profile.
 pub(crate) struct RefreshLock(#[allow(dead_code)] std::fs::File);
 
+#[derive(Debug, thiserror::Error)]
+#[error("Profile refresh lock timed out; retry later")]
+pub(crate) struct ProfileLockTimeout;
+
+const PROFILE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(65);
+const PROFILE_LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_PROFILE_LOCK_TIMEOUT: std::time::Duration;
+}
+
+fn profile_lock_timeout() -> std::time::Duration {
+    #[cfg(test)]
+    if let Ok(timeout) = TEST_PROFILE_LOCK_TIMEOUT.try_with(|timeout| *timeout) {
+        return timeout;
+    }
+    PROFILE_LOCK_TIMEOUT
+}
+
 pub(crate) fn acquire_refresh_lock(profile: Option<&str>) -> Result<RefreshLock> {
+    acquire_refresh_lock_with_timeout(profile, profile_lock_timeout())
+}
+
+fn acquire_refresh_lock_with_timeout(
+    profile: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<RefreshLock> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(lock) = try_refresh_lock(profile)? {
+            return Ok(lock);
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(ProfileLockTimeout.into());
+        }
+        std::thread::sleep(PROFILE_LOCK_POLL_INTERVAL.min(remaining));
+    }
+}
+
+pub(crate) async fn acquire_refresh_lock_async(profile: Option<&str>) -> Result<RefreshLock> {
+    let deadline = tokio::time::Instant::now() + profile_lock_timeout();
+    loop {
+        if let Some(lock) = try_refresh_lock(profile)? {
+            return Ok(lock);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(ProfileLockTimeout.into());
+        }
+        tokio::time::sleep(PROFILE_LOCK_POLL_INTERVAL.min(remaining)).await;
+    }
+}
+
+fn try_refresh_lock(profile: Option<&str>) -> Result<Option<RefreshLock>> {
     let dir = token_dir_for_profile(profile)?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(REFRESH_LOCK_FILE_NAME);
@@ -871,19 +1389,26 @@ pub(crate) fn acquire_refresh_lock(profile: Option<&str>) -> Result<RefreshLock>
         use std::os::unix::io::AsRawFd;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         // SAFETY: flock on a valid, open file descriptor we own.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            bail!("Failed to lock {}", path.display());
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(error).with_context(|| format!("Failed to lock {}", path.display()));
         }
     }
-    Ok(RefreshLock(file))
+    Ok(Some(RefreshLock(file)))
 }
 
 /// The access token another process may have just written: usable as-is when
 /// it still has more than the skew margin left.
-pub(crate) fn fresh_access_token_on_disk(profile: Option<&str>) -> Option<String> {
-    let token = read_saved_token_for(profile)?;
-    let exp = jwt_exp_from_token(&token)?;
-    (exp > Utc::now() + Duration::seconds(SESSION_SKEW_SECS)).then_some(token)
+pub(crate) fn fresh_access_token_on_disk(profile: Option<&str>) -> Result<Option<String>> {
+    Ok(
+        read_profile_file(profile, TOKEN_FILE_NAME)?.filter(|token| {
+            jwt_exp_from_token(token)
+                .is_some_and(|exp| exp > Utc::now() + Duration::seconds(SESSION_SKEW_SECS))
+        }),
+    )
 }
 
 /// Handle a session that can't be used: prompt for re-login when interactive,
@@ -1104,19 +1629,36 @@ pub(crate) fn clear_deleted_account_credentials(
 }
 
 pub async fn run_logout(base_url: &str, profile: Option<&str>) -> Result<()> {
-    let (generation, token, restricted) = {
+    let (generation, token, restricted, remote_destination_valid) = {
         let _lock = acquire_refresh_lock(profile)?;
-        validate_profile_destination(profile, base_url)?;
+        let remote_destination_valid = match validate_profile_destination(profile, base_url) {
+            Ok(()) => true,
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<ProfileDestinationError>(),
+                    Some(ProfileDestinationError::Invalid)
+                ) && read_profile_file(profile, BASE_URL_FILE_NAME)?.is_some_and(|saved| {
+                    saved.trim_end_matches('/') == base_url.trim_end_matches('/')
+                }) =>
+            {
+                // Exact saved-destination equality permits local logout even
+                // when transport is invalid. It never authorizes a request.
+                false
+            }
+            Err(error) => return Err(error),
+        };
         (
             login_generation(profile),
             read_saved_token_for(profile).map(zeroize::Zeroizing::new),
             agent_key::is_agent_key_profile(profile),
+            remote_destination_valid,
         )
     };
     let base_url = base_url.trim_end_matches('/');
     // Remote revocation is best effort. An unsafe destination or client setup
     // failure must never send the credential or prevent guarded local cleanup.
-    let revoked = if let Some(token) = &token
+    let revoked = if remote_destination_valid
+        && let Some(token) = &token
         && let Ok(client) = build_credential_http_client_for_url(profile, base_url)
     {
         let request = if restricted {
@@ -1779,7 +2321,7 @@ mod tests {
         let expired = RefreshRejection::classify(Some(&serde_json::json!({
             "error": "token_expired", "message": "Token expired"
         })));
-        assert_eq!(expired.reason, RefreshRejectionReason::Expired);
+        assert_eq!(expired.reason, RefreshRejectionReason::TokenExpired);
         let missing = RefreshRejection::classify(Some(&serde_json::json!({
             "error": "unauthorized", "message": "Refresh token not found"
         })));
@@ -1818,7 +2360,7 @@ mod tests {
     fn dead_session_reason_headline_expired() {
         assert!(
             super::DeadSessionReason::Rejected(super::RefreshRejection::local(
-                super::RefreshRejectionReason::Expired,
+                super::RefreshRejectionReason::TokenExpired,
                 "expired"
             ))
             .headline()
@@ -2318,10 +2860,14 @@ mod tests {
             .await
             .expect_err("preflight must reject HTTP");
         assert!(error.to_string().contains("requires HTTPS"));
+        assert!(error.is::<super::ProfileDestinationError>());
+        assert!(!error.is::<super::RefreshUnavailable>());
         let error = super::force_refresh_session(&auth)
             .await
             .expect_err("explicit refresh must reject HTTP");
         assert!(error.to_string().contains("requires HTTPS"));
+        assert!(error.is::<super::ProfileDestinationError>());
+        assert!(!error.is::<super::RefreshUnavailable>());
         assert!(
             super::read_saved_refresh_token_for(auth.profile.as_deref()).as_deref()
                 == Some(refresh.as_str())
@@ -2768,4 +3314,13 @@ mod tests {
         assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 0);
         assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 0);
     }
+}
+
+#[cfg(test)]
+#[path = "auth_refresh_tests.rs"]
+pub(crate) mod refresh_tests;
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TOKEN_WRITE_FAILURE: Option<std::path::PathBuf>;
 }

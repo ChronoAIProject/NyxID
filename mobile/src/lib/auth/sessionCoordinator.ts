@@ -1,6 +1,9 @@
 import { decodeJwtSub } from './jwt';
 export type StoredAuthSession = { accessToken: string; refreshToken?: string; accessTokenExpiresAt?: number; userId?: string; sessionGeneration?: number };
 export type SessionStorage = { getItemAsync(key: string): Promise<string | null>; setItemAsync(key: string, value: string): Promise<void>; deleteItemAsync(key: string): Promise<void> };
+export type RefreshCommitOutcome = { kind: 'committed'; metadataFailed?: boolean }
+  | { kind: 'superseded' } | { kind: 'persistence_failed'; cause: unknown };
+export type SessionInvalidationToken = { previous: StoredAuthSession; postClearGeneration: number };
 const ACCESS = 'nyxid.auth.access_token', REFRESH = 'nyxid.auth.refresh_token', EXPIRES = 'nyxid.auth.access_token_expires_at', USER = 'nyxid.auth.user_id';
 /** All SecureStore operations share this queue. Explicit login/logout advances
  * generation synchronously, fencing old network responses before they commit.
@@ -59,16 +62,57 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
         await Promise.all([ACCESS, REFRESH, EXPIRES, USER].map((key) => storage.deleteItemAsync(key)));
       });
     },
-    commitRefresh(expected: StoredAuthSession, next: StoredAuthSession) {
+    compareAndClear(expected: StoredAuthSession): Promise<SessionInvalidationToken | null> {
       return serial(async () => {
-        if (generation !== expected.sessionGeneration) return false;
+        if (generation !== expected.sessionGeneration) return null;
+        const current = await read(expected.sessionGeneration);
+        if (generation !== expected.sessionGeneration || current?.accessToken !== expected.accessToken
+          || current?.refreshToken !== expected.refreshToken) return null;
+        const postClearGeneration = ++generation; bind(null);
+        // Remove access first, retaining the established orphan cleanup rule
+        // when a crash interrupts logout or account replacement.
+        for (const key of [ACCESS, REFRESH, EXPIRES, USER]) await storage.deleteItemAsync(key);
+        return { previous: expected, postClearGeneration };
+      });
+    },
+    cleanupIfInvalidated(token: SessionInvalidationToken, cleanup: () => Promise<void> | void) {
+      return serial(async () => {
+        if (generation !== token.postClearGeneration) return false;
+        const current = await read(token.postClearGeneration);
+        if (generation !== token.postClearGeneration || current) return false;
+        // Local effects only. Never hold the coordinator queue over network I/O.
+        await cleanup();
+        return generation === token.postClearGeneration;
+      });
+    },
+    commitRefresh(expected: StoredAuthSession, next: StoredAuthSession): Promise<RefreshCommitOutcome> {
+      return serial(async () => {
+        if (generation !== expected.sessionGeneration) return { kind: 'superseded' };
         const current = await read(expected.sessionGeneration);
         if (generation !== expected.sessionGeneration || current?.accessToken !== expected.accessToken || current?.refreshToken !== expected.refreshToken
-          || decodeJwtSub(next.accessToken) !== decodeJwtSub(expected.accessToken)) return false;
-        await write(next);
-        if (generation !== expected.sessionGeneration) return false;
-        bind(decodeJwtSub(next.accessToken) ?? null);
-        return true;
+          || decodeJwtSub(next.accessToken) !== decodeJwtSub(expected.accessToken)) return { kind: 'superseded' };
+        let credentialsSaved = false, cause: unknown;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            if (generation !== expected.sessionGeneration) return { kind: 'superseded' };
+            if (!next.refreshToken) throw new Error('refresh_token_missing');
+            await storage.setItemAsync(REFRESH, next.refreshToken);
+            if (generation !== expected.sessionGeneration) return { kind: 'superseded' };
+            await storage.setItemAsync(ACCESS, next.accessToken);
+            credentialsSaved = true;
+            if (generation !== expected.sessionGeneration) return { kind: 'superseded' };
+            for (const [key, value] of [[EXPIRES, Number.isFinite(next.accessTokenExpiresAt) ? String(next.accessTokenExpiresAt) : undefined],
+              [USER, decodeJwtSub(next.accessToken)]] as const) {
+              if (value) await storage.setItemAsync(key, value); else await storage.deleteItemAsync(key);
+            }
+            if (generation !== expected.sessionGeneration) return { kind: 'superseded' };
+            bind(decodeJwtSub(next.accessToken) ?? null);
+            return { kind: 'committed' };
+          } catch (error) { cause = error; }
+        }
+        if (generation !== expected.sessionGeneration) return { kind: 'superseded' };
+        if (credentialsSaved) { bind(decodeJwtSub(next.accessToken) ?? null); return { kind: 'committed', metadataFailed: true }; }
+        return { kind: 'persistence_failed', cause };
       });
     },
   };

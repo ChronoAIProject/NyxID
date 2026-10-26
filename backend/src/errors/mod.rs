@@ -124,7 +124,10 @@ pub enum AppError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
-    #[error("OAuth authority is temporarily unavailable; retry the request")]
+    /// Retryable authorization uncertainty, including first-party session rereads,
+    /// refresh commit ambiguity and transient post-commit consent fences.
+    /// The OAuth-named wire key and numeric code remain stable for compatibility.
+    #[error("Authorization is temporarily unavailable; retry the request")]
     OAuthAuthorityUnavailable,
 
     #[error("Forbidden: {0}")]
@@ -1306,6 +1309,20 @@ impl AppError {
         }
     }
 
+    /// Record response failures using the shared severity policy.
+    pub(crate) fn log_response_error(&self) {
+        match self {
+            // Already logged once with bounded structured fields by the startup boundary.
+            Self::VoiceStartFailed(_) => {}
+            Self::Internal(msg) => tracing::error!(error = %msg, "Internal server error"),
+            Self::PoolAttemptTransport(kind) => {
+                tracing::error!(?kind, "Pool attempt transport failure")
+            }
+            Self::DatabaseError(err) => tracing::error!(error = %err, "Database error"),
+            _ => tracing::warn!(error = %self, "Client error"),
+        }
+    }
+
     /// RFC 6749 §5.2 OAuth error code for token endpoint responses.
     /// Each variant maps to a standard OAuth error string — no string matching.
     pub(crate) fn oauth_error_code(&self) -> &'static str {
@@ -1313,6 +1330,7 @@ impl AppError {
             Self::MfaRequired { .. } => "mfa_required",
             Self::MfaStepUpRequired => "mfa_step_up_required",
             Self::OAuthAuthorityUnavailable => "temporarily_unavailable",
+            Self::Internal(_) | Self::DatabaseError(_) => "server_error",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::PkceVerificationFailed | Self::InvalidRedirectUri => "invalid_grant",
             Self::InvalidDpopProof(_) => "invalid_dpop_proof",
@@ -1684,17 +1702,7 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        // Log server errors at error level; client errors at warn level.
-        match &self {
-            // Already logged once with bounded structured fields by the startup boundary.
-            AppError::VoiceStartFailed(_) => {}
-            AppError::Internal(msg) => tracing::error!(error = %msg, "Internal server error"),
-            AppError::PoolAttemptTransport(kind) => {
-                tracing::error!(?kind, "Pool attempt transport failure")
-            }
-            AppError::DatabaseError(err) => tracing::error!(error = %err, "Database error"),
-            _ => tracing::warn!(error = %self, "Client error"),
-        }
+        self.log_response_error();
         let mut response = (self.status_code(), axum::Json(self.response_body())).into_response();
         if self.error_key() == Self::ServiceConcurrencyLimited.error_key()
             || matches!(self, Self::OAuthAuthorityUnavailable)
@@ -1776,7 +1784,10 @@ mod tests {
         assert_eq!(error.error_key(), "oauth_authority_unavailable");
         assert_eq!(error.oauth_status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.oauth_error_code(), "temporarily_unavailable");
-        assert!(!error.to_string().contains("authorize again"));
+        assert_eq!(
+            error.to_string(),
+            "Authorization is temporarily unavailable; retry the request"
+        );
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.headers().get("retry-after").unwrap(), "1");
@@ -2907,6 +2918,15 @@ mod tests {
 
     #[test]
     fn oauth_error_codes() {
+        assert_eq!(
+            AppError::Internal("private server detail".into()).oauth_error_code(),
+            "server_error"
+        );
+        assert_eq!(
+            AppError::DatabaseError(mongodb::error::Error::custom("private DB detail"))
+                .oauth_error_code(),
+            "server_error"
+        );
         assert_eq!(
             AppError::UnsupportedGrantType("x".into()).oauth_error_code(),
             "unsupported_grant_type"

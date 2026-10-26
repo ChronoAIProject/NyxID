@@ -62,6 +62,52 @@ pub fn authenticated(filter: Document) -> Document {
         {"purpose": {"$exists": false}, "user_agent": {"$ne": "mfa_pending"}}
     ]}]}
 }
+/// Diagnose a failed live-session check without widening its owner/purpose scope.
+/// A live second read is an inconsistent snapshot, never proof of session death.
+pub async fn session_end_error(
+    db: &mongodb::Database,
+    session_id: &str,
+    user_id: &str,
+) -> crate::errors::AppError {
+    use crate::errors::AppError;
+    #[cfg(test)]
+    if RESTORE_BEFORE_END_READ
+        .try_with(|restore| *restore)
+        .unwrap_or(false)
+    {
+        // Reproduce a live authority change between the rejected read and its diagnostic reread.
+        if let Err(error) = db
+            .collection::<Document>(SESSIONS)
+            .update_one(
+                authenticated(doc! {"_id": session_id, "user_id": user_id}),
+                doc! {"$set": {"revoked": false, "expires_at": bson::DateTime::from_chrono(
+                chrono::Utc::now() + chrono::Duration::days(1))}},
+            )
+            .await
+        {
+            return AppError::DatabaseError(error);
+        }
+    }
+    let row = db
+        .collection::<crate::models::session::Session>(SESSIONS)
+        .find_one(authenticated(doc! {"_id": session_id, "user_id": user_id}))
+        .await;
+    match row {
+        Ok(Some(row)) if row.revoked => AppError::Unauthorized("Session has been revoked".into()),
+        Ok(Some(row)) if row.expires_at <= chrono::Utc::now() => {
+            AppError::Unauthorized("Session has expired".into())
+        }
+        Ok(None) => AppError::Unauthorized("Session has ended".into()),
+        Ok(Some(_)) => AppError::OAuthAuthorityUnavailable,
+        Err(error) => AppError::DatabaseError(error),
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static RESTORE_BEFORE_END_READ: bool;
+}
+
 pub fn pending(filter: Document, legacy: bool) -> Document {
     let purpose = if legacy {
         doc! {"purpose": {"$exists": false}, "user_agent": "mfa_pending"}
@@ -409,4 +455,110 @@ pub(crate) async fn revoke_other_sessions_in_transaction(
             .await?;
     }
     Ok(changed.modified_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::AppError;
+    use crate::models::session::Session;
+    use crate::test_utils::*;
+    #[tokio::test]
+    async fn session_end_reason_is_owner_and_purpose_scoped_and_live_reread_is_unavailable() {
+        let db = connect_transaction_test_database("session_end_reason").await;
+        let user = uuid::Uuid::new_v4().to_string();
+        let cookie = super::super::token_service::create_session(&db, &user, None, None)
+            .await
+            .unwrap();
+        let id = cookie.session_id;
+        assert!(matches!(
+            session_end_error(&db, &id, &user).await,
+            AppError::OAuthAuthorityUnavailable
+        ));
+        assert!(matches!(
+            session_end_error(&db, &id, "another-user").await,
+            AppError::Unauthorized(ref message) if message == "Session has ended"
+        ));
+        for purpose in ["mfa_pending", "unknown"] {
+            db.collection::<Document>(SESSIONS)
+                .update_one(
+                    doc! { "_id": &id },
+                    doc! {
+                        "$set": {
+                            "purpose": purpose,
+                            "revoked": true
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                session_end_error(&db, &id, &user).await,
+                AppError::Unauthorized(ref message) if message == "Session has ended"
+            ));
+        }
+        db.collection::<Document>(SESSIONS)
+            .update_one(
+                doc! { "_id": &id },
+                doc! {
+                    "$unset": {
+                        "purpose": ""
+                    },
+                    "$set": {
+                        "user_agent": "mfa_pending"
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            session_end_error(&db, &id, &user).await,
+            AppError::Unauthorized(ref message) if message == "Session has ended"
+        ));
+        db.collection::<Document>(SESSIONS)
+            .update_one(
+                doc! { "_id": &id },
+                doc! {
+                    "$unset": {
+                        "user_agent": ""
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        db.collection::<Document>(SESSIONS).update_one(doc! { "_id": &id },doc! {
+    "$set": {
+        "purpose": "authenticated",
+        "revoked": true,
+        "expires_at": bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::seconds(1))
+    }
+}).await.unwrap();
+        assert!(matches!(
+            session_end_error(&db, &id, &user).await,
+            AppError::Unauthorized(ref message) if message == "Session has been revoked"
+        ));
+        db.collection::<Session>(SESSIONS)
+            .update_one(
+                doc! { "_id": &id },
+                doc! {
+                    "$set": {
+                        "revoked": false
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            session_end_error(&db, &id, &user).await,
+            AppError::Unauthorized(ref message) if message == "Session has expired"
+        ));
+        db.collection::<Session>(SESSIONS)
+            .delete_one(doc! { "_id": &id })
+            .await
+            .unwrap();
+        assert!(matches!(
+            session_end_error(&db, &id, &user).await,
+            AppError::Unauthorized(ref message) if message == "Session has ended"
+        ));
+    }
 }

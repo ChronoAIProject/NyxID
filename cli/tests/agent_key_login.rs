@@ -603,6 +603,31 @@ async fn logout_unsafe_transport_clears_locally_without_proxying_credentials() {
 }
 
 #[tokio::test]
+async fn logout_invalid_destination_mismatch_preserves_the_saved_login() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    seed_profile(home.path(), &server);
+    let output = run(
+        home.path(),
+        &[
+            "logout",
+            "--profile",
+            "home-agent",
+            "--base-url",
+            "http://cleartext-fixture.invalid",
+        ],
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        std::fs::read_to_string(profile(home.path()).join("token")).unwrap(),
+        SECRET
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(!output_text(&output).contains(SECRET));
+}
+
+#[tokio::test]
 async fn logout_revokes_then_clears_locally_even_when_server_rejects() {
     for status in [200, 500] {
         let server = MockServer::start().await;

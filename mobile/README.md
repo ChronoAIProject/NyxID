@@ -323,7 +323,11 @@ All under `/api/v1` on the configured `*_API_BASE_URL`:
 
 - Access + refresh tokens persist in `SecureStore` (iOS Keychain / Android EncryptedSharedPreferences).
 - Cold start restores the session and routes to `Dashboard` if valid, `Auth` otherwise.
-- 401 after refresh failure triggers a full sign-out (state + storage + push deregistration).
+- Refresh retries the same credential at most three times within a 25-second total budget (7.5-second attempts including body reads), for network failures, 5xx, 408, 429 and recognized concurrent-rotation conflicts. Only complete access + refresh pairs commit; malformed responses remain transient.
+- Definitive refresh rejection or a second 401 after replay can sign out only the exact captured login generation and credential pair. Transient/indeterminate and storage failures keep the session and surface a retryable error. Superseded responses cannot clear or restore a newer login.
+- Refresh persistence is serialized, writes successor refresh before access and metadata, retains the existing access token throughout, and retries the same pair without a second rotation. Metadata-only failure preserves the pair. The existing refresh-only orphan cleanup remains: interrupted logout/account replacement must never restore an abandoned account after restart.
+- Automatic invalidation atomically compares and clears the failing pair and advances the login generation before awaited push cleanup. Remote cleanup uses only captured credentials, with no refresh/adoption; unusable access skips it. Local push deletion, telemetry reset and signed-out UI are fenced against a newer login. Explicit user sign-out retains its normal semantics.
+- Token sessions renew before the current refresh JWT expires; successful rotation restarts the configured lifetime (7 days by default). The server session retains or extends its deadline to cover the returned token and has no additional absolute cap for current authenticated authority. Pre-assurance sessions and legacy-migration/mobile-rollout MFA exemptions retain their fixed expiry. All server replicas must be upgraded for atomic rotation and sliding guarantees.
 
 ## Key source files
 

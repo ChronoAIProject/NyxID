@@ -393,6 +393,9 @@ struct ConsentRequestClaims {
 /// Uses `AppError::oauth_error_code()` and `AppError::oauth_status()` —
 /// each variant declares its own OAuth semantics, no string matching.
 fn oauth_error_response(err: AppError) -> Response {
+    if matches!(&err, AppError::Internal(_) | AppError::DatabaseError(_)) {
+        err.log_response_error();
+    }
     let status = err.oauth_status();
     let oauth_error = err.oauth_error_code();
 
@@ -2464,6 +2467,11 @@ fn authorization_code_grant_error(error: AppError) -> AppError {
 /// silently. A deactivated issuing client (`AuthenticationFailed`) stays
 /// `invalid_client` so the client re-registers.
 fn refresh_token_grant_error(error: AppError) -> AppError {
+    if crate::services::token_service::is_rotation_conflict(&error)
+        || crate::services::transaction_service::is_indeterminate_commit(&error)
+    {
+        return AppError::OAuthAuthorityUnavailable;
+    }
     match error {
         AppError::Unauthorized(message) | AppError::Conflict(message) => {
             AppError::ExternalTokenInvalid(message)
@@ -6446,6 +6454,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn refresh_grant_transients_return_temporarily_unavailable_without_revoking() {
+        for indeterminate in [false, true] {
+            let (db, config, _, issued) =
+                crate::services::token_service::refresh_tests::fixture().await;
+            let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
+            if !indeterminate {
+                db.collection::<mongodb::bson::Document>(crate::models::refresh_token::COLLECTION_NAME).update_one(doc!{"session_id":&issued.session_id},doc!{"$set":{
+                    "revoked":true,"revoked_at":mongodb::bson::DateTime::now(),"replaced_by":"missing-successor"}}).await.unwrap();
+            }
+            let request = refresh_grant_error(&state, &issued.refresh_token);
+            let (status, error) = if indeterminate {
+                crate::services::service_history::transaction::COMMIT_RESPONSE_LOSS
+                    .scope(
+                        std::cell::RefCell::new(
+                            crate::services::service_history::transaction::CommitResponseLoss {
+                                remaining: usize::MAX,
+                                attempts: 0,
+                                budget: std::time::Duration::from_millis(50),
+                            },
+                        ),
+                        request,
+                    )
+                    .await
+            } else {
+                request.await
+            };
+            assert_eq!(status.as_u16(), 503);
+            assert_eq!(error, "temporarily_unavailable");
+            assert!(
+                !db.collection::<mongodb::bson::Document>(crate::models::session::COLLECTION_NAME)
+                    .find_one(doc! {"_id":issued.session_id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get_bool("revoked")
+                    .unwrap()
+            );
+        }
+    }
+
     async fn refresh_grant_error(state: &AppState, refresh_token: &str) -> (StatusCode, String) {
         let response = token(
             State(state.clone()),
@@ -7258,5 +7307,94 @@ mod credential_debug_tests {
         let revoke: RevokeRequest = serde_json::from_value(value).unwrap();
         assert!(!format!("{introspect:?}").contains(secret));
         assert!(!format!("{revoke:?}").contains(secret));
+    }
+    #[tokio::test]
+    async fn refresh_grant_preserves_plain_database_and_internal_faults() {
+        let database = AppError::DatabaseError(mongodb::error::Error::custom("plain DB failure"));
+        let mapped = refresh_token_grant_error(database);
+        assert!(matches!(&mapped, AppError::DatabaseError(_)));
+        assert_eq!(mapped.oauth_status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(mapped.oauth_error_code(), "server_error");
+        let response = oauth_error_response(mapped);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "server_error");
+        assert_eq!(body["error_description"], "An internal error occurred");
+        assert!(!body.to_string().contains("plain DB failure"));
+
+        let mapped = refresh_token_grant_error(AppError::Internal("plain internal failure".into()));
+        assert!(matches!(&mapped, AppError::Internal(_)));
+        assert_eq!(mapped.oauth_status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(mapped.oauth_error_code(), "server_error");
+        let response = oauth_error_response(mapped);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "server_error");
+        assert_eq!(body["error_description"], "An internal error occurred");
+        assert!(!body.to_string().contains("plain internal failure"));
+    }
+
+    #[test]
+    fn oauth_server_faults_are_logged_at_error_level() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct Levels(std::sync::Arc<std::sync::Mutex<Vec<tracing::Level>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Levels {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _context: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0.lock().unwrap().push(*event.metadata().level());
+            }
+        }
+
+        let levels = Levels::default();
+        let subscriber = tracing_subscriber::registry().with(levels.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        // Earlier tests may have first registered these callsites without a subscriber.
+        tracing::callsite::rebuild_interest_cache();
+        for error in [
+            AppError::Internal("plain internal failure".into()),
+            AppError::DatabaseError(mongodb::error::Error::custom("plain DB failure")),
+        ] {
+            let response = oauth_error_response(refresh_token_grant_error(error));
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        let response = oauth_error_response(AppError::OAuthAuthorityUnavailable);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            *levels.0.lock().unwrap(),
+            vec![tracing::Level::ERROR, tracing::Level::ERROR]
+        );
+    }
+
+    #[test]
+    fn refresh_transients_are_temporarily_unavailable_and_definitive_grants_stay_invalid_grant() {
+        for error in [
+            AppError::Conflict(crate::services::token_service::ROTATION_CONFLICT_MESSAGE.into()),
+            AppError::OAuthAuthorityUnavailable,
+            crate::services::transaction_service::indeterminate_commit(),
+        ] {
+            let mapped = refresh_token_grant_error(error);
+            assert_eq!(mapped.oauth_status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(mapped.oauth_error_code(), "temporarily_unavailable");
+        }
+        for error in [
+            crate::services::consent_service::grant_changed(),
+            AppError::Unauthorized("Session has ended".into()),
+            AppError::TokenExpired,
+        ] {
+            let mapped = refresh_token_grant_error(error);
+            assert_eq!(mapped.oauth_error_code(), "invalid_grant");
+        }
     }
 }

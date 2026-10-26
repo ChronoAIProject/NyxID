@@ -1526,15 +1526,24 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
     // 401 → refresh access token via the saved refresh_token and retry
     // once. Mirrors ApiClient::try_refresh_token + retry pattern in
     // cli/src/api.rs::{get,post,put,patch,delete_empty}. Skipping refresh
-    // (or on refresh failure) falls through to the original 401 so the
-    // browser gets a real error instead of hanging.
+    // falls through to the original 401; definitive and transient refresh
+    // failures return their typed error without replaying the operation.
     let upstream_resp = if first_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        match try_refresh_access_token(&state).await {
-            Some(new_token) => match build_req(&new_token).send().await {
+        match try_refresh_access_token(&state, &current_token).await {
+            Ok(Some(new_token)) => match build_req(&new_token).send().await {
                 Ok(retry) => retry,
                 Err(_) => first_resp,
             },
-            None => first_resp,
+            Ok(None) => first_resp,
+            Err(error) => {
+                let (status, code) =
+                    if let Some(rejection) = error.downcast_ref::<crate::auth::ReauthRequired>() {
+                        (StatusCode::UNAUTHORIZED, rejection.code)
+                    } else {
+                        (StatusCode::SERVICE_UNAVAILABLE, "refresh_unavailable")
+                    };
+                return proxy_error_response(status, code, &error.to_string(), error.to_string());
+            }
         }
     } else {
         first_resp
@@ -1625,37 +1634,29 @@ async fn conditional_abandon_key(state: &ServerState, key_id: &str) {
     state.pending_keys.lock().await.remove(key_id);
 }
 
-/// Best-effort access-token refresh via the saved refresh_token for this
-/// profile. Mirrors `ApiClient::try_refresh_token` in `cli/src/api.rs`:
-/// POST `{base}/api/v1/auth/refresh` → `{access_token, refresh_token}`,
-/// persist via `crate::auth::save_tokens_for` (so subsequent CLI
-/// commands also benefit), then update this server's mutex. Returns the
-/// new access token on success, or `None` on any failure (no saved
-/// refresh token, refresh endpoint 4xx/5xx, network error, malformed
-/// body). Callers should treat `None` as "keep the original 401".
-async fn try_refresh_access_token(state: &ServerState) -> Option<String> {
-    let profile = state.proxy.profile.as_deref();
-    let refresh_token = crate::auth::read_saved_refresh_token_for(profile)?;
-    match crate::auth::exchange_refresh_token(
-        &state.upstream,
-        &state.proxy.base_url_root,
-        &refresh_token,
-    )
-    .await
-    {
-        crate::auth::RefreshExchange::Renewed {
-            access_token,
-            refresh_token,
-        } => {
-            crate::auth::save_tokens_for(profile, &access_token, Some(&refresh_token)).ok()?;
-            *state.access_token.lock().await = access_token.clone();
-            eprintln!("  [wizard] refreshed expired access token for profile {profile:?}");
-            Some(access_token)
-        }
-        crate::auth::RefreshExchange::Rejected(_) | crate::auth::RefreshExchange::Network(_) => {
-            None
-        }
+/// Refresh under the same bounded profile lock as ordinary CLI requests.
+async fn try_refresh_access_token(
+    state: &ServerState,
+    rejected_token: &str,
+) -> anyhow::Result<Option<String>> {
+    let mut current = state.access_token.lock().await;
+    if current.as_str() != rejected_token {
+        return Ok(Some(current.clone()));
     }
+    let outcome = crate::auth::refresh_captured_session(
+        &state.upstream,
+        state.proxy.profile.as_deref(),
+        &state.proxy.base_url_root,
+        state.proxy.login_generation.as_deref(),
+        &current,
+        state.proxy.refresh_eligible && state.proxy.credential_source.allows_session_refresh(),
+    )
+    .await;
+    let next = outcome.access_token()?;
+    if let Some(token) = &next {
+        *current = token.clone();
+    }
+    Ok(next)
 }
 
 /// `POST /api/proxy/abandon-placeholder` — client-triggered cleanup of a
@@ -2327,6 +2328,9 @@ mod tests {
                 base_url_root: base_url,
                 access_token: "test-token".into(),
                 profile: None,
+                credential_source: crate::auth::AccessTokenSource::SavedSession,
+                refresh_eligible: true,
+                login_generation: None,
             }),
             allowlist: Arc::new(Vec::new()),
             upstream: ReqwestClient::builder()
@@ -2341,6 +2345,129 @@ mod tests {
             completed_ai_key: Arc::new(tokio::sync::Mutex::new(None)),
             prefill: Arc::new(Value::Null),
         }
+    }
+
+    #[test]
+    fn concurrent_wizard_and_cli_refresh_share_lock_and_captured_provenance() {
+        use crate::auth::refresh_tests::{Home, args, jwt, runtime};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let _home = Home::new();
+        runtime().block_on(async {
+            let server = MockServer::start().await;
+            let auth = args(&server.uri());
+            let old = jwt(1);
+            let new = jwt(chrono::Utc::now().timestamp() + 3600);
+            crate::auth::refresh_tests::save_destination(auth.profile.as_deref(), &server.uri())
+                .unwrap();
+            crate::auth::save_tokens_for(auth.profile.as_deref(), &old, Some("original")).unwrap();
+            let mut state = make_state(server.uri(), Vec::new());
+            state.proxy = Arc::new(ProxyContext::from_auth(&auth).await.unwrap());
+            *state.access_token.lock().await = old.clone();
+            Mock::given(path("/api/v1/auth/refresh"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_delay(Duration::from_millis(50))
+                        .set_body_json(
+                            serde_json::json!({"access_token":new,"refresh_token":"new-refresh"}),
+                        ),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            state.bound_port = 9876;
+            state.allowlist = Arc::new(vec![ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/check",
+                body_fields: &[],
+            }]);
+            Mock::given(path("/api/v1/check"))
+                .and(wiremock::matchers::header(
+                    "authorization",
+                    format!("Bearer {old}"),
+                ))
+                .respond_with(ResponseTemplate::new(401).set_delay(Duration::from_millis(10)))
+                .expect(2)
+                .mount(&server)
+                .await;
+            Mock::given(path("/api/v1/check"))
+                .and(wiremock::matchers::header(
+                    "authorization",
+                    format!("Bearer {new}"),
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+                .expect(2)
+                .mount(&server)
+                .await;
+            let request = || {
+                Request::builder()
+                    .uri("/api/proxy/api/v1/check")
+                    .header("host", "127.0.0.1:9876")
+                    .header("x-wizard-csrf", "test-csrf")
+                    .body(Body::empty())
+                    .unwrap()
+            };
+            let (a, b, c) = tokio::join!(
+                handle_proxy(State(state.clone()), request()),
+                handle_proxy(State(state.clone()), request()),
+                crate::auth::ensure_session(&auth)
+            );
+            assert_eq!(a.status(), StatusCode::OK);
+            assert_eq!(b.status(), StatusCode::OK);
+            c.unwrap();
+            server.verify().await;
+            server.reset().await;
+            Mock::given(path("/api/v1/auth/refresh"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let mut explicit = auth.clone();
+            explicit.access_token = Some("caller-access".into());
+            state.proxy = Arc::new(ProxyContext::from_auth(&explicit).await.unwrap());
+            *state.access_token.lock().await = "caller-access".into();
+            assert!(
+                try_refresh_access_token(&state, "caller-access")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            state.proxy = Arc::new(ProxyContext::from_auth(&auth).await.unwrap());
+            *state.access_token.lock().await = new.clone();
+            crate::auth::refresh_tests::replace_login(auth.profile.as_deref(), || {
+                crate::auth::save_tokens_for(
+                    auth.profile.as_deref(),
+                    "replacement",
+                    Some("replacement-refresh"),
+                )
+            })
+            .unwrap();
+            assert!(
+                try_refresh_access_token(&state, &new)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                crate::auth::read_saved_token_for(auth.profile.as_deref()).unwrap(),
+                "replacement"
+            );
+            let dir = crate::auth::token_dir_for_profile(auth.profile.as_deref()).unwrap();
+            std::fs::write(dir.join("auth_kind"), "agent_key").unwrap();
+            std::fs::write(dir.join("token"), "nyx_ag_saved").unwrap();
+            state.proxy = Arc::new(ProxyContext::from_auth(&auth).await.unwrap());
+            *state.access_token.lock().await = "nyx_ag_saved".into();
+            assert!(!state.proxy.refresh_eligible);
+            assert!(
+                try_refresh_access_token(&state, "nyx_ag_saved")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let mut other_destination = auth.clone();
+            other_destination.base_url = Some("https://different.test".into());
+            assert!(ProxyContext::from_auth(&other_destination).await.is_err());
+            server.verify().await;
+        });
     }
 
     /// Drives the same router `run_flow` merges, so a missing or

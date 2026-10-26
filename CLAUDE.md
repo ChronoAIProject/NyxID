@@ -61,7 +61,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12600 service concurrency: 12600 `ServiceConcurrencyLimited` (HTTP 429, `Retry-After: 1`); client capacity rejection, never a server fault.
 - 12700 `ToolOperationNotPublished` (HTTP 404): unpublished or unknown operation on a tool offering.
 - 12800-12801: 12800 `ManagedExecutionPending` (HTTP 409), 12801 `ErasurePreparing` (HTTP 409, `erasure_preparing`).
-- 12900 `OAuthAuthorityUnavailable` (HTTP 503, `oauth_authority_unavailable`): a live OAuth authority read could not complete; retry the request without discarding tokens or reauthorizing.
+- 12900 `OAuthAuthorityUnavailable` (HTTP 503, `oauth_authority_unavailable`): a live authority read, first-party session diagnostic reread, or refresh commit/fence could not establish authorization; retry the request without discarding tokens or reauthorizing.
 - 12500-12501 assistant voice: 12500 `VoiceQueueFull` (HTTP 429), 12501 `VoiceProviderUnavailable` (HTTP 503).
 
 ### 4. Frontend Patterns
@@ -245,6 +245,7 @@ First-party RFC 8628-style login: plain `nyxid login` and `--device` display a s
 - **Mobile approval**: `CameraView` scans only QR codes whose shape is `https://<frontend>/login/device?user_code=...` or `nyxid://login/device?user_code=...`. The app extracts and normalizes only `user_code`; every request uses its configured API base URL. Deep links prefill without making a request. Preview and approve/reject remain separate explicit actions, share the >= 750 ms throttle, and never auto-approve.
 - **Web login**: the unauthenticated login page can start the browser delivery flow with an explicit click, showing both the QR payload and manual code; it never starts on mount or auto-regenerates codes.
 - **One-time codes**: web/mobile settings mint through `/auth/login-code`; public `/redeem` atomically claims and issues either grant. Issuer-only status, cancellation and revocation expose no secrets. Five-minute codes are limited by source and owner and stored only as HMACs. Browser handoff extends the initial 60-second delivery window to approval + 300 seconds; repeated handoffs never extend that fixed deadline. First-party JWT `sid` checks live session state during protected access and refresh; issuer revocation cascades to MCP and invalidates refreshed access too.
+- **Token renewal**: rotation CAS, successor insert and first-party authenticated-session `$max` expiry extension commit in one majority transaction. Unknown commits retry only COMMIT and return a retryable 503 if unresolved. Consent fences run after commit; definite authority denials revoke the successor, transient reads/writes preserve it for grace recovery. Refresh and bearer authentication share owner/purpose-scoped session-end reasons; a live diagnostic reread is a server availability error. CLI renewal uses an async bounded profile lock, captures login/destination provenance and persists refresh before access with bounded same-pair retries.
 - **Local identity lifecycle**: login replacement, refresh snapshots and logout use a profile generation under the refresh lock. An in-flight request cannot retry another login's token, including a replacement at the same destination. Bounded logout clears only the matching generation. Explicit credentials do not require profile storage or fall back to another identity.
 
 ### 13. Hosted Connect Links
@@ -467,11 +468,16 @@ JWT_PRIVATE_KEY_PATH=keys/private.pem
 JWT_PUBLIC_KEY_PATH=keys/public.pem
 JWT_ISSUER=nyxid
 JWT_ACCESS_TTL_SECS=900             # 15 min
-JWT_REFRESH_TTL_SECS=604800         # 7 days, ROLLING: every refresh rotates the token and restarts the TTL,
-                                    # so an active CLI never needs a browser re-login. Reuse of a rotated
-                                    # token more than 120s after rotation (a stale copy in another tool
-                                    # or profile) revokes the whole session; the CLI locks + re-reads the
-                                    # profile's token files across processes to avoid that.
+JWT_REFRESH_TTL_SECS=604800         # Renew before the current refresh JWT expires. Every successful rotation
+                                    # restarts this lifetime (7d default). Token-session rows retain their
+                                    # current deadline or extend to the returned refresh expiry, whichever
+                                    # is later; no additional absolute cap for current authority. Browser cookies,
+                                    # pre-assurance and MFA migration/mobile exemptions keep fixed expiry.
+                                    # A usable refresh credential can sustain full-account authority,
+                                    # including mfa_assured, indefinitely: rotation/reuse detection, live
+                                    # revocation, MFA-state gates and the refresh idle limit are the controls.
+                                    # Grace recovery (120s) requires an unexpired original JWT and an intact
+                                    # chain. All replicas must be upgraded for atomic rotation + sliding.
 JWT_RELAY_REPLY_TTL_SECS=1800       # Per-callback reply token TTL
 JWT_RELAY_CALLBACK_TTL_SECS=300     # Callback authentication JWT TTL
 JWT_RELAY_ACCESS_TTL_SECS=300       # X-NyxID-User-Token relay access token TTL. Relay tokens are
@@ -582,6 +588,7 @@ source "$HOME/.cargo/env" 2>/dev/null   # Ensure cargo is available
 cargo build -p nyxid-cli                # Build CLI binary (includes node subcommand)
 cargo test -p nyxid-cli                 # CLI tests (includes node agent tests)
 cargo install --path cli                # Install as `nyxid`
+nyxid session status --output json      # Saved-profile diagnostic; never refreshes or prompts
 nyxid session refresh                   # Renew the saved session now (rotates the refresh token); exit 3 = must `nyxid login`, 4 = retry later
 nyxid login --agent-key --profile agent  # Web key selection/creation or phone QR approval; stores no account session
 nyxid login --device                    # Explicit selectable device-code login (also the plain-login default)

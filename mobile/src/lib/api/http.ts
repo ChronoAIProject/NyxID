@@ -1,3 +1,8 @@
+import { unregisterCapturedDevice } from "./capturedCleanup";
+import { requestRefreshWithRetry } from "./refreshRequest";
+import { createSessionInvalidationRegistry } from "../auth/sessionInvalidation";
+import type { RefreshOutcome } from "../auth/refreshOutcome";
+import type { StoredAuthSession } from "../auth/sessionCoordinator";
 import { createSessionRefresh } from "../auth/sessionRefresh";
 import Constants from "expo-constants";
 import { guardedJsonTransport } from "./guardedTransport";
@@ -8,7 +13,7 @@ import { ACCOUNT_DELETION_POLICY_VERSION } from "../accountDeletionPolicy";
 import { ApiError } from "./ApiError";
 import { mfaChallengeFromResponse } from "../auth/mfaChallenge";
 import {
-  clearStoredAuthSession,
+  compareAndClearAuthSession,
   commitRefreshedAuthSession,
   authSessionGeneration,
   loadStoredAuthSession,
@@ -32,20 +37,14 @@ import {
 const DEFAULT_API_BASE_URL = "http://localhost:3001/api/v1";
 const DEFAULT_CHALLENGE_DURATION_SEC = 24 * 60 * 60;
 const ACTIVITY_PAGE_SIZE = 20;
-const REFRESH_CONFLICT_RETRY_COUNT = 1;
-const REFRESH_CONFLICT_RETRY_DELAY_MS = 160;
 const PROACTIVE_REFRESH_BUFFER_MS = 2 * 60 * 1000;
 
 // ── Session invalidation hook ──────────────────────────────────────
 // Allows AuthSessionContext to subscribe so that a 401 after failed
 // refresh triggers a full sign-out (state + storage + push cleanup)
 // rather than just clearing SecureStore behind React's back.
-type SessionInvalidationListener = () => void;
-let onSessionInvalidated: SessionInvalidationListener | null = null;
-
-export function setSessionInvalidationListener(listener: SessionInvalidationListener | null) {
-  onSessionInvalidated = listener;
-}
+const invalidationRegistry = createSessionInvalidationRegistry(compareAndClearAuthSession);
+export const setSessionInvalidationListener = invalidationRegistry.setListener;
 
 type RequestOptions = {
   expectedAccountId?: string;
@@ -79,12 +78,6 @@ type LoginResponse = {
 type RegisterResponse = {
   user_id: string;
   message: string;
-};
-
-type RefreshResponse = {
-  access_token: string;
-  expires_in: number;
-  refresh_token: string;
 };
 
 type SubmitDecisionResponse = {
@@ -407,80 +400,33 @@ function buildPushDevicePayload(payload: PushTokenRegisterRequest): {
 }
 
 
-async function requestRefreshAccessToken(
-  refreshToken: string,
-  max409Retries = REFRESH_CONFLICT_RETRY_COUNT
-): Promise<RefreshResponse | null> {
-  for (let attempt = 0; attempt <= max409Retries; attempt += 1) {
-    const response = await fetch(buildUrl("/auth/refresh"), {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ refresh_token: refreshToken, client: "mobile" }),
-    });
-
-    const payload = await readJsonSafely(response);
-
-    if (response.status === 409 && attempt < max409Retries) {
-      await new Promise((resolve) => setTimeout(resolve, REFRESH_CONFLICT_RETRY_DELAY_MS));
-      continue;
-    }
-
-    if (!response.ok) {
-      if (__DEV__) {
-        console.warn("[auth] refresh failed", response.status, payload);
-      }
-      return null;
-    }
-
-    if (payload && typeof payload === "object") {
-      const data = payload as Partial<RefreshResponse>;
-      if (typeof data.access_token === "string" && data.access_token.length > 0) {
-        return {
-          access_token: data.access_token,
-          expires_in:
-            typeof data.expires_in === "number" && Number.isFinite(data.expires_in)
-              ? data.expires_in
-              : 0,
-          refresh_token:
-            typeof data.refresh_token === "string" && data.refresh_token.length > 0
-              ? data.refresh_token
-              : refreshToken,
-        };
-      }
-    }
-
-    return null;
-  }
-
-  return null;
-}
+const requestRefreshAccessToken = (refreshToken: string) =>
+  requestRefreshWithRetry(buildUrl("/auth/refresh"), refreshToken);
 
 const refreshAccessTokenWithSingleFlight = createSessionRefresh({
   load: loadStoredAuthSession, commit: commitRefreshedAuthSession,
   request: requestRefreshAccessToken, expiresAt: computeAccessTokenExpiresAt,
 });
 
-export async function refreshAccessTokenIfNeeded(): Promise<boolean> {
+export async function refreshAccessTokenIfNeeded(): Promise<RefreshOutcome | null> {
   const session = await loadStoredAuthSession();
   if (!session?.accessToken || !session.refreshToken) {
-    return false;
+    return null;
   }
 
   const expiresAt = resolveAccessTokenExpiresAt(session);
   if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) {
-    return false;
+    return null;
   }
 
   const remainingMs = expiresAt - Date.now();
   if (remainingMs > PROACTIVE_REFRESH_BUFFER_MS) {
-    return false;
+    return null;
   }
 
   const refreshed = await refreshAccessTokenWithSingleFlight();
-  return Boolean(refreshed);
+  if (refreshed.kind === "rejected") await invalidationRegistry.invalidate(session);
+  return refreshed;
 }
 
 export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -527,6 +473,7 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
     headers.Authorization = `Bearer ${session.accessToken}`;
   }
 
+  let sentSession = session;
   const send = () => {
     guard();
     return fetch(buildUrl(path), {
@@ -542,15 +489,22 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
     refresh: async () => {
       const refreshed = await refreshAccessTokenWithSingleFlight();
       guard();
-      if (!refreshed) return false;
-      if (options.expectedAccountId && decodeJwtSub(refreshed.access_token) !== options.expectedAccountId)
-        throw new Error("analytics_account_changed");
-      headers.Authorization = `Bearer ${refreshed.access_token}`;
-      return true;
+      const next = refreshed.kind === "refreshed"
+        ? { accessToken: refreshed.credentials.access_token, refreshToken: refreshed.credentials.refresh_token,
+            sessionGeneration: expectedSessionGeneration }
+        : refreshed.kind === "superseded" ? refreshed.current : null;
+      if (next) {
+        if (next.sessionGeneration !== expectedSessionGeneration) throw new Error("auth_session_changed");
+        if (options.expectedAccountId && decodeJwtSub(next.accessToken) !== options.expectedAccountId)
+          throw new Error("analytics_account_changed");
+        sentSession = next;
+        headers.Authorization = `Bearer ${next.accessToken}`;
+      }
+      return refreshed;
     },
     invalidate: async () => {
       guard();
-      if (onSessionInvalidated) onSessionInvalidated(); else await clearStoredAuthSession();
+      if (sentSession) await invalidationRegistry.invalidate(sentSession);
     },
     failure: buildApiError,
   });
@@ -779,8 +733,14 @@ export async function rotatePushTokenRequest(
 }
 
 export async function unregisterPushTokenRequest(
-  payload: PushTokenRegisterRequest
+  payload: PushTokenRegisterRequest,
+  capturedSession?: StoredAuthSession,
 ): Promise<void> {
+  if (capturedSession) {
+    await unregisterCapturedDevice(buildUrl("/notifications/devices/current"), buildPushDevicePayload(payload),
+      capturedSession.accessToken, resolveAccessTokenExpiresAt(capturedSession));
+    return;
+  }
   await requestJson<MessageResponse>("/notifications/devices/current", {
     method: "DELETE",
     body: buildPushDevicePayload(payload),

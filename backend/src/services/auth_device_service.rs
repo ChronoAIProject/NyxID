@@ -2097,6 +2097,40 @@ mod tests {
             user_id
         );
 
+        let sid = updated.approved_session_id.as_ref().unwrap();
+        db.collection::<crate::models::session::Session>(crate::models::session::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": sid },
+                doc! {
+                    "$set": {
+                        "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(1))
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        token_service::refresh_tokens(&db, &config, &jwt_keys, &refresh, None, None)
+            .await
+            .unwrap();
+        let session = db
+            .collection::<crate::models::session::Session>(crate::models::session::COLLECTION_NAME)
+            .find_one(doc! { "_id": sid })
+            .await
+            .unwrap()
+            .unwrap();
+        let active = db
+            .collection::<crate::models::refresh_token::RefreshToken>(
+                crate::models::refresh_token::COLLECTION_NAME,
+            )
+            .find_one(doc! {
+                "session_id": sid,
+                "revoked": false
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.expires_at, active.expires_at);
+
         let audit_id = tokio::time::timeout(Duration::seconds(2).to_std().unwrap(), audit_written)
             .await
             .expect("audit write timed out")

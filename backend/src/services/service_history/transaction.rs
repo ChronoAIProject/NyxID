@@ -51,7 +51,7 @@ where
     let mut transaction = Transaction {
         session: db.client().start_session().await?,
     };
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    let deadline = transaction_deadline();
     loop {
         transaction
             .session
@@ -63,7 +63,7 @@ where
             Ok(value) => {
                 let mut commit_was_unknown = false;
                 loop {
-                    match transaction.session.commit_transaction().await {
+                    match commit_transaction(&mut transaction.session).await {
                         Ok(()) => return Ok(value),
                         Err(error)
                             if error.contains_label("UnknownTransactionCommitResult")
@@ -114,7 +114,7 @@ where
     let mut transaction = Transaction {
         session: db.client().start_session().await?,
     };
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    let deadline = transaction_deadline();
     loop {
         transaction
             .session
@@ -126,7 +126,7 @@ where
             Ok(value) => {
                 let mut commit_was_unknown = false;
                 loop {
-                    match transaction.session.commit_transaction().await {
+                    match commit_transaction(&mut transaction.session).await {
                         Ok(()) => return Ok(value),
                         Err(error)
                             if error.contains_label("UnknownTransactionCommitResult")
@@ -155,4 +155,53 @@ where
         }
         tokio::task::yield_now().await;
     }
+}
+
+fn transaction_deadline() -> tokio::time::Instant {
+    #[cfg(test)]
+    if let Ok(budget) = COMMIT_RESPONSE_LOSS.try_with(|fault| fault.borrow().budget) {
+        return tokio::time::Instant::now() + budget;
+    }
+    tokio::time::Instant::now() + std::time::Duration::from_secs(120)
+}
+
+async fn commit_transaction(session: &mut ClientSession) -> Result<()> {
+    session.commit_transaction().await?;
+    #[cfg(test)]
+    if COMMIT_RESPONSE_LOSS
+        .try_with(|fault| {
+            let mut fault = fault.borrow_mut();
+            fault.attempts += 1;
+            if fault.remaining == 0 {
+                false
+            } else {
+                fault.remaining -= 1;
+                true
+            }
+        })
+        .unwrap_or(false)
+    {
+        // The database committed; model losing only its acknowledgement.
+        let concern: mongodb::error::WriteConcernError = bson::from_document(bson::doc! {
+            "code":64,"errmsg":"injected lost commit acknowledgement",
+            "errorLabels":["UnknownTransactionCommitResult"]
+        })
+        .unwrap();
+        return Err(mongodb::error::ErrorKind::Write(
+            mongodb::error::WriteFailure::WriteConcernError(concern),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) struct CommitResponseLoss {
+    pub remaining: usize,
+    pub attempts: usize,
+    pub budget: std::time::Duration,
+}
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static COMMIT_RESPONSE_LOSS: std::cell::RefCell<CommitResponseLoss>;
 }

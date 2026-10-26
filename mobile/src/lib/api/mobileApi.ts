@@ -1,3 +1,4 @@
+import type { StoredAuthSession } from "../auth/sessionCoordinator";
 import { ApiError } from "./ApiError";
 import {
   approveAuthDeviceRequest,
@@ -196,8 +197,8 @@ export const mobileApi = {
   ): Promise<PushTokenRegisterResponse> {
     return rotatePushTokenRequest(payload);
   },
-  async unregisterPushToken(payload: PushTokenRegisterRequest): Promise<void> {
-    await unregisterPushTokenRequest(payload);
+  async unregisterPushToken(payload: PushTokenRegisterRequest, capturedSession?: StoredAuthSession): Promise<void> {
+    await unregisterPushTokenRequest(payload, capturedSession);
   },
   async getAccountProfile(): Promise<AccountProfile> {
     return getCurrentUserProfileRequest();

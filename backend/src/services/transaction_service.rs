@@ -48,10 +48,17 @@ pub(crate) fn map_error(error: mongodb::error::Error) -> AppError {
         AppError::DatabaseError(error)
     }
 }
+pub(crate) const INDETERMINATE_COMMIT_MESSAGE: &str =
+    "Transaction completion could not be confirmed";
+
+pub(crate) fn is_indeterminate_commit(error: &AppError) -> bool {
+    matches!(error, AppError::Internal(message) if message == INDETERMINATE_COMMIT_MESSAGE)
+}
+
 pub(crate) fn indeterminate_commit() -> AppError {
     // The same proof may already have been consumed. Do not promise that
     // repeating verification in a new transaction is safe or will succeed.
-    AppError::Internal("Transaction completion could not be confirmed".into())
+    AppError::Internal(INDETERMINATE_COMMIT_MESSAGE.into())
 }
 enum CommitFailure {
     Unknown,
@@ -125,6 +132,84 @@ mod tests {
                 .expect("unexpected commit attempt")
         }
     }
+    #[test]
+    fn only_the_expected_internal_message_is_indeterminate() {
+        let error = indeterminate_commit();
+        assert!(matches!(
+            &error,
+            AppError::Internal(message) if message == INDETERMINATE_COMMIT_MESSAGE
+        ));
+        assert!(is_indeterminate_commit(&error));
+        assert!(!is_indeterminate_commit(&AppError::Internal(
+            "Another internal failure".into(),
+        )));
+        assert!(!is_indeterminate_commit(&AppError::DatabaseError(
+            mongodb::error::Error::custom("plain database failure"),
+        )));
+        let wrapped =
+            super::super::api_key_mutation_service::abort_transaction(indeterminate_commit());
+        let recovered = super::super::api_key_mutation_service::map_transaction_error(wrapped);
+        assert!(matches!(&recovered, AppError::Internal(_)));
+        assert!(is_indeterminate_commit(&recovered));
+    }
+
+    #[tokio::test]
+    async fn indeterminate_commit_preserves_internal_wire_response_and_error_log() {
+        use axum::{http::StatusCode, response::IntoResponse};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        struct RecordedEvent {
+            level: tracing::Level,
+            error: String,
+        }
+
+        #[derive(Clone, Default)]
+        struct Events(std::sync::Arc<std::sync::Mutex<Vec<RecordedEvent>>>);
+
+        #[derive(Default)]
+        struct ErrorField(String);
+
+        impl tracing::field::Visit for ErrorField {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "error" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _context: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut error = ErrorField::default();
+                event.record(&mut error);
+                self.0.lock().unwrap().push(RecordedEvent {
+                    level: *event.metadata().level(),
+                    error: error.0,
+                });
+            }
+        }
+
+        let events = Events::default();
+        let subscriber = tracing_subscriber::registry().with(events.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        let response = indeterminate_commit().into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "internal_error");
+        assert!(!body.to_string().contains(INDETERMINATE_COMMIT_MESSAGE));
+        let recorded = events.0.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].level, tracing::Level::ERROR);
+        assert!(recorded[0].error.contains(INDETERMINATE_COMMIT_MESSAGE));
+    }
+
     #[tokio::test]
     async fn unknown_commit_then_definite_error_remains_indeterminate() {
         let mut commit = ScriptedCommit::new([
@@ -135,7 +220,7 @@ mod tests {
         ]);
         let error = retry_commit(&mut commit).await.unwrap_err();
         assert_eq!(commit.attempts, 2);
-        assert!(matches!(error, AppError::Internal(_)));
+        assert!(is_indeterminate_commit(&error));
         assert!(!error.to_string().contains("retry"));
     }
     #[tokio::test]
@@ -150,7 +235,7 @@ mod tests {
         let mut commit = ScriptedCommit::new((0..3).map(|_| Err(CommitFailure::Unknown)));
         let error = retry_commit(&mut commit).await.unwrap_err();
         assert_eq!(commit.attempts, 3);
-        assert!(matches!(error, AppError::Internal(_)));
+        assert!(is_indeterminate_commit(&error));
         assert!(!error.to_string().contains("retry"));
         let mut commit = ScriptedCommit::new([Err(CommitFailure::Definite(AppError::Conflict(
             "changed".into(),

@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use crate::api::ApiClient;
 
 pub const TOKEN_FILE: &str = "token";
-const AUTH_KIND_FILE: &str = "auth_kind";
-const METADATA_FILE: &str = "agent_key.json";
+pub(crate) const AUTH_KIND_FILE: &str = "auth_kind";
+pub(super) const METADATA_FILE: &str = "agent_key.json";
 pub const REJECTED_MESSAGE: &str = "Your Agent Key credential was rejected (revoked, expired, or the key was deleted). Run `nyxid login --agent-key` to authorize again.";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -55,11 +55,23 @@ impl std::fmt::Debug for Delivery {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AuthKind {
+    Session,
+    AgentKey,
+}
+
+pub(crate) fn read_auth_kind(profile: Option<&str>) -> Result<AuthKind> {
+    Ok(
+        match super::read_profile_file(profile, AUTH_KIND_FILE)?.as_deref() {
+            Some("agent_key") => AuthKind::AgentKey,
+            _ => AuthKind::Session,
+        },
+    )
+}
+
 pub fn is_agent_key_profile(profile: Option<&str>) -> bool {
-    super::token_dir_for_profile(profile)
-        .ok()
-        .and_then(|dir| std::fs::read_to_string(dir.join(AUTH_KIND_FILE)).ok())
-        .is_some_and(|value| value.trim() == "agent_key")
+    matches!(read_auth_kind(profile), Ok(AuthKind::AgentKey))
 }
 
 pub fn read_metadata(profile: Option<&str>) -> Option<Identity> {

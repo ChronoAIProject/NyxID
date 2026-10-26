@@ -8,3 +8,6 @@ export const persistAuthSession = coordinator.persist;
 export const clearStoredAuthSession = coordinator.clear;
 export const commitRefreshedAuthSession = coordinator.commitRefresh;
 export const authSessionGeneration = coordinator.generation;
+
+export const compareAndClearAuthSession = coordinator.compareAndClear;
+export const cleanupIfSessionInvalidated = coordinator.cleanupIfInvalidated;

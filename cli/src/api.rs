@@ -132,7 +132,7 @@ fn cli_http_client_builder(profile: Option<&str>) -> Result<reqwest::ClientBuild
     Ok(builder)
 }
 
-fn credential_request_url(address: &str) -> Result<url::Url> {
+pub(crate) fn credential_request_url(address: &str) -> Result<url::Url> {
     let address =
         url::Url::parse(address).map_err(|_| anyhow::anyhow!("Invalid credential request URL"))?;
     if address.host().is_none()
@@ -244,6 +244,10 @@ impl ApiClient {
             });
         }
         let _lock = crate::auth::acquire_refresh_lock(auth.profile.as_deref())?;
+        Self::from_saved_auth_locked(auth)
+    }
+
+    fn from_saved_auth_locked(auth: &crate::cli::AuthArgs) -> Result<Self> {
         let base_url = auth.resolved_base_url()?;
         let resolved = crate::auth::resolve_access_token_with_source(auth)?;
         let allow_refresh = resolved.source.allows_session_refresh();
@@ -286,7 +290,13 @@ impl ApiClient {
     /// are never eligible for saved-session refresh.
     pub async fn from_auth_checked(auth: &crate::cli::AuthArgs) -> Result<Self> {
         crate::auth::ensure_session(auth).await?;
-        Self::from_auth(auth)
+        if crate::auth::resolve_access_token_override(auth).is_some() {
+            return Self::from_auth(auth);
+        }
+        let _lock = crate::auth::acquire_refresh_lock_async(auth.profile.as_deref())
+            .await
+            .map_err(|error| crate::auth::RefreshUnavailable(error.to_string()))?;
+        Self::from_saved_auth_locked(auth)
     }
 
     /// Disable the automatic 401 → session-refresh retry path.
@@ -347,62 +357,26 @@ impl ApiClient {
         Ok(())
     }
 
-    /// Attempt to refresh the access token using the saved refresh token.
-    /// Returns `true` if the token was refreshed successfully. Delegates the
-    /// wire protocol to [`crate::auth::exchange_refresh_token`] (the single
-    /// source of truth) and owns only the token I/O: read the saved refresh
-    /// token, persist the rotated pair, and update this client's in-memory copy.
-    async fn try_refresh_token(&mut self) -> bool {
+    async fn try_refresh_token(&mut self) -> Result<bool> {
         let client = self.client.clone();
         self.try_refresh_token_with_client(&client).await
     }
 
-    async fn try_refresh_token_with_client(&mut self, client: &Client) -> bool {
-        if self.refresh_disabled {
-            return false;
-        }
-        let profile = self.profile.as_deref();
-        // Same cross-process discipline as the preflight: lock, then prefer a
-        // token another process already rotated over presenting a stale one.
-        let Ok(_lock) = crate::auth::acquire_refresh_lock(profile) else {
-            return false;
-        };
-        if self.login_generation != crate::auth::login_generation(profile)
-            || crate::auth::validate_profile_destination(profile, self.base_url_root()).is_err()
-        {
-            return false;
-        }
-        if crate::auth::agent_key::is_agent_key_profile(profile) {
-            return false;
-        }
-        if let Some(access_token) = crate::auth::fresh_access_token_on_disk(profile)
-            && access_token != self.access_token
-        {
-            self.access_token = access_token;
-            return true;
-        }
-        let refresh_token = match crate::auth::read_saved_refresh_token_for(profile) {
-            Some(rt) => rt,
-            None => return false,
-        };
-
-        match crate::auth::exchange_refresh_token(client, self.base_url_root(), &refresh_token)
-            .await
-        {
-            crate::auth::RefreshExchange::Renewed {
-                access_token,
-                refresh_token,
-            } => {
-                if crate::auth::save_tokens_for(profile, &access_token, Some(&refresh_token))
-                    .is_err()
-                {
-                    return false;
-                }
-                self.access_token = access_token;
-                true
-            }
-            crate::auth::RefreshExchange::Rejected(_)
-            | crate::auth::RefreshExchange::Network(_) => false,
+    async fn try_refresh_token_with_client(&mut self, client: &Client) -> Result<bool> {
+        let outcome = crate::auth::refresh_captured_session(
+            client,
+            self.profile.as_deref(),
+            self.base_url_root(),
+            self.login_generation.as_deref(),
+            &self.access_token,
+            !self.refresh_disabled,
+        )
+        .await;
+        if let Some(token) = outcome.access_token()? {
+            self.access_token = token;
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 
@@ -422,7 +396,7 @@ impl ApiClient {
             .with_context(|| format!("GET {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await? {
             let resp = self
                 .client
                 .get(&url)
@@ -462,7 +436,7 @@ impl ApiClient {
             .with_context(|| format!("GET {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await? {
             resp = self
                 .client
                 .get(&url)
@@ -506,7 +480,7 @@ impl ApiClient {
         self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
             && !self.write_refresh_disabled
-            && self.try_refresh_token().await
+            && self.try_refresh_token().await?
         {
             let resp = self
                 .client
@@ -550,7 +524,7 @@ impl ApiClient {
         self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
             && !self.write_refresh_disabled
-            && self.try_refresh_token().await
+            && self.try_refresh_token().await?
         {
             let resp = self
                 .client
@@ -595,7 +569,7 @@ impl ApiClient {
         self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
             && !self.write_refresh_disabled
-            && self.try_refresh_token().await
+            && self.try_refresh_token().await?
         {
             let resp = self
                 .client
@@ -644,7 +618,7 @@ impl ApiClient {
         self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
             && !self.write_refresh_disabled
-            && self.try_refresh_token().await
+            && self.try_refresh_token().await?
         {
             let resp = self
                 .client
@@ -699,7 +673,7 @@ impl ApiClient {
         self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
             && !self.write_refresh_disabled
-            && self.try_refresh_token().await
+            && self.try_refresh_token().await?
         {
             let resp = self
                 .client
@@ -746,7 +720,7 @@ impl ApiClient {
         self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
             && !self.write_refresh_disabled
-            && self.try_refresh_token_with_client(&client).await
+            && self.try_refresh_token_with_client(&client).await?
         {
             let resp = client
                 .delete(url)
@@ -784,7 +758,7 @@ impl ApiClient {
         self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
             && !self.write_refresh_disabled
-            && self.try_refresh_token().await
+            && self.try_refresh_token().await?
         {
             resp = self
                 .client
@@ -825,7 +799,7 @@ impl ApiClient {
         self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
             && !self.write_refresh_disabled
-            && self.try_refresh_token().await
+            && self.try_refresh_token().await?
         {
             let resp = self
                 .client
@@ -869,7 +843,7 @@ impl ApiClient {
         self.reject_agent_key_unauthorized(&response)?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             && read
-            && self.try_refresh_token().await
+            && self.try_refresh_token().await?
         {
             return self.mcp_request_once(session, version, body).await;
         }
@@ -962,24 +936,19 @@ impl ApiClient {
             .with_context(|| format!("Proxy request to {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !self.refresh_disabled {
-            // Drain the auth error body before refreshing so reqwest can reuse
-            // the connection for the refresh + retry sequence.
-            let _ = resp.bytes().await;
-
-            if self.try_refresh_token().await {
-                return build_req(&self.access_token)
-                    .send()
-                    .await
-                    .with_context(|| format!("Proxy request to {path} failed (retry)"));
-            }
-
-            // If refresh failed, replay the original unauthorized request so
-            // callers still receive the backend's 401 payload.
-            return build_req(&original_token)
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.refresh_disabled
+            && (!self.write_refresh_disabled
+                || matches!(
+                    method_parsed,
+                    reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
+                ))
+            && self.try_refresh_token().await?
+        {
+            return build_req(&self.access_token)
                 .send()
                 .await
-                .with_context(|| format!("Proxy request to {path} failed (unauthorized replay)"));
+                .with_context(|| format!("Proxy request to {path} failed (retry)"));
         }
 
         Ok(resp)
@@ -1161,6 +1130,10 @@ mod tests {
         ] {
             assert!(super::credential_request_url(address).is_ok(), "{address}");
             assert!(
+                crate::auth::login_exchange::normalized_destination(address).is_ok(),
+                "{address}"
+            );
+            assert!(
                 ApiClient::new(address, uuid::Uuid::new_v4().to_string()).is_ok(),
                 "{address}"
             );
@@ -1182,6 +1155,10 @@ mod tests {
             "service.example/hidden",
         ] {
             assert!(super::credential_request_url(address).is_err(), "{address}");
+            assert!(
+                crate::auth::login_exchange::normalized_destination(address).is_err(),
+                "{address}"
+            );
             assert!(
                 ApiClient::new(address, uuid::Uuid::new_v4().to_string()).is_err(),
                 "{address}"
@@ -1844,3 +1821,7 @@ mod tests {
         socket.write_all(response.as_bytes()).await
     }
 }
+
+#[cfg(test)]
+#[path = "api_refresh_tests.rs"]
+mod refresh_tests;
