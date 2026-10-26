@@ -1069,13 +1069,6 @@ pub struct ResetPasswordRequest {
     pub new_password: Zeroizing<String>,
 }
 
-impl std::fmt::Debug for ResetPasswordRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResetPasswordRequest")
-            .finish_non_exhaustive()
-    }
-}
-
 #[derive(Debug, Serialize)]
 pub struct ResetPasswordResponse {
     pub message: String,
@@ -1106,13 +1099,6 @@ pub async fn reset_password(
 pub struct ChangePasswordRequest {
     pub current_password: Zeroizing<String>,
     pub new_password: Zeroizing<String>,
-}
-
-impl std::fmt::Debug for ChangePasswordRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ChangePasswordRequest")
-            .finish_non_exhaustive()
-    }
 }
 
 /// POST /api/v1/auth/password/change
@@ -1661,6 +1647,7 @@ crate::errors::redacted_debug!(
     RefreshRequest,
     VerifyEmailRequest,
     ResetPasswordRequest,
+    ChangePasswordRequest,
     SetupRequest,
     CliTokenResponse
 );

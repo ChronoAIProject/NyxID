@@ -1161,24 +1161,18 @@ mod tests {
     }
 
     async fn assured_access_token(state: &AppState, user_id: &str) -> String {
-        let session =
-            crate::services::token_service::create_session_with_transaction_and_assurance(
-                &state.db, user_id, None, None, None, true,
-            )
-            .await
-            .unwrap();
-        crate::crypto::jwt::generate_access_token(
-            &state.jwt_keys,
+        crate::services::token_service::create_derived_session_tokens(
+            &state.db,
             &state.config,
-            &Uuid::parse_str(user_id).unwrap(),
-            "",
+            &state.jwt_keys,
+            user_id,
             None,
             None,
-            None,
-            None,
-            Some(&session.session_id),
+            crate::services::session_authority::DerivedMfaAuthority::new(true, true),
         )
+        .await
         .unwrap()
+        .access_token
     }
 
     async fn request_and_approve(state: &AppState, server: &TestServer, user_id: &str) -> Value {
