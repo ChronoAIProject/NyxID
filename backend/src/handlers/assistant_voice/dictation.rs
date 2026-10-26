@@ -38,10 +38,16 @@ impl Ingress {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DictationOptionsQuery {
+    conversation_id: String,
+}
+
 pub async fn dictation_options(
     State(state): State<AppState>,
     auth: AuthUser,
-    Query(q): Query<OptionsQuery>,
+    Query(q): Query<DictationOptionsQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
     super::super::login_client_context::require_first_party_human(&auth)?;
     let user = auth.user_id.to_string();

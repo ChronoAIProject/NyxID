@@ -1293,8 +1293,8 @@ async fn audio_options(
                 && c.service.api_key_id.is_some()
                 && c.service.credential_binding.as_deref() != Some("platform")
         }) {
-            if let (Some(authority), Some(thread)) = (&authority, thread) {
-                if !(super::voice::credentials::discovery_result(
+            if let (Some(authority), Some(thread)) = (&authority, thread)
+                && !(super::voice::credentials::discovery_result(
                     super::voice::credentials::authorize_with_authority(
                         db,
                         authority,
@@ -1315,9 +1315,8 @@ async fn audio_options(
                         .await,
                     )?
                     .is_some())
-                {
-                    continue;
-                }
+            {
+                continue;
             }
             own_connections.push(connection);
         }
