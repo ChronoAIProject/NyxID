@@ -4350,10 +4350,17 @@ async fn execute_resolved_proxy_inner<'a>(
             operation_catalog_id,
             method.as_str(),
             operation_path.as_ref(),
+            crate::services::agent_operation_scope_service::GuestHttpContext {
+                query: query.as_deref(),
+                websocket: is_ws_candidate,
+            },
         ),
     )
     .await?;
 
+    if operation_guest {
+        crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
+    }
     proxy_service::validate_ifttt_request(
         &target,
         &method,
@@ -4393,6 +4400,7 @@ async fn execute_resolved_proxy_inner<'a>(
             operation_catalog_id,
             &method,
             operation_path.as_ref(),
+            query.as_deref(),
         )
         .await?
     } else {
@@ -4935,9 +4943,9 @@ async fn execute_resolved_proxy_inner<'a>(
         // A delegated token carries service/node allowlists but no operation
         // limits, so its holder could call any operation; refuse rather than
         // mint one for an operation-scoped caller.
-        if !auth_user.assistant_operation_scopes.is_empty() {
+        if operation_guest || !auth_user.assistant_operation_scopes.is_empty() {
             return Err(AppError::ApiKeyScopeForbidden(
-                "Services that receive a delegation token are unavailable to operation-scoped keys"
+                "Services that receive a delegation token are unavailable to guests or operation-scoped keys"
                     .into(),
             ));
         }
@@ -6648,6 +6656,7 @@ async fn execute_resolved_proxy_inner<'a>(
                 Box::pin(proxy_service::forward_request_with_resource_proof(
                     if is_pool_attempt
                         || operation_scoped
+                        || operation_guest
                         || permission_ingress.is_some()
                         || target.service.offering_kind
                             == crate::models::downstream_service::OfferingKind::Tool

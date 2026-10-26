@@ -27,24 +27,27 @@ import {
 export function AgentOperationScopes({
   agentId,
   disabled = false,
+  guests = false,
 }: {
   readonly agentId: string;
   readonly disabled?: boolean;
+  readonly guests?: boolean;
 }) {
-  const enabled = useFeature(FEATURE_FLAG.AGENT_OPERATION_SCOPES);
-  const query = useAgentOperations(agentId, enabled && !disabled);
+  const enabled = useFeature(guests ? FEATURE_FLAG.GUEST_OPERATION_SCOPES : FEATURE_FLAG.AGENT_OPERATION_SCOPES);
+  const query = useAgentOperations(agentId, enabled && !disabled, guests);
   if (!enabled) {
     return (
       <p role="status" className="text-12 text-muted-foreground">
-        Operation scope configuration is not enabled yet. Existing operation limits still apply.
+        {guests ? "Guest operation" : "Operation scope"} configuration is not enabled yet. Existing operation limits still apply.
       </p>
     );
   }
   return (
-    <div className="space-y-3" aria-label="Service operations">
+    <div className="space-y-3" aria-label={guests ? "Guest service operations" : "Service operations"}>
       <p className="text-12 text-muted-foreground">
-        Limit each granted service to the operations this specialist needs.
-        Guest access and confirmations still apply.
+        {guests
+          ? "For guest turns only: withhold a service or select its permitted operations. Your own turns keep the service. The guest level above, specialist limits and confirmations still apply."
+          : "Limit each granted service to the operations this specialist needs. Guest access and confirmations still apply."}
       </p>
       {query.isLoading ? (
         <p className="text-12 text-muted-foreground">Loading operations…</p>
@@ -58,6 +61,7 @@ export function AgentOperationScopes({
         <ServiceOperationForm
           key={`${service.service_id}:${service.revision}`}
           agentId={agentId}
+          guests={guests}
           service={service}
           disabled={disabled}
         />
@@ -70,15 +74,18 @@ export function ServiceOperationForm({
   agentId,
   service,
   disabled = false,
+  guests = false,
 }: {
   readonly agentId: string;
   readonly service: AgentServiceOperations;
   readonly disabled?: boolean;
+  readonly guests?: boolean;
 }) {
-  const mutation = useSetAgentOperations(agentId);
+  const mutation = useSetAgentOperations(agentId, guests);
   return (
     <OperationSelectionForm
       service={service}
+      guests={guests}
       disabled={disabled}
       isSaving={mutation.isPending}
       save={(selection) =>
@@ -94,10 +101,12 @@ export function OperationSelectionForm({
   disabled = false,
   isSaving,
   save: persist,
+  guests = false,
 }: {
   readonly service: AgentServiceOperations;
   readonly disabled?: boolean;
   readonly isSaving: boolean;
+  readonly guests?: boolean;
   readonly save: (selection: OperationSelection) => Promise<unknown>;
 }) {
   const [search, setSearch] = useState("");
@@ -115,6 +124,7 @@ export function OperationSelectionForm({
   const all = form.watch("all_operations");
   const selected = form.watch("endpoint_ids");
   const rules = form.watch("rules");
+  const [guestMode, setGuestMode] = useState(service.all_operations ? "all" : service.endpoint_ids.length ? "selected" : "none");
   const operations = service.operations.filter((op) =>
     `${op.method} ${op.path} ${op.summary ?? ""}`
       .toLowerCase()
@@ -138,7 +148,7 @@ export function OperationSelectionForm({
   }
   return (
     <form
-      aria-label={`${service.service_name} operations`}
+      aria-label={`${service.service_name} ${guests ? "guest " : ""}operations`}
       onSubmit={form.handleSubmit(save)}
       className="space-y-3 rounded-xl border border-border/50 bg-card p-3"
     >
@@ -149,21 +159,27 @@ export function OperationSelectionForm({
         <Badge variant="secondary">Revision {service.revision}</Badge>
       </div>
       <Select
-        value={all ? "all" : "selected"}
+        value={guests ? guestMode : all ? "all" : "selected"}
         disabled={disabled}
-        onValueChange={(value) =>
-          form.setValue("all_operations", value === "all")
-        }
+        onValueChange={(value) => {
+          setGuestMode(value);
+          form.setValue("all_operations", value === "all");
+          if (value === "none") {
+            form.setValue("endpoint_ids", []);
+            form.setValue("rules", []);
+          }
+        }}
       >
-        <SelectTrigger aria-label={`${service.service_name} operation access`}>
+        <SelectTrigger aria-label={`${service.service_name} ${guests ? "guest " : ""}operation access`}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="all">All operations</SelectItem>
+          {guests ? <SelectItem value="none">No guest access</SelectItem> : null}
+          <SelectItem value="all">{guests ? "All operations permitted by guest level" : "All operations"}</SelectItem>
           <SelectItem value="selected">Selected operations</SelectItem>
         </SelectContent>
       </Select>
-      {!all ? (
+      {!all && (!guests || guestMode === "selected") ? (
         <>
           {service.operations.length ? (
             <>
@@ -367,6 +383,7 @@ export function OperationSelectionForm({
           disabled={disabled || !form.formState.isDirty}
           onClick={() => {
             form.reset();
+            setGuestMode(service.all_operations ? "all" : service.endpoint_ids.length ? "selected" : "none");
             setError(undefined);
           }}
         >
@@ -379,7 +396,7 @@ export function OperationSelectionForm({
           disabled={disabled || !form.formState.isDirty}
           isLoading={isSaving}
         >
-          Save operations
+          {guests ? "Save guest operations" : "Save operations"}
         </Button>
       </div>
     </form>

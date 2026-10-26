@@ -365,6 +365,8 @@ pub mod service_pool_routing;
 
 #[cfg(test)]
 mod agent_operation_scope_tests;
+#[cfg(test)]
+mod guest_access_tests;
 pub mod permission_policy_service;
 
 pub mod agent_skill_service;

@@ -2669,6 +2669,10 @@ async fn enforce_agent_llm_operations(
             catalog_id,
             method,
             canonical.as_ref(),
+            operations::GuestHttpContext {
+                query,
+                websocket: headers.contains_key(axum::http::header::UPGRADE),
+            },
         ))
         .await?;
         return Ok(LlmOperationScope {
@@ -2695,6 +2699,10 @@ async fn enforce_agent_llm_operations(
         catalog_id,
         method,
         Some(&canonical),
+        operations::GuestHttpContext {
+            query,
+            websocket: headers.contains_key(axum::http::header::UPGRADE),
+        },
     ))
     .await?;
     Ok(LlmOperationScope {
@@ -2743,7 +2751,7 @@ impl LlmOperationScope {
     }
 
     fn client<'a>(&self, shared: &'a reqwest::Client) -> &'a reqwest::Client {
-        if self.identity.is_some() {
+        if self.guest || self.identity.is_some() {
             proxy_service::no_redirect_http_client()
         } else {
             shared

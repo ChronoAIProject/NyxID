@@ -42,6 +42,8 @@ impl Registry {
             specialty: None,
             grants: Default::default(),
             guest_access: Default::default(),
+            guest_operation_scopes: Default::default(),
+            guest_operation_scope_revisions: Default::default(),
             operation_scopes: Default::default(),
             skills: vec![SkillReference {
                 source: "ornn".into(),

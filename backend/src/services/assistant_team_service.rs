@@ -191,6 +191,8 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         specialty: None,
         grants: AgentGrants::default(),
         guest_access: BTreeMap::new(),
+        guest_operation_scopes: Default::default(),
+        guest_operation_scope_revisions: Default::default(),
         operation_scopes: Default::default(),
         operation_scope_revisions: Default::default(),
         created_by: "user".into(),
@@ -1163,6 +1165,8 @@ async fn create_specialist_inner(
             account_read: request.account_read,
         },
         guest_access: BTreeMap::new(),
+        guest_operation_scopes: Default::default(),
+        guest_operation_scope_revisions: Default::default(),
         operation_scopes: Default::default(),
         operation_scope_revisions: Default::default(),
         created_by: request.created_by.into(),
@@ -1518,6 +1522,12 @@ pub async fn set_agent_policy(
 /// change keeps levels only for granted services, and none for the default.
 #[derive(Clone, Debug)]
 pub enum GrantChange {
+    /// Atomic guest levels plus guest-only catalog selections. The latter
+    /// live beside grants and are ignored by old model readers.
+    GuestOperations {
+        base: Box<GrantChange>,
+        selections: BTreeMap<String, crate::models::agent_operation_scope::OperationSelection>,
+    },
     Machine {
         base: Box<GrantChange>,
         machines: Option<Vec<String>>,
@@ -1552,7 +1562,7 @@ impl GrantChange {
         current: &AgentGrants,
         current_guests: &BTreeMap<String, GuestAccess>,
     ) -> (AgentGrants, BTreeMap<String, GuestAccess>) {
-        if let Self::Machine { base, .. } = self {
+        if let Self::Machine { base, .. } | Self::GuestOperations { base, .. } = self {
             return base.apply(current, current_guests);
         }
         let mut grants = current.clone();
@@ -1588,7 +1598,7 @@ impl GrantChange {
                 grants.account_read &= !remove.account_read;
             }
             Self::Guests(levels) => guests.extend(levels.clone()),
-            Self::Machine { .. } => unreachable!("handled above"),
+            Self::Machine { .. } | Self::GuestOperations { .. } => unreachable!("handled above"),
         }
         // A service granted anew starts at the default level, whatever an
         // earlier grant of it left behind (a writer that predates levels
@@ -1601,7 +1611,7 @@ impl GrantChange {
         let named: HashSet<&String> = match self {
             Self::Replace { guests: levels, .. } | Self::Guests(levels) => levels.keys().collect(),
             Self::Add(_) | Self::Remove(_) => HashSet::new(),
-            Self::Machine { .. } => unreachable!("handled above"),
+            Self::Machine { .. } | Self::GuestOperations { .. } => unreachable!("handled above"),
         };
         guests.retain(|id, _| before.contains(id) || named.contains(id));
         let granted: HashSet<&String> = grants
@@ -1738,12 +1748,37 @@ pub async fn apply_grants_in_session(
     let lost_account = agent.grants.account_read && !grants.account_read;
     agent.grants = grants;
     agent.guest_access = guest_access;
+    if let GrantChange::GuestOperations { selections, .. } = change {
+        for (service, selection) in selections {
+            Box::pin(super::agent_operation_scope_service::apply_guest_selection(
+                db, owner, &mut agent, service, selection, session,
+            ))
+            .await?;
+        }
+    }
+    for id in &removed {
+        agent.guest_operation_scopes.remove(id);
+        // Retain the revision tombstone to reject stale requests after regrant.
+        if let Some(revision) = agent.guest_operation_scope_revisions.get_mut(id) {
+            *revision = revision
+                .checked_add(1)
+                .ok_or_else(|| AppError::Conflict("Guest scope revision exhausted".into()))?;
+        }
+    }
     Box::pin(super::org_agent_service::validate_grants(db, owner, &agent)).await?;
     let encode = |value: bson::ser::Result<bson::Bson>| {
         value.map_err(|_| AppError::Internal("Grant encoding failed".into()))
     };
     let mut set = doc! {"grants": encode(bson::to_bson(&agent.grants))?,
     "guest_access": encode(bson::to_bson(&agent.guest_access))?, "updated_at": bson::DateTime::now()};
+    set.insert(
+        "guest_operation_scopes",
+        encode(bson::to_bson(&agent.guest_operation_scopes))?,
+    );
+    set.insert(
+        "guest_operation_scope_revisions",
+        encode(bson::to_bson(&agent.guest_operation_scope_revisions))?,
+    );
     if matches!(change, GrantChange::Machine { .. }) {
         set.insert(
             "machine_access",
@@ -1857,6 +1892,8 @@ pub async fn set_grants_as(
             "platform_service_ids": &agent.grants.platform_service_ids,
             "account_read": agent.grants.account_read,
             "guest_access": &agent.guest_access,
+            "guest_scoped_service_ids": agent.guest_operation_scopes.keys().collect::<Vec<_>>(),
+            "guest_operation_count": agent.guest_operation_scopes.values().map(|scope| scope.operations.len()).sum::<usize>(),
             "machines": &agent.machine_node_ids,
             "logins": &agent.saved_login_ids,
         }),
