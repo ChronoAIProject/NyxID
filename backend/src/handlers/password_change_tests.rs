@@ -18,11 +18,10 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 fn ascii_password(bytes: usize) -> String {
-    let mut value = String::with_capacity(bytes);
-    while value.len() < bytes {
-        value.push_str(&generate_random_token());
+    let mut value = String::new();
+    for _ in 0..bytes {
+        value.push(generate_random_token().chars().next().unwrap());
     }
-    value.truncate(bytes);
     value
 }
 
