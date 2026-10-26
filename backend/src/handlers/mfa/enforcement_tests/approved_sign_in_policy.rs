@@ -964,7 +964,7 @@ async fn qr_policy_app_identity_preserves_request_only_and_persistent_provenance
             if revoke_at == "before_decision" {
                 assert!(result.is_err());
             } else {
-                result.unwrap();
+                let _ = result.unwrap();
                 let delivered = device::poll_and_prepare(
                     &state.db,
                     &state.encryption_keys,
