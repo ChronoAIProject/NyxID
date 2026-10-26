@@ -35,6 +35,17 @@ run-wrapper = "telegram-personal-journey-stack"
 filter = "test(=handlers::assistant_nyxagent::tests::capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot) | test(=handlers::assistant_nyxagent::tests::capacity_retry_after_never_extends_trigger_grace_deadline) | test(=handlers::assistant_nyxagent::tests::expired_or_nearly_expired_run_grace_preserves_dispatch_and_response_bounds) | test(=handlers::assistant_nyxagent::tests::lost_session_rebinds_with_recap_and_same_turn_id)"
 threads-required = "num-cpus"
 
+# These migration tests use 900ms leases and 300ms renewal deadlines. Reserve
+# runner test slots so unrelated MongoDB fixture work cannot consume their
+# heartbeat, completion, and cancellation observation windows.
+[[profile.ci.overrides]]
+filter = """
+test(=services::platform_entry_migration::tests::owned_lease_is_renewed_during_an_operation_longer_than_its_initial_lifetime) |
+test(=services::platform_entry_migration::tests::publication_heartbeat_overlap_converges_on_committed_ready) |
+test(=services::platform_entry_migration::tests::ownership_loss_cancels_inflight_operation_and_cannot_retire_or_publish_ready)
+"""
+threads-required = "num-cpus"
+
 # Stream-bound tests use 400ms/500ms deadlines and one measures settlement
 # against a four-second ceiling. They need the same isolation as the recovery
 # tests above so unrelated database setup/drop work cannot consume those bounds.
