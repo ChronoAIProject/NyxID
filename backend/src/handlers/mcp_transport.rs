@@ -3586,7 +3586,13 @@ async fn authorize_mcp_prepared_tool_operation(
         )
     })?;
     if let Some(chat) = auth.chat.as_ref().filter(|chat| chat.guest) {
-        if endpoint.async_operation.is_some() {
+        // Presentation (CMA) operations run for guests without a durable watch,
+        // exactly as with the policy OFF; only other durable operations refuse here.
+        if endpoint
+            .async_operation
+            .as_ref()
+            .is_some_and(|contract| contract.presentation.is_none())
+        {
             if !matches!(
                 crate::services::async_service_operation::guest_refusal(&state.db, chat).await,
                 crate::errors::AppError::GuestEscalationUnavailable

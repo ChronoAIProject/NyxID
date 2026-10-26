@@ -418,6 +418,8 @@ Automation turns share the engine and team pool, with admission fenced inside `b
 
 Specialists store `guest_policy` beside grants, with `enabled=false` by default. OFF preserves legacy guest levels (missing = use), refusals, redirects, WebSockets and private skills; saved default/escalation/share values are dormant. ON applies default read/use, single-use explicit owner escalation and optional shared skill guidance/preloads; memory and owner tools remain private. ON guest HTTP does not follow redirects and requires upgraded nodes; ON WebSockets need explicit all and still pass every existing gate. Upgrade all API/execution/approval replicas before enabling any specialist; only ON guest routing requires node upgrades. Keep new binaries for rollback to OFF. See chat §12a.
 
+Guest CMA presentation calls return ordinary tool responses without watches in both policy modes. ON applies the normal guest level and single-use `ask_owner` escalation to those foreground calls; async endpoints without a presentation contract still refuse guests before durable admission.
+
 ## Channel Bot Notes
 
 Chat reply-length advice belongs in turn-only context and must use `channel_text::TextLimit` budgets. Route it by the actual primary/additional/manager/automation destination; app-only turns receive none. Prefer one message unless long/complete output is requested; never truncate, and retain multipart delivery. Chat-list tool results carry the same guidance for `post_to_chat`.

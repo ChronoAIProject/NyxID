@@ -843,6 +843,10 @@ guest authorization; their catalog inclusion grants no execution access.
   watches always refuse guests because consent cannot authorize background
   operations: ON + `ask_owner` returns 12104, while ON + `refuse` uses the
   legacy Forbidden for watch admission and the guest refusal for MCP calls.
+  CMA presentation calls return the ordinary tool response without a watch in
+  both modes. While ON, the usual guest level and single-use `ask_owner`
+  escalation apply; `refuse` rejects beyond-level calls. Async endpoints without
+  a presentation contract retain the durable-async refusal above.
   OFF retains the exact main-era async ordering and response, including
   `Forbidden("Guests cannot create async watches")` after ordinary approval checks.
   Use foreground MCP for guest approvals. Org specialists retain their existing

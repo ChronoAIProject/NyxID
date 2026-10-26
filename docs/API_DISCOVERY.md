@@ -677,9 +677,12 @@ when per-request completion is required.
 
 These adapters use the existing authenticated async-watch executor, two-hour
 deadline, quotas, billing and live authority checks. They add no user-controlled
-polling URL or new cancellation API. With the guest policy OFF, guest calls retain
-their ordinary tool response without registering a CMA watch. With the policy ON,
-these operations follow the guest refusal rules for durable async operations.
+polling URL or new cancellation API. Guest CMA presentation calls return their
+ordinary tool response without registering a watch in both guest-policy modes.
+With the policy ON, they still require the specialist's guest level or an exact,
+single-use owner approval under `ask_owner`; `refuse` rejects beyond-level calls.
+Async operations without a presentation contract retain the durable-async guest
+refusal rules.
 Card metadata allows only bounded identifiers and known status/phase values, and
 history excludes encrypted results. CMA watch metadata has a 30-day TTL; result
 encryption and the four-hour

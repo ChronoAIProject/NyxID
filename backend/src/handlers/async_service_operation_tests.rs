@@ -182,7 +182,10 @@ impl AsyncFixture {
 }
 
 async fn cma_fixture() -> AsyncFixture {
-    let a = AsyncFixture::new().await;
+    cma_fixture_for(AsyncFixture::new().await).await
+}
+
+async fn cma_fixture_for(a: AsyncFixture) -> AsyncFixture {
     let db = &a.f.state.db;
     let instance = db
         .collection::<crate::models::user_service::UserService>(
@@ -255,6 +258,225 @@ async fn cma_fixture() -> AsyncFixture {
         endpoints.insert_one(&endpoint).await.unwrap();
     }
     a
+}
+
+#[tokio::test]
+async fn guest_policy_cma_presentation_calls_apply_levels_without_watches() {
+    let a = cma_fixture_for(
+        AsyncFixture::build_for(fixture("guest_cma_presentation").await, false).await,
+    )
+    .await;
+    let db = &a.f.state.db;
+    crate::services::assistant_team_service::set_grants(
+        db,
+        &a.f.owner,
+        &a.f.chat.agent_id,
+        crate::services::assistant_team_service::GrantChange::Add(
+            crate::models::assistant_agent::AgentGrants {
+                service_ids: vec![a.service.clone()],
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    crate::services::notification_service::get_or_create_channel(db, &a.f.owner)
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
+        .update_one(
+            doc! {"user_id": &a.f.owner},
+            doc! {"$set": {"approval_required": false, "approval_timeout_secs": 10_i32}},
+        )
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &a.f.row.id},
+            doc! {"$set": {"guest_turn": true, "channel": {
+                "nyxbot_channel_id": "guest-channel", "partition": "guest-thread", "platform": "telegram"
+            }}},
+        )
+        .await
+        .unwrap();
+    let requests = db.collection::<crate::models::approval_request::ApprovalRequest>(
+        crate::models::approval_request::COLLECTION_NAME,
+    );
+    let watches = db.collection::<AsyncServiceOperation>(WATCHES);
+    let auth = authenticate(&a.f).await;
+    let catalog = mcp_service::load_operation_catalog(
+        db,
+        a.f.state.node_ws_manager.as_ref(),
+        &a.f.owner,
+        mcp_node_scope(&auth),
+        mcp_service_scope(&auth),
+    )
+    .await
+    .unwrap();
+    let service = catalog
+        .services
+        .iter()
+        .find(|s| s.service_id == a.service)
+        .unwrap();
+    for name in ["post_api_v1_agents", "post_agent_input"] {
+        assert!(
+            service
+                .endpoints
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap()
+                .async_operation
+                .as_ref()
+                .unwrap()
+                .presentation
+                .is_some()
+        );
+    }
+    assert!(
+        service
+            .endpoints
+            .iter()
+            .find(|e| e.name == "submit_execution_handler")
+            .unwrap()
+            .async_operation
+            .as_ref()
+            .unwrap()
+            .presentation
+            .is_none()
+    );
+    let mut approval_count = 0;
+    for universal in [false, true] {
+        for (tool, args, expected) in [
+            (
+                "sandbox__post_api_v1_agents",
+                json!({"Idempotency-Key": "guest-cma-provision", "name": "Coffee"}),
+                json!({"id": "lifecycle-1", "status": "queued"}),
+            ),
+            (
+                "sandbox__post_agent_input",
+                json!({"id": "agt_coffee", "text": "Guest task", "Idempotency-Key": "guest-cma-input"}),
+                json!({"queued": true}),
+            ),
+        ] {
+            for (enabled, level, escalation, decision) in [
+                // Stored ON-only settings cannot change legacy missing = use.
+                (false, None, "ask_owner", None),
+                (false, Some("read"), "ask_owner", None),
+                (true, Some("use"), "ask_owner", None),
+                (true, Some("all"), "refuse", None),
+                (true, Some("read"), "refuse", None),
+                (true, Some("read"), "ask_owner", Some(true)),
+                // Identical replay needs another decision; the previous one is single-use.
+                (true, Some("read"), "ask_owner", Some(false)),
+            ] {
+                let levels =
+                    level.map_or_else(bson::Document::new, |level| doc! {&a.service: level});
+                db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id": &a.f.chat.agent_id},
+                        doc! {"$set": {"guest_access": levels, "guest_policy": {
+                            "enabled": enabled, "default_access": "read", "escalation": escalation, "share_skills": true
+                        }}},
+                    )
+                    .await
+                    .unwrap();
+                let auth = authenticate(&a.f).await;
+                let hits_before = a.calls.lock().unwrap().len();
+                let pending = async {
+                    if universal {
+                        call(&a.f, &auth, tool, args.clone()).await
+                    } else {
+                        direct_call(&a.f, &auth, tool, args.clone()).await
+                    }
+                };
+                let response = if let Some(approved) = decision {
+                    let decide = async {
+                        next_guest_request(&a.f).await;
+                        assert_eq!(a.calls.lock().unwrap().len(), hits_before);
+                        assert_eq!(watches.count_documents(doc! {}).await.unwrap(), 0);
+                        decide_next_guest(&a.f, approved, false).await
+                    };
+                    let (response, request) = tokio::join!(Box::pin(pending), decide);
+                    let decided = approval_service::get_request(db, &request.id)
+                        .await
+                        .unwrap();
+                    assert_eq!(decided.guest.unwrap().consumed, approved);
+                    approval_count += 1;
+                    response
+                } else {
+                    pending.await
+                };
+                let allowed = level != Some("read") || decision == Some(true);
+                let value = result(response, !allowed).await;
+                if allowed {
+                    assert_eq!(
+                        value, expected,
+                        "{tool} ON={enabled} {level:?} {escalation}"
+                    );
+                } else if decision == Some(false) {
+                    assert_eq!(value["error"], "guest_owner_declined");
+                } else {
+                    assert_eq!(
+                        value,
+                        acks::guest_service_refusal("sandbox", GuestAccess::Read)
+                    );
+                }
+                assert_eq!(
+                    a.calls.lock().unwrap().len(),
+                    hits_before + usize::from(allowed)
+                );
+                assert_eq!(watches.count_documents(doc! {}).await.unwrap(), 0);
+                assert_eq!(
+                    requests.count_documents(doc! {}).await.unwrap(),
+                    approval_count
+                );
+            }
+        }
+        // A presentation contract is the exception; other async endpoints must
+        // still refuse before creating a watch, approval, or upstream effect.
+        for escalation in ["refuse", "ask_owner"] {
+            db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id": &a.f.chat.agent_id},
+                    doc! {"$set": {"guest_access": {&a.service: "all"}, "guest_policy": {
+                        "enabled": true, "default_access": "use", "escalation": escalation
+                    }}},
+                )
+                .await
+                .unwrap();
+            let auth = authenticate(&a.f).await;
+            let hits_before = a.calls.lock().unwrap().len();
+            let args = json!({"Idempotency-Key": "guest-no-watch", "script": "print(1)", "language": "python"});
+            let response = if universal {
+                call(&a.f, &auth, "sandbox__submit_execution_handler", args).await
+            } else {
+                direct_call(&a.f, &auth, "sandbox__submit_execution_handler", args).await
+            };
+            let refusal = result(response, true).await;
+            if escalation == "ask_owner" {
+                assert_eq!(refusal["error"], "guest_escalation_unavailable");
+            } else {
+                assert_eq!(
+                    refusal,
+                    acks::guest_refusal_for(auth.chat.as_ref().unwrap())
+                );
+            }
+            assert_eq!(a.calls.lock().unwrap().len(), hits_before);
+            assert_eq!(watches.count_documents(doc! {}).await.unwrap(), 0);
+            assert_eq!(
+                requests.count_documents(doc! {}).await.unwrap(),
+                approval_count
+            );
+        }
+    }
+    assert_eq!(
+        db.collection::<bson::Document>(crate::models::approval_grant::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]
