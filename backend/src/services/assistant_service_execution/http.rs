@@ -314,7 +314,11 @@ async fn check_http_projected_inner(
         && !method_override
         && super::request_identity::legacy_model_generation(target, method, path, body);
     let stateless = operation["kind"] == "inference";
-    let legacy_inference = model_transport && (!chat.turn_live || !stateless);
+    // Guest replies need the same model-transport scope exception. Keep it
+    // limited to the existing stateless contract in a live turn: this grants
+    // neither owner model consent nor any change to guest/approval policy.
+    let guest_inference = chat.guest && chat.turn_live && stateless && !method_override;
+    let legacy_inference = (model_transport && (!chat.turn_live || !stateless)) || guest_inference;
     if legacy_inference {
         // This only preserves the existing model transport scope exception. It
         // neither installs turn consent nor proves cross-account equivalence.

@@ -472,9 +472,19 @@ pub struct ChannelDeliveryResponse {
 
 #[derive(Serialize)]
 pub struct TurnMetadataResponse {
+    failure_reason: Option<TurnFailureReasonResponse>,
     channel_delivery: Option<ChannelDeliveryResponse>,
     attempts: Option<u32>,
     capacity_wait_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct TurnFailureReasonResponse {
+    source: String,
+    stage: String,
+    code: String,
+    http_status: Option<u16>,
+    nyxid_error_code: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -529,6 +539,13 @@ impl From<AssistantMessage> for MessageResponse {
             upstream_error_code: row.upstream_error_code,
             error_detail: row.error_detail.map(ErrorDetailResponse::from),
             turn_metadata: row.turn_metadata.map(|data| TurnMetadataResponse {
+                failure_reason: data.failure_reason.map(|reason| TurnFailureReasonResponse {
+                    source: reason.source,
+                    stage: reason.stage,
+                    code: reason.code,
+                    http_status: reason.http_status,
+                    nyxid_error_code: reason.nyxid_error_code,
+                }),
                 channel_delivery: data.channel_delivery.map(|e| ChannelDeliveryResponse {
                     status: e.status,
                     heard_prefix_chars: e.heard_prefix_chars,

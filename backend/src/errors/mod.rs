@@ -837,7 +837,7 @@ impl AppError {
         )
     }
 
-    fn status_code(&self) -> StatusCode {
+    pub(crate) fn status_code(&self) -> StatusCode {
         match self {
             Self::VoiceStartFailed(failure) => failure.source.status_code(),
             Self::BadRequest(_)

@@ -3682,73 +3682,108 @@ fn execute_resolved_proxy<'a>(
     auth_user: &'a AuthUser,
     service_id: &'a str,
     path: &'a str,
-    request: Request<Body>,
+    mut request: Request<Body>,
     extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &'a mut String,
     resolved: ResolvedProxyExecution,
 ) -> futures::future::BoxFuture<'a, AppResult<Response>> {
     Box::pin(async move {
-        *resolved_slug = resolved.target.service.slug.clone();
-        let managed =
-            crate::services::telnyx_platform_service::contract(&resolved.target.service).is_some();
-        let lease = crate::services::service_concurrency_service::acquire(
-            &state.db,
-            &resolved.target.service,
-            &auth_user.user_id.to_string(),
-        )
-        .await?;
-        let mut assistant_decision = None;
-        let mut assistant_approval = None;
-        let receipt_method = request.method().clone();
-        let preparation = execute_resolved_proxy_boxed(
-            state,
-            auth_user,
-            service_id,
-            path,
-            request,
-            extra_outbound_headers,
-            resolved_slug,
-            resolved,
-            lease.clone(),
-            &mut assistant_decision,
-            &mut assistant_approval,
-        );
-        // Finish preparation before polling forwarding, so their large debug
-        // poll frames never overlap. The lease guards both phases together.
-        let execution = async move {
-            match preparation.await? {
-                ProxyExecutionPhase::Complete(response) => Ok(response),
-                ProxyExecutionPhase::Forward(forwarding) => forwarding.await,
-            }
-        };
-        // The managed worker classifies lease loss after dispatch as pending.
-        // An outer cancellation would hide that identity behind a retryable 429.
-        let response = if managed {
-            execution.await?
+        // Observe the model callback before scope, approval and concurrency
+        // admission, so these failures can explain a later generic turn_failed.
+        let model_request = if resolved.machine_ingress.is_none()
+            && resolved.target.service.inference.is_some()
+            && request.method() == Method::POST
+            && (crate::services::assistant_model_observer::protocol(path)
+                != crate::services::assistant_model_observer::Protocol::Unknown
+                || path.trim_matches('/').ends_with("responses/compact"))
+            && let (Some(fence), Some(key)) = (
+                &auth_user.assistant_turn_fence,
+                auth_user.api_key_id.as_deref(),
+            ) {
+            crate::services::assistant_model_observer::ModelRequest::capture(
+                &state.db,
+                &fence.conversation_id,
+                key,
+                fence.turn_id.as_deref().unwrap_or_default(),
+            )
+            .await?
         } else {
-            match &lease {
-                Some(lease) => lease.run(execution).await?,
-                None => execution.await?,
-            }
+            None
         };
-        let response = match assistant_decision {
-            Some(decision) => {
-                decision
-                    .finish_http(
-                        response,
-                        state.db.clone(),
-                        auth_user.assistant_chat.as_deref().cloned(),
-                        receipt_method.as_str(),
-                        assistant_approval,
-                    )
-                    .await
-            }
-            None => response,
-        };
-        match lease {
-            Some(lease) => Ok(lease.hold_response(response)),
-            None => Ok(response),
+        if let Some(model_request) = &model_request {
+            request.extensions_mut().insert(model_request.clone());
         }
+        let result = async {
+            *resolved_slug = resolved.target.service.slug.clone();
+            let managed =
+                crate::services::telnyx_platform_service::contract(&resolved.target.service)
+                    .is_some();
+            let lease = crate::services::service_concurrency_service::acquire(
+                &state.db,
+                &resolved.target.service,
+                &auth_user.user_id.to_string(),
+            )
+            .await?;
+            let mut assistant_decision = None;
+            let mut assistant_approval = None;
+            let receipt_method = request.method().clone();
+            let preparation = execute_resolved_proxy_boxed(
+                state,
+                auth_user,
+                service_id,
+                path,
+                request,
+                extra_outbound_headers,
+                resolved_slug,
+                resolved,
+                lease.clone(),
+                &mut assistant_decision,
+                &mut assistant_approval,
+            );
+            // Finish preparation before polling forwarding, so their large debug
+            // poll frames never overlap. The lease guards both phases together.
+            let execution = async move {
+                match preparation.await? {
+                    ProxyExecutionPhase::Complete(response) => Ok(response),
+                    ProxyExecutionPhase::Forward(forwarding) => forwarding.await,
+                }
+            };
+            // The managed worker classifies lease loss after dispatch as pending.
+            // An outer cancellation would hide that identity behind a retryable 429.
+            let response = if managed {
+                execution.await?
+            } else {
+                match &lease {
+                    Some(lease) => lease.run(execution).await?,
+                    None => execution.await?,
+                }
+            };
+            let response = match assistant_decision {
+                Some(decision) => {
+                    decision
+                        .finish_http(
+                            response,
+                            state.db.clone(),
+                            auth_user.assistant_chat.as_deref().cloned(),
+                            receipt_method.as_str(),
+                            assistant_approval,
+                        )
+                        .await
+                }
+                None => response,
+            };
+            match lease {
+                Some(lease) => Ok(lease.hold_response(response)),
+                None => Ok(response),
+            }
+        }
+        .await;
+        if let (Some(model_request), Err(error)) = (&model_request, &result)
+            && model_request.rejected(error).await.is_err()
+        {
+            tracing::warn!("Assistant model refusal diagnostics deferred");
+        }
+        result
     })
 }
 
@@ -3823,6 +3858,10 @@ async fn execute_resolved_proxy_inner<'a>(
         .is_some();
     let permission_bound =
         auth_user.api_key_purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound;
+    let model_request = request
+        .extensions()
+        .get::<crate::services::assistant_model_observer::ModelRequest>()
+        .cloned();
     let ResolvedProxyExecution {
         machine_ingress,
         machine_git,
@@ -4966,26 +5005,6 @@ async fn execute_resolved_proxy_inner<'a>(
         }
     }
 
-    let model_request = if machine_ingress.is_none()
-        && target.service.inference.is_some()
-        && method == Method::POST
-        && (crate::services::assistant_model_observer::protocol(path)
-            != crate::services::assistant_model_observer::Protocol::Unknown
-            || path.trim_matches('/').ends_with("responses/compact"))
-        && let (Some(fence), Some(key)) = (
-            &auth_user.assistant_turn_fence,
-            auth_user.api_key_id.as_deref(),
-        ) {
-        crate::services::assistant_model_observer::ModelRequest::capture(
-            &state.db,
-            &fence.conversation_id,
-            key,
-            fence.turn_id.as_deref().unwrap_or_default(),
-        )
-        .await?
-    } else {
-        None
-    };
     let mut billing_ctx = billing_ctx.with_request_body(body.as_deref());
     billing_ctx.pool_attempt = pool_accounting.as_ref().map(|ctx| ctx.metadata.clone());
     if crate::services::telnyx_platform_service::contract(&target.service).is_some() {

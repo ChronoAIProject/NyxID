@@ -284,6 +284,13 @@ create) reach any active catalog service with `inference` metadata even outside
 its grants (`proxy::assistant_model_call`), whether the owner's own row, an org
 row or the catalog row resolves it. Nothing else widens: the key's allowlist,
 inventory, delegation tokens, consent screens and MCP tools stay its grants.
+For a live guest turn, the existing closed stateless inference contract also
+retains this exception during saved-connection selection and final execution
+revalidation. The model connection does not need to be a specialist tool grant.
+This does not create owner consent: guest service limits, explicit approval
+requirements, platform-key ACLs, billing and concurrency still apply. Stateful
+provider operations keep their existing authorization. NyxBot guest tool calls
+remain refused; specialists keep their configured per-service guest access.
 
 Legacy settings rows without `access_mode` are read with the Auto default and
 are migrated on settings writes. The retired
@@ -1913,6 +1920,20 @@ Generic copy is “The assistant could not complete this turn. Try again.”;
 `model_interrupted` warns that some actions may already have completed and must
 be checked before retrying. Old rows and old clients remain readable; existing
 failed rows are not backfilled.
+
+Failed turns additionally retain `turn_metadata.failure_reason` in history and
+the terminal event. It contains only `{source,stage,code,http_status,nyxid_error_code}`.
+The model observer starts before scope, approval and concurrency admission, so a
+generic `turn_failed` or `nyxid_error` can identify a rejected NyxID model callback
+as `source: nyxid`, `stage: model_proxy`, with its stable AppError key, HTTP status
+and numeric NyxID code. It uses the same 120-second, latest-attempt and
+non-overlap fences as billing attribution; success clears the refusal. Without
+that evidence, it records only NyxAgent's sanitized error code and stage. Old
+replicas' refusal rows without the new status/code fields use this fallback.
+The owner's Details panel and copied diagnostic ID show the reason, and the
+failure audit/settlement log include the same metadata. Upstream error prose,
+request bodies, prompts, headers and key material are never copied. Reading the
+stored NyxAgent response or exposing its thread credential is unnecessary.
 
 ### Capacity wait visibility and engine diagnostics
 

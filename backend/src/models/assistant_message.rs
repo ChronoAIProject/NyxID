@@ -160,10 +160,22 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
+    /// Closed metadata from a failed model callback, or the upstream code alone.
+    #[serde(default)]
+    pub failure_reason: Option<Box<TurnFailureReason>>,
     #[serde(default)]
     pub channel_delivery: Option<ChannelDelivery>,
     pub attempts: Option<u32>,
     pub capacity_wait_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TurnFailureReason {
+    pub source: String,
+    pub stage: String,
+    pub code: String,
+    pub http_status: Option<u16>,
+    pub nyxid_error_code: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
