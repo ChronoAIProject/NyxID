@@ -1114,19 +1114,57 @@ async fn bind_legacy_refresh_session(
     token: &RefreshToken,
 ) -> AppResult<String> {
     let context = (db.clone(), token.id.clone(), token.user_id.clone());
-    super::transaction_service::run_db_only(db, &context, |tx, c| Box::pin(async move {
-        let (db, id, user) = c;
-        let row = db.collection::<RefreshToken>(REFRESH_TOKENS).find_one(doc! {
-            "_id": id, "user_id": user, "revoked": false, "expires_at": {"$gt": bson::DateTime::now()}
-        }).session(&mut *tx).await?.ok_or_else(|| AppError::Unauthorized("Refresh token has expired or been revoked".into()))?;
-        if let Some(sid) = row.session_id { return Ok(sid); }
-        let issued = create_session_with_transaction(db, user, None, None, Some(&mut *tx)).await?;
-        db.collection::<bson::Document>(SESSIONS).update_one(doc! {"_id": &issued.session_id},
-            doc! {"$set": {"mfa_exemption": "legacy_migration"}}).session(&mut *tx).await?;
-        db.collection::<RefreshToken>(REFRESH_TOKENS).update_one(doc! {"_id": id},
-            doc! {"$set": {"session_id": &issued.session_id}}).session(&mut *tx).await?;
-        Ok(issued.session_id)
-    })).await
+    super::transaction_service::run_db_only(db, &context, |tx, c| {
+        Box::pin(async move {
+            let (db, id, user) = c;
+            let row = db
+                .collection::<RefreshToken>(REFRESH_TOKENS)
+                .find_one(doc! {
+                    "_id": id, "user_id": user
+                })
+                .session(&mut *tx)
+                .await?
+                .ok_or_else(|| AppError::Unauthorized("Refresh token not found".into()))?;
+            // A concurrent binder may already have rotated this row. Reusing its
+            // anchor lets the rotation CAS and normal grace checks settle the race.
+            if let Some(sid) = row.session_id {
+                return Ok(sid);
+            }
+            if row.revoked {
+                if row.replaced_by.is_some()
+                    && row.revoked_at.is_some_and(|at| {
+                        Utc::now() - at <= Duration::seconds(REUSE_GRACE_PERIOD_SECS)
+                    })
+                {
+                    return Err(rotation_conflict());
+                }
+                return Err(AppError::Unauthorized(
+                    "Refresh token has been revoked".into(),
+                ));
+            }
+            if row.expires_at <= Utc::now() {
+                return Err(AppError::Unauthorized("Refresh token has expired".into()));
+            }
+            let issued =
+                create_session_with_transaction(db, user, None, None, Some(&mut *tx)).await?;
+            db.collection::<bson::Document>(SESSIONS)
+                .update_one(
+                    doc! {"_id": &issued.session_id},
+                    doc! {"$set": {"mfa_exemption": "legacy_migration"}},
+                )
+                .session(&mut *tx)
+                .await?;
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .update_one(
+                    doc! {"_id": id},
+                    doc! {"$set": {"session_id": &issued.session_id}},
+                )
+                .session(&mut *tx)
+                .await?;
+            Ok(issued.session_id)
+        })
+    })
+    .await
 }
 
 async fn validate_refresh_session(db: &mongodb::Database, token: &RefreshToken) -> AppResult<()> {

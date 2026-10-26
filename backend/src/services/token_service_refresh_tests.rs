@@ -217,10 +217,17 @@ async fn sidless_migration_and_mobile_exemption_keep_a_fixed_thirty_day_anchor()
         )
         .await
         .unwrap();
+    let stale = token_row(&db, &issued.refresh_token).await;
+    assert!(stale.session_id.is_none());
     let migrated = renew(&db, &config, &keys, &issued.refresh_token)
         .await
         .unwrap();
     let anchor = session_row(&db, &migrated.session_id).await;
+    assert!(token_row(&db, &issued.refresh_token).await.revoked);
+    assert_eq!(
+        bind_legacy_refresh_session(&db, &stale).await.unwrap(),
+        anchor.id
+    );
     assert_eq!(
         anchor.mfa_exemption,
         Some(crate::models::session::MfaExemption::LegacyMigration)
@@ -254,6 +261,62 @@ async fn sidless_migration_and_mobile_exemption_keep_a_fixed_thirty_day_anchor()
         row.expires_at
     );
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_binding_never_creates_an_anchor_for_dead_or_partially_rotated_tokens() {
+    for state in ["expired", "revoked", "rotating"] {
+        let (db, _, _, issued) = fixture().await;
+        let mut fields = doc! {"session_id": null};
+        match state {
+            "expired" => {
+                fields.insert(
+                    "expires_at",
+                    bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1)),
+                );
+            }
+            "revoked" => {
+                fields.insert("revoked", true);
+            }
+            _ => {
+                fields.insert("revoked", true);
+                fields.insert("revoked_at", bson::DateTime::now());
+                fields.insert("replaced_by", "missing-successor");
+            }
+        }
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .update_one(
+                doc! {"session_id": &issued.session_id},
+                doc! {"$set": fields},
+            )
+            .await
+            .unwrap();
+        let token = token_row(&db, &issued.refresh_token).await;
+        let error = bind_legacy_refresh_session(&db, &token).await.unwrap_err();
+        match state {
+            "expired" => assert!(
+                matches!(error, AppError::Unauthorized(message) if message == "Refresh token has expired")
+            ),
+            "revoked" => assert!(
+                matches!(error, AppError::Unauthorized(message) if message == "Refresh token has been revoked")
+            ),
+            _ => assert!(is_rotation_conflict(&error)),
+        }
+        assert_eq!(
+            db.collection::<Session>(SESSIONS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            token_row(&db, &issued.refresh_token)
+                .await
+                .session_id
+                .is_none()
+        );
+        db.drop().await.unwrap();
+    }
 }
 #[tokio::test]
 async fn concurrent_rotations_converge_on_one_successor_and_slide_its_expiry() {
