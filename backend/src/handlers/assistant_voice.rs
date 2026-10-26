@@ -380,12 +380,15 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
                 .collection::<crate::models::assistant_voice::VoiceRequest>(REQUESTS)
                 .update_one(
                     doc! {"_id":&request.id,"state":"queued"},
-                    doc! {"$set":{"state":"cancelled"}},
+                    doc! {"$set":{"state":"cancelled", "terminal_error_code":
+                        if request.expires_at <= chrono::Utc::now() { "voice_request_expired".to_owned() }
+                        else { result.as_ref().err().map(|e|e.error_key().to_owned()).unwrap_or_else(||"cancelled".into()) } }},
                 )
                 .await?;
         }
         // Pool/active-turn/temporary database errors leave the durable queue intact.
     }
+    voice::publish_completed_results(&state.db).await?;
     Ok(())
 }
 

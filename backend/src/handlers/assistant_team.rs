@@ -1299,6 +1299,12 @@ fn dispatch<'a>(
     args: &'a Value,
 ) -> futures::future::BoxFuture<'a, AppResult<(Value, bool)>> {
     match name {
+        "task_status" => Box::pin(async move {
+            Ok((
+                crate::services::assistant_task_status::read(&state.db, chat, args).await?,
+                false,
+            ))
+        }),
         "create_schedule" | "list_schedules" | "update_schedule" | "delete_schedule"
         | "run_schedule_now" => Box::pin(async move {
             Ok((
