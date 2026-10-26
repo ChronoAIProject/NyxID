@@ -1,5 +1,6 @@
 import "@/lib/platform-personal-handoff";
 import { PersonalLinkPage } from "@/pages/platform-personal-link";
+import { NyxbotStartPage } from "@/pages/nyxbot-start";
 import { onboardingSearch } from "@/schemas/platform-onboarding";
 import { ToolsPage } from "@/pages/tools";
 import { AdminToolsPage } from "@/pages/admin-tools";
@@ -52,6 +53,7 @@ import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 import { validateSettingsSearch, withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import { parseNyxbotStartSearch } from "@/lib/assistant/business-starters";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { parseAuthDeviceSearch } from "@/schemas/auth-device";
 import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
@@ -205,6 +207,13 @@ const loginRoute = createRoute({
       : {}),
   }),
   component: LoginPage,
+});
+
+const nyxbotStartRoute = createRoute({
+  path: "/nyxbot/start",
+  getParentRoute: () => rootRoute,
+  validateSearch: parseNyxbotStartSearch,
+  component: NyxbotStartPage,
 });
 
 const nyxbotOnboardingRoute = createRoute({
@@ -1239,6 +1248,7 @@ const routeTree = rootRoute.addChildren([
   platformPersonalLinkRoute,
   landingRoute,
   nyxbotOnboardingRoute,
+  nyxbotStartRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
   ...(oauthConsentPreviewRoute ? [oauthConsentPreviewRoute] : []),

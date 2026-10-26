@@ -25,6 +25,8 @@ const state = vi.hoisted(() => ({
   voice: false,
   voiceMounts: 0,
   voiceEnds: 0,
+  navigate: vi.fn(),
+  send: vi.fn(),
 }));
 const agent = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -45,7 +47,7 @@ const staleCard: NyxAgentAcknowledgement = {
 };
 vi.mock("@tanstack/react-router", async (original) => ({
   ...await original<typeof import("@tanstack/react-router")>(),
-  useNavigate: () => vi.fn(),
+  useNavigate: () => state.navigate,
   useRouterState: ({ select }: { select: (value: unknown) => unknown }) => select({ location: { pathname: "/assistant", search: state.search } }),
 }));
 vi.mock("@/hooks/use-feature-flag", () => ({
@@ -66,7 +68,7 @@ vi.mock("@/hooks/use-assistant-nyxagent", () => ({ useNyxAgentAssistantChat: () 
   session: { title: "Thread", messages: state.staleCard ? [{ id: `nyxagent-acknowledgement:${staleCard.id}`, role: "system", content: staleCard.summary }]
     : state.search.c ? [{ id: "one", role: "assistant", content: "Hello" }] : [] },
   isStreaming: state.streaming, waiting: [], acknowledgements: state.staleCard ? [staleCard] : [], approvals: [], conversations: [], threadsLoaded: false,
-  send: vi.fn(), stop: vi.fn(), refreshHistory: vi.fn(), deleteConversation: vi.fn(),
+  send: state.send, stop: vi.fn(), refreshHistory: vi.fn(), deleteConversation: vi.fn(),
 }) }));
 vi.mock("@/lib/assistant/nyxagent-transport", () => ({ nyxAgentTransport: {
   getConversation: (id?: string) => id ? conversation : undefined,
@@ -87,7 +89,11 @@ vi.mock("./chat-message", () => ({ ChatMessageList: ({ session, renderMessage }:
 }) => session?.messages.filter((message) => message.id.startsWith("nyxagent-acknowledgement:"))
   .map((message) => <div key={message.id}>{renderMessage?.(message)}</div>) ?? null }));
 vi.mock("./assistant-link-modals", () => ({ AssistantLinkModalHost: ({ children }: { children: ReactNode }) => children }));
-afterEach(() => vi.unstubAllGlobals());
+const originalAuth = useAuthStore.getState();
+afterEach(() => {
+  useAuthStore.setState(originalAuth);
+  vi.unstubAllGlobals();
+});
 beforeEach(() => {
   const track = Object.assign(new EventTarget(), { stop: vi.fn() });
   Object.defineProperty(navigator, "mediaDevices", {
@@ -110,11 +116,38 @@ beforeEach(() => {
   state.mode = "nyxmode";
   state.override = null;
   state.staleCard = false;
+  state.navigate.mockReset();
+  state.send.mockReset();
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
 });
 function mount() {
-  return render(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><NyxAgentAssistantChatPage /></QueryClientProvider>);
 }
+it.each(["", "My saved draft"])("clears a failed business starter with history replace and preserves draft %j", async (draft) => {
+  const owner = "starter-owner";
+  const draftKey = "screen:nyxagent:assistant";
+  useAuthStore.setState({ user: { id: owner } as NonNullable<ReturnType<typeof useAuthStore.getState>["user"]> });
+  if (draft) useAssistantDraftStore.getState().saveDraft(owner, draftKey, draft);
+  state.search = { draft: true, starter: "queue-manager", panel: "settings", panelTab: "display" };
+  const fetchHelp = vi.fn(async (input: RequestInfo | URL) => {
+    if (input === "/api/v1/public/help/use-cases") {
+      return new Response(JSON.stringify({ error: "unavailable", error_code: -1, message: "Help unavailable" }), { status: 503 });
+    }
+    if (input === "/api/v1/keys") return Response.json({ keys: [] });
+    throw new Error(`Unexpected request: ${String(input)}`);
+  });
+  vi.stubGlobal("fetch", fetchHelp);
+  mount();
+
+  await waitFor(() => expect(state.navigate).toHaveBeenCalledOnce());
+  expect(fetchHelp).toHaveBeenCalledWith("/api/v1/public/help/use-cases", expect.anything());
+  const navigation = state.navigate.mock.calls[0]![0];
+  expect(navigation).toEqual({ to: "/assistant", search: expect.any(Function), replace: true });
+  expect(navigation.search(state.search)).toEqual({ draft: true, panel: "settings", panelTab: "display", starter: undefined });
+  expect(screen.getByRole("textbox").textContent).toBe(draft);
+  expect(useAssistantDraftStore.getState().getDraft(draftKey)).toBe(draft);
+  expect(state.send).not.toHaveBeenCalled();
+});
 it.each([{}, { draft: true }, { draft: true, agent: agent.id }])("puts combined settings in the home/draft composer %j", (search) => {
   state.search = search; const view = mount();
   const controls = view.container.querySelector("[data-composer-footer]") as HTMLElement;

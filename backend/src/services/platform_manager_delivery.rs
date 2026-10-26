@@ -2542,7 +2542,22 @@ pub async fn deliver_command(
         },
         expires_at: Utc::now() + Duration::minutes(1),
     };
-    let body = if let super::platform_manager_command_service::PersonalCommandReply::Management {
+    let body = if matches!(
+        command.reply,
+        super::platform_manager_command_service::PersonalCommandReply::UseCase
+    ) && matches!(
+        command.effect,
+        super::platform_manager_command_service::ManagerCommandEffect::Help
+    ) {
+        super::platform_use_case_service::render_for_receipt(
+            &state.db,
+            &destination.manager,
+            &command.sender,
+            &command.ingress.receipt_id,
+            &state.config.frontend_url,
+        )
+        .await?
+    } else if let super::platform_manager_command_service::PersonalCommandReply::Management {
         connect_token,
     } = &command.reply
     {

@@ -2202,6 +2202,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/{id}/deny", post(handlers::login_approval::deny));
 
     let api_v1_public = Router::new()
+        .route(
+            "/public/help/use-cases",
+            get(handlers::platform_help::public_use_cases),
+        )
         .merge(public_nyxbot_model_billing_routes!(
             register_billing_routes,
             Router::new()

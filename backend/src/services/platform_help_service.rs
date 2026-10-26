@@ -234,6 +234,27 @@ pub async fn revision(db: &Database, reference: &HelpReference) -> AppResult<Hel
         .await?
         .ok_or_else(missing)
 }
+/// Read public starter content without seeding or consulting an unpublished draft.
+pub async fn public_use_cases(db: &Database) -> AppResult<Vec<HelpUseCase>> {
+    let Some(library) = db
+        .collection::<bson::Document>(LIBRARIES)
+        .find_one(doc! {"_id": DEFAULT_LIBRARY})
+        .projection(doc! {"published_revision": 1})
+        .await?
+    else {
+        return Ok(vec![]);
+    };
+    let published_revision = library.get_i64("published_revision").unwrap_or(0);
+    if published_revision <= 0 {
+        return Ok(vec![]);
+    }
+    Ok(db
+        .collection::<HelpRevision>(REVISIONS)
+        .find_one(doc! {"library_id": DEFAULT_LIBRARY, "revision": published_revision})
+        .await?
+        .map_or_else(Vec::new, |revision| revision.content.use_cases))
+}
+
 pub async fn published(db: &Database, profile: &str) -> AppResult<HelpRevision> {
     let assignment = db
         .collection::<HelpAssignment>(ASSIGNMENTS)
@@ -447,6 +468,41 @@ mod tests {
         c.articles[0].body = "🦉".repeat(6000);
         assert!(validate(&c).is_err());
     }
+    #[tokio::test]
+    async fn public_use_cases_read_only_published_default() {
+        let db = crate::test_utils::connect_test_database("public_use_cases_service")
+            .await
+            .unwrap();
+        assert!(public_use_cases(&db).await.unwrap().is_empty());
+        assert_eq!(
+            db.collection::<HelpLibrary>(LIBRARIES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        ensure(&db).await.unwrap();
+        let expected = seed_content().unwrap().use_cases;
+        db.collection::<bson::Document>(LIBRARIES).update_one(
+            doc! {"_id": DEFAULT_LIBRARY},
+            doc! {"$set": {"draft.use_cases": [{"id":"draft-only","title":"Private draft","description":"Unpublished","example_prompts":["Never public"]}]}}
+        ).await.unwrap();
+        let actual = public_use_cases(&db).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        db.collection::<bson::Document>(LIBRARIES)
+            .update_one(
+                doc! {"_id": DEFAULT_LIBRARY},
+                doc! {"$set": {"published_revision": 999_i64}},
+            )
+            .await
+            .unwrap();
+        assert!(public_use_cases(&db).await.unwrap().is_empty());
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn publication_is_atomic_versioned_shared_and_reversible() {
         let db = crate::test_utils::connect_transaction_test_database("help_publication").await;

@@ -1,6 +1,8 @@
 //! Local Mongo transactions and a local Telegram HTTP server; never live accounts.
 #[path = "platform_manager_journey_tests/account_parity.rs"]
 mod account_parity;
+#[path = "platform_manager_journey_tests/business_starters.rs"]
+mod business_starters;
 #[path = "platform_manager_journey_tests/faq.rs"]
 mod faq;
 #[path = "platform_manager_journey_tests/legacy_compatibility.rs"]

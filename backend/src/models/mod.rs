@@ -98,6 +98,7 @@ pub mod platform_public_session;
 pub mod platform_public_turn;
 pub mod platform_settings;
 pub mod platform_setup;
+pub mod platform_use_case_selection;
 pub mod provider_config;
 pub mod pushed_authorization_request;
 pub mod refresh_token;

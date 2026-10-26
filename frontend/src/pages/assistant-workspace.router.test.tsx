@@ -657,3 +657,16 @@ it.each(["settings", "billing", "nyxbot"])("preserves signed-out %s deep links i
   expect(router.state.location.search).toMatchObject({ panel });
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
+
+it("preserves a signed-out business starter query in the trusted login return URL", async () => {
+  useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: false });
+  const assign = vi.spyOn(window.location, "assign").mockImplementation(() => undefined);
+  const path = "/assistant?draft=true&starter=queue-manager,business-faq";
+  await open(path);
+  const login = new URL(assign.mock.calls[0]![0] as string, window.location.origin);
+  const returnTo = new URL(login.searchParams.get("return_to")!);
+  expect(returnTo.origin).toBe(window.location.origin);
+  expect(returnTo.pathname).toBe("/assistant");
+  expect(returnTo.searchParams.get("draft")).toBe("true");
+  expect(returnTo.searchParams.get("starter")).toBe("queue-manager,business-faq");
+});

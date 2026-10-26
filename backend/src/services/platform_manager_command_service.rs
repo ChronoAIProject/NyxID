@@ -20,10 +20,14 @@ pub enum PersonalCommandKind {
     Unlink,
     Status,
     Help,
+    UseCase { id: Option<String> },
     Management(crate::models::platform_manager_management::ManagerManagementView),
 }
 
 pub fn personal_command(text: &str, username: &str) -> Option<PersonalCommandKind> {
+    if let Some(id) = super::platform_use_case_service::parse(text, username) {
+        return Some(PersonalCommandKind::UseCase { id });
+    }
     let mut words = text.split_whitespace();
     let command = words.next()?;
     if command
@@ -57,6 +61,7 @@ pub enum PersonalCommandReply {
     Unlinked,
     Status(ChatLoginStatus),
     Help,
+    UseCase,
     ManagementUnavailable,
     Management {
         connect_token: Option<Zeroizing<String>>,
@@ -313,6 +318,15 @@ pub async fn execute(
                     .is_some_and(|code| code.to_ascii_uppercase().starts_with("P-"))
                 && words.next().is_none()
         }
+        PersonalCommandKind::UseCase { id } => {
+            let username = command
+                .text()
+                .split_whitespace()
+                .next()
+                .and_then(|word| word.split_once('@').map(|(_, name)| name))
+                .unwrap_or("");
+            super::platform_use_case_service::parse(command.text(), username) == Some(id.clone())
+        }
         PersonalCommandKind::Management(selection) => {
             super::platform_manager_management::parse(
                 command.text(),
@@ -362,6 +376,7 @@ pub async fn execute(
                 },
                 PersonalCommandKind::Unlink=> {
                     let revocation=lifecycle.unlink_sender_in_session(db,session,command).await?;
+                    super::platform_use_case_service::clear_in_session(db, session, &controls::policy(&row).manager, &update.sender).await?;
                     (PersonalCommandReply::Unlinked,ManagerCommandEffect::LoggedOut,Some(revocation))
                 },
                 PersonalCommandKind::Status => {
@@ -369,6 +384,18 @@ pub async fn execute(
                     (PersonalCommandReply::Status(state),ManagerCommandEffect::Status {state},None)
                 },
                 PersonalCommandKind::Help => (PersonalCommandReply::Help,ManagerCommandEffect::Help,None),
+                PersonalCommandKind::UseCase {id} => {
+                    if !matches!(update.entry, EntryIdentity::TelegramV1 {..}) || row.retired || row.emergency_stopped || (!row.public_enabled && !row.personal_enabled) {
+                        return Err(AppError::Conflict("Use case selection is unavailable".into()));
+                    }
+                    let binding = match super::platform_personal_binding_service::resolve_sender_in_session(db, session, update).await? {
+                        super::platform_personal_binding_service::ResolvedPersonalSender::Personal {binding,..} => Some(binding),
+                        _ => None,
+                    };
+                    let _ = super::platform_use_case_service::select_in_session(db, session, update, &controls::policy(&row).manager, binding.as_deref(), id.as_deref(), &claim.receipt_id).await?;
+                    // The existing help receipt is informational and authorizes no effect.
+                    (PersonalCommandReply::UseCase,ManagerCommandEffect::Help,None)
+                },
                 PersonalCommandKind::Management(_) if !matches!(update.entry,EntryIdentity::TelegramV1 {..}) =>
                     (PersonalCommandReply::ManagementUnavailable,ManagerCommandEffect::ManagementUnavailable,None),
                 PersonalCommandKind::Management(selection) => {
@@ -438,6 +465,7 @@ impl PersonalCommandReply {
                 url.set_path("/nyxbot/link");url.set_query(None);url.set_fragment(Some(&format!("intent_token={}",token.as_str())));
                 format!("Review your NyxID account at {url}\nThis links your own NyxBot, its existing access and memory, and your personal billing. After approving on the web, return to this private chat with the confirmation command. Never share the link or enter a password here.")
             },
+            Self::UseCase => return Err(AppError::Internal("Use case replies require published rendering".into())),
             Self::ManagementUnavailable=>"These chat bot-setup controls are available in Telegram. Open NyxID to manage your owned bots; your personal NyxBot can still use your normal account tools here.".into(),
             Self::Confirmed if chat != super::platform_chat_presentation::ChatPresentation::Telegram => format!("Your personal NyxBot is linked. New questions here use your account's existing NyxBot access and credits. This saved thread will appear in NyxID. Send {} to check login or {} to disconnect. {}",chat.status(),chat.logout(),chat.question_instruction()),
             Self::Confirmed=>"Your personal NyxBot is linked. New messages here use your account's existing NyxBot access and credits. This saved thread will appear in NyxID. Send /status to check login or /logout to disconnect (/unlink also works).".into(),
