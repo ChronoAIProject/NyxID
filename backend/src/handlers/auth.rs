@@ -1247,7 +1247,7 @@ pub async fn cli_token(
         &user_id_str,
         extract_ip(&headers, Some(peer)).as_deref(),
         user_agent.as_deref(),
-        auth_user.mfa_assured,
+        auth_user.derived_mfa_authority(),
     )
     .await?;
 

@@ -115,7 +115,7 @@ pub async fn user(db: &Database, row: &LoginApproval) -> AppResult<User> {
         .await?
         .ok_or_else(invalid)?;
     auth_service::ensure_person_user(&user)?;
-    if row.verified && user.mfa_enabled && !row.mfa_verified {
+    if row.verified && !super::session_authority::may_derive(user.mfa_enabled, row.mfa_verified) {
         return Err(invalid());
     }
     Ok(user)
@@ -271,8 +271,8 @@ pub async fn approve_app_identity(
         .await?
         .ok_or_else(invalid)?;
     auth_service::ensure_person_user(&actor)?;
-    if actor.mfa_enabled && !mfa_assured {
-        return Err(invalid());
+    if !super::session_authority::may_derive(actor.mfa_enabled, mfa_assured) {
+        return Err(AppError::MfaStepUpRequired);
     }
     let result = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(
         doc! {"_id": &request.id, "status": "pending", "expires_at": {"$gt": mongodb::bson::DateTime::now()}},
@@ -323,7 +323,7 @@ pub async fn app_identity(
         .find_one(doc! {"_id": &request.approved_user_id, "is_active": true})
         .await?
         .ok_or_else(invalid)?;
-    if actor.mfa_enabled && !request.mfa_assured {
+    if !super::session_authority::may_derive(actor.mfa_enabled, request.mfa_assured) {
         return Err(invalid());
     }
     let row = if row.user_id.as_deref() == Some(&actor.id) && !row.verified {

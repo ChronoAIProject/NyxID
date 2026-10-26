@@ -112,6 +112,7 @@ describe("feature flag catalog", () => {
   it("pins the backend registry key literals", () => {
     expect(FEATURE_FLAG).toEqual({
       INVITATION_CODE: "auth:invitation-code",
+      MOBILE_MFA: "auth:mobile-mfa",
       AI_ASSISTANT: "experimental:ai-assistant",
       ASSISTANT_VOICE: "assistant:voice",
       VOICE_OPENAI_PLATFORM: "assistant:voice-openai-platform",
@@ -119,6 +120,7 @@ describe("feature flag catalog", () => {
       VOICE_GROK_PLATFORM: "assistant:voice-grok-platform",
       NYXAGENT_ENGINE: "assistant:nyxagent-engine",
       ASSISTANT_MODEL_CONTROLS: "assistant:model-controls",
+      ASSISTANT_WORKSPACE_PREVIEW: "assistant:workspace-preview",
       ASSISTANT_OWNER_INVOCATIONS: "assistant:owner-invocations",
       MACHINE_CAPABILITIES: "assistant:machine-capabilities",
       MACHINE_CONTEXTS: "assistant:machine-contexts",

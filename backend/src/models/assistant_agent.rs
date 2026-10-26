@@ -137,6 +137,9 @@ pub struct AssistantAgent {
     /// Optional per-agent approval policy; absent inherits the owner's mode.
     #[serde(default)]
     pub access_mode_override: Option<super::assistant_settings::AccessMode>,
+    /// Send one progress reply for channel turns needing external checks after five seconds.
+    #[serde(default)]
+    pub channel_checking_notice: bool,
     /// Where NyxID delivers this agent's events when no thread asked for them.
     #[serde(default)]
     pub home_conversation_id: Option<String>,

@@ -556,132 +556,17 @@ pub async fn callback(
         return Ok((status, response_headers, body));
     }
 
-    if user.mfa_enabled {
-        return finish_social_mfa_redirect(
-            &state.db,
-            &user.id,
-            provider.as_str(),
-            &redirect_target,
-            secure,
-            domain,
-        )
-        .await;
-    }
-    match &redirect_target {
-        SocialRedirectTarget::Web { .. } => {
-            let session =
-                token_service::create_session(&state.db, &user.id, ip.as_deref(), ua.as_deref())
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "Social auth session creation failed");
-                        if let Some(ref iid) = reserved_invite_id {
-                            let db = state.db.clone();
-                            let iid = iid.clone();
-                            tokio::spawn(async move {
-                                let _ = invite_code_service::release_reservation(&db, &iid).await;
-                            });
-                        }
-                        redirect_with_error(
-                            &redirect_target,
-                            "social_auth_exchange",
-                            secure,
-                            domain,
-                        )
-                    })?;
-
-            audit_service::log_async(
-                state.db.clone(),
-                Some(user.id.clone()),
-                "social_login".to_string(),
-                Some(serde_json::json!({
-                    "provider": provider.as_str(),
-                    "session_id": session.session_id,
-                })),
-                ip,
-                ua,
-                None,
-                None,
-            );
-
-            emit_event(
-                state.telemetry.as_deref(),
-                &user.id,
-                None,
-                &tele_social,
-                TelemetryEvent::AuthLoggedIn {
-                    method: provider.as_str().to_string(),
-                    mfa_required: false,
-                },
-            )
-            .await;
-
-            build_web_auth_redirect(
-                &session,
-                &redirect_target,
-                provider.as_str(),
-                &user.id,
-                secure,
-                domain,
-            )
-        }
-        SocialRedirectTarget::Mobile { .. } => {
-            let tokens = token_service::create_session_and_issue_tokens(
-                &state.db,
-                &state.config,
-                &state.jwt_keys,
-                &user.id,
-                ip.as_deref(),
-                ua.as_deref(),
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Social auth session creation failed");
-                if let Some(ref iid) = reserved_invite_id {
-                    let db = state.db.clone();
-                    let iid = iid.clone();
-                    tokio::spawn(async move {
-                        let _ = invite_code_service::release_reservation(&db, &iid).await;
-                    });
-                }
-                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
-            })?;
-
-            audit_service::log_async(
-                state.db.clone(),
-                Some(user.id.clone()),
-                "social_login".to_string(),
-                Some(serde_json::json!({
-                    "provider": provider.as_str(),
-                    "session_id": tokens.session_id,
-                })),
-                ip,
-                ua,
-                None,
-                None,
-            );
-
-            emit_event(
-                state.telemetry.as_deref(),
-                &user.id,
-                None,
-                &tele_social,
-                TelemetryEvent::AuthLoggedIn {
-                    method: provider.as_str().to_string(),
-                    mfa_required: false,
-                },
-            )
-            .await;
-
-            build_mobile_auth_redirect(
-                &tokens,
-                &redirect_target,
-                provider.as_str(),
-                &user.id,
-                secure,
-                domain,
-            )
-        }
-    }
+    finish_social_sign_in(SocialSignIn {
+        state: &state,
+        user: &user,
+        provider: provider.as_str(),
+        redirect_target: &redirect_target,
+        ip,
+        ua,
+        tele_social: &tele_social,
+        reserved_invite_id,
+    })
+    .await
 }
 
 // --- Apple POST callback (response_mode=form_post) ---
@@ -1004,24 +889,72 @@ pub async fn apple_callback(
         return Ok((status, response_headers, body));
     }
 
-    if user.mfa_enabled {
+    finish_social_sign_in(SocialSignIn {
+        state: &state,
+        user: &user,
+        provider: "apple",
+        redirect_target: &redirect_target,
+        ip,
+        ua,
+        tele_social: &tele_social,
+        reserved_invite_id,
+    })
+    .await
+}
+
+/// Both GET callbacks and Apple's form_post cross this same verified-identity
+/// boundary. The typed server-resolved target is the only mobile signal.
+struct SocialSignIn<'a> {
+    state: &'a AppState,
+    user: &'a crate::models::user::User,
+    provider: &'a str,
+    redirect_target: &'a SocialRedirectTarget,
+    ip: Option<String>,
+    ua: Option<String>,
+    tele_social: &'a TelemetryContext,
+    reserved_invite_id: Option<String>,
+}
+
+async fn finish_social_sign_in(
+    input: SocialSignIn<'_>,
+) -> Result<(StatusCode, HeaderMap, ()), (StatusCode, HeaderMap, ())> {
+    let SocialSignIn {
+        state,
+        user,
+        provider,
+        redirect_target,
+        ip,
+        ua,
+        tele_social,
+        reserved_invite_id,
+    } = input;
+    let secure = state.config.use_secure_cookies();
+    let domain = state.config.cookie_domain();
+    let mobile_exempt = user.mfa_enabled
+        && matches!(redirect_target, SocialRedirectTarget::Mobile { .. })
+        && !crate::services::feature_flag_service::mobile_mfa_required(&state.db, &user.id)
+            .await
+            .map_err(|_| {
+                redirect_with_error(redirect_target, "social_auth_exchange", secure, domain)
+            })?;
+    if user.mfa_enabled && !mobile_exempt {
         return finish_social_mfa_redirect(
             &state.db,
             &user.id,
-            "apple",
-            &redirect_target,
+            provider,
+            redirect_target,
             secure,
             domain,
         )
         .await;
     }
-    match &redirect_target {
+    match redirect_target {
         SocialRedirectTarget::Web { .. } => {
             let session =
                 token_service::create_session(&state.db, &user.id, ip.as_deref(), ua.as_deref())
                     .await
                     .map_err(|e| {
-                        tracing::error!(error = %e, "Apple auth session creation failed");
+                        tracing::error!(error = %e, "Social auth session creation failed");
                         if let Some(ref iid) = reserved_invite_id {
                             let db = state.db.clone();
                             let iid = iid.clone();
@@ -1029,12 +962,7 @@ pub async fn apple_callback(
                                 let _ = invite_code_service::release_reservation(&db, &iid).await;
                             });
                         }
-                        redirect_with_error(
-                            &redirect_target,
-                            "social_auth_exchange",
-                            secure,
-                            domain,
-                        )
+                        redirect_with_error(redirect_target, "social_auth_exchange", secure, domain)
                     })?;
 
             audit_service::log_async(
@@ -1042,7 +970,7 @@ pub async fn apple_callback(
                 Some(user.id.clone()),
                 "social_login".to_string(),
                 Some(serde_json::json!({
-                    "provider": "apple",
+                    "provider": provider,
                     "session_id": session.session_id,
                 })),
                 ip,
@@ -1055,9 +983,9 @@ pub async fn apple_callback(
                 state.telemetry.as_deref(),
                 &user.id,
                 None,
-                &tele_social,
+                tele_social,
                 TelemetryEvent::AuthLoggedIn {
-                    method: "apple".to_string(),
+                    method: provider.to_string(),
                     mfa_required: false,
                 },
             )
@@ -1065,25 +993,26 @@ pub async fn apple_callback(
 
             build_web_auth_redirect(
                 &session,
-                &redirect_target,
-                "apple",
+                redirect_target,
+                provider,
                 &user.id,
                 secure,
                 domain,
             )
         }
         SocialRedirectTarget::Mobile { .. } => {
-            let tokens = token_service::create_session_and_issue_tokens(
+            let tokens = token_service::create_mobile_social_tokens(
                 &state.db,
                 &state.config,
                 &state.jwt_keys,
                 &user.id,
                 ip.as_deref(),
                 ua.as_deref(),
+                mobile_exempt,
             )
             .await
             .map_err(|e| {
-                tracing::error!(error = %e, "Apple auth session creation failed");
+                tracing::error!(error = %e, "Social auth session creation failed");
                 if let Some(ref iid) = reserved_invite_id {
                     let db = state.db.clone();
                     let iid = iid.clone();
@@ -1091,7 +1020,7 @@ pub async fn apple_callback(
                         let _ = invite_code_service::release_reservation(&db, &iid).await;
                     });
                 }
-                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+                redirect_with_error(redirect_target, "social_auth_exchange", secure, domain)
             })?;
 
             audit_service::log_async(
@@ -1099,8 +1028,9 @@ pub async fn apple_callback(
                 Some(user.id.clone()),
                 "social_login".to_string(),
                 Some(serde_json::json!({
-                    "provider": "apple",
+                    "provider": provider,
                     "session_id": tokens.session_id,
+                    "mfa": if mobile_exempt { "skipped_mobile_rollout" } else { "not_required" },
                 })),
                 ip,
                 ua,
@@ -1112,15 +1042,25 @@ pub async fn apple_callback(
                 state.telemetry.as_deref(),
                 &user.id,
                 None,
-                &tele_social,
+                tele_social,
                 TelemetryEvent::AuthLoggedIn {
-                    method: "apple".to_string(),
+                    method: provider.to_string(),
                     mfa_required: false,
                 },
             )
             .await;
 
-            build_mobile_auth_redirect(&tokens, &redirect_target, "apple", &user.id, secure, domain)
+            if mobile_exempt {
+                emit_event(
+                    state.telemetry.as_deref(),
+                    &user.id,
+                    None,
+                    tele_social,
+                    TelemetryEvent::AuthMobileMfaExempted,
+                )
+                .await;
+            }
+            build_mobile_auth_redirect(&tokens, redirect_target, provider, &user.id, secure, domain)
         }
     }
 }
@@ -1677,6 +1617,142 @@ impl std::fmt::Debug for AppleCallbackForm {
 mod tests {
     use super::*;
     use bson::doc;
+
+    #[tokio::test]
+    async fn finished_get_and_apple_form_post_mobile_callbacks_obey_personal_rollout() {
+        use crate::models::{
+            session::{COLLECTION_NAME as SESSIONS, MfaExemption, Session},
+            user::{User, UserType},
+        };
+        use crate::services::feature_flag_service::{
+            self as flags, FlagTarget, MOBILE_MFA_FLAG_KEY,
+        };
+        use bson::doc;
+        let db =
+            crate::test_utils::connect_transaction_test_database("mobile_social_rollout").await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut user = crate::test_utils::test_user(&id, UserType::Person);
+        user.mfa_enabled = true;
+        db.collection::<User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(&user)
+            .await
+            .unwrap();
+        let mobile = SocialRedirectTarget::Mobile {
+            redirect_uri: "nyxid://auth/social/callback".into(),
+        };
+        let web = SocialRedirectTarget::Web {
+            frontend_url: "https://app.example.com".into(),
+            return_to: None,
+        };
+        let tele = TelemetryContext::pre_auth(&HeaderMap::new());
+        for provider in ["google", "github", "apple"] {
+            let (_, headers, _) = finish_social_sign_in(SocialSignIn {
+                state: &state,
+                user: &user,
+                provider,
+                redirect_target: &mobile,
+                ip: None,
+                ua: None,
+                tele_social: &tele,
+                reserved_invite_id: None,
+            })
+            .await
+            .unwrap();
+            let url =
+                url::Url::parse(headers.get(header::LOCATION).unwrap().to_str().unwrap()).unwrap();
+            assert!(
+                url.query_pairs()
+                    .any(|(k, v)| k == "status" && v == "success")
+            );
+            assert!(url.query_pairs().any(|(k, _)| k == "access_token"));
+            let (_, headers, _) = finish_social_sign_in(SocialSignIn {
+                state: &state,
+                user: &user,
+                provider,
+                redirect_target: &web,
+                ip: None,
+                ua: None,
+                tele_social: &tele,
+                reserved_invite_id: None,
+            })
+            .await
+            .unwrap();
+            assert!(
+                headers
+                    .get(header::LOCATION)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .contains("mfa=required")
+            );
+        }
+        assert_eq!(
+            db.collection::<Session>(SESSIONS)
+                .count_documents(
+                    doc! {"user_id": &id, "mfa_assured": false, "mfa_exemption": "mobile_rollout"}
+                )
+                .await
+                .unwrap(),
+            3
+        );
+        for target in [FlagTarget::Global, FlagTarget::User(id.clone())] {
+            flags::set_platform_override(&db, MOBILE_MFA_FLAG_KEY, &target, true, &id)
+                .await
+                .unwrap();
+            let (_, headers, _) = finish_social_sign_in(SocialSignIn {
+                state: &state,
+                user: &user,
+                provider: "apple",
+                redirect_target: &mobile,
+                ip: None,
+                ua: None,
+                tele_social: &tele,
+                reserved_invite_id: None,
+            })
+            .await
+            .unwrap();
+            let url =
+                url::Url::parse(headers.get(header::LOCATION).unwrap().to_str().unwrap()).unwrap();
+            assert!(url.fragment().unwrap().starts_with("status=mfa_required"));
+            flags::set_platform_override(&db, MOBILE_MFA_FLAG_KEY, &target, false, &id)
+                .await
+                .unwrap();
+        }
+        // A later flag flip never changes already issued sessions.
+        flags::set_platform_override(
+            &db,
+            MOBILE_MFA_FLAG_KEY,
+            &FlagTarget::User(id.clone()),
+            true,
+            &id,
+        )
+        .await
+        .unwrap();
+        use futures::TryStreamExt;
+        let sessions: Vec<Session> = db
+            .collection::<Session>(SESSIONS)
+            .find(doc! {"user_id": &id})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        for row in sessions {
+            assert_eq!(row.mfa_exemption, Some(MfaExemption::MobileRollout));
+            assert!(
+                crate::services::session_authority::mfa_assurance(&db, &id, Some(&row.id))
+                    .await
+                    .is_ok()
+            );
+        }
+        for _ in 0..100 {
+            if db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME).count_documents(doc! {"user_id": &id, "event_type": "social_login", "event_data.mfa": "skipped_mobile_rollout"}).await.unwrap() == 3 {break;}
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME).count_documents(doc! {"user_id": &id, "event_type": "social_login", "event_data.mfa": "skipped_mobile_rollout"}).await.unwrap(), 3);
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn social_mfa_finished_callback_issues_only_a_challenge_for_apple_google_github() {

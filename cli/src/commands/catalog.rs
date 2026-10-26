@@ -10,6 +10,7 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
         command @ (CatalogCommands::Endpoint { .. }
         | CatalogCommands::Discover { .. }
         | CatalogCommands::Publish { .. }
+        | CatalogCommands::ResyncIdentity { .. }
         | CatalogCommands::Topics { .. }) => super::catalog_tools::run_admin(command).await,
         CatalogCommands::List { all, public, auth } => {
             let path = if all {

@@ -1453,6 +1453,11 @@ async fn execute_turn_inner(
             }
             Err(_) => None,
         };
+    let _checking_notice = agent
+        .as_ref()
+        .filter(|agent| agent.channel_checking_notice)
+        .and_then(|_| egress.checking_notice(row))
+        .map(AbortOnDropHandle::new);
     decisions.push_str(&turn_notes(state, row, agent.as_ref(), previous).await);
     decisions.push_str(
         &crate::services::async_service_operation::input_context(

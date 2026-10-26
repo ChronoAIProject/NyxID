@@ -108,6 +108,7 @@ export type SubmitDecisionOptions = {
 };
 
 export type AccountProfile = {
+  capabilities?: { enabled_features?: string[] };
   id: string;
   email: string;
   display_name?: string | null;

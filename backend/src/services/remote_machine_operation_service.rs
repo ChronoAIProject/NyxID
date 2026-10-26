@@ -16,7 +16,9 @@ use crate::{
         remote_machine_operation::{
             COLLECTION_NAME as OPERATIONS, MachineOperation, OperationState,
         },
-        remote_machine_outbox::{COLLECTION_NAME as OUTBOX, EffectState, MachineEffectOutbox},
+        remote_machine_outbox::{
+            COLLECTION_NAME as OUTBOX, EffectKind, EffectState, MachineEffectOutbox,
+        },
     },
 };
 
@@ -104,6 +106,28 @@ pub(crate) async fn cancel_undispatched_delete_effects(db: &Database) -> AppResu
     Ok(cancelled)
 }
 
+/// Only the first Running delivery can carry this claim-specific proof.
+/// Stop-only/platform receipt delivery bookkeeping is independent of creation.
+pub(crate) fn has_fresh_undispatched_claim(effect: &MachineEffectOutbox) -> bool {
+    (effect.kind == EffectKind::RekeySandbox
+        || (effect.desired_mode == "running"
+            && matches!(
+                effect.kind,
+                EffectKind::CreateSandbox
+                    | EffectKind::ResumeSandbox
+                    | EffectKind::ReconcileSandbox
+                    | EffectKind::UpdateSandboxDeadline
+            )))
+        && effect.attempts == 1
+        && effect.state == EffectState::Claimed
+        && effect.submission.is_none()
+        && effect
+            .claim_id
+            .as_ref()
+            .is_some_and(|claim| !claim.is_empty())
+        && effect.undispatched_claim_id == effect.claim_id
+}
+
 /// The current worker may seal its attested fresh claim before any external call.
 /// A reclaimed legacy claim has no such attestation and remains unknown. The caller
 /// invokes this only on an inert superseded/deleting path, before dispatch.
@@ -112,12 +136,7 @@ pub(crate) async fn cancel_undispatched_claim(
     machine: &ManagedMachine,
     effect: &MachineEffectOutbox,
 ) -> AppResult<bool> {
-    if effect.attempts != 1
-        || effect.state != EffectState::Claimed
-        || effect.submission.is_some()
-        || effect.claim_id.is_none()
-        || effect.undispatched_claim_id != effect.claim_id
-    {
+    if !has_fresh_undispatched_claim(effect) {
         return Ok(false);
     }
     let db_owned = db.clone();
@@ -130,13 +149,135 @@ pub(crate) async fn cancel_undispatched_claim(
         .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             super::api_key_mutation_service::transaction_result(
-                cancel_unattempted_in_session(&db_owned, session, &machine, Some(&effect))
-                    .await
-                    .map(|count| count == 1),
+                Box::pin(cancel_claim_in_session(
+                    &db_owned, session, &machine, &effect,
+                ))
+                .await
+                .map(|count| count == 1),
             )
         })
         .await
         .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+/// Single-claim cancellation has a distinct authorization from the bounded
+/// owner-delete sweep. An arbitrary active-operation mismatch grants nothing.
+async fn cancel_claim_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    machine: &ManagedMachine,
+    effect: &MachineEffectOutbox,
+) -> AppResult<u64> {
+    use crate::models::remote_machine_operation::LifecycleAction;
+    if machine.resource_state == ResourceState::Deleting {
+        return Box::pin(cancel_unattempted_in_session(
+            db,
+            session,
+            machine,
+            Some(effect),
+        ))
+        .await;
+    }
+    if !matches!(
+        machine.resource_state,
+        ResourceState::Stopping | ResourceState::Paused
+    ) || machine.writer_admitted
+        || machine.owner_id != effect.owner_id
+        || machine.node_id != effect.machine_id
+        || machine.active_operation_id.as_deref() == Some(effect.operation_id.as_str())
+    {
+        return Ok(0);
+    }
+    let operations = db.collection::<MachineOperation>(OPERATIONS);
+    let Some(prior) = operations
+        .find_one(doc! {
+            "_id":&effect.operation_id,"owner_id":&machine.owner_id,"machine_id":&machine.node_id,
+        })
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(0);
+    };
+    let Some(successor) = operations.find_one(doc! {
+        "_id":&machine.active_operation_id,"owner_id":&machine.owner_id,"machine_id":&machine.node_id,
+    }).session(&mut *session).await? else { return Ok(0); };
+    let live_pause = successor.terminal_at.is_none()
+        && matches!(
+            successor.state,
+            OperationState::Accepted | OperationState::Applying | OperationState::Reconciling
+        );
+    let completed_pause = machine.resource_state == ResourceState::Paused
+        && successor.state == OperationState::Succeeded
+        && successor.terminal_at.is_some();
+    let Some(reason) = machine
+        .stop_reason
+        .as_deref()
+        .filter(|reason| !reason.is_empty())
+    else {
+        return Ok(0);
+    };
+    let Some(revision) = successor.expected_revision else {
+        return Ok(0);
+    };
+    if successor.action != LifecycleAction::Pause
+        || !(live_pause || completed_pause)
+        || successor.desired_runtime_generation != Some(machine.runtime_generation)
+        || revision >= machine.revision
+        || prior
+            .expected_revision
+            .is_some_and(|prior| prior >= revision)
+        || successor.created_at < effect.created_at
+        || successor.created_at < prior.created_at
+        || !matches!(
+            prior.state,
+            OperationState::Failed | OperationState::Succeeded
+        )
+        || prior.terminal_at.is_none_or(|at| at > successor.created_at)
+    {
+        return Ok(0);
+    }
+    // Both safety producers have immutable provenance; neither mutable error
+    // codes nor an arbitrary user Pause authorize non-dispatch cancellation.
+    let runtime_digest = format!("{reason}:{revision}");
+    let effect_digest = if successor.idempotency_key_hash == format!("system:{runtime_digest}")
+        && successor.request_digest == runtime_digest
+    {
+        runtime_digest
+    } else {
+        let account = super::remote_machine_service::account_safety_identity(
+            machine,
+            LifecycleAction::Pause,
+            None,
+        );
+        let retained_recovery = super::remote_machine_service::account_safety_identity(
+            machine,
+            LifecycleAction::Pause,
+            Some(&prior.id),
+        );
+        if successor.request_digest != account.request_digest
+            || (successor.idempotency_key_hash != account.idempotency_key_hash
+                && successor.idempotency_key_hash != retained_recovery.idempotency_key_hash)
+        {
+            return Ok(0);
+        }
+        account.effect_digest
+    };
+    // Verify the persisted safety operation's concrete stop effect, including
+    // its original resource scope. No caller can supply a substitute operation.
+    if successor.effect_id.is_none() || db.collection::<Document>(OUTBOX).count_documents(doc! {
+        "_id":&successor.effect_id,"operation_id":&successor.id,"owner_id":&machine.owner_id,
+        "machine_id":&machine.node_id,"namespace":&machine.sandbox_namespace,"sandbox_name":&machine.sandbox_name,
+        "kind":"suspend_sandbox","desired_mode":"suspended","effect_digest":effect_digest,
+    }).limit(1).session(&mut *session).await? != 1 {
+        return Ok(0);
+    }
+    Box::pin(seal_unattempted_in_session(
+        db,
+        session,
+        machine,
+        Some(effect),
+    ))
+    .await
 }
 
 async fn cancel_unattempted_in_session(
@@ -160,16 +301,43 @@ async fn cancel_unattempted_in_session(
         "_id":&machine.active_operation_id,"machine_id":&machine.node_id,"owner_id":&machine.owner_id,
         "action":"delete","state":{"$in":["accepted","applying","reconciling"]},"terminal_at":Bson::Null,
     }).limit(1).session(&mut *session).await? != 1 { return Ok(0); }
+    Box::pin(seal_unattempted_in_session(
+        db,
+        session,
+        machine,
+        current_first_claim,
+    ))
+    .await
+}
+
+/// Machine fencing, request evidence and delivery acknowledgement commit as one
+/// write. The competing dispatch journal writes both these same documents.
+async fn seal_unattempted_in_session(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    machine: &ManagedMachine,
+    current_first_claim: Option<&MachineEffectOutbox>,
+) -> AppResult<u64> {
+    if machine.writer_fence.is_empty() {
+        return Ok(0);
+    }
     let mut filter = if let Some(effect) = current_first_claim {
         let mut filter = running_effect_filter();
         filter.extend(doc! {"_id":&effect.id,"state":"claimed","attempts":1_i64,
-            "claim_id":&effect.claim_id,"undispatched_claim_id":&effect.claim_id,"submission":Bson::Null});
+            "claim_id":&effect.claim_id,"undispatched_claim_id":&effect.claim_id,"submission":Bson::Null,
+            "operation_id":&effect.operation_id,
+            "claimed_until":{"$eq":effect.claimed_until.map(mongodb::bson::DateTime::from_chrono),
+                "$gt":mongodb::bson::DateTime::now()}});
         filter
     } else {
         unattempted_effect_filter()
     };
     filter.insert("machine_id", &machine.node_id);
     filter.insert("owner_id", &machine.owner_id);
+    if current_first_claim.is_some() {
+        filter.insert("namespace", &machine.sandbox_namespace);
+        filter.insert("sandbox_name", &machine.sandbox_name);
+    }
     let effects: Vec<Document> = db
         .collection::<Document>(OUTBOX)
         .find(filter.clone())
@@ -189,7 +357,7 @@ async fn cancel_unattempted_in_session(
         "_id":&machine.node_id,"owner_id":&machine.owner_id,"revision":machine.revision,
         "active_operation_id":&machine.active_operation_id,"runtime_generation":machine.runtime_generation,
         "credential_epoch":machine.credential_epoch,"writer_fence":&machine.writer_fence,
-        "resource_state":"deleting","writer_admitted":false,"native_uncertainty":&machine.native_uncertainty,
+        "resource_state":machine.resource_state.as_str(),"writer_admitted":false,"native_uncertainty":&machine.native_uncertainty,
         "deletion_basis":mongodb::bson::to_bson(&machine.deletion_basis)
             .map_err(|_|AppError::Internal("submission cancellation encoding failed".into()))?,
     },doc! {"$inc":{"submission_evidence_fence":1_i64}}).session(&mut *session).await?;
@@ -380,15 +548,45 @@ pub(crate) async fn begin_submission(
         .write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
             let result:AppResult<String>=async {
                 let changed=db.collection::<Document>(crate::models::remote_machine::COLLECTION_NAME).update_one(
-                    doc!{"_id":&machine.node_id,"revision":machine.revision,"runtime_generation":machine.runtime_generation,
+                    doc!{"_id":&machine.node_id,"owner_id":&machine.owner_id,"revision":machine.revision,"runtime_generation":machine.runtime_generation,
                         "credential_epoch":machine.credential_epoch,"writer_fence":&machine.writer_fence,
                         "active_operation_id":&effect.operation_id,"resource_state":{"$nin":["deleting","deleted","stopping","paused"]}},
                     doc!{"$inc":{"submission_evidence_fence":1_i64}}).session(&mut *session).await?;
                 if changed.matched_count!=1{return Err(AppError::Conflict("runtime_submission_fenced".into()));}
                 let existing=db.collection::<Document>(OUTBOX).find_one(doc!{"_id":&effect.id,
-                    "operation_id":&effect.operation_id,"machine_id":&machine.node_id}).session(&mut *session)
+                    "operation_id":&effect.operation_id,"machine_id":&machine.node_id,"owner_id":&machine.owner_id,
+                    "namespace":&machine.sandbox_namespace,"sandbox_name":&machine.sandbox_name}).session(&mut *session)
                     .await?.ok_or_else(||AppError::Conflict("runtime_submission_identity_or_capacity_conflict".into()))?;
+                let saved:MachineEffectOutbox=mongodb::bson::from_document(existing.clone())
+                    .map_err(|_|AppError::Conflict("runtime_submission_identity_or_capacity_conflict".into()))?;
+                let current_delivery = if let Some(claim) = effect.claim_id.as_deref() {
+                    saved.state == EffectState::Claimed && saved.claim_id.as_deref() == Some(claim)
+                        && saved.attempts == effect.attempts
+                        && saved.claimed_until.is_some_and(|until| until > Utc::now())
+                } else {
+                    // Current observation repair is a legitimate claimless
+                    // consumer. It cannot borrow a live worker's delivery.
+                    saved.claim_id.is_none() && matches!(saved.state,
+                        EffectState::Pending | EffectState::Retry | EffectState::Applied)
+                };
+                if !current_delivery || effect.owner_id != machine.owner_id
+                    || saved.submission.as_ref().is_some_and(|submission| submission.cancelled_before_dispatch)
+                {
+                    return Err(AppError::Conflict("runtime_submission_claim_fenced".into()));
+                }
                 let mut dispatches=Vec::new();
+                if saved.submission.is_none()
+                    && !(has_fresh_undispatched_claim(&saved)
+                        || (saved.state == EffectState::Pending && saved.attempts == 0))
+                {
+                    // Retain missing historical delivery evidence as an
+                    // unresolved responsibility. created_at is only the
+                    // durable intent lower bound, never an inferred I/O time.
+                    dispatches.push(crate::models::remote_machine_outbox::MachineSubmissionDispatch {
+                        id:format!("{}:legacy",effect.id),started_at:saved.created_at,completed_at:None,
+                        cancelled_before_dispatch:false,result_sandbox_uid:None,result_resource_version:None,
+                    });
+                }
                 if let Some(value)=existing.get("submission").filter(|value|!matches!(value,Bson::Null)) {
                     let old:crate::models::remote_machine_outbox::MachineSubmission=mongodb::bson::from_bson(value.clone())
                         .map_err(|_|AppError::Conflict("runtime_submission_identity_or_capacity_conflict".into()))?;
@@ -407,7 +605,8 @@ pub(crate) async fn begin_submission(
                     writer_fence:machine.writer_fence.clone(),started_at:Utc::now(),completed_at:None,cancelled_before_dispatch:false,
                     result_sandbox_uid:None,result_resource_version:None,dispatches:Vec::new(),
                 };
-                db.collection::<Document>(OUTBOX).update_one(doc!{"_id":&effect.id,"operation_id":&effect.operation_id,"machine_id":&machine.node_id,"submission":Bson::Null},
+                db.collection::<Document>(OUTBOX).update_one(doc!{"_id":&effect.id,"operation_id":&effect.operation_id,"machine_id":&machine.node_id,
+                    "owner_id":&machine.owner_id,"state":saved.state.as_str(),"claim_id":&saved.claim_id,"submission":Bson::Null},
                     doc!{"$set":{"submission":mongodb::bson::to_bson(&submission).map_err(|_|AppError::Internal("submission encoding failed".into()))?,
                         "undispatched_claim_id":Bson::Null}})
                     .session(&mut *session).await?;
@@ -418,6 +617,7 @@ pub(crate) async fn begin_submission(
                 dispatches.push(dispatch);
                 // A bounded journal fails closed rather than dropping a request.
                 let changed=db.collection::<Document>(OUTBOX).update_one(doc!{"_id":&effect.id,"operation_id":&effect.operation_id,"machine_id":&machine.node_id,
+                    "owner_id":&machine.owner_id,"state":saved.state.as_str(),"claim_id":&saved.claim_id,
                     "submission.request_id":&effect.id,"submission.runtime_generation":machine.runtime_generation,
                     "submission.credential_epoch":machine.credential_epoch,"submission.writer_fence":&machine.writer_fence,
                     "submission.dispatches.255":{"$exists":false}},
@@ -754,6 +954,12 @@ pub async fn acknowledge_effect(
     let Some(effect) = effect else {
         return Ok(false);
     };
+    // A receipt is not request evidence. In particular, an error exit after
+    // safety_pause must first seal cancellation transactionally. Returning
+    // false leaves the original claim and its final proof intact.
+    if has_fresh_undispatched_claim(&effect) {
+        return Ok(false);
+    }
     let retry_seconds = retry_backoff_seconds(effect.attempts);
     let (state, available) = if applied {
         (EffectState::Applied.as_str(), None)

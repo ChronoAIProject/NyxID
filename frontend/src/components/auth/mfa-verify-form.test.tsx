@@ -58,7 +58,7 @@ describe("MfaVerifyForm", () => {
     await user.type(screen.getByLabelText("Recovery code"), "R3c-v_12");
     await user.click(screen.getByRole("button", { name: "Verify" }));
     await waitFor(() => expect(mockVerifyMutateAsync).toHaveBeenCalledWith({ code: "R3c-v_12" }));
-    expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" });
+    expect(mockNavigate).toHaveBeenCalledWith({ to: "/assistant" });
   });
 
   it("returns an expired social challenge to sign-in with a clear status", async () => {
@@ -107,7 +107,7 @@ describe("MfaVerifyForm", () => {
     assign.mockRestore();
   });
 
-  it("submits code -> calls useMfaVerify with the code + stored mfa_token, then navigates to /dashboard", async () => {
+  it("submits code -> calls useMfaVerify with the code + stored mfa_token, then navigates to /assistant", async () => {
     const user = userEvent.setup();
     mockVerifyMutateAsync.mockResolvedValue(undefined);
 
@@ -125,7 +125,7 @@ describe("MfaVerifyForm", () => {
         mfa_token: "mfa-session-token",
       });
     });
-    expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" });
+    expect(mockNavigate).toHaveBeenCalledWith({ to: "/assistant" });
   });
 
   it("submits an eight-character recovery code with the existing challenge", async () => {
@@ -148,13 +148,17 @@ describe("MfaVerifyForm", () => {
     }));
   });
 
-  it("preserves the approval code query in a same-origin returnTo after MFA", async () => {
+  it.each([
+    "/login/agent-key?user_code=ABCDEFGH",
+    "/dashboard?explicit=1",
+    "/oauth/authorize?client_id=app&state=review&scope=openid",
+  ])("preserves the explicit same-origin returnTo %s after MFA", async (path) => {
     const user = userEvent.setup();
     mockVerifyMutateAsync.mockResolvedValue(undefined);
     const assignSpy = vi
       .spyOn(window.location, "assign")
       .mockImplementation(() => undefined);
-    const returnTo = `${window.location.origin}/login/agent-key?user_code=ABCDEFGH`;
+    const returnTo = `${window.location.origin}${path}`;
 
     render(<MfaVerifyForm returnTo={returnTo} />);
 
@@ -167,19 +171,19 @@ describe("MfaVerifyForm", () => {
     await waitFor(() => {
       expect(assignSpy).toHaveBeenCalledWith(returnTo);
     });
-    // Trusted returnTo wins: no router navigation to the dashboard.
+    // Trusted returnTo wins: no router navigation to the Assistant.
     expect(mockNavigate).not.toHaveBeenCalled();
     assignSpy.mockRestore();
   });
 
-  it("rejects an untrusted-origin returnTo: navigates to /dashboard and never calls window.location.assign (open-redirect guard)", async () => {
+  it("rejects an untrusted-origin returnTo: navigates to /assistant and never calls window.location.assign (open-redirect guard)", async () => {
     const user = userEvent.setup();
     mockVerifyMutateAsync.mockResolvedValue(undefined);
     const assignSpy = vi
       .spyOn(window.location, "assign")
       .mockImplementation(() => undefined);
     // A protocol-relative returnTo must be discarded -- the user lands on
-    // /dashboard, not the attacker host.
+    // /assistant, not the attacker host.
     const returnTo = "//evil.example/x";
 
     render(<MfaVerifyForm returnTo={returnTo} />);
@@ -191,7 +195,7 @@ describe("MfaVerifyForm", () => {
     await user.click(screen.getByRole("button", { name: "Verify" }));
 
     await waitFor(() => {
-      expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" });
+      expect(mockNavigate).toHaveBeenCalledWith({ to: "/assistant" });
     });
     expect(assignSpy).not.toHaveBeenCalled();
     assignSpy.mockRestore();

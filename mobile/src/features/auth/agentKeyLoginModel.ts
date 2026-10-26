@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MOBILE_MFA_STEP_UP_MESSAGE } from "../../lib/api/errorMessages";
 import type {
   AgentKeyOptions,
   AgentKeySummary,
@@ -115,6 +116,7 @@ export function agentKeyLoginError(error: unknown): string {
     return error.issues[0]?.message ?? "Check the login details.";
   }
   const code = (error as { errorCode?: number } | null)?.errorCode;
+  if (code === 2003) return MOBILE_MFA_STEP_UP_MESSAGE;
   const messages: Record<number, string> = {
     11900: "This request is no longer available.",
     11901: "This request has expired.",

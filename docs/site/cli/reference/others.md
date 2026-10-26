@@ -120,6 +120,8 @@ Renew before the current refresh JWT expires. Every successful rotation restarts
 `JWT_REFRESH_TTL_SECS` (7 days by default). The session row retains its deadline or
 extends to the returned refresh expiry, whichever is later. Token sessions have
 no additional absolute cap; browser cookie sessions retain a fixed 30-day lifetime.
+Pre-assurance sessions and legacy-migration/mobile-rollout MFA exemptions keep
+their fixed deadlines; refresh and grace recovery do not extend them.
 A usable refresh credential can sustain full-account authority, including existing
 `mfa_assured`, indefinitely while renewals succeed. Rotation/reuse detection, live
 revocation, MFA-state gates and the refresh idle limit control this authority.

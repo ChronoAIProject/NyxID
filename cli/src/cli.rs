@@ -213,7 +213,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: TelemetryCommands,
     },
-    /// Call ChatGPT Pro (and other browser oracles) through NyxID
+    /// DEPRECATED: NyxID's built-in oracle is permanently retired; every call is refused with HTTP 410
     Oracle {
         #[command(subcommand)]
         command: OracleCommands,
@@ -1174,6 +1174,17 @@ pub enum CatalogCommands {
         /// Publication state to apply atomically to all selected operations
         #[arg(long, default_value = "published", value_parser = ["published", "paused", "draft", "validated"])]
         state: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Overwrite identity-forwarding settings on every connection to a service with the
+    /// service's current settings, including customized ones (Admin or the service creator)
+    ResyncIdentity {
+        /// Catalog service UUID or slug
+        service: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },

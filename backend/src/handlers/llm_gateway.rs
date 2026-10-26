@@ -2919,9 +2919,34 @@ mod tests {
             user::{self, UserType},
             user_provider_token,
         };
-        use crate::test_utils::{connect_transaction_test_database, test_membership, test_user};
+        use crate::test_utils::{
+            connect_transaction_test_database_with_command_handler, test_membership, test_user,
+        };
         use mongodb::bson::{self, doc};
-        let db = connect_transaction_test_database("gateway_selection_batch").await;
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{Arc, Mutex};
+
+        // system.profile is a capped, best-effort server log: a completed find
+        // need not leave a profile row. Observe this dedicated client's
+        // synchronous command events to measure the request's batching directly.
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let observed = commands.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command_name == "find"
+                && let Ok(collection) = event.command.get_str("find")
+            {
+                observed
+                    .lock()
+                    .unwrap()
+                    .push((event.db, collection.to_owned()));
+            }
+        });
+        let db = connect_transaction_test_database_with_command_handler(
+            "gateway_selection_batch",
+            handler,
+        )
+        .await;
         let actor = uuid::Uuid::new_v4().to_string();
         let org = uuid::Uuid::new_v4().to_string();
         db.collection::<user::User>(user::COLLECTION_NAME)
@@ -2973,22 +2998,23 @@ mod tests {
             })
             .await
             .unwrap();
-        // Profiling applies only to this isolated test database.
-        for (iteration, expected) in [(1, "openai"), (2, "openai-codex")] {
-            db.run_command(doc! {"profile": 2}).await.unwrap();
+        for expected in ["openai", "openai-codex"] {
+            commands.lock().unwrap().clear();
             let selected = super::resolve_provider_slug_with_fallback(&db, &actor, "openai").await;
-            db.run_command(doc! {"profile": 0}).await.unwrap();
             assert_eq!(selected.unwrap(), expected);
             for collection in [
                 org_membership::COLLECTION_NAME,
                 provider_config::COLLECTION_NAME,
             ] {
                 assert_eq!(
-                    db.collection::<bson::Document>("system.profile")
-                        .count_documents(doc! {"command.find": collection})
-                        .await
-                        .unwrap(),
-                    iteration
+                    commands
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(database, found)| database == db.name() && found == collection)
+                        .count(),
+                    1,
+                    "one {collection} find per request, including fallback selection"
                 );
             }
             db.collection::<org_membership::OrgMembership>(org_membership::COLLECTION_NAME)

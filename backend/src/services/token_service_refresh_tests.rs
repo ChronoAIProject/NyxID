@@ -116,6 +116,145 @@ async fn session_deadline_never_shortens_and_creation_covers_long_refresh_lifeti
         SESSION_TTL_SECS
     );
 }
+
+#[tokio::test]
+async fn legacy_and_mobile_exempt_refresh_keep_fixed_deadlines_through_rotation_and_grace() {
+    for (assurance, exemption, slides) in [
+        (None, None, false),
+        (Some(bson::Bson::Null), None, false),
+        (
+            Some(bson::Bson::Boolean(false)),
+            Some("legacy_migration"),
+            false,
+        ),
+        (
+            Some(bson::Bson::Boolean(false)),
+            Some("mobile_rollout"),
+            false,
+        ),
+        (
+            Some(bson::Bson::Boolean(true)),
+            Some("mobile_rollout"),
+            true,
+        ),
+    ] {
+        let (db, config, keys, issued) = fixture().await;
+        shorten_session(&db, &issued.session_id).await;
+        let before = session_row(&db, &issued.session_id).await;
+        let mut patch = doc! {"$unset": {"mfa_assured": ""}};
+        let mut fields = doc! {"last_active_at": bson::DateTime::from_chrono(
+        Utc::now() - Duration::hours(1))};
+        if let Some(assurance) = assurance {
+            patch.remove("$unset");
+            fields.insert("mfa_assured", assurance);
+        }
+        if let Some(exemption) = exemption {
+            fields.insert("mfa_exemption", exemption);
+        }
+        patch.insert("$set", fields);
+        db.collection::<Session>(SESSIONS)
+            .update_one(doc! {"_id": &issued.session_id}, patch)
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &before.user_id},
+                doc! {"$set": {"mfa_enabled": true}},
+            )
+            .await
+            .unwrap();
+        let renewed = renew(&db, &config, &keys, &issued.refresh_token)
+            .await
+            .unwrap();
+        let successor = token_row(&db, &renewed.refresh_token).await;
+        let expected = if slides {
+            successor.expires_at
+        } else {
+            before.expires_at
+        };
+        let after = session_row(&db, &issued.session_id).await;
+        assert_eq!(after.expires_at, expected);
+        assert!(after.last_active_at > Utc::now() - Duration::minutes(1));
+        let recovered = renew(&db, &config, &keys, &issued.refresh_token)
+            .await
+            .unwrap();
+        assert_eq!(recovered.refresh_token, renewed.refresh_token);
+        assert_eq!(
+            session_row(&db, &issued.session_id).await.expires_at,
+            expected
+        );
+        db.collection::<Session>(SESSIONS)
+            .update_one(
+                doc! {"_id": &issued.session_id},
+                doc! {"$set": {
+                    "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))
+                }},
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(renew(&db, &config, &keys, &renewed.refresh_token).await,
+            Err(AppError::Unauthorized(message)) if message == "Session has expired")
+        );
+        assert!(!token_row(&db, &renewed.refresh_token).await.revoked);
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn sidless_migration_and_mobile_exemption_keep_a_fixed_thirty_day_anchor() {
+    let (db, mut config, keys, issued) = fixture().await;
+    config.jwt_refresh_ttl_secs = Duration::days(45).num_seconds();
+    let owner = session_row(&db, &issued.session_id).await.user_id;
+    db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(doc! {"_id": &owner}, doc! {"$set": {"mfa_enabled": true}})
+        .await
+        .unwrap();
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .update_one(
+            doc! {"session_id": &issued.session_id},
+            doc! {"$unset": {"session_id": ""}},
+        )
+        .await
+        .unwrap();
+    let migrated = renew(&db, &config, &keys, &issued.refresh_token)
+        .await
+        .unwrap();
+    let anchor = session_row(&db, &migrated.session_id).await;
+    assert_eq!(
+        anchor.mfa_exemption,
+        Some(crate::models::session::MfaExemption::LegacyMigration)
+    );
+    assert_eq!(
+        (anchor.expires_at - anchor.created_at).num_seconds(),
+        SESSION_TTL_SECS
+    );
+    assert!(token_row(&db, &migrated.refresh_token).await.expires_at > anchor.expires_at);
+    for token in [&issued.refresh_token, &migrated.refresh_token] {
+        let next = renew(&db, &config, &keys, token).await.unwrap();
+        assert_eq!(next.session_id, anchor.id);
+        assert_eq!(
+            session_row(&db, &anchor.id).await.expires_at,
+            anchor.expires_at
+        );
+    }
+    let mobile = create_mobile_social_tokens(&db, &config, &keys, &owner, None, None, true)
+        .await
+        .unwrap();
+    let row = session_row(&db, &mobile.session_id).await;
+    assert_eq!(
+        (row.expires_at - row.created_at).num_seconds(),
+        SESSION_TTL_SECS
+    );
+    renew(&db, &config, &keys, &mobile.refresh_token)
+        .await
+        .unwrap();
+    assert_eq!(
+        session_row(&db, &mobile.session_id).await.expires_at,
+        row.expires_at
+    );
+    db.drop().await.unwrap();
+}
 #[tokio::test]
 async fn concurrent_rotations_converge_on_one_successor_and_slide_its_expiry() {
     let (db, config, keys, issued) = fixture().await;

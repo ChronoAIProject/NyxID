@@ -13,7 +13,8 @@ import { useAuthStore } from "@/stores/auth-store";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import type { VoicePreferences } from "@/schemas/assistant-voice";
 import { VoicePanel } from "./voice-panel";
-vi.mock("@/lib/api-client", () => ({
+vi.mock("@/lib/api-client", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/api-client")>(),
   api: { put: vi.fn().mockResolvedValue({}) },
 }));
 const mock = vi.hoisted(() => ({

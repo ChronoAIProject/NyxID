@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "react";
+import { useMfaStepUp } from "@/hooks/use-mfa-step-up";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useAuthStore } from "@/stores/auth-store";
 import { api } from "@/lib/api-client";
@@ -18,7 +19,12 @@ export function CliAuthPage() {
   const { port, state, client_ua } = useSearch({
     strict: false,
   }) as CliAuthSearch;
-  const { isAuthenticated, isLoading } = useAuthStore();
+  const { user, isAuthenticated, isLoading } = useAuthStore();
+  const [error, setError] = useState<string | null>(null);
+  const { handle: handleStepUp, prompt: stepUpPrompt } = useMfaStepUp(
+    `${user?.id ?? ""}:${port}:${state}`,
+    () => setError("Verification cancelled. Run nyxid login again."),
+  );
   const callbackSent = useRef(false);
 
   useEffect(() => {
@@ -40,9 +46,27 @@ export function CliAuthPage() {
     // Authenticated and we have a CLI callback port -- send the token
     if (port && !callbackSent.current) {
       callbackSent.current = true;
-      void sendTokenToCliCallback(port, state, client_ua);
+      const send = async () => {
+        try {
+          await sendTokenToCliCallback(port, state, client_ua);
+        } catch (failure) {
+          if (handleStepUp(failure, send)) return;
+          setError(
+            `Failed to send token to CLI. ${failure instanceof Error ? failure.message : "Please try again."}`,
+          );
+        }
+      };
+      void send();
     }
-  }, [isAuthenticated, isLoading, port, state, client_ua, navigate]);
+  }, [
+    isAuthenticated,
+    isLoading,
+    port,
+    state,
+    client_ua,
+    navigate,
+    handleStepUp,
+  ]);
 
   if (isLoading) {
     return (
@@ -79,16 +103,26 @@ export function CliAuthPage() {
     <div className="flex min-h-screen items-center justify-center">
       <div className="flex max-w-sm flex-col items-center gap-4 text-center">
         <NyxidIcon className="h-12 w-12" />
+        {stepUpPrompt}
+        {error && (
+          <p role="alert" className="text-12 text-destructive">
+            {error}
+          </p>
+        )}
         <h2 className="text-lg font-semibold">
           CLI Authentication
         </h2>
-        <p className="text-12 text-muted-foreground">
-          Sending credentials to the NyxID CLI...
-        </p>
-        <p className="text-xs text-muted-foreground">
-          You can close this tab after you see a success message in your
-          terminal.
-        </p>
+        {!error && (
+          <>
+            <p className="text-12 text-muted-foreground">
+              Sending credentials to the NyxID CLI...
+            </p>
+            <p className="text-xs text-muted-foreground">
+              You can close this tab after you see a success message in your
+              terminal.
+            </p>
+          </>
+        )}
       </div>
     </div>
   );
@@ -99,28 +133,17 @@ async function sendTokenToCliCallback(
   state?: string,
   clientUa?: string,
 ) {
-  try {
-    // Request a fresh access token for the CLI (uses cookie session).
-    // Pass through the CLI's user-agent so the session is identifiable.
-    const response = await api.post<TokenResponse>("/auth/cli-token", {
-      client_ua: clientUa,
-    });
-    const callbackUrl = new URL(`http://127.0.0.1:${port}/callback`);
-    callbackUrl.searchParams.set("access_token", response.access_token);
-    callbackUrl.searchParams.set("refresh_token", response.refresh_token);
-    if (state) {
-      callbackUrl.searchParams.set("state", state);
-    }
-
-    window.location.assign(callbackUrl.toString());
-  } catch {
-    // If refresh fails, show success page anyway -- the CLI timeout will handle it
-    document.body.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:system-ui">
-        <div style="text-align:center;max-width:400px">
-          <p style="font-size:14px;color:#888">Failed to send token to CLI. Please try again.</p>
-        </div>
-      </div>
-    `;
+  // Request a fresh access token for the CLI (uses cookie session).
+  // Pass through the CLI's user-agent so the session is identifiable.
+  const response = await api.post<TokenResponse>("/auth/cli-token", {
+    client_ua: clientUa,
+  });
+  const callbackUrl = new URL(`http://127.0.0.1:${port}/callback`);
+  callbackUrl.searchParams.set("access_token", response.access_token);
+  callbackUrl.searchParams.set("refresh_token", response.refresh_token);
+  if (state) {
+    callbackUrl.searchParams.set("state", state);
   }
+
+  window.location.assign(callbackUrl.toString());
 }

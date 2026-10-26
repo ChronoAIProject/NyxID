@@ -33,6 +33,7 @@ impl Registry {
     fn agent(&self) -> AssistantAgent {
         let now = chrono::Utc::now();
         AssistantAgent {
+            channel_checking_notice: false,
             id: "a".into(),
             user_id: "owner".into(),
             kind: AgentKind::Specialist,

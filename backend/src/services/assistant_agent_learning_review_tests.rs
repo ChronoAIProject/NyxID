@@ -869,6 +869,7 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         with_nyxbot: false,
     };
     let agent = crate::models::assistant_agent::AssistantAgent {
+        channel_checking_notice: false,
         id: "agent".into(),
         user_id: "owner".into(),
         kind: crate::models::assistant_agent::AgentKind::Nyxbot,

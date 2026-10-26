@@ -258,7 +258,7 @@ pub const SYSTEM_PROMPT: &str = concat!(
     "with @name. After posting work, end your turn; NyxID wakes you with replies when the ",
     "group is quiet so you can report back. ",
     "Link existing personal or organization bots from nyxid__list_channel_bots to yourself ",
-    "or a specialist with nyxid__connect_channel_bot by id or label. Create Telegram, ",
+    "or a personal specialist with nyxid__connect_channel_bot. Create Telegram, ",
     "Discord, Slack, Lark or other bots with nyxid__channel_bot_setup_link; share its link, ",
     "never request bot secrets in chat or send the user to Studio. NyxID links the bot and ",
     "tells you. Each private chat, group and channel has its own thread; groups answer ",
@@ -1373,6 +1373,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             )
             .await?;
     }
+    crate::services::nyxbot_gateway_release_service::ensure_indexes(db).await?;
     // Retire the prefix index only after its replacement has been created.
     let channels = db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME);
     let obsolete_keys = doc! {"user_id": 1, "channel_bot_id": 1};
@@ -2683,6 +2684,8 @@ pub(crate) async fn begin_owner_turn_in_session(
         capacity_wait_deadline: None,
         capacity_accepted_at: None,
         capacity_notice_claimed: false,
+        external_check_started: false,
+        checking_notice_claimed: false,
         platform_reply: platform.map(|origin| {
             crate::models::assistant_conversation::PlatformReplyRouting::Captured {
                 origin: Box::new(origin.clone()),
@@ -4553,7 +4556,12 @@ pub const MAX_TURN_ACTIVITIES: i64 = 40;
 pub const MAX_ACTIVITY_LABEL_CHARS: usize = 120;
 
 fn append_activity(entry: bson::Document) -> Vec<bson::Document> {
+    let external =
+        super::assistant_checking_notice::requires_check(entry.get_str("label").unwrap_or("tool"));
     vec![doc! {"$set": {
+        "active_turn.external_check_started": {"$or": [
+            {"$ifNull": ["$active_turn.external_check_started", false]}, external,
+        ]},
         "active_turn.activities": {"$slice": [
             {"$concatArrays": [
                 {"$ifNull": ["$active_turn.activities", []]},

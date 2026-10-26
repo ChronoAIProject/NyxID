@@ -354,7 +354,7 @@ prices with `nyxid admin billing service show <slug>` and
 | `JWT_PUBLIC_KEY_PATH` | `keys/public.pem` | Path to RSA public key PEM file |
 | `JWT_ISSUER` | `nyxid` | JWT `iss` claim value |
 | `JWT_ACCESS_TTL_SECS` | `900` (15 min) | Access token lifetime in seconds |
-| `JWT_REFRESH_TTL_SECS` | `604800` (7 days) | Rolling refresh JWT lifetime. Renew before the current JWT expires; each successful rotation restarts this lifetime. The token-session row retains its deadline or extends to the returned refresh expiry, whichever is later, with no additional absolute cap. Browser cookie sessions keep their fixed 30-day lifetime. |
+| `JWT_REFRESH_TTL_SECS` | `604800` (7 days) | Rolling refresh JWT lifetime. Renew before the current JWT expires; each successful rotation restarts this lifetime. The token-session row retains its deadline or extends to the returned refresh expiry, whichever is later, with no additional absolute cap. Browser cookie sessions, pre-assurance sessions and MFA migration/mobile exemptions keep their fixed lifetime. |
 | `JWT_RELAY_REPLY_TTL_SECS` | `1800` (30 min) | Lifetime of the per-callback reply token issued with channel-relay inbound callbacks (see [CHANNEL_BOT_RELAY.md](CHANNEL_BOT_RELAY.md#reply-token)). Tokens authorize one send, scoped to one inbound message + conversation + agent. Repeated attachment downloads do not consume the send; edits require the consumed send token. |
 | `JWT_RELAY_CALLBACK_TTL_SECS` | `300` (5 min) | Lifetime of the signed channel-relay callback JWT sent in `X-NyxID-Callback-Token`. |
 | `JWT_RELAY_ACCESS_TTL_SECS` | `300` (5 min) | Lifetime of the `X-NyxID-User-Token` relay access token shipped to a bot callback URL. Kept short (vs. the 900s general access token) because it is a first-party bearer credential that leaves NyxID's trust boundary. It is usable only on proxy/LLM surfaces (rejected elsewhere), inherits the originating agent key's service/node allowlist, and is invalidated when that agent key is revoked. |
@@ -362,7 +362,9 @@ prices with `nyxid admin billing service show <slug>` and
 | `SA_TOKEN_TTL_SECS` | `3600` (1 hour) | Service account token lifetime in seconds |
 
 A usable refresh credential can sustain full-account authority, including existing
-`mfa_assured`, indefinitely while renewals succeed. Rotation/reuse detection,
+`mfa_assured`, indefinitely while renewals succeed. Pre-assurance sessions and
+legacy-migration/mobile-rollout MFA exemptions retain their fixed deadlines;
+refresh does not extend these compatibility windows. Rotation/reuse detection,
 live revocation, MFA-state gates and the refresh idle limit control that authority.
 Successful commands may use a still-valid access token and therefore do not prove
 recent renewal. Schedule `nyxid session refresh` well inside the configured lifetime

@@ -258,7 +258,8 @@ pub async fn claim_notice(
             "active_turn.capacity_accepted_at": bson::Bson::Null,
             "active_turn.origin": {"$ne": "trigger"}, "active_turn.trigger_run_id": bson::Bson::Null,
             "active_turn.engine_request_started_at": {"$lte": bson::DateTime::from_chrono(now - chrono::Duration::from_std(policy::ACK_DELAY).expect("bounded acknowledgement delay"))},
-            "active_turn.capacity_notice_claimed": {"$ne": true}},
+            "active_turn.capacity_notice_claimed": {"$ne": true},
+            "active_turn.checking_notice_claimed": {"$ne": true}},
         doc! {"$set": {"active_turn.capacity_notice_claimed": true}},
     ).await?.modified_count == 1)
 }

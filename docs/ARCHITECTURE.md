@@ -799,7 +799,10 @@ password/device-code/login-code token delivery) start with the later of 30 days
 and the refresh JWT expiry. Renew before the current refresh JWT expires; each
 successful rotation restarts `JWT_REFRESH_TTL_SECS` (7 days by default). The
 session retains its deadline or extends to the returned refresh expiry, whichever
-is later. No additional absolute cap applies to token sessions.
+is later. No additional absolute cap applies to current token sessions.
+Pre-assurance sessions and legacy-migration/mobile-rollout MFA exemptions retain
+their fixed deadlines; token rotation and grace recovery never extend those
+compatibility windows.
 
 The refresh JWT, refresh row and session extension share one issuance instant.
 Rotation CAS, successor insertion and the first-party session slide commit in a

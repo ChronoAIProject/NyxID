@@ -101,6 +101,7 @@ describe("incremental consent", () => {
       "action",
       "/oauth/authorize/incremental/decision",
     );
+    expect(new FormData(form).get("browser_form")).toBe("true");
   });
 
   it("updates the count and submitted additions for optional selections", async () => {

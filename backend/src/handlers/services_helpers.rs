@@ -430,6 +430,7 @@ pub async fn service_to_response_with_viewer(
         node_id: viewer.and_then(|v| v.node_id.clone()),
         your_user_service_id: viewer.and_then(|v| v.user_service_id.clone()),
         your_binding_count: viewer.map_or(0, |v| v.binding_count),
+        can_resync_identity: None,
     }
 }
 

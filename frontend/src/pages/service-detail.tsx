@@ -51,6 +51,7 @@ import { McpConnectionInfo } from "@/components/dashboard/mcp-connection-info";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
 import { ServiceRequirementsView } from "@/components/dashboard/service-requirements-editor";
 import { RoutingSection } from "@/components/dashboard/routing-section";
+import { IdentityResyncSection } from "@/components/dashboard/identity-resync-section";
 import { useMyProviderTokens, useProvider } from "@/hooks/use-providers";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { Separator } from "@/components/ui/separator";
@@ -573,6 +574,8 @@ export function ServiceDetailPage() {
               </DetailSection>
             </>
           )}
+
+          <IdentityResyncSection service={service} />
 
           {(service.homepage_url ||
             service.repository_url ||

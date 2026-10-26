@@ -214,7 +214,7 @@ export function AuthFlow({
           window.location.assign(trustedReturnTo);
           return;
         }
-        void navigate({ to: "/dashboard" as string });
+        void navigate({ to: "/assistant" as string });
       }
     } catch (error) {
       if (error instanceof ApiError) {

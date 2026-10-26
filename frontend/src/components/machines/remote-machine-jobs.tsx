@@ -206,7 +206,9 @@ export function RemoteMachineJobs({
       </Form>
       <p className="text-12 text-muted-foreground">
         Date filters use your local timezone and are sent as absolute
-        timestamps.
+        timestamps. Finished includes all recorded exit results, including
+        nonzero exit codes. A cancelled record alone does not confirm a physical
+        stop.
       </p>
       {cancelNotice && (
         <p role="status" className="text-12 text-muted-foreground">
@@ -239,6 +241,12 @@ export function RemoteMachineJobs({
           No jobs match these filters.
         </p>
       )}
+      {!query.isPending && !query.error && (
+        <p className="text-12 text-muted-foreground">
+          Loaded {jobs.length} {jobs.length === 1 ? "job" : "jobs"} on this
+          page.
+        </p>
+      )}
       <div className="flex flex-col gap-3 md:hidden">
         {jobs.map((job) => (
           <article
@@ -263,6 +271,13 @@ export function RemoteMachineJobs({
               {when(job.started_at ?? job.created_at)} · Generation{" "}
               {job.runtime_generation ?? "Not reported"}
             </p>
+            {job.status === "finished" && (
+              <p className="text-11 text-muted-foreground">
+                {job.exit_code === null
+                  ? "Exit result not reported"
+                  : `Exit code ${job.exit_code}`}
+              </p>
+            )}
             <Button onClick={() => setSelectedId(job.id)}>View job</Button>
           </article>
         ))}

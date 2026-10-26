@@ -93,8 +93,8 @@ Content-Type: application/json
 Read `GET /api/v1/keys` again and verify `forward_access_token=true` on that same UserService ID
 before retesting. The catalog entry's `id` and the account-owned entry's `id` are intentionally
 different; use the latter here. Never send `catalog_service_id` to `/api/v1/user-services/{id}`.
-`POST /api/v1/services/{catalogServiceId}/resync-identity` is a separate admin-only catalog
-recovery operation, not the owner self-service path.
+`POST /api/v1/services/{catalogServiceId}/resync-identity` is a separate catalog recovery
+operation for Admins and the catalog service's creator, not the owner self-service path.
 
 Do not require a personal node, local Codex login, caller-managed OpenSandbox key, separate LLM
 consent, Landlock installation, or sandbox-side credential injection. Prepare the managed

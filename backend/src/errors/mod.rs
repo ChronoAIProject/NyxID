@@ -214,6 +214,11 @@ pub enum AppError {
     #[error("MFA required")]
     MfaRequired { session_token: String },
 
+    #[error(
+        "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."
+    )]
+    MfaStepUpRequired,
+
     #[error("PKCE verification failed")]
     PkceVerificationFailed,
 
@@ -759,6 +764,14 @@ pub enum AppError {
     )]
     OraclePoolActiveWork,
 
+    /// NyxID's built-in oracle relay is retired for good. Every route under
+    /// `/api/v1/oracle` and every `nyx__oracle_*` MCP tool answers with this
+    /// so a caller, an AI agent above all, learns there is nothing to retry.
+    #[error(
+        "NyxID's built-in oracle is permanently deprecated and no longer serves requests. Do not retry this call."
+    )]
+    OracleRetired,
+
     #[error("Service pool not found: {0}")]
     ServicePoolNotFound(String),
 
@@ -854,7 +867,7 @@ impl AppError {
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => StatusCode::TOO_MANY_REQUESTS,
-            Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
+            Self::MfaRequired { .. } | Self::MfaStepUpRequired => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
             | Self::InvalidDpopProof(_)
             | Self::InvalidRedirectUri
@@ -1036,6 +1049,7 @@ impl AppError {
             Self::OracleLoginSnapshotNotFound(_) => StatusCode::NOT_FOUND,
             Self::OracleWorkerCredentialRenewalRequired => StatusCode::CONFLICT,
             Self::OraclePoolActiveWork => StatusCode::CONFLICT,
+            Self::OracleRetired => StatusCode::GONE,
             Self::ServicePoolInfrastructureUnavailable | Self::ServicePoolCoolingDown => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
@@ -1096,6 +1110,7 @@ impl AppError {
             Self::AuthenticationFailed(_) => 2000,
             Self::TokenExpired => 2001,
             Self::MfaRequired { .. } => 2002,
+            Self::MfaStepUpRequired => 2003,
             Self::PkceVerificationFailed => 3000,
             Self::InvalidRedirectUri => 3001,
             Self::InvalidScope(_) => 3002,
@@ -1275,6 +1290,7 @@ impl AppError {
             Self::OracleLoginSnapshotNotFound(_) => 11015,
             Self::OracleWorkerCredentialRenewalRequired => 11016,
             Self::OraclePoolActiveWork => 11017,
+            Self::OracleRetired => 11099,
             Self::ServicePoolUpstreamEncodingUnsupported => 11407,
             Self::ServicePoolInfrastructureUnavailable => 11404,
             Self::ServicePoolCoolingDown => 11405,
@@ -1312,6 +1328,7 @@ impl AppError {
     pub(crate) fn oauth_error_code(&self) -> &'static str {
         match self {
             Self::MfaRequired { .. } => "mfa_required",
+            Self::MfaStepUpRequired => "mfa_step_up_required",
             Self::OAuthAuthorityUnavailable => "temporarily_unavailable",
             Self::Internal(_) | Self::DatabaseError(_) => "server_error",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
@@ -1383,6 +1400,7 @@ impl AppError {
             Self::AuthenticationFailed(_) => "authentication_failed",
             Self::TokenExpired => "token_expired",
             Self::MfaRequired { .. } => "mfa_required",
+            Self::MfaStepUpRequired => "mfa_step_up_required",
             Self::PkceVerificationFailed => "pkce_verification_failed",
             Self::InvalidDpopProof(_) => "invalid_dpop_proof",
             Self::InvalidRedirectUri => "invalid_redirect_uri",
@@ -1561,6 +1579,7 @@ impl AppError {
             Self::OracleWorkerLabelUnavailable(_) => "oracle_worker_label_unavailable",
             Self::OracleLoginSnapshotNotFound(_) => "oracle_login_snapshot_not_found",
             Self::OraclePoolActiveWork => "oracle_pool_active_work",
+            Self::OracleRetired => "oracle_retired",
             Self::OracleWorkerCredentialRenewalRequired => {
                 "oracle_worker_credential_renewal_required"
             }
@@ -1715,6 +1734,27 @@ impl From<crate::models::credits::CreditsError> for AppError {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn mfa_step_up_error_preserves_typed_403_with_actionable_message() {
+        let response = AppError::MfaStepUpRequired.into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !response
+                .headers()
+                .contains_key(axum::http::header::SET_COOKIE)
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error_code"], 2003);
+        assert_eq!(body["error"], "mfa_step_up_required");
+        assert_eq!(
+            body["message"],
+            "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."
+        );
+    }
+
     #[test]
     fn rate_refusal_preserves_bounded_retry_after_without_changing_the_error_contract() {
         use axum::response::IntoResponse;
@@ -1865,6 +1905,22 @@ mod tests {
         assert_eq!(payload["error_code"], 1000);
         assert_eq!(payload["error"], "bad_request");
         assert_eq!(payload["message"], "Bad request: API key is failed");
+    }
+
+    /// The retirement answer is a contract with callers that still have the
+    /// old routes or tools wired in: 410 Gone, a stable key, and a message
+    /// that says the feature is gone for good so nobody retries.
+    #[tokio::test]
+    async fn oracle_retired_is_a_permanent_410() {
+        let response = AppError::OracleRetired.into_response();
+        assert_eq!(response.status(), StatusCode::GONE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"], "oracle_retired");
+        assert_eq!(payload["error_code"], 11099);
+        let message = payload["message"].as_str().unwrap();
+        assert!(message.contains("permanently deprecated"), "{message}");
+        assert!(message.contains("Do not retry"), "{message}");
     }
 
     #[test]
@@ -2314,6 +2370,7 @@ mod tests {
             AppError::OracleWorkerLabelUnavailable("".into()).error_code(),
             AppError::OracleLoginSnapshotNotFound("".into()).error_code(),
             AppError::OracleWorkerCredentialRenewalRequired.error_code(),
+            AppError::OracleRetired.error_code(),
             AppError::GrantCascadeConfirmationRequired(Box::new(GrantCascadePayload {
                 provider_slug: "github".into(),
                 provider_name: "GitHub".into(),

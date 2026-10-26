@@ -178,7 +178,7 @@ describe("WebDeviceLogin", () => {
     expect(mockGenerateNew).toHaveBeenCalledTimes(1);
   });
 
-  it("routes through the normal dashboard destination after cookie adoption", async () => {
+  it("routes through the normal Assistant destination after cookie adoption", async () => {
     deviceState.phase = "success";
     const user = userEvent.setup();
     render(<WebDeviceLogin />);
@@ -186,6 +186,23 @@ describe("WebDeviceLogin", () => {
       screen.getByRole("button", { name: "Continue with the NyxID app" }),
     );
 
-    expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" });
+    expect(mockNavigate).toHaveBeenCalledWith({ to: "/assistant" });
+  });
+
+  it.each([
+    "/dashboard?explicit=1",
+    "/oauth/authorize?client_id=app&state=review",
+    "/orgs/join/invitation",
+  ])("preserves the explicit returnTo %s after cookie adoption", async (path) => {
+    deviceState.phase = "success";
+    const returnTo = `${window.location.origin}${path}`;
+    const assign = vi.spyOn(window.location, "assign").mockImplementation(() => undefined);
+    try {
+      render(<WebDeviceLogin returnTo={returnTo} />);
+      await waitFor(() => expect(assign).toHaveBeenCalledWith(returnTo));
+      expect(mockNavigate).not.toHaveBeenCalled();
+    } finally {
+      assign.mockRestore();
+    }
   });
 });

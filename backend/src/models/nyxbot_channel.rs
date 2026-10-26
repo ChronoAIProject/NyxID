@@ -5,6 +5,7 @@ pub const COLLECTION_NAME: &str = "nyxbot_channels";
 pub const THREADS_COLLECTION_NAME: &str = "nyxbot_threads";
 pub const EVENTS_COLLECTION_NAME: &str = "nyxbot_events";
 pub const WATCHES_COLLECTION_NAME: &str = "nyxbot_watches";
+pub const LINK_CODE_TTL_HOURS: i64 = 24;
 
 /// Negotiated transport metadata, never provider references or message bodies.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +82,14 @@ pub struct NyxbotChannel {
     pub gateway_channel_id: Option<String>,
     #[serde(default)]
     pub gateway_record_id: Option<String>,
+    #[serde(default)]
+    pub gateway_setup_release_id: Option<String>,
+    #[serde(default)]
+    pub continuity_from_channel_id: Option<String>,
+    #[serde(default)]
+    pub continuity_to_channel_id: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub continuity_restored_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub gateway_version: Option<i64>,
     /// Confirmed gateway echo of reply.ack_after_ms=0; absent means unverified.

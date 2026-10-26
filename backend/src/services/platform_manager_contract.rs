@@ -821,6 +821,15 @@ pub trait NyxAgentEgress: Send + Sync {
         Ok(String::new())
     }
 
+    /// Optional progress task, cancelled when execution completes or stops.
+    /// Only the channel adapter implements delivery; other transports return None.
+    fn checking_notice(
+        &self,
+        _row: &crate::models::assistant_conversation::AssistantConversation,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        None
+    }
+
     /// Optional human-channel display note after the durable acknowledgement.
     /// The adapter owns delivery authorization; the runtime cancels this task on acceptance.
     fn admission_acknowledged(

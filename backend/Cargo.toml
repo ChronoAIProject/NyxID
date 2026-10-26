@@ -123,6 +123,8 @@ tokio = { workspace = true, features = ["test-util"] }
 nyxid-service-adapters = { path = "../service-adapters", features = ["test-support"] }
 wiremock = "0.6"
 nyxid-node-proxy-test = { package = "nyxid-cli", path = "../cli", features = ["node-proxy-test"] }
+# Lexer for the JWT verifier source inventory test (crypto/jwt_verifier_inventory_tests.rs).
+proc-macro2 = "1.0.106"
 
 [features]
 default = []

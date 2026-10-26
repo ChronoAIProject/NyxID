@@ -161,6 +161,7 @@ CLI text errors preserve the existing `Error: ...` line and append the accepted 
 | 2000 | `authentication_failed`    | 401         | Wrong email/password or invalid MFA code |
 | 2001 | `token_expired`            | 401         | JWT has expired                          |
 | 2002 | `mfa_required`             | 403         | MFA verification needed to complete login|
+| 2003 | `mfa_step_up_required` | 403 | Verify the current session before approving a sign-in on another device |
 | 3000 | `pkce_verification_failed` | 400         | PKCE code_verifier mismatch              |
 | 3001 | `invalid_redirect_uri`     | 400         | Redirect URI not registered for client   |
 | 3002 | `invalid_scope`            | 400         | Requested scope not allowed              |
@@ -993,7 +994,7 @@ OAuth callback handler. Called by the provider after user authorization.
 
 **Response (302 on success, web):** For users without MFA, redirects to the frontend root and sets the `nyx_session` cookie. For users with MFA enabled, no session is created: the callback sets the narrowly scoped, HttpOnly `nyx_mfa_challenge` cookie for five minutes and redirects to `/login?mfa=required` (with a trusted `return_to` value when an OAuth authorization is being resumed).
 
-**Response (302 on success, mobile):** For users without MFA, redirects to the provided deep link with `status=success`, `provider`, `user_id`, `access_token`, `refresh_token`, and `expires_in` query parameters. MFA users receive no tokens; the deep link fragment contains `status=mfa_required`, `provider`, and the short-lived `mfa_token` challenge. The app posts that token and a TOTP/recovery code to `/auth/mfa/verify`.
+**Response (302 on success, mobile):** For users without MFA, redirects to the provided deep link with `status=success`, `provider`, `user_id`, `access_token`, `refresh_token`, and `expires_in` query parameters. When `auth:mobile-mfa` is enabled for the signing-in person, MFA users receive no tokens; the deep link fragment contains `status=mfa_required`, `provider`, and the short-lived `mfa_token` challenge. The app posts that token and a TOTP/recovery code to `/auth/mfa/verify`. The flag defaults off: MFA users receive the normal success tokens with a persisted mobile-rollout exemption. Resolution includes live org overrides and occurs only at sign-in; a later flag flip does not revoke existing devices. While off, a social first-factor holder can sign in through mobile without an MFA code.
 
 **Response (302 on error):** Redirects to `{FRONTEND_URL}/login?error={error_key}`.
 
@@ -1018,7 +1019,7 @@ Possible error keys in the redirect:
 - `social_auth_conflict` is reserved for write-time identity collisions (for example, if the provider identity is already bound to another account)
 - New users created via social login have `email_verified = true` (provider verified the email) and no password set
 - Existing email/password accounts keep their password login path after social linking
-- Existing accounts with MFA enabled must complete MFA before either a browser session or mobile tokens are issued. The challenge token never appears in a web URL, audit row, log, or telemetry event.
+- Existing accounts with MFA enabled must complete MFA before a browser session is issued; mobile social MFA follows `auth:mobile-mfa` (default off). The challenge token never appears in a web URL, audit row, log, or telemetry event.
 
 ---
 
@@ -1534,9 +1535,14 @@ Get a single downstream service by ID.
   "identity_jwt_audience": null,
   "created_by": "550e8400-e29b-41d4-a716-446655440000",
   "created_at": "2025-06-01T10:00:00+00:00",
-  "updated_at": "2025-06-01T10:00:00+00:00"
+  "updated_at": "2025-06-01T10:00:00+00:00",
+  "can_resync_identity": false
 }
 ```
+
+`can_resync_identity` says whether the caller may use
+[`POST /api/v1/services/{service_id}/resync-identity`](#post-apiv1servicesservice_idresync-identity).
+Only this endpoint computes it; list, create and update responses omit it.
 
 **Errors:**
 - `1003 not_found` -- Service does not exist
@@ -1643,6 +1649,70 @@ Deactivate a downstream service (soft delete). Only admins or the original servi
 ```bash
 curl -X DELETE http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef \
   -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### POST /api/v1/services/{service_id}/resync-identity
+
+Overwrite the identity-forwarding settings on every connection (`UserService`)
+created from this catalog service with the service's current settings,
+including connections whose settings were customized. The fields are
+`identity_propagation_mode`, `identity_include_user_id`,
+`identity_include_email`, `identity_include_name`, `identity_jwt_audience`,
+`forward_access_token`, `inject_delegation_token` and `delegation_token_scope`.
+Connections whose stored values already match are not rewritten, so their
+`updated_at` and history are unchanged. It also clears a pending or failed
+identity propagation marker on the service. It does not touch stored
+credentials or anyone's sign-in with the downstream service.
+
+Ordinary service edits (`PUT /api/v1/services/{service_id}`) already copy
+identity changes to connections that still match the previous value, and skip
+customized ones. Resync is the deliberate override for that drift.
+
+**Auth:** First-party human session (API keys, service accounts, delegated and
+relay tokens are refused). The caller must be allowed to change this service's
+identity fields through `PUT /api/v1/services/{service_id}`: an Admin, or the
+service's creator under the plain creator rule. Catalog Managers and Tools
+Managers are refused because identity fields are Admin-only for them, including
+on rows they created; person-owned rows are Admin-only. The service must be an
+HTTP service. The write commits in one transaction that rechecks this authority
+against the live service row.
+
+**Response (200):**
+
+```json
+{
+  "catalog_service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
+  "matched_count": 37,
+  "changed_count": 2,
+  "affected_count": 2
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `matched_count` | Connections to this service that were checked |
+| `changed_count` | Connections whose settings differed and were rewritten |
+| `affected_count` | Deprecated alias of `changed_count`. Earlier releases counted every connection here, changed or not |
+
+The `catalog_identity_resync_succeeded` audit event records the actor,
+`authority` (`admin` or `creator`), the field list, `matched_count` and
+`changed_count`.
+
+**Errors:**
+- `1002 forbidden` -- Not a first-party human session, or not allowed to change this service's identity fields
+- `1003 not_found` -- Service does not exist
+- `1000 bad_request` -- The service is not an HTTP service
+- `1004 conflict` -- The service's authority or identity settings changed while the request ran; reload and retry
+
+**CLI:** `nyxid catalog resync-identity <SERVICE_ID_OR_SLUG> [--yes] [--output json]`
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/resync-identity \
+  -H "Authorization: Bearer <access_token>"
 ```
 
 ---
@@ -5567,7 +5637,7 @@ with `details.reason: "mfa_challenge_expired"` and clear the challenge cookie.
 A wrong code on a live challenge keeps the cookie and spends the existing attempt budget.
 Clients return to sign-in after terminal failures. The web form explicitly offers recovery codes.
 
-Social token exchange at `/oauth/token` uses OAuth error JSON (HTTP 400):
+When `auth:mobile-mfa` is enabled for the signing-in person, social id_token exchange (Google/GitHub/Apple native-mobile flow) at `/oauth/token` uses OAuth error JSON (HTTP 400):
 
 ```json
 { "error": "mfa_required", "error_description": "MFA required", "error_code": 2002, "session_token": "<five-minute-challenge>" }
@@ -5577,13 +5647,43 @@ No access/refresh token or session is issued in that response. Send `session_tok
 as `mfa_token` with `code` and `client: "token"` (or `"mobile"`) to MFA verify.
 Password login keeps its existing HTTP 403 error code 2002 response.
 
-Completed sessions record MFA assurance. A legacy session without assurance is
-rejected with HTTP 401 for a live MFA-enabled account by cookie/bearer auth,
-first-party refresh and MCP fallback; sign in again. Derived login-code, device
-approval/poll-web, CLI-token and approval keep-signed-in sessions inherit the exact
-parent/approval assurance. OAuth authorize, Agent Key approval and app approval
-require an accepted human session. Confirmation requires an identified session,
-marks it assured and signs out other devices transactionally. There is no startup cutoff.
+The default-off flag skips the social token-exchange MFA challenge and persists a mobile-exempt session. Password login, including `client: "mobile"`, always retains MFA. No environment variable controls this flag.
+
+Skipped mobile MFA records metadata-only `mfa: skipped_mobile_rollout` in the `social_login` audit for redirect sign-in or the `social_token_exchange` audit for native exchange. Both paths also emit `auth.mobile_mfa_exempted` through the existing telemetry consent gates.
+
+Completed legacy sessions with absent/null assurance and mobile-exempt sessions keep authenticating through cookie, bearer, refresh and MCP fallback until normal expiry/revocation. Parent-less legacy MCP fallback for MFA accounts has a fixed 30-day bound from creation, independent of its sliding idle expiry. Explicit unverified sessions are rejected for MFA accounts. A sid-less legacy first-party refresh acquires a fixed 30-day session on first refresh; successors cannot extend its expiry. In-flight legacy device codes, login codes and approvals without assurance fail closed.
+
+Third-party OAuth authorize/consent is SSO from existing IdP authority and accepts legacy/mobile-exempt sessions. Account management, such as API-key management, is also not a NyxID sign-in derivation. A new NyxID sign-in derived from an existing device requires verified authority for an MFA account.
+
+#### POST /api/v1/auth/mfa/step-up
+
+Verify the **current** session before authorizing a sign-in on another device.
+
+**Auth:** First-party human cookie session or first-party bearer with `sid`. API keys, service accounts, delegated/relay and OAuth-client tokens receive the standard HTTP 403 credential-type denial. Sid-less bearers cannot step up.
+
+```json
+{ "code": "123456" }
+```
+
+Accepts TOTP or a single-use recovery code using the login verifier, replay protection and shared per-account rate budget (10 attempts per 300 seconds). Success atomically sets verified assurance and removes any exemption from this live session, with a metadata-only `mfa_step_up` audit. It does not issue tokens or extend expiry.
+
+**Response (200):** `{ "message": "Session verified" }`.
+
+**Errors:** HTTP 400 for MFA not enabled or wrong/replayed/consumed codes; HTTP 429 when the shared verification budget is exhausted; HTTP 401 for expired/revoked session authority.
+
+For MFA accounts, device approval, Agent Key approval, login-code minting, CLI-token and app identity approval from legacy/mobile-exempt authority return:
+
+```json
+{
+  "error": "mfa_step_up_required",
+  "error_code": 2003,
+  "message": "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."
+}
+```
+
+This is HTTP 403 and does not expire the approver session. Verify through step-up and retry the original action. Web shows an inline authenticator/recovery prompt; mobile shows it only when `/users/me.capabilities.enabled_features` includes `auth:mobile-mfa`, otherwise it directs the user to the NyxID website to verify and approve or create a login code. Enrollment continues to verify the current session and sign out other devices.
+
+Requester-side device polls and browser handoff creation return terminal `auth_device_access_denied` (403 / 11204) when an old approval lacks verified authority; the browser stops polling and shows a denied request. Start a new request after verifying the approver. The CLI explicitly handles `mfa_step_up_required` with exit code 23 for login-code redemption of an old in-flight code; generate a new code from a verified session.
 
 #### POST /api/v1/auth/mfa/cancel
 
@@ -7122,8 +7222,11 @@ admin-only. `GET /api/v1/users/me` reports the result as
 #### GET /api/v1/admin/assistant/model-usage
 
 Returns attributed NyxBot and specialist model costs, requests, and provider
-token counts, with daily UTC series and top billing accounts. Requires Admin
-or Operator; the Usage Viewer permission alone does not grant access.
+token counts, with daily UTC series and top billing accounts. Same read access
+as Admin Usage: Admin, Operator, or the `nyxid:admin:usage:read` permission
+(Usage Viewer). `GET /api/v1/admin/assistant/analytics` and
+`GET /api/v1/admin/assistant/feedback`, which back the rest of the Usage ->
+NyxBot tab, use the same check.
 
 Use `from` and `to` RFC 3339 timestamps for a positive window of at most 31 days.
 An optional `model` selects an exact, case-sensitive billing model (trimmed,
@@ -7141,8 +7244,9 @@ orchestration, ordinary tools, unclassified assistant activity, and historical
 platform records without provable attribution. See the full
 [reporting contract](BILLING_ANALYTICS.md#nyxbot-model-usage).
 
-**Errors:** `400` invalid window or model filter; `403` without Admin/Operator
-access; `503` (`12200`) when the bounded report times out.
+**Errors:** `400` invalid window or model filter; `403` without Admin, Operator,
+or `nyxid:admin:usage:read` access; `503` (`12200`) when the bounded report
+times out.
 
 #### GET /api/v1/admin/usage/identities
 
@@ -8809,6 +8913,9 @@ See the [owner CLI/API reference](chat/09-owner-cli-api.md) for the full
 request/response schema, lifecycle, limits, and rollout contract, and the
 [CLI reference](site/cli/reference/nyxbot.md) for terminal examples.
 
+NyxBot channel link and chat override targets follow the organization-agent
+boundary and recovery contract in [ORG_AGENTS.md](ORG_AGENTS.md).
+
 ## Assistant voice and dictation
 
 The [voice contract](chat/11-voice.md) specifies the existing call lifecycle,
@@ -9070,3 +9177,69 @@ An actor-scoped request UUID freezes payload and recipients. Retrying the same
 payload resumes safely; reusing the UUID for different settings returns conflict.
 See [exact allocation accounting](BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim)
 for rollout, activation, journal and recovery guarantees.
+
+## NyxBot gateway release review
+
+All routes require a live platform admin. Delegated `account:read` access is denied
+by the existing `/admin` route class. Responses contain captured public identity,
+state, revision and versions; they omit credentials, key IDs/hashes, ciphertext and
+remote response bodies. See [gateway lifecycle](CHANNEL_EVENT_GATEWAY.md#nyxbot-gateway-retirement-and-recovery).
+
+| Method | Path | Request and response |
+| --- | --- | --- |
+| GET | `/api/v1/admin/nyxbot-gateway-releases` | Optional `after` UUID cursor, `limit` (default 50, capped at 100), comma-separated `states` (default `due,review_required`). Returns `{items, next_cursor}` ordered by ID. |
+| POST | `/api/v1/admin/nyxbot-gateway-releases/{id}/inspect` | Returns `{captured, observation}` with captured revision and a fresh sanitized observation; does not change captured authority. |
+| POST | `/api/v1/admin/nyxbot-gateway-releases/{id}/resolve` | Body `{revision, observation, action, dispatch_drained?}`. Echo the inspected observation and revision; returns 204 after a live admin check and fresh matching observation. |
+
+Observation `status` is `missing`, `matching` (with `channel_id`, `version`),
+`changed` (with optional `version`), `malformed`, `destination_changed`,
+`live_reference` or `owner_unavailable`. Resolution actions are `retry_original`,
+`preserve_changed`, `confirm_missing`. Only `review_required` records can be
+resolved. `retry_original` accepts `matching`, or `missing` while the channel
+identity is still unknown. `preserve_changed` accepts every status except
+`matching` and `missing`; it settles as `preserved` without deleting anything,
+records the observation status in audit metadata, and leaves `gateway_released`
+false. `confirm_missing` accepts `missing`. For an uncertain create, it also
+requires the 24-hour dispatch window to have elapsed and `dispatch_drained: true`;
+absence alone never proves no creation. A stale revision/observation returns
+conflict; an invalid action returns validation failure. Authority/storage
+unavailability is retryable. No action deletes a replacement version.
+
+### OAuth consent decisions
+
+Browser consent forms submit a `browser_form=true` marker. Successful, denied,
+and callback-error decisions return a script-free 200 interstitial that performs
+a meta-refresh to the already validated callback; API and non-browser callers
+retain the normal 302/JSON contract. An unauthenticated form is also completed
+through the interstitial before its same-origin `/login?return_to=...` navigation.
+OAuth redirect URIs are checked at both
+registration and execution time. HTTP(S), loopback HTTP, and RFC 8252 private-use
+native schemes (including reverse-DNS schemes with a path) are accepted;
+browser execution, content, local-file, and opaque schemes are rejected with
+the normal invalid-redirect error.
+Registration trims surrounding whitespace and stores the trimmed exact string;
+embedded tab/CR/LF are rejected. Execution requires the exact registered string
+and rejects browser-normalized whitespace/control variants.
+
+An ordinary approval preserves the live consent's existing scopes, service
+allowlist, and expiry and unions the newly approved request. The standard screen does not
+provide a complete editable view of the grant, so it cannot silently narrow
+previous authority; use Authorized Applications to revoke or narrow access.
+Reordered or duplicate selections are equal authority and are a no-op: the
+consent id, revision, issuance fence, and Machine external grant remain stable.
+Incremental approval with no additions has the same no-op behavior. Pure broadening
+preserves the existing authority revision and does not invalidate tokens bound to it;
+each token remains limited to its own scope, service, and resource claims. Narrowing,
+expiry shortening, revoke, regrant, and authority-removing Machine or binding changes
+create a new revision and invalidate tokens bound to the previous revision.
+
+The new code carries only the approved request's validated scope, its service
+selection and required resource services; it does not inherit the older stored
+union or its allow-all flag. CAS uses an independent optional `write_version`,
+compatible with old rows/readers. Signed decisions bind the revocation generation, so a request issued before
+revocation fails with a conflict and requires fresh authorization; a new request
+can authorize immediately. Old signed requests use a conservative timestamp
+compatibility fence, including same-second revocation. Double submit before
+revocation is harmless. URI
+spelling is preserved exactly: tab/CR/LF anywhere and leading/trailing C0/space
+are rejected rather than normalized into a match.

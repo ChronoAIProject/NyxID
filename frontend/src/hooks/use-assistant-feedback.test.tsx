@@ -5,7 +5,10 @@ import { describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/api-client";
 import { useAssistantFeedback } from "./use-assistant-feedback";
 
-vi.mock("@/lib/api-client", () => ({ api: { put: vi.fn(), delete: vi.fn() } }));
+vi.mock("@/lib/api-client", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/api-client")>(),
+  api: { put: vi.fn(), delete: vi.fn() },
+}));
 
 describe("useAssistantFeedback", () => {
   const wrapper = ({ children }: { children: ReactNode }) => (

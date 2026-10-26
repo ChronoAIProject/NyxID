@@ -20,7 +20,7 @@ when you talk to NyxBot or in a group NyxBot is in (#1883). When NyxBot assigned
 the work, the specialist asks NyxBot for anything else and NyxBot decides from
 what the user asked. Conversations are
 **threads** of an agent, so the user can talk to NyxBot or any specialist, in the
-web app or through a channel bot linked to that agent (Telegram, Lark, ...).
+web app or, for NyxBot and personal specialists, through a linked channel bot (Telegram, Lark, ...).
 NyxID owns agents, threads, keys and wake-ups; NyxAgent runs each thread
 unchanged.
 
@@ -129,8 +129,10 @@ thread; returns started, busy or pool_full), `wait_for_subagents` (≤ 120 s),
 `create_group`, `list_groups`, `post_to_group`, `update_group`, `delete_group`,
 `settings_link` (the exact NyxID page for configuration the tools do not cover,
 such as creating an agent key, security, profile, billing, organizations or
-triggers), `channel_bot_setup_link`, `connect_channel_bot` (to NyxBot or a
+triggers), `channel_bot_setup_link`, `connect_channel_bot` (to NyxBot or a personal
 specialist), `link_channel_bot`, `list_channel_agents`, `disconnect_channel_bot`.
+The organization-specialist channel-target boundary and recovery contract are
+documented in [ORG_AGENTS.md](../ORG_AGENTS.md).
 `message_subagent` accepts a personal specialist name or ID, an organization
 specialist ID, or the qualified `org-slug/agent-name` shown by the roster. A
 bare name always prefers the person's specialist; an organization-only bare
@@ -362,9 +364,11 @@ Account deletion purges agents, settings, threads and channel records.
 
 ## 12. Channel bots
 
-Any channel bot can be linked to NyxBot or a specialist (`connect_channel_bot`,
+Any channel bot can be linked to NyxBot or a personal specialist (`connect_channel_bot`,
 settings, or relinked later); each chat becomes a thread of the linked agent
 (or of the chat's own agent, §12a), with that agent's authority and memory.
+See [ORG_AGENTS.md](../ORG_AGENTS.md) for the organization-specialist channel
+target boundary and recovery contract.
 
 - **Everything is answerable in the chat.** A chat app cannot show NyxID's cards
   or buttons, so channel threads are told to give every link as a full URL and
@@ -426,7 +430,7 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   platforms other than Telegram pins the bot's own user ID (Lark: its `open_id`,
   looked up with the bot's credentials) instead of a username; without it the
   gateway counts any mention of a bot as addressing it. If the
-  gateway refuses, its channel is released at its current version, the new keys
+  gateway refuses, exact-version cleanup is durably queued, the new keys
   are deleted and the bot stays exactly as it was (`gateway_fallback_at`),
   retried the next day; a manual connect never rebuilds a working bot just to
   change transport. A new bot on a listed platform the gateway refuses is
@@ -441,13 +445,15 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   images directly through its adapters on both transports, before the reply text. A message whose route the relay looked up
   just before the swap committed reaches NyxID's relay endpoint after it and is
   refused and reported like any lost message. A move whose replica stopped
-  midway leaves `pending_agent_api_key_id`/`pending_route_api_key_id`; the sweep
-  deletes those keys after 30 minutes. The swap needs MongoDB transactions (a
+  midway leaves `pending_agent_api_key_id`/`pending_route_api_key_id`; after
+  30 minutes, a retirement transaction captures its cleanup responsibility and
+  revokes those keys while preserving the working route. The swap needs MongoDB transactions (a
   replica set, as in production); on a standalone development database every
   move ends as `swap_failed` and the bot stays on its existing transport.
   A return to the relay builds a fresh route key beside the working gateway
-  connection and atomically swaps the channel and existing route before
-  releasing the gateway channel and deleting its provider key and old route key.
+  connection and atomically swaps the channel and existing route, revokes the
+  provider and old route keys, and captures exact gateway cleanup responsibility.
+  Remote release is attempted after that transaction commits.
   Both directions recheck the flag, org authority and active turns before the
   swap; a busy return retries after ten minutes. At most one move is attempted
   per sweep per replica, across both directions. Gateway private events retain
@@ -470,8 +476,8 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   Every gateway provider endpoint and relay inbound re-checks live org-admin
   membership, as do the sweep and asynchronous replies. Loss fails the link with
   `org_access_lost`, retains the existing metadata audit and link-status/watch
-  behaviour, removes the org route, releases the gateway channel, and deletes
-  active and pending keys under their respective owners. No event reaches the
+  behaviour, atomically retires the org route, queues exact gateway cleanup and
+  revokes active and pending keys under their respective owners. No event reaches the
   linking person's agent after that check fails. Telegram org bots always use
   the gateway. Lark/Feishu org bots use the linking person's media flag and
   the same owner-media rules as personal bots; live org-admin authority is
@@ -532,6 +538,32 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   are delivered to the chat through the gateway's `replyToEvent` while the newest
   event reference is valid, or through the relay reply API; messages that arrive
   while the agent is busy are queued and answered next instead of bounced.
+
+### Explicit reconnect continuity
+
+An explicit reconnect restores eligible history atomically with activation. The
+source is the latest disconnected connection for the same linking person and bot,
+with the same canonical platform and effective bot owner, no committed successor,
+and ordinary personal-route eligibility. An incompatible newest row is a boundary;
+NyxBot never skips it to recover older history. Failed attempts and platform
+conversion are not continuity sources. A failed activation consumes no predecessor
+and leaves no active destination.
+
+Verified owner sender IDs, private-chat policy, stable chat partitions and their
+settings carry forward. All `conv_*` partitions remain on the predecessor, as
+before. Changing the channel's agent invalidates inherited conversation bindings
+and stops followed children; otherwise suspended children stay unavailable until
+admitted again. Stable conversation `channel` and `reply_channel` metadata move
+independently. Every activation stores a fresh one-time owner-link hash with a
+24-hour expiry and returns its new code; predecessor link material is never copied.
+Lineage records the committed predecessor/successor relationship. Gateway group
+policy is marked due in the activation transaction, so a crash before inline sync
+is repaired by the existing sweep.
+
+Reconnect remains explicit. Gateway lifecycle cleanup is independent of reconnect
+and adds no message delivery retry. See [gateway retirement and recovery](../CHANNEL_EVENT_GATEWAY.md#nyxbot-gateway-retirement-and-recovery)
+for the release states, exact-version cleanup, retired-binding acknowledgement,
+operator review and deployment boundary.
 
 ### Channel turn delivery after the provider stream closes
 
@@ -679,7 +711,7 @@ payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
 | `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing; a member who addresses it before the owner has talked there is told why, at most daily. |
 | `allow_posts` | off | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |
-| agent | the bot's agent | The chat reaches another agent; it starts a new thread with it, and relinking the bot leaves such chats alone. |
+| agent | the bot's agent | The chat reaches NyxBot or a personal specialist; it starts a new thread with it, and relinking the bot leaves such chats alone. Organization specialists are refused under the [organization-agent channel contract](../ORG_AGENTS.md) because their conversations are private member threads. |
 
 Per bot, `private_chats` (`nyxid__update_channel_access`) is `owner` (default)
 or `everyone`: anyone who messages the bot privately gets their own thread, as a
@@ -980,7 +1012,7 @@ admin-settable at `/api/v1/admin/assistant/profile-routes` but inactive
 5. A direct message to a specialist does not wake NyxBot; it appears in NyxBot's
    next turn.
 6. NyxBot is one persistent personal agent (Muse / Grok Bot), not one
-   orchestrator per chat; chat apps link to NyxBot or any specialist.
+   orchestrator per chat; chat apps link to NyxBot or any personal specialist.
 
 ## Machine nodes and saved logins
 
@@ -1310,6 +1342,30 @@ guests and execution fences remain enforced. The legacy `skip_destructive_confir
 kept synchronized for one rolling release; rows without `access_mode` migrate
 from its value (`true` means `autopilot`). Specialists may override the owner
 mode with `access_mode_override`.
+
+### Progress replies during external checks
+
+In an agent’s Profile, **Channel progress reply** enables the optional
+`channel_checking_notice` boolean. A first-party human maintainer can also set
+it through `PATCH /api/v1/assistant/nyxagent/agents/{id}`. Omitted fields preserve
+the current value; existing agents default to `false`. This applies to both
+NyxBot and specialists, including their authorized guest channel turns.
+
+When enabled, a channel turn that has started work beyond attached skill reads
+and tool discovery receives one interim reply after at least five seconds:
+“Got it, let me check and get back to you.” External work starting later receives
+the notice on the next 500 ms check, if the turn is still running. Network and
+provider delivery time are additional; this is not a hard delivery deadline.
+An attached FAQ read alone never triggers it. The trigger is observed tool
+activity, not a model’s estimate of whether it knows an answer.
+
+The task is cancelled when execution ends. A durable claim is fenced to the
+same live, unstopped turn, suppresses a second capacity/progress notice, and is
+never retried after an ambiguous send. It uses the existing live-authorized
+channel reply path. It adds no model/transcript text and does not claim or
+settle the eventual answer. Scheduled triggers, app-only threads, and the
+separate personal manager transport do not receive this channel notice.
+Only opted-in channel turns run the timer; other turns add no polling reads.
 
 ### Access modes
 

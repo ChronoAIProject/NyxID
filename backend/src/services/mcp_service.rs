@@ -1676,7 +1676,8 @@ async fn load_user_tools_with_grants(
         }
 
         let endpoint_rows = eps_by_svc.get(svc.id.as_str()).cloned().unwrap_or_default();
-        let endpoints = stored_service_endpoints_to_mcp(&endpoint_rows, Some(svc));
+        let mut endpoints = stored_service_endpoints_to_mcp(&endpoint_rows, Some(svc));
+        super::cma_operation::apply_contracts(&svc.slug, &mut endpoints);
         let durable_endpoint_metadata =
             service_endpoint_durable_metadata(&endpoint_rows, Some(svc.slug.as_str()));
 
@@ -1778,6 +1779,7 @@ fn service_endpoint_durable_metadata(
 /// overlay says about the operations they share, matched literally by
 /// endpoint name or `METHOD path`.
 fn mark_catalog_operations(published: &mut ParsedMcpEndpoints, catalog_slug: &str) {
+    super::cma_operation::apply_contracts(catalog_slug, &mut published.endpoints);
     for endpoint in &published.endpoints {
         let marks = super::catalog_spec_registry::operation_marks(
             catalog_slug,
@@ -2711,150 +2713,6 @@ pub fn generate_tool_definitions(
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {}
-        }),
-    });
-
-    tools.push(McpToolDefinition {
-        name: "nyx__oracle_pools".to_string(),
-        description: "List oracle pools this MCP caller can submit work to. Use this before \
-            nyx__oracle_ask, nyx__oracle_attach, or nyx__oracle_extract when you need to \
-            choose a browser LLM pool."
-            .to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "required": []
-        }),
-    });
-
-    tools.push(McpToolDefinition {
-        name: "nyx__oracle_ask".to_string(),
-        description: "Ask a browser-backed LLM through a NyxID oracle pool. Use this for \
-            natural-language research, reasoning, or continuing an existing oracle \
-            conversation; returns the answer if it finishes before wait_seconds, otherwise \
-            returns a task_id for nyx__oracle_result."
-            .to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pool": {
-                    "type": "string",
-                    "description": "Oracle pool slug or ID to submit to"
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "Prompt to send to the oracle worker"
-                },
-                "model": {
-                    "type": "string",
-                    "description": "Optional model label hint for the worker"
-                },
-                "project_url": {
-                    "type": "string",
-                    "description": "Optional ChatGPT Project URL override for this task"
-                },
-                "conversation_id": {
-                    "type": "string",
-                    "description": "Optional oracle conversation ID to continue"
-                },
-                "wait_seconds": {
-                    "type": "integer",
-                    "description": "How long to poll for completion before returning a task_id (default 120, range 5-300)",
-                    "default": 120
-                }
-            },
-            "required": ["pool", "prompt"]
-        }),
-    });
-
-    tools.push(McpToolDefinition {
-        name: "nyx__oracle_result".to_string(),
-        description: "Poll an oracle task by task_id. Use this after nyx__oracle_ask or \
-            nyx__oracle_extract returns a still-processing task, or to check failure and \
-            cancellation status."
-            .to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "task_id": {
-                    "type": "string",
-                    "description": "Oracle task ID returned by nyx__oracle_ask, nyx__oracle_extract, or nyx__oracle_attach"
-                },
-                "wait_seconds": {
-                    "type": "integer",
-                    "description": "How long to poll for completion (default 60, range 0-300)",
-                    "default": 60
-                }
-            },
-            "required": ["task_id"]
-        }),
-    });
-
-    tools.push(McpToolDefinition {
-        name: "nyx__oracle_attach".to_string(),
-        description: "Import an existing ChatGPT conversation into NyxID as an oracle \
-            session. Use this when the user gives a ChatGPT conversation URL and wants the \
-            agent to continue or inspect it through NyxID."
-            .to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pool": {
-                    "type": "string",
-                    "description": "Oracle pool slug or ID whose worker should scrape the conversation"
-                },
-                "chatgpt_url": {
-                    "type": "string",
-                    "description": "Existing ChatGPT conversation URL to import"
-                }
-            },
-            "required": ["pool", "chatgpt_url"]
-        }),
-    });
-
-    tools.push(McpToolDefinition {
-        name: "nyx__oracle_extract".to_string(),
-        description: "Ask an oracle worker to read a web page and extract its content. Use \
-            this for pages that need a browser-backed LLM or authenticated browser context; \
-            returns content if it finishes before wait_seconds, otherwise returns a task_id \
-            for nyx__oracle_result."
-            .to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pool": {
-                    "type": "string",
-                    "description": "Oracle pool slug or ID to submit the extraction task to"
-                },
-                "url": {
-                    "type": "string",
-                    "description": "HTTP or HTTPS URL to read"
-                },
-                "wait_seconds": {
-                    "type": "integer",
-                    "description": "How long to poll for completion before returning a task_id (default 120, range 5-300)",
-                    "default": 120
-                }
-            },
-            "required": ["pool", "url"]
-        }),
-    });
-
-    tools.push(McpToolDefinition {
-        name: "nyx__oracle_session".to_string(),
-        description: "Read an oracle conversation transcript by conversation_id. Use this \
-            after nyx__oracle_attach has imported a conversation, or to inspect prior turns \
-            in an oracle session."
-            .to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "conversation_id": {
-                    "type": "string",
-                    "description": "Oracle conversation ID to read"
-                }
-            },
-            "required": ["conversation_id"]
         }),
     });
 
@@ -11424,8 +11282,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 14 meta-tools (6 core + 2 SSH + 6 oracle)
-        assert_eq!(tools.len(), 14);
+        // Should only have the 8 meta-tools (6 core + 2 SSH)
+        assert_eq!(tools.len(), 8);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -11450,8 +11308,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 14 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 15);
+        // 8 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 9);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -11475,40 +11333,23 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 14 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 16);
+        // 8 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 10);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
     }
 
     #[test]
-    fn generate_tool_definitions_includes_oracle_meta_tools() {
+    /// The built-in oracle is retired: an agent must not even see the tools,
+    /// or it would try them and be told so on every call.
+    fn generate_tool_definitions_omits_retired_oracle_tools() {
         let tools = generate_tool_definitions(&[], None);
-
-        let required_for = |name: &str| -> Vec<String> {
-            tools
-                .iter()
-                .find(|t| t.name == name)
-                .unwrap_or_else(|| panic!("missing tool {name}"))
-                .input_schema
-                .get("required")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|v| v.as_str().map(ToString::to_string))
-                .collect()
-        };
-
-        assert_eq!(required_for("nyx__oracle_pools"), Vec::<String>::new());
-        assert_eq!(required_for("nyx__oracle_ask"), vec!["pool", "prompt"]);
-        assert_eq!(required_for("nyx__oracle_result"), vec!["task_id"]);
-        assert_eq!(
-            required_for("nyx__oracle_attach"),
-            vec!["pool", "chatgpt_url"]
-        );
-        assert_eq!(required_for("nyx__oracle_extract"), vec!["pool", "url"]);
-        assert_eq!(required_for("nyx__oracle_session"), vec!["conversation_id"]);
+        let leaked: Vec<&str> = tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .filter(|name| name.starts_with("nyx__oracle_"))
+            .collect();
+        assert!(leaked.is_empty(), "{leaked:?}");
     }
 
     #[test]
