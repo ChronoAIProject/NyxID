@@ -1655,3 +1655,5 @@ async fn inactive_user_cannot_reach_derived_mfa_guard_or_mint_tokens() {
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+mod approved_sign_in_policy;

@@ -37,6 +37,7 @@ import {
 } from "@/lib/url-tabs";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog";
+import { ApprovedSignInPolicy } from "@/components/settings/approved-sign-in-policy";
 import { DisplaySettings } from "@/components/settings/display-settings";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -418,17 +419,7 @@ function SecurityTab() {
             </div>
           </div>
           <Separator />
-          <div className="flex items-start justify-between gap-4">
-            <div className="space-y-1">
-              <p className="text-12 font-medium">Skip MFA for NyxID app sign-ins</p>
-              <p className="text-12 text-muted-foreground">
-                Approving a QR sign-in from your signed-in NyxID mobile app
-                completes verification without another authenticator code.
-                This is enabled automatically.
-              </p>
-            </div>
-            <Badge variant="success">Always enabled</Badge>
-          </div>
+          <ApprovedSignInPolicy key={user?.id} />
         </CardContent>
       </Card>
 

@@ -602,6 +602,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/me/preferences/analytics",
             get(handlers::users::get_analytics_consent).put(handlers::users::set_analytics_consent),
         )
+        .route(
+            "/me/security",
+            put(handlers::users::save_security_preferences),
+        )
         .route("/me", get(handlers::users::get_me))
         .route("/me", put(handlers::users::update_me))
         .route("/me", delete(handlers::users::delete_me))

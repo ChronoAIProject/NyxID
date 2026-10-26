@@ -78,6 +78,8 @@ impl PlatformRole {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserProfileConfig {
     #[serde(default)]
+    pub security: SecurityPreferences,
+    #[serde(default)]
     pub analytics: AnalyticsConsent,
     #[serde(default)]
     pub onboarding: OnboardingState,
@@ -87,6 +89,17 @@ pub struct UserProfileConfig {
     pub services_view: Option<ServiceViewPreferences>,
     #[serde(default)]
     pub service_views: Option<ServiceViewsPreferences>,
+}
+
+/// Explicit account policy for human-approved QR/manual-code sign-ins.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityPreferences {
+    #[serde(default)]
+    pub skip_mfa_for_approved_sign_ins: bool,
+    #[serde(default)]
+    pub revision: Option<String>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub changed_at: Option<DateTime<Utc>>,
 }
 
 /// Optional product analytics permission. Absence is always denial. Device

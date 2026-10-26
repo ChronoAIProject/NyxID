@@ -50,7 +50,12 @@ export interface OnboardingState {
 }
 
 /// User-scoped configuration surfaced on `GET /users/me`.
+export interface SecurityPreferences {
+  readonly skip_mfa_for_approved_sign_ins: boolean;
+}
+
 export interface ProfileConfig {
+  readonly security?: SecurityPreferences;
   readonly services_view?: ServiceViewFilters | null;
   readonly service_views?: ServiceViewsPreferences | null;
   readonly onboarding: OnboardingState;

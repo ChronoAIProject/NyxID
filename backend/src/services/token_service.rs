@@ -188,6 +188,27 @@ pub(crate) async fn create_session_with_transaction_and_assurance(
     transaction: Option<&mut mongodb::ClientSession>,
     mfa_assured: bool,
 ) -> AppResult<IssuedSession> {
+    create_session_with_transaction_and_mfa_authority(
+        db,
+        user_id,
+        ip_address,
+        user_agent,
+        transaction,
+        mfa_assured,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn create_session_with_transaction_and_mfa_authority(
+    db: &mongodb::Database,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    transaction: Option<&mut mongodb::ClientSession>,
+    mfa_assured: bool,
+    mfa_exemption: Option<crate::models::session::MfaExemption>,
+) -> AppResult<IssuedSession> {
     Uuid::parse_str(user_id).map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
     let session_token = generate_random_token();
@@ -201,7 +222,7 @@ pub(crate) async fn create_session_with_transaction_and_assurance(
         purpose: Some(crate::models::session::SessionPurpose::Authenticated),
         mfa_method: None,
         mfa_assured: Some(mfa_assured),
-        mfa_exemption: None,
+        mfa_exemption,
         id: session_id.clone(),
         user_id: user_id.to_string(),
         token_hash: session_token_hash,
@@ -305,6 +326,11 @@ pub struct PreparedSessionTokens {
 }
 
 impl PreparedSessionTokens {
+    pub(crate) fn set_app_policy_exempt(&mut self, exempt: bool) {
+        self.session.mfa_exemption =
+            exempt.then_some(crate::models::session::MfaExemption::ApprovedSignInPolicy);
+    }
+
     pub(crate) fn set_mfa_assured(&mut self, assured: bool) {
         self.session.mfa_assured = Some(assured);
     }
@@ -1116,6 +1142,30 @@ pub async fn create_mobile_social_tokens(
     insert_prepared_session(db, &prepared, &mut tx).await?;
     super::transaction_service::commit(&mut tx).await?;
     Ok(prepared.tokens)
+}
+
+/// Transactional session/refresh revocation for an undelivered login grant.
+/// Such a session has not been returned to a client and cannot have MCP children.
+pub(crate) async fn revoke_session_in_transaction(
+    db: &mongodb::Database,
+    id: &str,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    db.collection::<Session>(SESSIONS)
+        .update_one(
+            doc! {"_id": id},
+            doc! {"$set": {"revoked": true, "last_active_at": bson::DateTime::now()}},
+        )
+        .session(&mut *tx)
+        .await?;
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .update_many(
+            doc! {"session_id": id, "revoked": false},
+            doc! {"$set": {"revoked": true}},
+        )
+        .session(&mut *tx)
+        .await?;
+    Ok(())
 }
 
 /// Revoke a session and all its associated refresh tokens.

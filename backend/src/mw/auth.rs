@@ -118,6 +118,8 @@ impl AuthUser {
         crate::services::session_authority::DerivedMfaAuthority {
             mfa_enabled: self.mfa_enabled,
             verified: self.mfa_assured,
+            session_id: self.session_id,
+            app_policy_revision: None,
         }
     }
 }

@@ -314,6 +314,7 @@ async fn traces_record_hashed_ip_identifiers_and_outcomes_without_secrets() {
             None,
             None,
             None,
+            crate::services::session_authority::DerivedMfaAuthority::new(false, false),
         )
         .await
         .unwrap();
