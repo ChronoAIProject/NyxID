@@ -94,6 +94,8 @@ pub mod oracle_worker_bundle;
 pub mod oracle_workers;
 pub mod org_role_scopes;
 pub mod orgs;
+#[cfg(test)]
+mod password_change_tests;
 pub mod platform_binding;
 pub mod platform_bots;
 pub mod platform_personal_bindings;

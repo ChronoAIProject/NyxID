@@ -224,7 +224,7 @@ async fn complete_identity(
         "login_request_identity_verified".into(),
         Some(
             serde_json::json!({"request_id": row.request_id, "keep_signed_in": row.keep_signed_in,
-                "method": method, "mfa_verified": method == "password_mfa"}),
+                "method": method, "mfa_verified": row.mfa_verified}),
         ),
         Some(ip),
         ua,

@@ -837,7 +837,7 @@ Reset a user's password using a valid reset token.
 | Field          | Type   | Required | Description                    |
 |----------------|--------|----------|--------------------------------|
 | `token`        | string | Yes      | Password reset token           |
-| `new_password` | string | Yes      | New password (8-128 characters)|
+| `new_password` | string | Yes      | New password (8–128 UTF-8 bytes)|
 
 ```json
 {
@@ -850,13 +850,16 @@ Reset a user's password using a valid reset token.
 
 ```json
 {
-  "message": "Password reset successfully"
+  "message": "Password has been reset successfully"
 }
 ```
 
 **Errors:**
-- `1000 bad_request` -- Missing token or password too short/long
-- `1003 not_found` -- Token not found, expired, or already used
+- `1008 validation_error` (400) -- Password outside 8–128 UTF-8 bytes
+- `1000 bad_request` (400) -- Token invalid, expired, replaced, or already used
+
+Reset completion requires an active person account and atomically consumes the
+still-current, unexpired token. Reusing the current password is permitted.
 
 **Example:**
 
@@ -865,6 +868,63 @@ curl -X POST http://localhost:3001/api/v1/auth/reset-password \
   -H "Content-Type: application/json" \
   -d '{"token": "reset-token-here", "new_password": "newsecurepassword123"}'
 ```
+
+---
+
+#### POST /api/v1/auth/password/change
+
+Change an existing password for an active person account, including a
+social-linked account that has a stored password. Passwordless accounts cannot
+use this route to create a credential.
+
+**Auth:** Verified first-party human session cookie or first-party account access
+JWT. API keys, OAuth-client tokens, delegated tokens, relay tokens, service
+accounts, organization identities, and inactive accounts are rejected.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `current_password` | string | Yes | Current password, nonempty and at most 128 UTF-8 bytes; historical passwords shorter than 8 bytes remain verifiable |
+| `new_password` | string | Yes | 8–128 UTF-8 bytes; no character-class requirements |
+
+```json
+{
+  "current_password": "currentpassword",
+  "new_password": "newpassword"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "message": "Password changed successfully. Existing sessions remain signed in."
+}
+```
+
+A new password equal to the current password is allowed, matching reset-password
+behavior. Every successful change replaces the hash with a new salted Argon2id
+hash and clears any pending password-reset token and expiry in the same atomic
+update. Reset completion also checks its still-current, unexpired token at the
+final write, so an obsolete reset cannot overwrite a completed change.
+
+All existing browser, access-token, and refresh-token sessions remain valid,
+including the caller's session. Use the session revocation endpoints separately
+when needed. Successful changes emit a metadata-only `password_changed` audit
+event with `sessions_retained: true`; passwords and hashes are never returned.
+
+Dedicated shared limits are **20 attempts/IP/minute** and **5 attempts/account/minute**,
+resolved through configured trusted proxies. Attempts include successes and
+counters are not reset on success. Limits run before password verification.
+
+**Errors:**
+
+- `400`, `1008 validation_error`: invalid byte length, incorrect current password,
+  or no stored password. An incorrect password does not return `401` or sign out
+  an otherwise valid session.
+- `409`, `1004 conflict`: password or active-person state changed after verification;
+  retry with the current credential.
+- `429`, `1005 rate_limited`: an IP or account limit was reached; the session stays valid.
+- `401`: missing or invalid authentication; `403`: unsupported credential or account.
 
 ---
 
@@ -1034,10 +1094,14 @@ Returns the profile of the currently authenticated user.
   "avatar_url": "https://example.com/avatar.jpg",
   "email_verified": true,
   "mfa_enabled": false,
+  "has_password": true,
   "created_at": "2025-01-15T10:30:00+00:00",
   "last_login_at": "2025-06-01T14:22:00+00:00"
 }
 ```
+
+`has_password` reports whether the account has a stored password credential,
+independently of any linked social provider. Password hashes are never returned.
 
 **Example:**
 

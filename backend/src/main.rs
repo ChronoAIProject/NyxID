@@ -136,6 +136,9 @@ pub struct AppState {
     pub device_code_ip_limiter: mw::rate_limit::SharedPerIpRateLimiter,
     /// Per-IP limiter for `POST /api/v1/auth/device/request` (5/min).
     pub auth_device_request_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Password changes: 20 attempts/IP/minute and 5 attempts/account/minute.
+    pub password_change_ip_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    pub password_change_user_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
     /// Per-IP limiter for `POST /api/v1/auth/device/poll` (60/min).
     pub auth_device_poll_limiter: mw::rate_limit::SharedPerIpRateLimiter,
     /// Per-IP limiter for `POST /api/v1/auth/device/approve` (10/min).
@@ -899,6 +902,18 @@ async fn server_main() {
         auth_device_request_limiter: mw::rate_limit::create_per_ip_rate_limiter(
             db.clone(),
             "auth_device_request",
+            5,
+            60,
+        ),
+        password_change_ip_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "password_change_ip",
+            20,
+            60,
+        ),
+        password_change_user_limiter: mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "password_change_user",
             5,
             60,
         ),

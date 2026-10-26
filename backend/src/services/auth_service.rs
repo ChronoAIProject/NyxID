@@ -1,6 +1,7 @@
 use chrono::Utc;
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::crypto::password;
 use crate::crypto::token::{generate_random_token, hash_token};
@@ -10,6 +11,86 @@ use crate::services::role_service;
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
 const MAX_PASSWORD_LENGTH: usize = 128;
+
+fn validate_new_password(password: &str) -> AppResult<()> {
+    if !(8..=MAX_PASSWORD_LENGTH).contains(&password.len()) {
+        return Err(AppError::ValidationError(
+            "Password must be between 8 and 128 UTF-8 bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Replace an existing human credential while retaining all existing sessions.
+pub async fn change_password(
+    db: &mongodb::Database,
+    user_id: &str,
+    current_password: Zeroizing<String>,
+    new_password: Zeroizing<String>,
+) -> AppResult<()> {
+    if current_password.is_empty() || current_password.len() > MAX_PASSWORD_LENGTH {
+        return Err(AppError::ValidationError(
+            "Current password must be between 1 and 128 UTF-8 bytes".into(),
+        ));
+    }
+    validate_new_password(&new_password)?;
+    let mut user = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": user_id })
+        .await?
+        .ok_or_else(|| AppError::Forbidden("Account is unavailable".into()))?;
+    ensure_person_user(&user)?;
+    if !user.is_active {
+        return Err(AppError::Forbidden("Account is inactive".into()));
+    }
+    let old_hash =
+        Zeroizing::new(user.password_hash.take().ok_or_else(|| {
+            AppError::ValidationError("Account has no password to change".into())
+        })?);
+    let (old_hash, new_hash) = tokio::task::spawn_blocking(move || {
+        if !password::verify_password(&current_password, &old_hash)? {
+            return Err(AppError::ValidationError(
+                "Current password is incorrect".into(),
+            ));
+        }
+        let new_hash = Zeroizing::new(password::hash_password(&new_password)?);
+        Ok((old_hash, new_hash))
+    })
+    .await
+    .map_err(|_| AppError::Internal("Password hashing task failed".into()))??;
+    replace_verified_password(db, user_id, &old_hash, &new_hash).await
+}
+
+async fn replace_verified_password(
+    db: &mongodb::Database,
+    user_id: &str,
+    old_hash: &str,
+    new_hash: &str,
+) -> AppResult<()> {
+    let result = db
+        .collection::<User>(USERS)
+        .update_one(
+            doc! { "_id": user_id, "password_hash": old_hash,
+            "user_type": "person", "is_active": true },
+            doc! { "$set": {
+                "password_hash": new_hash,
+                "password_reset_token": null,
+                "password_reset_expires_at": null,
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+    if result.matched_count != 1 {
+        return Err(AppError::Conflict(
+            "Account or password changed; retry with the current password".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "password_change_tests.rs"]
+mod password_change_tests;
 
 /// Reject any auth flow that lands on an org-type user.
 ///
@@ -293,18 +374,7 @@ pub async fn reset_password(
     token: &str,
     new_password: &str,
 ) -> AppResult<()> {
-    if new_password.len() < 8 {
-        return Err(AppError::ValidationError(
-            "Password must be at least 8 characters".to_string(),
-        ));
-    }
-
-    if new_password.len() > MAX_PASSWORD_LENGTH {
-        return Err(AppError::ValidationError(format!(
-            "Password must be at most {} characters",
-            MAX_PASSWORD_LENGTH
-        )));
-    }
+    validate_new_password(new_password)?;
 
     let token_hash = hash_token(token);
 
@@ -316,23 +386,48 @@ pub async fn reset_password(
 
     ensure_person_user(&user)?;
 
+    if !user.is_active {
+        return Err(AppError::BadRequest(
+            "Invalid or expired reset token".into(),
+        ));
+    }
+
     // Check token expiration
     if let Some(expires_at) = user.password_reset_expires_at {
-        if expires_at < Utc::now() {
+        if expires_at <= Utc::now() {
             return Err(AppError::BadRequest("Reset token has expired".to_string()));
         }
     } else {
         return Err(AppError::BadRequest("Invalid reset token".to_string()));
     }
 
-    let new_hash = password::hash_password(new_password)?;
-    let now = Utc::now();
+    let new_password = Zeroizing::new(new_password.to_owned());
+    let new_hash = tokio::task::spawn_blocking(move || {
+        password::hash_password(&new_password).map(Zeroizing::new)
+    })
+    .await
+    .map_err(|_| AppError::Internal("Password hashing task failed".into()))??;
+    finish_password_reset(db, &user.id, &token_hash, &new_hash).await?;
 
-    db.collection::<User>(USERS)
+    tracing::info!(user_id = %user.id, "Password reset completed");
+    Ok(())
+}
+
+async fn finish_password_reset(
+    db: &mongodb::Database,
+    user_id: &str,
+    token_hash: &str,
+    new_hash: &str,
+) -> AppResult<()> {
+    let now = Utc::now();
+    let result = db
+        .collection::<User>(USERS)
         .update_one(
-            doc! { "_id": &user.id },
+            doc! { "_id": user_id, "user_type": "person", "is_active": true,
+            "password_reset_token": token_hash,
+            "password_reset_expires_at": { "$gt": bson::DateTime::from_chrono(now) } },
             doc! { "$set": {
-                "password_hash": &new_hash,
+                "password_hash": new_hash,
                 "password_reset_token": null,
                 "password_reset_expires_at": null,
                 "updated_at": bson::DateTime::from_chrono(now),
@@ -340,8 +435,11 @@ pub async fn reset_password(
         )
         .await?;
 
-    tracing::info!(user_id = %user.id, "Password reset completed");
-
+    if result.matched_count != 1 {
+        return Err(AppError::BadRequest(
+            "Invalid or expired reset token".into(),
+        ));
+    }
     Ok(())
 }
 

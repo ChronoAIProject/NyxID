@@ -12,7 +12,7 @@ NyxID supports TOTP-based MFA (Time-based One-Time Password) using any authentic
 ### Enable MFA
 
 1. Go to **Settings → Security**.
-2. Click **Set up two-factor authentication**.
+2. Turn on the **Two-Factor Authentication** switch.
 3. NyxID generates a QR code and a backup secret.
 4. Open your authenticator app, scan the QR code (or enter the secret manually).
 5. Enter the 6-digit code from your app to confirm the setup.
@@ -26,11 +26,28 @@ Store your backup codes in a secure location (password manager, printed and lock
 
 After entering your email and password on the login page, NyxID prompts for a 6-digit TOTP code. Enter the current code from your authenticator app.
 
+### Sign in with the NyxID mobile app
+
+Choose **Continue with the NyxID app** on the login page, then scan the QR code
+with a phone that is already signed in to NyxID and approve the request.
+That approval completes verification, so NyxID does not ask for another
+authenticator code, even when TOTP MFA is enabled. Scanning the QR code alone
+does not approve a sign-in.
+
+If approval succeeds but your account cannot load, choose **Retry loading
+account**. NyxID retries the account lookup using the delivered browser session;
+it does not redeem the QR code a second time. Sign-in completes after that lookup
+succeeds.
+
+**Settings → Security → Two-Factor Authentication** shows **Skip MFA for NyxID
+app sign-ins** as **Always enabled**. This also applies when the app verifies
+your identity while you approve another device's login request.
+
 ### Disable MFA
 
 1. Go to **Settings → Security**.
-2. Click **Disable two-factor authentication**.
-3. Confirm with your current TOTP code or a backup code.
+2. Turn off the **Two-Factor Authentication** switch.
+3. Enter your current password in the confirmation dialog, then click **Disable MFA**.
 
 :::note
 MFA setup is idempotent on the backend — calling setup again while a factor is unverified replaces the pending factor without error. A verified factor must be explicitly disabled before setup can be repeated.
@@ -40,12 +57,26 @@ MFA setup is idempotent on the backend — calling setup again while a factor is
 
 ### Change your password
 
-1. Go to **Settings → Security**.
-2. Click **Change password**.
-3. Enter your current password, then your new password twice.
-4. Click **Save**.
+The **Change Password** card appears only when your account has a password set.
+This includes accounts that use social sign-in and later add a password.
 
-Password changes do not invalidate existing sessions.
+1. Go to **Settings → Security**.
+2. Enter your current password, then your new password twice in **Change Password**.
+3. Click **Change Password**.
+
+New passwords must contain 8–128 UTF-8 bytes; accented characters and emoji may
+use more than one byte. There is no uppercase, lowercase, or digit requirement
+for this action. Reusing the current password is allowed, matching password reset.
+Your current password is required, so this action cannot add a password to a
+passwordless account.
+
+Successful changes invalidate pending password-reset links. Existing browser,
+access-token, and refresh-token sessions remain valid, including the current
+session. Use **Sessions** to revoke any session you no longer trust.
+
+Attempts, including successful changes, are limited to 5 per account and 20 per
+IP address per minute across servers. A wrong current password or a rate limit
+shows an inline error and keeps you signed in.
 
 ### Reset a forgotten password
 

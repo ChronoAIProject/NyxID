@@ -631,7 +631,7 @@ Consent endpoints use the authenticated user's ID from the `AuthUser` middleware
 - **Algorithm:** Argon2id (recommended by OWASP)
 - **Parameters:** m=64MiB, t=3 iterations, p=4 parallelism
 - **Salt:** Random per-hash via `SaltString::generate(OsRng)`
-- **Max length:** 128 characters (prevents Argon2 DoS)
+- **Max length:** 128 UTF-8 bytes (prevents Argon2 DoS)
 
 ### Cookie Security
 
@@ -652,7 +652,22 @@ Requests are authenticated in this order:
 2. `nyx_session` cookie (hashed, looked up in DB)
 3. `X-API-Key` header (hashed, looked up in DB)
 
-All methods verify the user is active before granting access.
+All methods verify the user is active before granting access. Temporary
+password-MFA proof rows (`user_agent = "mfa_pending"`) cannot authenticate as
+`nyx_session` cookies. They remain usable only by the dedicated MFA completion
+flow until that challenge is verified.
+
+### Password changes
+
+`POST /api/v1/auth/password/change` requires verified first-party human authority
+and the current stored password. It accepts new passwords of 8–128 UTF-8 bytes,
+including the current password, and cannot create a passwordless credential.
+A compare-and-set against the verified hash and live active-person state prevents
+stale changes from overwriting newer credentials. The same update invalidates
+pending reset tokens; reset completion rechecks its unexpired token in its final
+write. Existing sessions remain valid. See [API.md](API.md#post-apiv1authpasswordchange)
+for errors and the [account security guide](site/web/guides/account-security.md)
+for session revocation.
 
 ### Browser CSRF Protection
 
@@ -693,7 +708,11 @@ Dual-layer rate limiting protects against abuse:
 | Global sustained rate    | 10/sec  | `RATE_LIMIT_PER_SECOND`      |
 | Global burst capacity    | 30      | `RATE_LIMIT_BURST`           |
 
-Rate limit state is per-instance (in-memory). For distributed deployments, consider rate limiting at the reverse proxy level.
+Production rate limit state is shared through MongoDB. Password changes use
+dedicated `password_change_ip` and `password_change_user` namespaces with limits
+of 20 attempts/IP/minute and 5 attempts/account/minute. The IP comes from the
+trusted-proxy resolver. Successful changes consume attempts and do not reset
+counters; both limits run before password verification.
 
 ---
 

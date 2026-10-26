@@ -211,6 +211,7 @@ pub struct UserProfileResponse {
     pub avatar_url: Option<String>,
     pub email_verified: bool,
     pub mfa_enabled: bool,
+    pub has_password: bool,
     pub is_admin: bool,
     pub is_operator: bool,
     /// Resolved platform role: `"admin"`, `"operator"`, or `"user"`.
@@ -324,6 +325,7 @@ pub async fn get_me(
         avatar_url: user_model.avatar_url,
         email_verified: user_model.email_verified,
         mfa_enabled: user_model.mfa_enabled,
+        has_password: user_model.password_hash.is_some(),
         is_admin,
         is_operator,
         role,
@@ -574,6 +576,38 @@ mod tests {
     use crate::services::role_service;
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn profile_reports_stored_password_independently_of_social_provider() {
+        let db = connect_test_database("profile_password").await.unwrap();
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for (has_password, provider) in [
+            (false, None),
+            (false, Some("google")),
+            (true, None),
+            (true, Some("google")),
+        ] {
+            let user_id = Uuid::new_v4().to_string();
+            let mut user = test_user(&user_id, UserType::Person);
+            user.password_hash = has_password.then(|| "$argon2id$test-hash".to_string());
+            user.social_provider = provider.map(str::to_owned);
+            db.collection::<User>(USERS)
+                .insert_one(&user)
+                .await
+                .unwrap();
+
+            let Json(profile) = get_me(State(state.clone()), test_auth_user(&user_id))
+                .await
+                .unwrap();
+            let json = serde_json::to_value(profile).unwrap();
+            assert_eq!(json["has_password"], has_password);
+            assert!(json.get("password_hash").is_none());
+        }
+        db.drop().await.unwrap();
+    }
 
     fn service_view_request() -> SaveServiceViewRequest {
         SaveServiceViewRequest {
@@ -1118,6 +1152,7 @@ mod tests {
             avatar_url: Some("https://example.com/avatar.png".to_string()),
             email_verified: true,
             mfa_enabled: false,
+            has_password: false,
             is_admin: true,
             is_operator: false,
             role: "admin".to_string(),
@@ -1176,6 +1211,7 @@ mod tests {
             avatar_url: None,
             email_verified: false,
             mfa_enabled: false,
+            has_password: false,
             is_admin: false,
             is_operator: false,
             role: "user".to_string(),
@@ -1225,6 +1261,7 @@ mod tests {
             avatar_url: None,
             email_verified: true,
             mfa_enabled: false,
+            has_password: false,
             is_admin: false,
             is_operator: false,
             role: "user".to_string(),
@@ -1414,6 +1451,7 @@ mod tests {
             avatar_url: None,
             email_verified: false,
             mfa_enabled: false,
+            has_password: false,
             is_admin: false,
             is_operator: false,
             role: "user".to_string(),
@@ -1451,6 +1489,7 @@ mod tests {
             "avatar_url",
             "email_verified",
             "mfa_enabled",
+            "has_password",
             "is_admin",
             "is_operator",
             "role",

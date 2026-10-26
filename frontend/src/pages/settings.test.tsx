@@ -99,6 +99,100 @@ async function open(
 describe.each(["/settings", "/assistant"] as const)(
   "SettingsPage at %s",
   (route) => {
+    it.each([400, 429])("shows password-change %i errors without signing out", async (status) => {
+      useAuthStore.setState({
+        user: { ...useAuthStore.getState().user!, has_password: true },
+        isAuthenticated: true,
+      });
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => {
+        if (url === "/api/v1/auth/password/change") {
+          return new Response(JSON.stringify({
+            error: status === 400 ? "validation_error" : "rate_limited",
+            error_code: status === 400 ? 1008 : 1005,
+            message: status === 400 ? "Validation error: Current password is incorrect" : "Rate limited",
+          }), { status, headers: { "Content-Type": "application/json" } });
+        }
+        return original(url, options);
+      });
+      await open(route, "security");
+      await userEvent.type(screen.getByLabelText("Current Password"), "old");
+      await userEvent.type(screen.getByLabelText("New Password", { exact: true }), "abcdefé");
+      await userEvent.type(screen.getByLabelText("Confirm New Password"), "abcdefé");
+      await userEvent.click(screen.getByRole("button", { name: "Change Password" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(status === 400 ? "Current password is incorrect" : "Rate limited");
+      expect(useAuthStore.getState().isAuthenticated).toBe(true);
+      expect(useAuthStore.getState().user?.id).toBe("owner");
+      expect(transport).toHaveBeenCalledWith("/api/v1/auth/password/change", expect.objectContaining({
+        method: "POST", body: JSON.stringify({ current_password: "old", new_password: "abcdefé" }),
+      }));
+    });
+
+    it("submits same-as-current passwords and clears the fields on success", async () => {
+      useAuthStore.setState({ user: { ...useAuthStore.getState().user!, has_password: true } });
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/auth/password/change"
+        ? new Response(JSON.stringify({ message: "Password changed successfully" }), { status: 200 })
+        : original(url, options));
+      await open(route, "security");
+      for (const label of ["Current Password", "New Password", "Confirm New Password"]) {
+        await userEvent.type(screen.getByLabelText(label, { exact: true }), "samepassword");
+      }
+      await userEvent.click(screen.getByRole("button", { name: "Change Password" }));
+      await waitFor(() => expect(screen.getByLabelText("Current Password")).toHaveValue(""));
+      expect(screen.getByLabelText("New Password", { exact: true })).toHaveValue("");
+      expect(screen.getByRole("button", { name: "Change Password" })).toBeDisabled();
+    });
+
+    it.each([false, true])(
+      "shows QR MFA verification as automatic when TOTP is %s",
+      async (mfa_enabled) => {
+        useAuthStore.setState({
+          user: { ...useAuthStore.getState().user!, mfa_enabled },
+        });
+        await open(route, "security");
+        expect(
+          screen.getByText("Skip MFA for NyxID app sign-ins"),
+        ).toBeInTheDocument();
+        expect(screen.getByText("Always enabled")).toBeInTheDocument();
+        expect(
+          screen.getByRole("switch", {
+            name: "Toggle two-factor authentication",
+          }),
+        ).toHaveAttribute("aria-checked", String(mfa_enabled));
+      },
+    );
+
+    it.each([
+      { social_provider: null, has_password: false },
+      { social_provider: "google", has_password: false },
+      { social_provider: null, has_password: true },
+      { social_provider: "google", has_password: true },
+      { social_provider: null, has_password: undefined },
+    ])(
+      "shows password changes only for a stored password: %j",
+      async (credentials) => {
+        useAuthStore.setState({
+          user: { ...useAuthStore.getState().user!, ...credentials },
+        });
+        await open(route, "security");
+        if (credentials.has_password) {
+          expect(
+            screen.getByText("Change Password", { selector: "div" }),
+          ).toBeInTheDocument();
+          expect(screen.getByLabelText("Current Password")).toBeEnabled();
+          expect(
+            screen.getByRole("button", { name: "Change Password" }),
+          ).toBeInTheDocument();
+        } else {
+          expect(screen.queryAllByText("Change Password")).toHaveLength(0);
+          expect(
+            screen.queryByLabelText("Current Password"),
+          ).not.toBeInTheDocument();
+        }
+      },
+    );
+
     it("discloses deletion of every managed Machine and paused workspace in the actual confirmation", async () => {
       await open(route, "security");
       await userEvent.click(screen.getByRole("button", { name: "Delete My Account" }));

@@ -558,6 +558,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/verify-email", post(handlers::auth::verify_email))
         .route("/forgot-password", post(handlers::auth::forgot_password))
         .route("/reset-password", post(handlers::auth::reset_password))
+        .route("/password/change", post(handlers::auth::change_password))
         .route("/setup", post(handlers::auth::setup))
         .route("/social/{provider}", get(handlers::social_auth::authorize))
         .route(

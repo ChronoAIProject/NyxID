@@ -22,8 +22,10 @@ export interface User {
   readonly avatar_url: string | null;
   readonly email_verified: boolean;
   readonly mfa_enabled: boolean;
-  /// Social login provider ("google", "github", ...) or null for
-  /// email/password accounts. Older backends omit the field.
+  /// Whether a password credential is set. Older backends omit this field.
+  readonly has_password?: boolean;
+  /// Linked social provider ("google", "github", ...) or null when absent.
+  /// Password availability is independent. Older backends omit this field.
   readonly social_provider?: string | null;
   readonly is_admin: boolean;
   /// Read-only platform admin. Defaults to false. When true (and `is_admin`

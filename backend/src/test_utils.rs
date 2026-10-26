@@ -2126,6 +2126,18 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             5,
             60,
         ),
+        password_change_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "password_change_ip",
+            20,
+            60,
+        ),
+        password_change_user_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "password_change_user",
+            5,
+            60,
+        ),
         auth_device_poll_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
             db.clone(),
             "auth_device_poll",

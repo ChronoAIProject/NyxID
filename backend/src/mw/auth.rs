@@ -1400,7 +1400,8 @@ impl FromRequestParts<AppState> for AuthUser {
                 let session = state
                     .db
                     .collection::<Session>(SESSIONS)
-                    .find_one(doc! { "token_hash": &token_hash, "revoked": false })
+                    .find_one(doc! { "token_hash": &token_hash, "revoked": false,
+                        "user_agent": { "$ne": "mfa_pending" } })
                     .await
                     .map_err(|e| AppError::Internal(format!("Session lookup failed: {e}")))?;
 

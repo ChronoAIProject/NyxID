@@ -1328,7 +1328,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_device_web_poll_sets_browser_cookie_and_revokes_approval_session() {
+    async fn auth_device_web_poll_skips_extra_mfa_and_revokes_approval_session() {
         let Some(state) = setup_state("auth_device_web_poll_happy").await else {
             return;
         };
@@ -1337,6 +1337,12 @@ mod tests {
             .expect("seed roles");
         let user_id = Uuid::new_v4().to_string();
         insert_user(&state, &user_id).await;
+        state
+            .db
+            .collection::<crate::models::user::User>(USERS)
+            .update_one(doc! {"_id": &user_id}, doc! {"$set": {"mfa_enabled": true}})
+            .await
+            .expect("enable MFA");
         let server = spawn_test_server(state.clone()).await;
         let request_json = request_and_approve(&state, &server, &user_id).await;
 
@@ -1437,6 +1443,7 @@ mod tests {
             .await
             .expect("users/me response");
         assert_eq!(me_json["id"], user_id);
+        assert_eq!(me_json["mfa_enabled"], true);
 
         for _ in 0..20 {
             if let Some(log) = state
@@ -1744,12 +1751,21 @@ mod tests {
         for enabled in [false, true] {
             let db = crate::test_utils::connect_transaction_test_database("device_gate_http").await;
             crate::db::ensure_indexes(&db).await.unwrap();
+            crate::services::role_service::seed_system_roles(&db)
+                .await
+                .unwrap();
             let mut config = test_app_config();
             config.frontend_url = "https://nyxid.dev".into();
             config.auth_device_eight_char_codes = enabled;
             let state = crate::test_utils::test_app_state_with_config(db, config);
             let actor = Uuid::new_v4().to_string();
             insert_user(&state, &actor).await;
+            state
+                .db
+                .collection::<crate::models::user::User>(USERS)
+                .update_one(doc! {"_id": &actor}, doc! {"$set": {"mfa_enabled": true}})
+                .await
+                .unwrap();
             let token = access_token(&state, &actor);
             let server = spawn_test_server(state.clone()).await;
             for (kind, ua) in [("cli", "nyxid-cli/0.20.0"), ("browser", "Mozilla/5.0")] {
@@ -1801,6 +1817,15 @@ mod tests {
                 assert_eq!(delivery["auth_kind"], "account_session");
                 assert!(delivery["access_token"].as_str().is_some());
                 assert!(delivery["refresh_token"].as_str().is_some());
+                let (status, me) = get_json(
+                    &server,
+                    "/api/v1/users/me",
+                    delivery["access_token"].as_str(),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{me}");
+                assert_eq!(me["id"], actor);
+                assert_eq!(me["mfa_enabled"], true);
             }
             state.db.drop().await.unwrap();
         }

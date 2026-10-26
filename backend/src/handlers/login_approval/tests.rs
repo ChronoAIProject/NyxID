@@ -5,6 +5,7 @@ use mongodb::bson::doc;
 use serde_json::{Value, json};
 
 async fn exercise(keep: bool, mfa: bool, app: bool) {
+    crate::test_utils::init_test_audit_chain_hmac_key();
     let Some(db) = connect_test_database("request_only_identity").await else {
         return;
     };
@@ -211,6 +212,31 @@ async fn exercise(keep: bool, mfa: bool, app: bool) {
             .update_one(app_filter, doc! {"$unset": {"approved_session_id": ""}})
             .await
             .unwrap();
+        let another_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&another_id, UserType::Person))
+            .await
+            .unwrap();
+        let approvals = db.collection::<crate::models::login_approval::LoginApproval>(
+            crate::models::login_approval::COLLECTION_NAME,
+        );
+        approvals
+            .update_one(doc! {"_id": id}, doc! {"$set": {"user_id": &another_id}})
+            .await
+            .unwrap();
+        let cross_account = client
+            .post(&app_poll)
+            .header("Origin", &origin)
+            .header("Cookie", &cookie)
+            .json(&json!({"device_code": app_request["device_code"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(cross_account.status(), StatusCode::UNAUTHORIZED);
+        approvals
+            .update_one(doc! {"_id": id}, doc! {"$set": {"user_id": null}})
+            .await
+            .unwrap();
         assert_eq!(
             db.collection::<Session>("sessions")
                 .count_documents(doc! {"user_id": &actor_id})
@@ -299,6 +325,33 @@ async fn exercise(keep: bool, mfa: bool, app: bool) {
     assert_eq!(signed["verified"], true);
     assert_eq!(signed["mfa_required"], false);
     assert!(signed.get("access_token").is_none());
+    let expected_method = if app {
+        "app"
+    } else if mfa {
+        "password_mfa"
+    } else {
+        "password"
+    };
+    let mut audit = None;
+    for _ in 0..100 {
+        audit = db
+            .collection::<crate::models::audit_log::AuditLog>(
+                crate::models::audit_log::COLLECTION_NAME,
+            )
+            .find_one(doc! {"event_type": "login_request_identity_verified", "user_id": &actor_id})
+            .await
+            .unwrap();
+        if audit.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let metadata = audit
+        .expect("identity verification audit")
+        .event_data
+        .unwrap();
+    assert_eq!(metadata["method"], expected_method);
+    assert_eq!(metadata["mfa_verified"], app || mfa);
     assert_eq!(
         db.collection::<Session>("sessions")
             .count_documents(doc! {"user_id": &actor_id})
