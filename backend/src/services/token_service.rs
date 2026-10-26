@@ -1090,7 +1090,7 @@ async fn post_commit_consent_fence(
     client: &str,
     scope: &str,
     reference: Option<&crate::models::consent::ProtectedConsentRef>,
-    route: &str,
+    route: &'static str,
 ) -> AppResult<()> {
     #[cfg(test)]
     if let Ok(Some(error)) = POST_COMMIT_FAILURE.try_with(|fault| fault.borrow_mut().take()) {
