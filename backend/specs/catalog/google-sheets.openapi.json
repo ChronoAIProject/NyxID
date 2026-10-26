@@ -493,7 +493,6 @@
           },
           {
             "name": "insertDataOption",
-            "description": "For guest append-only use, explicitly choose INSERT_ROWS. OVERWRITE and an omitted value do not qualify as append-only.",
             "in": "query",
             "required": false,
             "schema": {

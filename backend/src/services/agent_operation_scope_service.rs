@@ -1784,7 +1784,16 @@ pub async fn filter_guest_catalog(
         services.clear();
         return Ok(());
     }
-    let agent = team::agent(db, &chat.user_id, &chat.agent_id).await?;
+    // Fail closed without failing discovery: a guest of a missing or destroyed
+    // agent sees no tools, while the rest of tools/list still answers.
+    let agent = match team::agent(db, &chat.user_id, &chat.agent_id).await {
+        Ok(agent) => agent,
+        Err(AppError::NotFound(_)) => {
+            services.clear();
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     filter_catalog(&agent.guest_operation_scopes, services);
     for service in services.iter_mut() {
         // A generic tool's advertised POST is the MCP envelope, not the
