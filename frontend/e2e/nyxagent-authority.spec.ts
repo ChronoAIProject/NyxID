@@ -40,6 +40,12 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/v1/public/config", (route) =>
     route.fulfill({ json: { mcp_url: "https://nyxid.test/mcp" } }),
   );
+  await page.route("**/api/v1/platform-personal-bindings", (route) =>
+    route.fulfill({ json: { bindings: [], next_before_id: null } }),
+  );
+  await page.route("**/api/v1/onboarding/bindings", (route) =>
+    route.fulfill({ json: { bindings: [] } }),
+  );
   await page.route("**/api/v1/sessions", (route) =>
     route.fulfill({ json: [] }),
   );
@@ -70,7 +76,7 @@ async function settled(page: import("@playwright/test").Page) {
 }
 
 const CONFIRMED =
-  /^Confirmed: Delete agent key 'ci-bot' \(nyxid_ag_12345678\) \(acknowledgement_id [0-9a-f-]{36}\)\. Retry it now\.$/;
+  /^Confirmed: Delete agent key 'ci-bot' \(nyxid_ag_12345678\) \(acknowledgement_id [0-9a-f-]{36}\)\. Retry it now\. Then tell the user in one or two plain sentences what you did and the result\.$/;
 
 test("every chat runs with Full access: services and account tools need no cards", async ({
   page,
@@ -105,10 +111,10 @@ test("a destructive action asks once, and Allow retries it with its acknowledgem
   // The single-use confirmation is retried with its acknowledgement ID.
   await expect(page.getByText(CONFIRMED)).toBeVisible();
   await expect(page.getByText("Deleted agent key ci-bot.")).toBeVisible();
-  await expect(page.getByRole("status").filter({ hasText: /Used · Confirm:/ })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: /Used · Delete agent key/ })).toBeVisible();
   await settled(page);
   await page.reload();
-  await expect(page.getByRole("status").filter({ hasText: /Used · Confirm:/ })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: /Used · Delete agent key/ })).toBeVisible();
   await expect(page.getByText("Deleted agent key ci-bot.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
 });
@@ -126,10 +132,10 @@ test("Allow clicked while the reply is still streaming resumes once the reply fi
   await expect(card).toHaveCount(0);
   await expect(page.getByText(CONFIRMED)).toHaveCount(0);
   // After the running reply settles, the confirmation is delivered as one continuation.
-  await expect(page.getByText(CONFIRMED)).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole("status").filter({ hasText: "Continuing after your decision" })).toBeVisible({ timeout: 10_000 });
   await expect(page.getByText("Deleted agent key ci-bot.")).toBeVisible({ timeout: 10_000 });
   await settled(page);
-  await expect(page.getByText(CONFIRMED)).toHaveCount(1);
+  await expect(page.getByText("Deleted agent key ci-bot.", { exact: true })).toHaveCount(1);
 });
 
 test("Deny produces a refusal on retry without opening another card", async ({ page }) => {
@@ -145,18 +151,19 @@ test("Deny produces a refusal on retry without opening another card", async ({ p
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
 });
 
-test("NyxBot settings confirm destructive actions by default; turning that off deletes without a card", async ({
+test("NyxBot settings ask before destructive actions in Auto; Full access deletes without a card", async ({
   page,
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   await page.getByRole("button", { name: "NyxBot settings" }).click();
   const settings = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
-  const toggle = settings.getByRole("switch", { name: "Confirm destructive actions" });
-  await expect(toggle).toBeChecked();
+  const mode = settings.getByRole("combobox", { name: "Access mode" });
+  await expect(mode).toHaveText("Auto");
   const save = settings.getByRole("button", { name: "Save settings" });
   await expect(save).toBeDisabled();
-  await toggle.click();
-  await expect(toggle).not.toBeChecked();
+  await mode.click();
+  await page.getByRole("option", { name: "Full access", exact: true }).click();
+  await expect(mode).toHaveText("Full access");
   await expect(settings.getByRole("alert")).toContainText("without asking you first");
   await save.click();
   await expect(save).toBeDisabled();
@@ -183,12 +190,12 @@ test("NyxBot settings confirm destructive actions by default; turning that off d
   await page.reload();
   await page.getByRole("button", { name: "NyxBot settings" }).click();
   await expect(
-    settings.getByRole("switch", { name: "Confirm destructive actions" }),
-  ).not.toBeChecked();
+    settings.getByRole("combobox", { name: "Access mode" }),
+  ).toHaveText("Full access");
 });
 
 function agentsNav(page: import("@playwright/test").Page) {
-  return page.getByRole("navigation");
+  return page.getByRole("navigation", { name: "Agents and conversations" });
 }
 
 function homeHeading(page: import("@playwright/test").Page) {
@@ -299,7 +306,7 @@ test("a specialist's permission request is routed to NyxBot and the user can sti
   await expect(
     page
       .getByRole("status")
-      .filter({ hasText: "Allowed by you · Allow this agent to use Slack?" }),
+      .filter({ hasText: "You allowed · Use Slack" }),
   ).toBeVisible();
   // NyxID resumes the specialist itself (shown as an activity card); no
   // continuation is typed for the user.
@@ -310,14 +317,15 @@ test("a specialist's permission request is routed to NyxBot and the user can sti
   await expect(page.getByText(/^Approved: /)).toHaveCount(0);
 });
 
-test("NyxBot delegates to a specialist, shows it working in the Team strip, and is woken by its reply", async ({
+test("NyxBot delegates to a sidebar specialist and is woken by its reply", async ({
   page,
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   await sendMessage(page, "Ask the researcher for urgent issues");
   await expect(page.getByText("I asked the researcher to find the urgent issues.")).toBeVisible();
-  const team = page.getByRole("region", { name: "Team" });
-  await expect(team).toContainText("researcher");
+  const researcher = agentsNav(page).getByRole("button", { name: /^researcher, specialist/ });
+  await expect(researcher).toBeVisible();
+  await expect(page.getByRole("region", { name: "Team" })).toHaveCount(0);
   // The specialist's report arrives as a compact activity card whose text expands.
   const card = page.getByRole("note", { name: "NyxID event: researcher replied" });
   await expect(card).toBeVisible({ timeout: 15_000 });
@@ -325,9 +333,9 @@ test("NyxBot delegates to a specialist, shows it working in the Team strip, and 
   await card.getByRole("button", { name: "researcher replied" }).click();
   await expect(card).toContainText("Found 3 urgent issues: #12, #15 and #18.");
   await expect(page.getByText("The researcher reported back: Found 3 urgent issues: #12, #15 and #18.")).toBeVisible();
-  await expect(team).toContainText("Idle", { timeout: 10_000 });
+  await expect(researcher).toHaveAccessibleName(/^researcher, specialist, Idle/, { timeout: 10_000 });
   // The specialist's own thread shows NyxBot's instruction as coming from NyxBot.
-  await agentsNav(page).getByRole("button", { name: /^researcher, specialist/ }).click();
+  await researcher.click();
   await expect(
     page.getByRole("article", { name: "Message from NyxBot" }).last(),
   ).toContainText("From NyxBot");
@@ -435,7 +443,7 @@ const DESTINATIONS = [
   { label: "Studio", pathname: "/dashboard" },
 ] as const;
 
-test.describe("sidebar navigation leaves an open thread and stays there", () => {
+test.describe("assistant navigation leaves an open thread and stays there", () => {
   for (const source of ["NyxBot thread", "specialist thread"] as const) {
     for (const destination of DESTINATIONS) {
       test(`${source}: ${destination.label} opens ${destination.pathname}`, async ({ page }) => {
@@ -450,7 +458,13 @@ test.describe("sidebar navigation leaves an open thread and stays there", () => 
         }
         await expect(page).toHaveURL(/\/assistant\?.*c=nyxa-[a-f0-9]{32}/);
 
-        await page.getByRole("link", { name: destination.label }).click();
+        if (destination.label === "Studio") {
+          await expect(page.getByRole("link", { name: "Studio", exact: true })).toHaveCount(0);
+          await page.getByRole("button", { name: "Account menu" }).click();
+          await page.getByRole("menuitem", { name: "Open Studio", exact: true }).click();
+        } else {
+          await page.getByRole("link", { name: destination.label }).click();
+        }
 
         const pathname = () => new URL(page.url()).pathname;
         await expect.poll(pathname).toBe(destination.pathname);
@@ -536,4 +550,341 @@ test("assistant chat keys are hidden until requested and detail links back to th
   );
   await expect(page.getByText("Daily Activity", { exact: true })).toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test("chat width resizes the transcript and composer together, persists, and fits smaller screens", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await sendMessage(page, "Use GitHub");
+  await expect(page.getByText("Repository lookup succeeded.")).toBeVisible();
+  await settled(page);
+  // The message row and input follow the same column, including at its limits.
+  const message = page.locator("[id^=message-]").last();
+  const composer = page.locator("[data-composer-input]");
+  const handle = page.getByRole("separator", { name: "Resize chat content from right" });
+  const original = await composer.boundingBox();
+  const grip = await handle.boundingBox();
+  expect(original).not.toBeNull();
+  expect(grip).not.toBeNull();
+  expect(grip!.y).toBeCloseTo((await page.locator("header").boundingBox())!.height, 0);
+  expect((await handle.locator("svg").boundingBox())!.y).toBeCloseTo(grip!.y, 0);
+  expect(grip!.x + grip!.width / 2).toBeCloseTo(original!.x + original!.width, 0);
+  const guide = handle.locator("..").locator("[data-chat-width-guide]");
+  await expect(guide).toHaveCSS("opacity", "0");
+  // Grab the triangular marker at the top of the column.
+  const gripY = grip!.y + 8;
+  await page.mouse.move(grip!.x + grip!.width / 2, gripY);
+  await expect(guide).toHaveCSS("opacity", "1");
+  await page.mouse.down();
+  await page.mouse.move(grip!.x + grip!.width / 2 + 100, gripY, { steps: 8 });
+  await expect(guide).toHaveCSS("opacity", "1");
+  await page.mouse.up();
+  await page.mouse.move(20, 20);
+  await expect(guide).toHaveCSS("opacity", "0");
+  const expanded = await composer.boundingBox();
+  expect(expanded!.width).toBeCloseTo(original!.width + 200, 0);
+  const row = await message.boundingBox();
+  expect(row!.width).toBeCloseTo(expanded!.width, 0);
+  expect(row!.x).toBeCloseTo(expanded!.x, 0);
+  await page.reload();
+  await expect(page.getByText("Repository lookup succeeded.")).toBeVisible();
+  expect((await composer.boundingBox())!.width).toBeCloseTo(expanded!.width, 0);
+  await handle.focus();
+  await expect(guide).toHaveCSS("opacity", "1");
+  await page.keyboard.press("ArrowLeft");
+  expect((await composer.boundingBox())!.width).toBeCloseTo(expanded!.width - 16, 0);
+  await page.getByRole("button", { name: "Chat layout", exact: true }).click();
+  await expect(page.getByRole("slider", { name: "Chat content width" })).toHaveValue(String(Math.round(expanded!.width - 16)));
+  await page.getByRole("button", { name: "Reset chat content width" }).click();
+  expect((await composer.boundingBox())!.width).toBeCloseTo(original!.width, 0);
+  await page.keyboard.press("Escape");
+  await handle.focus();
+  await page.keyboard.press("End");
+  for (const width of [1024, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    const rect = await composer.boundingBox();
+    expect(rect!.x).toBeGreaterThanOrEqual(0);
+    expect(rect!.x + rect!.width).toBeLessThanOrEqual(width);
+    const overflow = await page.getByRole("main").evaluate((element) => element.scrollWidth - element.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(1);
+    if (width < 768) {
+      await expect(handle).toBeHidden();
+    }
+  }
+});
+
+test("display settings share chat width and composer height across chats and reloads", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await sendMessage(page, "Use GitHub");
+  await expect(page.getByText("Repository lookup succeeded.")).toBeVisible();
+  await settled(page);
+
+  async function openDisplay() {
+    await page.getByRole("button", { name: "Account menu" }).click();
+    await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
+    await page.getByRole("tab", { name: "Display", exact: true }).click();
+  }
+  const settings = page.getByRole("dialog", { name: "Account Settings" });
+  await openDisplay();
+  await page.getByRole("slider", { name: "Chat content width" }).press("Home");
+  const heightSetting = page.getByRole("slider", { name: "Maximum composer height" });
+  await heightSetting.press("Home");
+  await heightSetting.press("PageUp");
+  const savedHeight = Number(await heightSetting.inputValue());
+  expect(savedHeight).toBeGreaterThan(64);
+  expect(savedHeight).toBeLessThan(400);
+  await settings.getByRole("button", { name: "Close", exact: true }).click();
+
+  const input = composerInput(page);
+  const composer = page.locator("[data-composer-input]");
+  const draft = Array.from({ length: 40 }, (_, i) => `Line ${i + 1}: review the next step.`).join("\n");
+  async function expectLayout(width: number, height: number) {
+    await input.fill(draft);
+    await expect.poll(async () => (await composer.boundingBox())!.width).toBeCloseTo(width, 0);
+    await expect.poll(async () => (await input.boundingBox())!.height).toBeCloseTo(height, 0);
+  }
+  await expectLayout(520, savedHeight);
+  await agentsNav(page).getByRole("button", { name: /^researcher, specialist/ }).click();
+  await expectLayout(520, savedHeight);
+  await page.getByRole("separator", { name: "Resize chat content from right" }).press("ArrowRight");
+  await page.getByRole("separator", { name: "Resize composer" }).press("ArrowDown");
+  await expectLayout(536, savedHeight - 24);
+
+  await agentsNav(page).getByRole("button", { name: "New chat with researcher" }).click();
+  await expectLayout(536, savedHeight - 24);
+  await agentsNav(page).getByRole("button", { name: "New group", exact: true }).click();
+  const group = page.getByRole("dialog", { name: "New group", exact: true });
+  await group.getByRole("textbox", { name: "Name", exact: true }).fill("Shared layout");
+  await group.getByRole("button", { name: "Create group", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Shared layout", exact: true })).toBeVisible();
+  await expectLayout(536, savedHeight - 24);
+  await page.reload();
+  await expectLayout(536, savedHeight - 24);
+
+  await page.setViewportSize({ width: 390, height: 300 });
+  await expect.poll(async () => (await input.boundingBox())!.height).toBeLessThan(savedHeight - 24);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expectLayout(536, savedHeight - 24);
+  await input.fill("Short draft");
+  await expect.poll(async () => (await input.boundingBox())!.height).toBeLessThan(60);
+  await openDisplay();
+  await expect(page.getByRole("slider", { name: "Chat content width" })).toHaveValue("536");
+  await expect(page.getByRole("slider", { name: "Maximum composer height" })).toHaveValue(String(savedHeight - 24));
+  await page.getByRole("button", { name: "Reset display settings" }).click();
+  await expect(page.getByRole("slider", { name: "Chat content width" })).toHaveValue("758");
+  await expect(page.getByRole("slider", { name: "Maximum composer height" })).toHaveValue("92");
+});
+
+test("chat scroll fades follow hidden content at both edges and inside code blocks", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 600 });
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  const sidebar = agentsNav(page);
+  await expect(sidebar).toHaveAttribute("data-scroll-edges", "bottom");
+  await sidebar.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(sidebar).toHaveAttribute("data-scroll-edges", "top");
+  await sidebar.getByRole("button", { name: /^researcher, specialist/ }).click();
+  const text = Array.from({ length: 20 }, (_, index) => `Section ${index + 1}: Check the current work and report the result.`).join("\n\n")
+    + "\n\n```text\n" + "wide-output ".repeat(60) + "\n```";
+  await sendMessage(page, text);
+  await expect(page.getByText(/^Working on it: Section 1/)).toBeVisible();
+  await settled(page);
+  const transcript = page.getByRole("main").locator("[data-scroll-fade]").filter({ has: page.locator("[id^=message-]") }).first();
+  await expect(transcript).toHaveAttribute("data-scroll-edges", "top");
+  const replyBounds = await page.locator("[id^=message-]").last().boundingBox();
+  await expect.poll(async () => (await page.locator("[data-composer-input]").boundingBox())!.x).toBeCloseTo(replyBounds!.x, 0);
+  await transcript.evaluate((element) => { element.scrollTop = element.scrollHeight / 2 - element.clientHeight / 2; });
+  await expect(transcript).toHaveAttribute("data-scroll-edges", "top bottom");
+  expect(await transcript.evaluate((element) => getComputedStyle(element).getPropertyValue("--scroll-fade-top").trim())).toBe("20px");
+  await transcript.evaluate((element) => { element.scrollTop = 0; });
+  await expect(transcript).toHaveAttribute("data-scroll-edges", "bottom");
+  const code = page.getByRole("main").locator("pre[data-scroll-fade]");
+  await expect(code).toHaveAttribute("data-scroll-edges", "right");
+  await code.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+  await expect(code).toHaveAttribute("data-scroll-edges", "left");
+  await page.setViewportSize({ width: 1280, height: 2000 });
+  await expect(sidebar).toHaveAttribute("data-scroll-edges", "");
+});
+
+test("conversation index previews and navigates messages outside the rendered window", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await sendMessage(page, "Use GitHub");
+  await settled(page);
+  const rail = page.getByRole("navigation", { name: "Conversation index" });
+  await expect(rail).toHaveAttribute("data-scroll-edges", "");
+  const regularPitch = (await rail.locator("[data-chat-index-target]").first().boundingBox())!.height;
+  await page.evaluate(() => {
+    const fixture = JSON.parse(sessionStorage.getItem("nyxagent-http-fixture-v4")!);
+    const id = new URLSearchParams(location.search).get("c");
+    const row = fixture.rows.find(([key]: [string]) => key === id)[1];
+    row.history.messages = Array.from({ length: 160 }, (_, index) => ({
+      id: `index-message-${index}`, seq: index + 1, turn_id: `index-turn-${Math.floor(index / 2)}`,
+      role: index % 2 ? "assistant" : "user", text: `Review item ${index + 1}: ${index % 2 ? "The findings are ready to check." : "Please check the next item."}`,
+      status: "completed", error_code: null, created_at: new Date(1_790_000_000_000 + index * 1000).toISOString(), activities: [], attachments: [],
+    }));
+    row.history.conversation.message_count = row.history.messages.length;
+    row.history.acknowledgements = [];
+    sessionStorage.setItem("nyxagent-http-fixture-v4", JSON.stringify(fixture));
+  });
+  await page.reload();
+  const transcript = page.locator("[data-chat-transcript]");
+  await expect(rail).toBeVisible();
+  await expect(rail.getByRole("button", { name: /Earlier messages|Later messages/ })).toHaveCount(0);
+  await expect(rail).toHaveAttribute("data-scroll-edges", "top");
+  expect((await rail.locator("[data-chat-index-target]").first().boundingBox())!.height).toBeLessThan(regularPitch);
+  expect(await rail.evaluate((element) => getComputedStyle(element).maskImage)).not.toBe("none");
+  await expect(rail.locator('[aria-current="location"]')).toHaveAttribute("data-message-id", "index-message-159");
+  expect(await page.locator("[data-chat-message-index]").count()).toBeLessThan(30);
+  async function expectRailFitsAboveComposer() {
+    const bounds = (await rail.boundingBox())!;
+    const composer = (await page.locator("[data-composer-surface]").boundingBox())!;
+    const transcriptBounds = (await transcript.boundingBox())!;
+    expect(bounds.y).toBeCloseTo(transcriptBounds.y, 0);
+    expect(bounds.y + bounds.height).toBeCloseTo(composer.y, 0);
+    const marks = rail.locator("[data-chat-index-target]");
+    const pitch = (await marks.first().boundingBox())!.height;
+    const occupied = await marks.count() * pitch;
+    expect(occupied).toBeLessThanOrEqual(bounds.height);
+    expect(bounds.height - occupied).toBeLessThan(pitch);
+    return bounds.height;
+  }
+  await expectRailFitsAboveComposer();
+  await rail.locator('[data-message-id="index-message-159"]').hover();
+  await expect(page.getByRole("tooltip")).toContainText("Review item 160");
+
+  const initialScroll = await transcript.evaluate((element) => element.scrollTop);
+  const firstIndex = Number(await rail.locator("[data-chat-index-target]").first().getAttribute("data-chat-index-target"));
+  await page.mouse.wheel(0, -160);
+  await expect(rail).toHaveAttribute("data-scroll-edges", "top bottom");
+  await expect.poll(async () => Number(await rail.locator("[data-chat-index-target]").first().getAttribute("data-chat-index-target"))).toBeLessThan(firstIndex);
+  expect(await transcript.evaluate((element) => element.scrollTop)).toBe(initialScroll);
+  await expect(rail.locator('[data-chat-index-target][tabindex="0"]')).toHaveCount(1);
+  const target = rail.locator("[data-chat-index-target]").first();
+  const id = await target.getAttribute("data-message-id");
+  await expect(page.locator(`#message-${id}`)).toHaveCount(0);
+  await target.click();
+  await expect(page.locator(`#message-${id}`)).toBeInViewport();
+  await expect(rail.locator('[aria-current="location"]')).toHaveAttribute("data-message-id", id!);
+
+  await rail.locator('[aria-current="location"]').focus();
+  await page.keyboard.press("Home");
+  await expect(rail).toHaveAttribute("data-scroll-edges", "bottom");
+  await expect(page.locator("#message-index-message-0")).toBeInViewport();
+  await expect(rail.locator('[data-message-id="index-message-0"]')).toBeFocused();
+  const userTick = await rail.locator('[data-message-id="index-message-0"] span').boundingBox();
+  const agentTick = await rail.locator('[data-message-id="index-message-1"] span').boundingBox();
+  // Keyboard focus magnifies the current tick, as hovering does in Heca.
+  expect(agentTick!.width).toBeGreaterThan(userTick!.width);
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator("#message-index-message-1")).toBeInViewport();
+  await expect(rail.locator('[data-message-id="index-message-1"]')).toBeFocused();
+
+  const dragFrom = (await rail.locator('[data-message-id="index-message-2"]').boundingBox())!;
+  const dragTo = (await rail.locator('[data-message-id="index-message-8"]').boundingBox())!;
+  await page.mouse.move(dragFrom.x + 12, dragFrom.y + dragFrom.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(dragTo.x + 12, dragTo.y + dragTo.height / 2, { steps: 6 });
+  await page.mouse.up();
+  await expect(page.locator("#message-index-message-8")).toBeInViewport();
+  await rail.locator('[aria-current="location"]').focus();
+  await page.keyboard.press("End");
+  await expect(rail).toHaveAttribute("data-scroll-edges", "top");
+  await expect(page.locator("#message-index-message-159")).toBeInViewport();
+  await expect.poll(() => transcript.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(1);
+  const initialRailHeight = await expectRailFitsAboveComposer();
+  await composerInput(page).fill("Review the next item.\n".repeat(40));
+  await page.getByRole("separator", { name: "Resize composer" }).press("End");
+  await expect.poll(async () => (await rail.boundingBox())!.height).toBeLessThan(initialRailHeight - 250);
+  await expect(async () => { await expectRailFitsAboveComposer(); }).toPass();
+  await composerInput(page).fill("");
+  await page.setViewportSize({ width: 1440, height: 1200 });
+  await expect(rail).toHaveAttribute("data-scroll-edges", "");
+  await expect(rail.locator("[data-chat-index-target]")).toHaveCount(160);
+  const fittedPitch = (await rail.locator("[data-chat-index-target]").first().boundingBox())!.height;
+  expect(fittedPitch).toBeGreaterThan(5);
+  expect(fittedPitch).toBeLessThan(regularPitch);
+  await expectRailFitsAboveComposer();
+  await page.setViewportSize({ width: 1440, height: 1600 });
+  await expect(rail).toHaveAttribute("data-scroll-edges", "");
+  await expect(rail.locator("[data-chat-index-target]")).toHaveCount(160);
+  await expect.poll(async () => (await rail.locator("[data-chat-index-target]").first().boundingBox())!.height).toBe(regularPitch);
+  await page.setViewportSize({ width: 390, height: 700 });
+  await expect(rail).toBeHidden();
+  expect(await page.getByRole("main").evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+});
+
+test("conversation controls float after scrolling without moving the reading position", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await agentsNav(page).getByRole("button", { name: /^researcher, specialist/ }).click();
+  const text = Array.from({ length: 20 }, (_, index) => `Section ${index + 1}: Check the current work and report the result.`).join("\n\n");
+  await sendMessage(page, text);
+  await expect(page.getByText(/^Working on it: Section 1/)).toBeVisible();
+  await settled(page);
+  const controls = page.getByRole("group", { name: "Conversation controls" });
+  const transcript = page.locator("[data-chat-transcript]");
+  await expect(controls).toHaveAttribute("data-compact", "true");
+  await expect.poll(() => transcript.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(1);
+
+  await transcript.evaluate((element) => { element.scrollTop = 0; });
+  await expect(controls).toHaveAttribute("data-compact", "false");
+  await expect.poll(() => transcript.evaluate((element) => element.scrollTop)).toBe(0);
+  const expandedHeight = await transcript.evaluate((element) => element.clientHeight);
+  await transcript.evaluate((element) => { element.scrollTop = 120; });
+  await expect(controls).toHaveAttribute("data-compact", "false");
+  const message = page.locator("[id^=message-]").first();
+  const before = (await message.boundingBox())!.y;
+  const viewport = (await transcript.boundingBox())!;
+  await page.mouse.move(viewport.x + viewport.width / 2, viewport.y + 200);
+  await page.mouse.wheel(0, 100);
+  await expect(controls).toHaveAttribute("data-compact", "true");
+  await expect.poll(async () => (await message.boundingBox())!.y).toBeCloseTo(before - 100, 0);
+  expect(await transcript.evaluate((element) => element.clientHeight)).toBeGreaterThan(expandedHeight);
+
+  // Small movements around the collapse point must not toggle the row again.
+  await page.mouse.wheel(0, -30);
+  await expect.poll(() => transcript.evaluate((element) => element.scrollTop)).toBeLessThan(160);
+  await expect(controls).toHaveAttribute("data-compact", "true");
+  for (const name of ["Working context", "Agent details"]) {
+    const trigger = controls.getByRole("button", { name });
+    await trigger.click();
+    await expect(page.getByRole("dialog", { name, exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(trigger).toBeFocused();
+    await expect(controls).toHaveAttribute("data-compact", "true");
+  }
+
+  // Returning near the start restores the row and keeps the text anchored.
+  const restoredY = await transcript.evaluate((element) => {
+    element.scrollTop = 20;
+    return element.querySelector("[id^=message-]")!.getBoundingClientRect().y;
+  });
+  await expect(controls).toHaveAttribute("data-compact", "false");
+  await expect.poll(async () => (await message.boundingBox())!.y).toBeCloseTo(restoredY, 0);
+
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 700 });
+    await transcript.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect(controls).toHaveAttribute("data-compact", "true");
+    const box = (await controls.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(width);
+    await controls.getByRole("button", { name: "Working context" }).click();
+    await expect(page.getByRole("dialog", { name: "Working context", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    expect(await page.getByRole("main").evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+    await transcript.evaluate((element) => { element.scrollTop = 0; });
+    await expect(controls).toHaveAttribute("data-compact", "false");
+    await expect.poll(() => transcript.evaluate((element) => element.scrollTop)).toBe(0);
+  }
+
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await sendMessage(page, "Continue checking");
+  await settled(page);
+  await expect.poll(() => transcript.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(1);
+  await expect(controls).toHaveAttribute("data-compact", "true");
+  await agentsNav(page).getByRole("button", { name: "New chat with researcher" }).click();
+  await expect(controls).toHaveAttribute("data-compact", "false");
+  await expect.poll(() => transcript.evaluate((element) => element.scrollTop)).toBe(0);
 });

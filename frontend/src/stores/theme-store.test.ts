@@ -57,6 +57,36 @@ describe("useThemeStore", () => {
     expect(useThemeStore.getState().sidebarWidths).toEqual({ dashboard: 360, assistant: 180 });
   });
 
+  it("persists and validates chat width and includes it in display reset", async () => {
+    useThemeStore.getState().setChatContentWidth(1050);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).state.chatContentWidth).toBe(1050);
+    await useThemeStore.persist.rehydrate();
+    expect(useThemeStore.getState().chatContentWidth).toBe(1050);
+    for (const [value, expected] of [[10, 520], [9999, 1600], ["wide", 758], [null, 758]] as const) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { chatContentWidth: value }, version: 1 }));
+      await useThemeStore.persist.rehydrate();
+      expect(useThemeStore.getState().chatContentWidth).toBe(expected);
+    }
+    useThemeStore.getState().setChatContentWidth(1200);
+    useThemeStore.getState().resetDisplay();
+    expect(useThemeStore.getState().chatContentWidth).toBe(758);
+  });
+
+  it("restores a shared composer maximum and bounds invalid saved heights", async () => {
+    useThemeStore.getState().setComposerMaxHeight(280);
+    const saved = localStorage.getItem(STORAGE_KEY)!;
+    useThemeStore.getState().resetDisplay();
+    expect(useThemeStore.getState().composerMaxHeight).toBe(92);
+    localStorage.setItem(STORAGE_KEY, saved);
+    await useThemeStore.persist.rehydrate();
+    expect(useThemeStore.getState().composerMaxHeight).toBe(280);
+    for (const [value, expected] of [[10, 64], [9999, 1600], ["tall", 92], [null, 92]] as const) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { composerMaxHeight: value }, version: 1 }));
+      await useThemeStore.persist.rehydrate();
+      expect(useThemeStore.getState().composerMaxHeight).toBe(expected);
+    }
+  });
+
   it("keeps a sidebar mode chosen before it moved into display settings", async () => {
     // A user from before this change: theme persisted, sidebar mode in its old key.
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { mode: "dark" }, version: 1 }));

@@ -13,6 +13,9 @@ import { AssistantDrawerDismissContext } from "@/components/assistant/assistant-
 import { useApplyTheme } from "@/hooks/use-theme";
 import { useThemeStore } from "@/stores/theme-store";
 import { SidebarResizeHandle } from "@/components/layout/sidebar-resize-handle";
+import { useScrollFades } from "@/hooks/use-scroll-fades";
+import { ChatContentLayout } from "./chat-content-layout";
+import { ChatLayoutMenu } from "./chat-width-control";
 
 export function AssistantShell({
   title,
@@ -20,6 +23,7 @@ export function AssistantShell({
   headerActions,
   onRenameTitle,
   titleKey,
+  resizableContent = false,
   children,
 }: {
   readonly title: string;
@@ -27,10 +31,12 @@ export function AssistantShell({
   readonly headerActions?: ReactNode;
   readonly onRenameTitle?: (title: string) => Promise<void>;
   readonly titleKey?: string;
+  readonly resizableContent?: boolean;
   readonly children: ReactNode;
 }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const viewportRef = useAssistantViewport();
+  useScrollFades(viewportRef);
   const savedSidebarWidth = useThemeStore((s) => s.sidebarWidths.assistant);
   const [previewWidth, setPreviewWidth] = useState<number | null>(null);
   const sidebarWidth = previewWidth ?? savedSidebarWidth;
@@ -118,6 +124,7 @@ export function AssistantShell({
                 )}
               </div>
               {headerActions}
+              {resizableContent ? <ChatLayoutMenu /> : null}
               <ThemeToggle className="shrink-0" />
               <AssistantAccountMenu>
                 <button
@@ -144,7 +151,9 @@ export function AssistantShell({
                 onPreview={setPreviewWidth}
               />
             </aside>
-            <main className="min-w-0 flex-1 overflow-hidden">{children}</main>
+            <main className="min-w-0 flex-1 overflow-hidden">
+              {resizableContent ? <ChatContentLayout>{children}</ChatContentLayout> : children}
+            </main>
           </div>
 
           {mobileSidebarOpen && (

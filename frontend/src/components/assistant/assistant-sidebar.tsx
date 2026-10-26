@@ -32,7 +32,6 @@ import {
   Monitor,
   CalendarClock,
   ShieldCheck,
-  SlidersHorizontal,
   Trash2,
   User,
   type LucideIcon,
@@ -812,7 +811,7 @@ export function AssistantSidebar({
           {notice}
         </p>
       ) : null}
-      <nav className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-3">
+      <nav aria-label="Agents and conversations" data-scroll-fade="" className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-3">
         {agents ? (
           <>
             <div className="-ml-2 flex items-center justify-between">
@@ -865,21 +864,13 @@ export function AssistantSidebar({
       </nav>
 
       <div className="shrink-0 border-t border-border/60 p-2">
-        <Link
-          to="/dashboard"
-          className="flex items-center gap-3 rounded-lg px-3 py-2 text-13 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground"
-        >
-          <SlidersHorizontal className="h-4 w-4 text-text-tertiary" />
-          <span className="flex-1">Studio</span>
-          <ChevronRight className="h-3.5 w-3.5" />
-        </Link>
         <AssistantAccountMenu align="start" side="top">
           <button
             type="button"
             aria-label="Account menu"
             data-keep-drawer-open=""
             className={cn(
-              "mt-1 flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-overlay",
+              "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-overlay",
               Boolean(accountPanel.panel) && "bg-overlay-strong font-medium text-foreground",
             )}
           >

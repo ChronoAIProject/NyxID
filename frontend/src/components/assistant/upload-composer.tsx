@@ -404,6 +404,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
                 ref={attachmentStrip}
                 aria-label="Attachments"
                 tabIndex={0}
+                data-scroll-fade=""
                 className="assistant-scrollbar flex gap-2 overflow-x-auto overscroll-x-contain py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-xl"
               >
                 {files.map((file) => (

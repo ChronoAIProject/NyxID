@@ -69,6 +69,11 @@ test.beforeEach(async ({ page, context }) => {
     "/billing/allowances": { allowances: [billingAllowance()] },
     "/billing/topups": { owner_id: "test-user", topups: [{ id: "topup-1", created_at: "2026-10-01T00:00:00Z", amount_credits: 100, status: "paid", receipt_available: true, invoice_number: "INV-1", credits_expire_at: "2027-10-01T00:00:00Z" }], page: 1, per_page: 10, total: 1 },
     "/catalog": { entries: billingCatalog },
+    "/onboarding/bindings": { bindings: [] },
+    "/platform-personal-bindings": { bindings: [], next_before_id: null },
+    "/keys": { keys: [] },
+    "/billing/bill": { owner_id: "test-user", currency: "USD", from: "2026-10-01", to: "2026-11-01", charges: [], subtotal: "0", taxes: [], tax_total: "0", rounding: "0", total: "0" },
+    "/billing/invoices": { owner_id: "test-user", page: 1, per_page: 10, total: 0, invoices: [] },
   };
   for (const [path, json] of Object.entries(fixtures)) {
     await context.route(`**/api/v1${path}*`, (route) => route.fulfill({ json }));
@@ -300,8 +305,8 @@ for (const width of [320, 390, 768, 1024, 1280]) {
       await expect(page.getByRole("dialog", { name: "NyxBot settings" })).toBeVisible();
 
       await expectUsable(
-        page.getByRole("switch", {
-          name: "Confirm destructive actions",
+        page.getByRole("combobox", {
+          name: "Access mode",
           exact: true,
         }),
       );
@@ -601,7 +606,7 @@ test("the group chat header gear opens NyxBot settings", async ({ page }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
       await expect(page.getByRole("button", { name: "Account menu", includeHidden: true })).toBeAttached();
   await page
-    .getByRole("navigation")
+    .getByRole("navigation", { name: "Agents and conversations" })
     .getByRole("button", { name: "New group", exact: true })
     .click();
   const dialog = page.getByRole("dialog", { name: "New group", exact: true });

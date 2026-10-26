@@ -77,8 +77,9 @@ vi.mock("@/lib/assistant/nyxagent-transport", () => ({ nyxAgentTransport: {
 vi.mock("./assistant-shell", () => ({ AssistantShell: ({ children }: { children: ReactNode }) => <main>{children}</main> }));
 vi.mock("./assistant-engine-sidebar", () => ({ AssistantEngineSidebar: () => null }));
 vi.mock("./nyxbot-agent-panels", () => ({
+  ThreadPanels: ({ children }: { children: ReactNode }) => <>{children}</>,
   ThreadHeader: ({ controls }: { controls?: ReactNode }) => <header data-testid="thread-header">{controls}</header>,
-  TeamStrip: () => null, PendingEventsNote: () => null, WaitingNote: () => null, ChannelBadge: () => null,
+  PendingEventsNote: () => null, WaitingNote: () => null, ChannelBadge: () => null,
 }));
 vi.mock("./nyxbot-agent-details", () => ({ AgentDetailsSheet: () => null }));
 vi.mock("./nyxbot-home", () => ({ NyxBotHome: () => <div>Home</div> }));

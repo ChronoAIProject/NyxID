@@ -5,7 +5,7 @@ import { MachineCapabilities } from "./machine-capabilities";
 import { AgentOperationScopes } from "./agent-operation-scopes";
 import { MachineGrantPicker } from "./machine-grant-picker";
 import { AgentAutomations } from "./automation-preferences";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQueryClient } from "@tanstack/react-query";
 import { Trash2 } from "lucide-react";
@@ -220,6 +220,7 @@ export function AgentDetailsSheet({
   readonly onDeleted: () => void;
 }) {
   const detail = useNyxBotAgent(agentId, open);
+  const returnFocus = useRef<HTMLElement | null>(null);
   const agent = detail.data?.agent;
   const loadedAgentId = agent?.id;
   const requestMode = useNyxBotSettings(open).data?.specialist_access_requests;
@@ -234,7 +235,20 @@ export function AgentDetailsSheet({
   }, [open, tab, loadedAgentId]);
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
+      <SheetContent
+        className="w-full overflow-y-auto sm:max-w-lg"
+        onOpenAutoFocus={() => {
+          returnFocus.current = document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null;
+        }}
+        onCloseAutoFocus={(event) => {
+          if (returnFocus.current?.isConnected) {
+            event.preventDefault();
+            returnFocus.current.focus({ preventScroll: true });
+          }
+        }}
+      >
         <SheetHeader className="space-y-1.5 pr-6">
           <SheetTitle>Agent details</SheetTitle>
           <SheetDescription>

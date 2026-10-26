@@ -22,7 +22,6 @@ import {
   Copy,
   MessageSquare,
   RotateCcw,
-  Sparkles,
   X,
   ThumbsDown,
   ThumbsUp,
@@ -44,6 +43,7 @@ import { CmaOperationCard } from "./cma-operation-card";
 import { MessageTime } from "./message-time";
 import { useAssistantFeedback } from "@/hooks/use-assistant-feedback";
 import { capture } from "@/lib/telemetry";
+import { ChatIndexRail } from "./chat-index-rail";
 
 const EMPTY_MESSAGES: readonly ChatMessage[] = [];
 
@@ -99,7 +99,7 @@ function ThinkingBlock({
         {streaming ? <PulseDot /> : null}
       </button>
       {open ? (
-        <div className="ml-3.5 max-h-56 overflow-auto border-l border-hairline pl-3 text-11 leading-relaxed text-text-tertiary whitespace-pre-wrap">
+        <div data-scroll-fade="" className="ml-3.5 max-h-56 overflow-auto border-l border-hairline pl-3 text-11 leading-relaxed text-text-tertiary whitespace-pre-wrap">
           {text}
         </div>
       ) : null}
@@ -303,7 +303,7 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
                 ) : null}
               </summary>
               {tool.result ? (
-                <pre className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-10 text-text-tertiary">
+                <pre data-scroll-fade="" className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-10 text-text-tertiary">
                   {tool.result.slice(0, 500)}
                 </pre>
               ) : null}
@@ -588,14 +588,7 @@ export function ChatMessageBubble({
       data-system-note={capacityNote ? "capacity_wait" : undefined}
       className="group/message flex items-start gap-2.5"
     >
-      <span
-        {...(thinking ? { "data-assistant-halo": "" } : {})}
-        aria-hidden="true"
-        className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-nyx-secondary-400/25 bg-nyx-secondary-400/10 text-nyx-secondary-400"
-      >
-        <Sparkles className="h-3 w-3" />
-      </span>
-      <div className="min-w-0 max-w-[min(84%,758px)] flex-1 pt-0.5">
+      <div className="min-w-0 w-full pt-0.5">
         <ThinkingBlock text={message.thinking ?? ""} streaming={streaming} />
         <ActivityBlock message={message} />
         {message.toolCalls
@@ -671,7 +664,7 @@ export function ChatMessageBubble({
                   Review request
                 </button>
                 {reviewOpen ? (
-                  <div className="max-h-56 overflow-auto rounded-md border border-border p-2">
+                  <div data-scroll-fade="" className="max-h-56 overflow-auto rounded-md border border-border p-2">
                     <p className="whitespace-pre-wrap break-words text-foreground">{message.recovery.text}</p>
                     {message.recovery.attachments.length ? (
                       <p className="mt-2 break-all">Attachments: {message.recovery.attachments.join(", ")}</p>
@@ -735,7 +728,7 @@ export function ChatMessageBubble({
             data-turn-status
             className="flex min-h-5 items-center gap-1 text-11 text-muted-foreground"
           >
-            {!content ? <span data-streaming-dots><PulseDot /></span> : null}
+            {!content ? <span data-streaming-dots {...(thinking ? { "data-assistant-halo": "" } : {})}><PulseDot /></span> : null}
             <span
               {...(!content && runningTool ? { "data-running-tool": runningTool.name } : {})}
               {...(!runningTool && lastTool ? { "data-last-tool": true } : {})}
@@ -906,7 +899,7 @@ export function ChatMessageEntry({
           <div
             className={cn(
               "text-10 text-text-tertiary",
-              message.role === "user" ? "self-end" : "ml-8",
+              message.role === "user" ? "self-end" : undefined,
             )}
           >
             {authorName}
@@ -986,7 +979,7 @@ const MessageRow = memo(
     measure,
   }: MessageRowProps) {
     return (
-      <div id={`message-${message.id}`} data-index={index} ref={measure}>
+      <div id={`message-${message.id}`} data-index={index} data-chat-message-index={index} ref={measure}>
         {renderMessage?.(message) ?? (
           <ChatMessageEntry
             message={message}
@@ -1245,63 +1238,81 @@ export function ChatMessageList({
     : messages.map((_, index) => ({ index, start: 0 }));
   const firstStart = rows[0]?.start ?? scrollMargin;
 
+  function navigateToMessage(index: number) {
+    const element = scrollRef.current;
+    if (!element) return;
+    followingRef.current = index === messages.length - 1;
+    if (followingRef.current) pinRef.current(true);
+    else if (windowed) virtualizer.scrollToIndex(index, { align: "start" });
+    else {
+      const row = element.querySelector<HTMLElement>(`[data-chat-message-index="${index}"]`);
+      if (row) element.scrollTop += row.getBoundingClientRect().top - element.getBoundingClientRect().top - 24;
+    }
+    lastScrollTopRef.current = element.scrollTop;
+  }
+
   return (
-    <div
-      ref={scrollRef}
-      onScroll={handleScroll}
-      className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6"
-      // The windowed list anchors rows itself; the browser's anchoring would double it.
-      style={windowed ? { overflowAnchor: "none" } : undefined}
-    >
+    <div className="relative flex min-h-0 flex-1">
       <div
-        ref={contentRef}
-        className="mx-auto flex min-h-full w-full max-w-[758px] flex-col gap-4 pt-6"
-        style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
+        ref={scrollRef}
+        onScroll={handleScroll}
+        data-chat-transcript=""
+        data-scroll-fade=""
+        className="relative min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:pl-6 sm:pr-[calc(var(--spacing)*6+var(--chat-index-width,0px))]"
+        // The windowed list anchors rows itself; the browser's anchoring would double it.
+        style={windowed ? { overflowAnchor: "none" } : undefined}
       >
-        {notice ? (
-          <div
-            role="status"
-            className="rounded-lg border border-border bg-overlay px-3 py-2 text-11 text-muted-foreground"
-          >
-            {notice}
-          </div>
-        ) : null}
-        {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
-        {/* One element tree in both modes, so crossing the threshold never
-            remounts a row (or restarts a streaming reply's reveal). */}
         <div
-          ref={listRef}
-          className={windowed ? "relative w-full" : "contents"}
-          style={windowed ? { height: virtualizer.getTotalSize() } : undefined}
+          ref={contentRef}
+          className="mx-auto flex min-h-full w-full max-w-[var(--chat-content-width,758px)] flex-col gap-4 pt-6"
+          style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
         >
+          {notice ? (
+            <div
+              role="status"
+              className="rounded-lg border border-border bg-overlay px-3 py-2 text-11 text-muted-foreground"
+            >
+              {notice}
+            </div>
+          ) : null}
+          {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
+          {/* One element tree in both modes, so crossing the threshold never
+              remounts a row (or restarts a streaming reply's reveal). */}
           <div
-            className={windowed ? "absolute inset-x-0 top-0 flex flex-col gap-4" : "contents"}
-            style={
-              windowed ? { transform: `translateY(${String(firstStart - scrollMargin)}px)` } : undefined
-            }
+            ref={listRef}
+            className={windowed ? "relative w-full" : "contents"}
+            style={windowed ? { height: virtualizer.getTotalSize() } : undefined}
           >
-            {rows.map(({ index }) => {
-              const message = messages[index]!;
-              return (
-                <MessageRow
-                  key={message.id}
-                  message={message}
-                  conversationId={session?.conversationId}
-                  feedbackEnabled={feedbackEnabled}
-                  renderMessage={renderMessage}
-                  projectionVersion={projectionVersion}
-                  index={windowed ? index : undefined}
-                  measure={windowed ? virtualizer.measureElement : undefined}
-                />
-              );
-            })}
+            <div
+              className={windowed ? "absolute inset-x-0 top-0 flex flex-col gap-4" : "contents"}
+              style={
+                windowed ? { transform: `translateY(${String(firstStart - scrollMargin)}px)` } : undefined
+              }
+            >
+              {rows.map(({ index }) => {
+                const message = messages[index]!;
+                return (
+                  <MessageRow
+                    key={message.id}
+                    message={message}
+                    conversationId={session?.conversationId}
+                    feedbackEnabled={feedbackEnabled}
+                    renderMessage={renderMessage}
+                    projectionVersion={projectionVersion}
+                    index={index}
+                    measure={windowed ? virtualizer.measureElement : undefined}
+                  />
+                );
+              })}
+            </div>
           </div>
+          {footer}
+          {emptyTurnDetected ? (
+            <span data-empty-turn-error className="sr-only" aria-hidden="true" />
+          ) : null}
         </div>
-        {footer}
-        {emptyTurnDetected ? (
-          <span data-empty-turn-error className="sr-only" aria-hidden="true" />
-        ) : null}
       </div>
+      <ChatIndexRail key={conversationKey} messages={messages} scrollRef={scrollRef} bottomInset={bottomInset} onNavigate={navigateToMessage} />
     </div>
   );
 }

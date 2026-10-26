@@ -528,8 +528,10 @@ describe("canonical chat presentation", () => {
     const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
       x: 0, y: 0, top: 0, left: 0, right: 600, bottom: 600, width: 600, height: 600, toJSON: () => ({}),
     } as DOMRect);
-    const width = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(600);
-    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
+    const width = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(600);
+    const height = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
+    const offsetWidth = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(600);
+    const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
     try {
       const messages = Array.from({ length: 200 }, (_, index): ChatMessage => ({
         ...BASE, id: `m-${String(index)}`, content: `Message ${String(index)}`,
@@ -550,12 +552,14 @@ describe("canonical chat presentation", () => {
       rect.mockRestore();
       width.mockRestore();
       height.mockRestore();
+      offsetWidth.mockRestore();
+      offsetHeight.mockRestore();
     }
   });
 
   it("starts windowing only while the reader follows the newest message", () => {
-    const width = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(600);
-    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
+    const width = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(600);
+    const height = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
     try {
       const session = (count: number): ChatSessionState => ({
         clientId: "c", conversationId: "nyxagent-growing", status: "completed_text", title: "T",
@@ -763,7 +767,7 @@ describe("canonical chat presentation", () => {
     const { container, rerender } = render(
       <ChatMessageList session={first} bottomInset={0} />,
     );
-    const scroller = container.firstElementChild as HTMLDivElement;
+    const scroller = container.querySelector<HTMLDivElement>("[data-chat-transcript]")!;
     let scrollHeight = 1_000;
     Object.defineProperty(scroller, "scrollHeight", {
       configurable: true,

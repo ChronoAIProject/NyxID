@@ -176,7 +176,7 @@ function CommandExcerpt({ endpoint }: { readonly endpoint: string }) {
   if (failed) return <p role="status">Excerpt unavailable.</p>;
   if (text === undefined) return <p role="status">Loading excerpt…</p>;
   return (
-    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-overlay p-2 font-mono text-11">
+    <pre data-scroll-fade="" className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-overlay p-2 font-mono text-11">
       {text}
     </pre>
   );

@@ -18,7 +18,7 @@ function homeHeading(page: Page) {
 }
 
 function nav(page: Page) {
-  return page.getByRole("navigation");
+  return page.getByRole("navigation", { name: "Agents and conversations" });
 }
 
 test("the home composer starts a NyxBot thread: durable reload, connect link, rename and delete", async ({
@@ -339,7 +339,7 @@ test("a thread that came from a chat app sits in its bot's section and shows its
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   // Chat-app threads are grouped per bot, collapsed until opened.
   const section = page
-    .getByRole("navigation")
+    .getByRole("navigation", { name: "Agents and conversations" })
     .getByRole("button", { name: "Telegram bot on Telegram, 1 chat" });
   await expect(section).toHaveAttribute("aria-expanded", "false");
   await expect(conversationRow(page, "Morning briefing")).toHaveCount(0);

@@ -24,7 +24,7 @@ test("a first send stays continuous through the canonical id transition", async 
   const message = "Plan my week with my connected calendar.";
   await openAssistant(page, { faults: { aliasOnFirstSend: true } });
   const sidebarRows = page
-    .getByRole("navigation")
+    .getByRole("navigation", { name: "Agents and conversations" })
     .getByRole("button", { name: "Options for" });
 
   await expect(

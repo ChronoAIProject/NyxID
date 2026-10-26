@@ -13,8 +13,8 @@ import { NyxBotSettingsButton } from "./nyxbot-settings-button";
 import {
   ChannelBadge,
   PendingEventsNote,
-  TeamStrip,
   ThreadHeader,
+  ThreadPanels,
   WaitingNote,
 } from "./nyxbot-agent-panels";
 import { AgentDetailsSheet } from "./nyxbot-agent-details";
@@ -324,6 +324,7 @@ export function AssistantChatPage() {
 
   return (
     <AssistantShell
+      resizableContent
       title={title}
       sidebar={sidebar}
       headerActions={
@@ -491,6 +492,7 @@ export function DirectAssistantChatPage() {
 
   return (
     <AssistantShell
+      resizableContent
       title={chat.session.title}
       sidebar={sidebar}
       headerActions={
@@ -875,47 +877,32 @@ function NyxAgentThreadPage() {
           lastReply.turnId ?? null,
         )
       : undefined;
-  const threadPanels =
-    headerAgent && !showHome ? (
-      <div className="shrink-0 px-4 pt-3 sm:px-6">
-        <div className="mx-auto w-full max-w-[758px] space-y-2">
-          <ThreadHeader
-            name={agentName}
-            handle={headerNamed ? agentHandle(headerNamed) : undefined}
-            kind={headerAgent.kind}
-            agentId={headerAgent.id}
-            destroyed={destroyed}
-            channelPlatform={conversation?.platform_thread?.platform ?? channelPlatform}
-            onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
-          />
-          {headerAgent.kind === "nyxbot" ? (
-            <TeamStrip
-              agents={agents.data?.agents ?? []}
-              onOpenConversation={go}
-            />
-          ) : null}
-          {conversation && !chat.isStreaming ? (
-            <PendingEventsNote
-              count={conversation.pending_events}
-              agentName={agentName}
-            />
-          ) : null}
-          {selectedId && !chat.isStreaming ? (
-            <WaitingNote items={chat.waiting} agentName={agentName} />
-          ) : null}
-          {selectedId ? (
-            <WorkingContextPanel
-              conversationId={selectedId}
-              onManageMemory={setDetailsAgentId}
-              onReset={() => void chat.refreshHistory()}
-            />
-          ) : null}
-        </div>
-      </div>
-    ) : null;
+  const threadPanels = headerAgent && !showHome ? (
+    <ThreadPanels>
+      <ThreadHeader
+        name={agentName}
+        handle={headerNamed ? agentHandle(headerNamed) : undefined}
+        kind={headerAgent.kind}
+        agentId={headerAgent.id}
+        destroyed={destroyed}
+        channelPlatform={conversation?.platform_thread?.platform ?? channelPlatform}
+        onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
+        controls={selectedId ? (
+          <WorkingContextPanel conversationId={selectedId} onManageMemory={setDetailsAgentId} onReset={() => void chat.refreshHistory()} />
+        ) : undefined}
+      />
+      {conversation && !chat.isStreaming ? (
+        <PendingEventsNote count={conversation.pending_events} agentName={agentName} />
+      ) : null}
+      {selectedId && !chat.isStreaming ? (
+        <WaitingNote items={chat.waiting} agentName={agentName} />
+      ) : null}
+    </ThreadPanels>
+  ) : null;
 
   return (
     <AssistantShell
+      resizableContent
       title={showHome ? "Home" : chat.session.title}
       titleKey={selectedId}
       onRenameTitle={

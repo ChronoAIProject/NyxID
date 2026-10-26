@@ -105,7 +105,7 @@ function EventCard({ notice }: { readonly notice: EventNotice }) {
 export function NyxBotEventNotice({ message }: { readonly message: ChatMessage }) {
   const notices = eventNotices(message.content).map(describeEventNotice);
   return (
-    <div role="group" aria-label="NyxID updates" className="ml-[30px] space-y-1.5">
+    <div role="group" aria-label="NyxID updates" className="space-y-1.5">
       {notices.map((notice, index) => (
         <EventCard key={index} notice={notice} />
       ))}
