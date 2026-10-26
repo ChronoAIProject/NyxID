@@ -1,9 +1,10 @@
 # Configurable MFA for QR sign-ins
 
-Status: revised to default-on after the user's clarification on 2026-10-26.
-The earlier default-off implementation passed all nine policy tests at
-`724bff133`; the default-on revision is undergoing runtime validation and renewed
-Opus review in [PR #2047](https://github.com/ChronoAIProject/NyxID/pull/2047).
+Status: implemented and validated in
+[PR #2047](https://github.com/ChronoAIProject/NyxID/pull/2047). On 2026-10-27,
+Opus gave final approval at `db13dbdc35148ae2be3fcb1d2ef72376c2b74916`:
+**"FINAL APPROVED: no open findings."** The saved setting defaults to on, as
+required by the user's clarification on 2026-10-26.
 
 ## Investigation evidence
 
@@ -84,6 +85,53 @@ their existing checks.
 - Retain the real `/login` MFA-to-QR tests from the current worktree. Compile and
   run backend tests against an isolated MongoDB replica set; run frontend tests,
   TypeScript, lint and the production build. Record actual limits and results.
+
+## Validation results
+
+All runtime results below are from the approved source commit
+`db13dbdc35148ae2be3fcb1d2ef72376c2b74916`. No source changed after these runs.
+
+| Backend suite | Passed |
+| --- | ---: |
+| `handlers::mfa::enforcement_tests::approved_sign_in_policy` | 14 |
+| Remaining `handlers::mfa::enforcement_tests` | 14 |
+| `handlers::login_approval::tests` | 13 |
+| `services::auth_device_service` | 47 |
+| `services::auth_agent_key_login_service` | 28 |
+| `services::login_code_service` | 10 |
+| `handlers::users::tests` | 24 |
+| `models::session` | 4 |
+| `services::token_service::tests` | 15 |
+| `mw::auth::tests` | 121 |
+| **Total** | **290** |
+
+All passed with zero failures or ignored tests against an isolated MongoDB 8
+replica set. The 276 surrounding tests exclude the policy module to avoid double
+counting. The final Rust build emitted no warnings. Local libtest runs used two
+threads: the initial four-thread surrounding MFA run exceeded the existing
+two-slot recovery-code hashing admission limit in two enrollment fixtures. The
+two-thread rerun passed without a source change. CI runs tests in separate
+nextest processes and passed too.
+
+Frontend validation passed all 125 tests in seven files: Settings, LoginPage,
+QR session integration, auth hooks, auth-device hooks, MFA step-up, and MFA verify
+form. TypeScript, focused ESLint, the production frontend build and footprint
+checks, `cargo fmt --all --check`, the backend boundary script, and
+`git diff --check` passed.
+
+[CI for the approved source](https://github.com/ChronoAIProject/NyxID/actions/runs/40353270240)
+completed with 35 successful checks, 14 skipped, one neutral, and none failed or
+pending. This includes the complete backend suite, all ordinary and coverage
+shards, backend coverage verification, Clippy, Rust feature combinations,
+billing smoke, frontend validation, and CodeQL. Opus checked the commit, policy
+log, all nine surrounding-suite records, and CI results before final acceptance.
+
+Installed-phone acceptance remains pending after deployment. Browser visual
+inspection was unavailable because the browser runtime rejected its
+`node:process` import; no screenshot or physical-device result is claimed.
+Replacement-code behavior is covered by execution, while replacement precisely
+between handoff lookup and claim was approved through source review without a
+test forcing that interleaving.
 
 ## Deployment acceptance
 
