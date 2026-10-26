@@ -1925,6 +1925,14 @@ async fn dispatch_agent_settings(
                     true,
                 ));
             }
+            if none {
+                // `none` withholds through an empty guest selection only. Keep
+                // the stored level, so clearing that selection later restores
+                // exactly the owner's earlier level, never the wider default.
+                for (id, level) in levels.iter_mut() {
+                    *level = agent.guest_access.get(id).copied().unwrap_or_default();
+                }
+            }
             let mut selections = BTreeMap::new();
             if none || args.get("selection").is_some() {
                 if levels.len() != 1 || requested.len() != 1 {

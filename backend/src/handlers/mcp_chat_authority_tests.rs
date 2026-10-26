@@ -5205,6 +5205,104 @@ async fn configure_guest_with_owner_card(
 }
 
 #[tokio::test]
+async fn guest_access_none_then_clear_selection_preserves_read_level() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::services::{
+        agent_operation_scope_service as scopes, assistant_team_service as team,
+        feature_flag_service as flags,
+    };
+    let f = boxed_chat_fixture("guest_none_preserves_read").await;
+    let id = connected(&f.state.db, &f.owner, "read-only", "http://127.0.0.1:9").await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    flags::set_platform_override(
+        &f.state.db,
+        flags::GUEST_OPERATION_SCOPES_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let nyxbot = authenticate_id(&f, &f.nyxbot_thread).await;
+    configure_guest_with_owner_card(
+        &f,
+        &nyxbot,
+        json!({"subagent":"worker", "services":[id], "access":"read"}),
+    )
+    .await;
+    let mut guest = f.auth.clone();
+    let mut chat = f.chat.clone();
+    chat.guest = true;
+    guest.assistant_chat = Some(Arc::new(chat));
+    let path =
+        crate::services::proxy_authorization::CanonicalPath::from_mcp_literal("/items").unwrap();
+    let allowed = |method: &'static str| {
+        scopes::check_non_mcp_context(
+            &f.state.db,
+            &guest,
+            false,
+            &id,
+            None,
+            method,
+            Some(&path),
+            Default::default(),
+        )
+    };
+    assert!(allowed("GET").await.is_ok());
+    assert!(allowed("POST").await.is_err());
+
+    configure_guest_with_owner_card(
+        &f,
+        &nyxbot,
+        json!({"subagent":"worker", "services":[id], "access":"none",
+            "selection":{"expected_revision":0}}),
+    )
+    .await;
+    let withheld = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(withheld.guest_access[&id], GuestAccess::Read);
+    assert!(withheld.guest_operation_scopes[&id].operations.is_empty());
+    assert!(allowed("GET").await.is_err());
+
+    // Clear only the selection through the human route. Supplying `read` again
+    // would hide a regression where `none` had silently widened the stored level.
+    let Json(cleared) = crate::handlers::assistant_team::set_guest_operations(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.owner),
+        axum::extract::Path((f.chat.agent_id.clone(), id.clone())),
+        Json(
+            serde_json::from_value(json!({
+                "expected_revision":1, "all_operations":true
+            }))
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cleared["revision"], 2);
+    let restored = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(restored.guest_access[&id], GuestAccess::Read);
+    assert!(!restored.guest_operation_scopes.contains_key(&id));
+    assert_eq!(restored.guest_operation_scope_revisions[&id], 2);
+    assert!(allowed("GET").await.is_ok());
+    assert!(allowed("POST").await.is_err());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn guest_operation_selection_filters_discovery_and_refuses_direct_and_universal_calls() {
     use crate::models::assistant_agent::AgentGrants;
     use crate::services::{assistant_team_service as team, feature_flag_service as flags};
