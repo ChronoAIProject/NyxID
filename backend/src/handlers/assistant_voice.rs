@@ -68,7 +68,7 @@ pub fn preference_patch<'de, D: serde::Deserializer<'de>>(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OptionsQuery {
-    conversation_id: String,
+    conversation_id: Option<String>,
 }
 
 pub async fn options(
@@ -79,8 +79,12 @@ pub async fn options(
     super::login_client_context::require_first_party_human(&auth)?;
     let user = auth.user_id.to_string();
     voice::require_enabled(&state.db, &user).await?;
-    let thread = voice::thread(&state.db, &user, &q.conversation_id).await?;
-    let options = voice::options(&state.db, &state.encryption_keys, &thread).await?;
+    let options = if let Some(id) = q.conversation_id {
+        let thread = voice::thread(&state.db, &user, &id).await?;
+        voice::options(&state.db, &state.encryption_keys, &thread).await?
+    } else {
+        voice::settings_options(&state.db, &state.encryption_keys, &user).await?
+    };
     Ok(Json(serde_json::json!({"options":options,"limits": {
         "call_seconds":crate::models::assistant_voice::MAX_CALL_SECONDS,"idle_seconds":crate::models::assistant_voice::IDLE_SECONDS,"idle_warning_seconds":crate::models::assistant_voice::IDLE_WARNING_SECONDS,
         "transmitting_calls":1,"queued_requests":crate::models::assistant_voice::MAX_QUEUED},"recording":false})))

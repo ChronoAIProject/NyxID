@@ -21,11 +21,12 @@ type Props = Omit<UploadProps, "onSend"> & {
   readonly conversation?: NyxAgentConversation;
   readonly agentModel?: string;
   readonly agentOverride?: NyxAgentAccessMode | null;
+  readonly onVoiceSettings?: () => void;
   readonly onSend: (...args: [...Parameters<UploadProps["onSend"]>, model?: string]) => Promise<void>;
 };
 
 /** Key by person + thread: pending guidance must never move with navigation. */
-export function NyxAgentComposer({ conversation, agentModel, agentOverride, ...props }: Props) {
+export function NyxAgentComposer({ conversation, agentModel, agentOverride, onVoiceSettings, ...props }: Props) {
   const [draftModel, setDraftModel] = useState<string>();
   const [connection, setConnection] = useState<KeyInfo>();
   const [connectionPickerOpen, setConnectionPickerOpen] = useState(false);
@@ -50,6 +51,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentOverride, ...p
   const connectionLocked = Boolean(props.active || props.sending || submitting || props.disabled);
 
   return <UploadComposer {...props}
+    onVoiceSettings={onVoiceSettings}
     footerControls={<ComposerSettings
       conversationId={conversation?.id}
       model={conversation?.model ?? draftModel ?? agentModel ?? "nyxagent/chat"}
@@ -57,6 +59,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentOverride, ...p
       agentOverride={agentOverride}
       active={props.active || props.sending || submitting}
       disabled={props.disabled}
+      onVoiceSettings={onVoiceSettings}
     />}
     attachmentMenuItems={<DropdownMenuItem disabled={connectionLocked} onSelect={() => setConnectionPickerOpen(true)}>
       <Link2 aria-hidden className="size-4" />Use a connection

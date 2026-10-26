@@ -1,3 +1,4 @@
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { PreparedMicrophone } from "@/lib/microphone-capture";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AssistantErrorNotice } from "./assistant-error-notice";
@@ -546,6 +547,7 @@ export function NyxAgentAssistantChatPage() {
 function NyxAgentThreadPage() {
   const voiceEnabled = useFeature("assistant:voice");
   const nyxBotSettings = useNyxBotSettings();
+  const [voiceSettingsOpen, setVoiceSettingsOpen] = useState(false);
   const [voiceBinding, setVoiceBinding] = useState<{
     threadId: string;
     actorId?: string;
@@ -808,6 +810,7 @@ function NyxAgentThreadPage() {
    * returns to its home (where the composer starts a new NyxBot thread).
    */
   function go(id?: string) {
+    setVoiceSettingsOpen(false);
     setVoiceThread(undefined);
     setFocusRequest((value) => value + 1);
     if (id) navigateTo({ c: id });
@@ -1152,8 +1155,26 @@ function NyxAgentThreadPage() {
             />
           </AssistantLinkModalHost>
         )}
+        {voiceEnabled && !destroyed && !channelPlatform && <Dialog open={voiceSettingsOpen} onOpenChange={setVoiceSettingsOpen}>
+          <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl" aria-describedby={undefined}>
+            <DialogTitle className="sr-only">Voice settings</DialogTitle>
+            <VoicePanel key={`${user?.id}:voice-settings:${selectedId ?? "draft"}`} threadId={selectedId ?? ""}
+              settingsOnly savedPreferences={nyxBotSettings.data?.voice}
+              preferencesReady={!nyxBotSettings.isPending && !nyxBotSettings.isFetching}
+              preferencesError={nyxBotSettings.isError} onRetryPreferences={() => nyxBotSettings.refetch()}
+              onClose={() => setVoiceSettingsOpen(false)} />
+          </DialogContent>
+        </Dialog>}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <NyxAgentComposer
+            onVoiceSettings={voiceEnabled && !destroyed && !channelPlatform ? () => setVoiceSettingsOpen(true) : undefined}
+            onVoicePrepare={() => {
+              if (!nyxBotSettings.data?.voice || nyxBotSettings.isError || nyxBotSettings.isPending) {
+                setVoiceSettingsOpen(true);
+                return false;
+              }
+              return true;
+            }}
             voiceControls={
               voiceEnabled &&
               voiceThread &&

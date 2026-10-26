@@ -1,3 +1,4 @@
+import { loadVoicePanel } from "@/lib/assistant/voice-panel-loader";
 import { PreparedMicrophone, microphoneDevice, microphoneError } from "@/lib/microphone-capture";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import {
@@ -62,12 +63,14 @@ type Pending = {
 type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
   readonly scope: UploadScope;
   readonly attachmentMenuItems?: ReactNode;
+  readonly onVoiceSettings?: () => void;
+  readonly onVoicePrepare?: () => boolean;
   readonly onVoice?: (conversationId: string, preparation?: PreparedMicrophone) => Promise<void>;
   readonly onSend: (text: string, uploads?: UploadedMessage) => Promise<void>;
 };
 
 /** Keyed by owner + conversation at the call site: drafts never cross threads. */
-export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ...props }: Props) {
+export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoicePrepare, attachmentMenuItems, ...props }: Props) {
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const [preview, setPreview] = useState<Pending>();
@@ -242,6 +245,10 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
     if (props.disabled || !voiceAvailable) cancelVoicePreparation();
   }, [props.disabled, voiceAvailable]);
   async function openVoice(configureOnly = false) {
+    if (configureOnly && onVoiceSettings) {
+      onVoiceSettings();
+      return;
+    }
     if (openingVoice.current) {
       cancelVoicePreparation();
       return;
@@ -257,6 +264,8 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
       !onVoice
     )
       return;
+    if (!configureOnly && onVoicePrepare && !onVoicePrepare()) return;
+    void loadVoicePanel().catch(() => {});
     // Permission and AudioContext originate in the actual waveform activation,
     // before lazy loading, draft creation or catalog requests.
     const ticket = ++voiceGeneration.current;

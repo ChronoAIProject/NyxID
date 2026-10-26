@@ -19,6 +19,14 @@ import {
   type VoiceSnapshot,
 } from "@/schemas/assistant-voice";
 
+export type VoiceConnectionStatus =
+  | "microphone"
+  | "audio"
+  | "server"
+  | "connecting"
+  | "ready"
+  | "reconnecting";
+
 /** Media is ephemeral; only the server's sideband can admit work or usage. */
 export class AssistantVoiceClient {
   private grok?: GrokAudio;
@@ -39,6 +47,9 @@ export class AssistantVoiceClient {
   private closed = false;
   private held = false;
   private speakerMuted = false;
+  private connectionStatus?: VoiceConnectionStatus;
+  private phaseStartedAt = 0;
+  private startupAt?: number;
   get isClosed() {
     return this.closed;
   }
@@ -51,6 +62,7 @@ export class AssistantVoiceClient {
   private lastPlaybackMs = 0;
   private onActivity: (activity: AudioActivity) => void;
   private onConflict: (session: VoiceSession | null) => void;
+  private onStatus: (status: VoiceConnectionStatus) => void;
   constructor(
     thread: string,
     onSnapshot: (value: VoiceSnapshot) => void,
@@ -58,6 +70,7 @@ export class AssistantVoiceClient {
     onClosed: () => void = () => {},
     onConflict: (session: VoiceSession | null) => void = () => {},
     privateActivity: (activity: AudioActivity) => void = () => {},
+    onStatus: (status: VoiceConnectionStatus) => void = () => {},
   ) {
     this.thread = thread;
     this.onSnapshot = onSnapshot;
@@ -65,6 +78,29 @@ export class AssistantVoiceClient {
     this.onClosed = onClosed;
     this.onConflict = onConflict;
     this.onActivity = privateActivity;
+    this.onStatus = onStatus;
+  }
+  private setStatus(status: VoiceConnectionStatus) {
+    if (this.closed || this.connectionStatus === status) return;
+    const now = performance.now();
+    if (this.startupAt !== undefined) {
+      if (this.connectionStatus) {
+        const name = `nyxid.voice.startup.${this.connectionStatus}`;
+        performance.clearMeasures(name);
+        performance.measure(name, { start: this.phaseStartedAt, end: now });
+      }
+      if (status === "ready") {
+        performance.clearMeasures("nyxid.voice.startup.total");
+        performance.measure("nyxid.voice.startup.total", {
+          start: this.startupAt,
+          end: now,
+        });
+        this.startupAt = undefined;
+      }
+    }
+    this.phaseStartedAt = now;
+    this.connectionStatus = status;
+    this.onStatus(status);
   }
   private path() {
     return `/assistant/nyxagent/conversations/${this.thread}/voice-sessions`;
@@ -77,6 +113,23 @@ export class AssistantVoiceClient {
     preparation?: PreparedMicrophone,
     deviceId?: string,
   ) {
+    if (this.closed || this.connectionStatus) return;
+    this.startupAt = preparation?.startedAt ?? performance.now();
+    for (const phase of [
+      "preparation",
+      "microphone",
+      "audio",
+      "server",
+      "connecting",
+      "reconnecting",
+      "total",
+    ])
+      performance.clearMeasures(`nyxid.voice.startup.${phase}`);
+    performance.measure("nyxid.voice.startup.preparation", {
+      start: this.startupAt,
+      end: performance.now(),
+    });
+    this.setStatus("microphone");
     this.preferences = preferences;
     this.preparation = preparation;
     let step: VoiceStartStep = "microphone";
@@ -133,6 +186,7 @@ export class AssistantVoiceClient {
         t.enabled = false;
       });
       step = "webrtc";
+      this.setStatus("audio");
       if (protocol === "xai_realtime") {
         if (preferences.input_mode !== "push_to_talk")
           throw new Error("Grok requires Hold to talk");
@@ -167,6 +221,7 @@ export class AssistantVoiceClient {
         await this.grok.start(media);
         if (this.closed) return;
         step = "server";
+        this.setStatus("server");
         const raw = await apiClient(this.path(), {
           method: "POST",
           signal: this.abort.signal,
@@ -230,6 +285,7 @@ export class AssistantVoiceClient {
       await this.waitForIce(peer);
       if (this.closed) return;
       step = "server";
+      this.setStatus("server");
       const raw = await apiClient(this.path(), {
         method: "POST",
         signal: this.abort.signal,
@@ -310,6 +366,7 @@ export class AssistantVoiceClient {
   }
   private openControls() {
     if (!this.session || this.closed) return;
+    if (this.connectionStatus !== "reconnecting") this.setStatus("connecting");
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.reconnectTimer = undefined;
     this.controlsReady = false;
@@ -322,7 +379,7 @@ export class AssistantVoiceClient {
     this.controlSocket = socket;
     socket.binaryType = "arraybuffer";
     socket.onmessage = ({ data }) => {
-      if (this.closed) return;
+      if (this.closed || socket !== this.controlSocket) return;
       try {
         if (this.grok && data instanceof ArrayBuffer) {
           if (
@@ -395,9 +452,12 @@ export class AssistantVoiceClient {
       if (this.closed || socket !== this.controlSocket) return;
       if (this.heartbeat) clearInterval(this.heartbeat);
       this.controlsReady = false;
+      this.held = false;
       this.updateInput();
+      this.setStatus("reconnecting");
       if (this.reconnectAttempt >= 6) {
         this.onError("Voice control connection could not reconnect.");
+        void this.end();
         return;
       }
       const delays = [1000, 2000, 4000, 8000, 15000, 30000];
@@ -430,13 +490,16 @@ export class AssistantVoiceClient {
     }, 1000);
   }
   private updateInput() {
-    const enabled =
+    const ready =
       !this.closed &&
       this.started &&
       this.controlsReady &&
-      this.session?.state === "active" &&
-      !this.session.muted &&
-      !this.session.input_muted &&
+      this.session?.state === "active";
+    if (ready) this.setStatus("ready");
+    const enabled =
+      ready &&
+      !this.session?.muted &&
+      !this.session?.input_muted &&
       (this.preferences?.input_mode === "automatic" || this.held);
     this.media?.getAudioTracks().forEach((t) => {
       t.enabled = enabled;
@@ -445,15 +508,16 @@ export class AssistantVoiceClient {
   }
   hold(pressed: boolean) {
     if (this.closed || this.held === pressed) return;
+    if (
+      pressed &&
+      (!this.started ||
+        !this.controlsReady ||
+        this.session?.state !== "active" ||
+        this.session.muted ||
+        this.session.input_muted)
+    )
+      return;
     if (this.grok) {
-      if (
-        pressed &&
-        (this.session?.state !== "active" ||
-          this.session.muted ||
-          this.session.input_muted ||
-          !this.controlsReady)
-      )
-        return;
       if (this.controlSocket?.readyState === WebSocket.OPEN)
         this.controlSocket.send(
           JSON.stringify({ type: pressed ? "ptt_begin" : "ptt_commit" }),

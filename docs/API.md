@@ -8924,6 +8924,13 @@ thread does not require granting OpenAI as a tool. The live conversation, agent
 and key binding, platform ACL, operation restrictions and billing admission still
 apply. BYOK retains the exact selected connection's ownership and grant checks.
 
+`GET /api/v1/assistant/nyxagent/voice/options` also accepts an omitted
+`conversation_id` for editing account voice settings before a conversation exists.
+This first-party human, feature-gated mode returns caller-visible catalog metadata
+and personal connections without creating a thread, reserving funds, or authorizing
+a call. Supplying `conversation_id` retains the live thread and source checks above;
+call startup always reauthorizes the selected connection against its actual thread.
+
 Dictation adds two first-party human browser routes:
 
 | Route | Contract |

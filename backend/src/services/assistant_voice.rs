@@ -1174,7 +1174,16 @@ pub async fn options(
     keys: &crate::crypto::aes::EncryptionKeys,
     thread: &AssistantConversation,
 ) -> AppResult<Vec<VoiceOption>> {
-    audio_options(db, keys, thread, false).await
+    audio_options(db, keys, &thread.user_id, Some(thread), false).await
+}
+
+/// Account settings discovery does not create a thread or authorize a call.
+pub async fn settings_options(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    user: &str,
+) -> AppResult<Vec<VoiceOption>> {
+    audio_options(db, keys, user, None, false).await
 }
 
 pub async fn dictation_options(
@@ -1182,28 +1191,34 @@ pub async fn dictation_options(
     keys: &crate::crypto::aes::EncryptionKeys,
     thread: &AssistantConversation,
 ) -> AppResult<Vec<VoiceOption>> {
-    audio_options(db, keys, thread, true).await
+    audio_options(db, keys, &thread.user_id, Some(thread), true).await
 }
 
 async fn audio_options(
     db: &Database,
     keys: &crate::crypto::aes::EncryptionKeys,
-    thread: &AssistantConversation,
+    user: &str,
+    thread: Option<&AssistantConversation>,
     dictation: bool,
 ) -> AppResult<Vec<VoiceOption>> {
     // Authenticate this exact thread once; source checks reuse only this
     // request's live key/org/agent authority, never a cross-request cache.
-    let Some(authority) = super::voice::credentials::discovery_result(
-        super::voice::credentials::inference_authority(db, thread).await,
-    )?
-    else {
-        return Ok(Vec::new());
+    let authority = if let Some(thread) = thread {
+        let Some(authority) = super::voice::credentials::discovery_result(
+            super::voice::credentials::inference_authority(db, thread).await,
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+        Some(authority)
+    } else {
+        None
     };
     // Reuse catalog visibility and its request-scoped, batched platform grants.
     // Discovery neither provisions a connection nor decrypts a user credential.
-    let catalog = super::catalog_service::list_catalog_all(db, keys, &thread.user_id).await?;
+    let catalog = super::catalog_service::list_catalog_all(db, keys, user).await?;
     let connections =
-        super::user_service_service::list_user_services_with_sources(db, &thread.user_id).await?;
+        super::user_service_service::list_user_services_with_sources(db, user).await?;
     let services: Vec<crate::models::downstream_service::DownstreamService> = db
         .collection(crate::models::downstream_service::COLLECTION_NAME)
         .find(doc! {"inference.voice":{"$type":"object"},"is_active":true})
@@ -1238,7 +1253,7 @@ async fn audio_options(
         if voice.protocol == crate::models::downstream_service::VoiceProtocol::XaiRealtime
             && !super::feature_flag_service::personal_flag_enabled(
                 db,
-                &thread.user_id,
+                user,
                 super::feature_flag_service::VOICE_GROK_FLAG_KEY,
             )
             .await?
@@ -1248,14 +1263,23 @@ async fn audio_options(
         // Compute source/connection eligibility once, before expanding models.
         // Discovery reserves no funds and cannot promise later start capacity.
         let platform_authorized = entry.platform_key.available
-            && super::voice::credentials::discovery_result(if dictation {
-                super::voice::credentials::authorize_dictation(db, &authority, service, None).await
-            } else {
-                super::voice::credentials::authorize_with_authority(db, &authority, service, None)
+            && if let Some(authority) = &authority {
+                super::voice::credentials::discovery_result(if dictation {
+                    super::voice::credentials::authorize_dictation(db, authority, service, None)
+                        .await
+                } else {
+                    super::voice::credentials::authorize_with_authority(
+                        db, authority, service, None,
+                    )
                     .await
-            })?
-            .is_some();
-        let resource_owner = thread.agent_owner_id.as_deref().unwrap_or(&thread.user_id);
+                })?
+                .is_some()
+            } else {
+                true
+            };
+        let resource_owner = thread
+            .and_then(|row| row.agent_owner_id.as_deref())
+            .unwrap_or(user);
         let mut own_connections = Vec::new();
         for connection in connections.iter().filter(|c| {
             !dictation
@@ -1269,30 +1293,33 @@ async fn audio_options(
                 && c.service.api_key_id.is_some()
                 && c.service.credential_binding.as_deref() != Some("platform")
         }) {
-            if super::voice::credentials::discovery_result(
-                super::voice::credentials::authorize_with_authority(
-                    db,
-                    &authority,
-                    service,
-                    Some(&connection.service.id),
-                )
-                .await,
-            )?
-            .is_some()
-                && super::voice::credentials::discovery_result(
-                    Box::pin(super::voice::credentials::own_snapshot(
+            if let (Some(authority), Some(thread)) = (&authority, thread) {
+                if !(super::voice::credentials::discovery_result(
+                    super::voice::credentials::authorize_with_authority(
                         db,
-                        keys,
-                        thread,
+                        authority,
                         service,
-                        &connection.service.id,
-                    ))
+                        Some(&connection.service.id),
+                    )
                     .await,
                 )?
                 .is_some()
-            {
-                own_connections.push(connection);
+                    && super::voice::credentials::discovery_result(
+                        Box::pin(super::voice::credentials::own_snapshot(
+                            db,
+                            keys,
+                            thread,
+                            service,
+                            &connection.service.id,
+                        ))
+                        .await,
+                    )?
+                    .is_some())
+                {
+                    continue;
+                }
             }
+            own_connections.push(connection);
         }
         let billing = service.billing.as_ref();
         let platform_priced =
@@ -1301,7 +1328,7 @@ async fn audio_options(
             super::voice::credentials::duration_billing(&VoiceKeySource::Own, billing);
         let platform_enabled = super::feature_flag_service::personal_flag_enabled(
             db,
-            &thread.user_id,
+            user,
             super::voice::credentials::platform_flag(&voice.protocol),
         )
         .await?;
@@ -1373,7 +1400,7 @@ async fn audio_options(
                     } else {
                         entry.byok_pricing.clone()
                     },
-                    billing_owner: if resource_owner == thread.user_id {
+                    billing_owner: if resource_owner == user {
                         "acting_person"
                     } else {
                         "organization"

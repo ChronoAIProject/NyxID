@@ -1,8 +1,7 @@
 import { lazy, Suspense, type ComponentProps } from "react";
+import { loadVoicePanel } from "@/lib/assistant/voice-panel-loader";
 
-const VoicePanel = lazy(() =>
-  import("./voice-panel").then((module) => ({ default: module.VoicePanel })),
-);
+const VoicePanel = lazy(loadVoicePanel);
 
 /** Default-off voice must not load media setup code on ordinary chat visits. */
 export function LazyVoicePanel(props: ComponentProps<typeof VoicePanel>) {

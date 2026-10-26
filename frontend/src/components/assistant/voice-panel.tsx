@@ -73,8 +73,8 @@ function VoiceCreditUsage({ option }: { option: VoiceOption }) {
         {option.billing_owner === "organization" ? "the organization" : "you"}.
       </p>
       <p className="mt-1">
-        Assistant tasks are billed separately. Muting keeps the call running
-        and billed.{" "}
+        Assistant tasks are billed separately. Muting keeps the call running and
+        billed.{" "}
         {option.billing_owner === "organization"
           ? "Charges are recorded against the organization's credits."
           : "View recorded charges in your account menu under Usage."}
@@ -91,6 +91,7 @@ export function VoicePanel({
   preparation,
   settingsRequest = 0,
   preferencesReady = true,
+  settingsOnly = false,
   preferencesError = false,
   onRetryPreferences,
   onClose,
@@ -102,6 +103,7 @@ export function VoicePanel({
   preparation?: PreparedMicrophone;
   settingsRequest?: number;
   preferencesReady?: boolean;
+  settingsOnly?: boolean;
   preferencesError?: boolean;
   onRetryPreferences?: () => Promise<unknown>;
   onClose: () => void;
@@ -110,6 +112,12 @@ export function VoicePanel({
   const voice = useAssistantVoice(threadId);
   const actorId = useAuthStore((state) => state.user?.id);
   const queryClient = useQueryClient();
+  const [saving, setSaving] = useState(false);
+  const [callPreferences, setCallPreferences] = useState<VoicePreferences>();
+  const active = voice.starting || voice.connected;
+  const effectivePreferences = active
+    ? (callPreferences ?? savedPreferences)
+    : savedPreferences;
   const preparingCapture = Boolean(preparation && !preparation.isClosed);
   useEffect(() => {
     onViewChange?.({
@@ -172,47 +180,74 @@ export function VoicePanel({
   const configuredInputMode = preferencesForm.watch("input_mode");
   const preferredVoice = preferencesForm.watch("voice");
   const notifyOnCompletion = preferencesForm.watch("notify_on_completion");
+  const { reset } = preferencesForm;
+  const { isDirty } = preferencesForm.formState;
+  useEffect(() => {
+    if (!active && !isDirty && preferencesReady && !preferencesError)
+      reset({
+        input_mode: savedPreferences?.input_mode ?? "automatic",
+        voice: savedPreferences?.voice ?? null,
+        notify_on_completion: savedPreferences?.notify_on_completion ?? false,
+      });
+  }, [
+    active,
+    isDirty,
+    preferencesReady,
+    preferencesError,
+    savedPreferences,
+    reset,
+  ]);
   const options = useQuery({
     queryKey: ["assistant-voice-options", actorId, threadId],
     retry: false,
     queryFn: async () =>
       voiceOptionsSchema.parse(
         await api.get(
-          `/assistant/nyxagent/voice/options?conversation_id=${encodeURIComponent(threadId)}`,
+          `/assistant/nyxagent/voice/options${threadId ? `?conversation_id=${encodeURIComponent(threadId)}` : ""}`,
         ),
       ),
   });
   const choices = options.data?.options ?? [];
   // An explicit or saved paid source is exact. Unavailable preferences never
   // authorize silently starting another service/connection/model.
-  const option = selected
-    ? choices.find(
-        (o) =>
-          `${o.service_id}:${o.connection_id ?? o.key_source}:${o.model}` ===
-          selected,
-      )
-    : savedPreferences
+  const option =
+    !active && selected
       ? choices.find(
           (o) =>
-            o.service_id === savedPreferences.service_id &&
-            o.connection_id === savedPreferences.connection_id &&
-            o.key_source === savedPreferences.key_source &&
-            o.model === savedPreferences.model,
+            `${o.service_id}:${o.connection_id ?? o.key_source}:${o.model}` ===
+            selected,
         )
-      : (choices.find(
-          (o) => o.available && o.default_model && o.key_source === "platform",
-        ) ??
-        choices.find((o) => o.available && o.default_model) ??
-        choices.find((o) => o.available));
+      : effectivePreferences
+        ? choices.find(
+            (o) =>
+              o.service_id === effectivePreferences.service_id &&
+              o.connection_id === effectivePreferences.connection_id &&
+              o.key_source === effectivePreferences.key_source &&
+              o.model === effectivePreferences.model,
+          )
+        : (choices.find(
+            (o) =>
+              o.available && o.default_model && o.key_source === "platform",
+          ) ??
+          choices.find((o) => o.available && o.default_model) ??
+          choices.find((o) => o.available));
   const isGrok = option?.voice.protocol === "xai_realtime";
-  const inputMode = isGrok ? "push_to_talk" : configuredInputMode;
+  const inputMode =
+    active && callPreferences
+      ? callPreferences.input_mode
+      : isGrok
+        ? "push_to_talk"
+        : configuredInputMode;
   const voiceName =
-    option?.voice.voices.find((v) => v.id === preferredVoice)?.id ??
+    option?.voice.voices.find(
+      (v) =>
+        v.id ===
+        (active && callPreferences ? callPreferences.voice : preferredVoice),
+    )?.id ??
     option?.voice.voices[0]?.id ??
     null;
-  const active = voice.starting || voice.connected;
   const settingsDisabled =
-    active || !preferencesReady || preferencesError || retrying;
+    active || !preferencesReady || preferencesError || retrying || saving;
   const elapsed = voice.snapshot
     ? Math.max(
         0,
@@ -227,20 +262,31 @@ export function VoicePanel({
     : 0;
   const timer = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`;
   const status = voice.starting
-    ? "Connecting"
+    ? voice.connectionStatus === "microphone"
+      ? "Opening microphone"
+      : voice.connectionStatus === "audio"
+        ? "Preparing audio"
+        : voice.connectionStatus === "reconnecting"
+          ? "Reconnecting"
+          : "Connecting"
     : voice.snapshot?.session.state === "active"
       ? "Connected"
       : voice.snapshot?.session.state === "closing"
         ? "Ending"
         : "Ready";
   const microphoneMuted = voice.snapshot?.session.muted ?? false;
+  const canTalk =
+    voice.connected &&
+    !voice.starting &&
+    !microphoneMuted &&
+    voice.snapshot?.session.state === "active" &&
+    !voice.snapshot.session.input_muted;
   const selectionKey = option
     ? `${option.service_id}:${option.connection_id ?? option.key_source}:${option.model}`
     : "";
-  async function start(prepared?: PreparedMicrophone) {
-    if (!option?.available || settingsDisabled || options.isError) return;
-    const startingActor = actorId;
-    const preferences: VoicePreferences = {
+  function selectedPreferences(): VoicePreferences | undefined {
+    if (!option?.available) return;
+    return {
       service_id: option.service_id,
       connection_id: option.connection_id,
       key_source: option.key_source,
@@ -250,45 +296,64 @@ export function VoicePanel({
       language: savedPreferences?.language ?? null,
       notify_on_completion: notifyOnCompletion,
     };
+  }
+  async function remember(preferences: VoicePreferences) {
+    const startingActor = actorId;
+    if (!startingActor || useAuthStore.getState().user?.id !== startingActor)
+      throw new Error("Your account changed. Start voice again.");
+    // The session request carries these preferences and revalidates access
+    // and funding. An unchanged saved selection needs no settings round trip.
+    if (
+      savedPreferences &&
+      (Object.keys(preferences) as (keyof VoicePreferences)[]).every(
+        (key) => preferences[key] === savedPreferences[key],
+      )
+    )
+      return;
+    try {
+      const settings = await nyxBotApi.updateSettings({
+        voice: preferences,
+      });
+      if (useAuthStore.getState().user?.id !== startingActor)
+        throw new Error("Your account changed. Start voice again.");
+      // Only the server-confirmed response replaces the original actor's
+      // cache. A later panel remount must see the preferences just saved.
+      queryClient.setQueryData(
+        nyxBotQueryKeys.settings(startingActor),
+        settings,
+      );
+    } catch {
+      if (useAuthStore.getState().user?.id === startingActor)
+        setSettingsError(
+          "Voice preferences could not be saved. Please try again.",
+        );
+      throw new Error("Voice preferences could not be saved.");
+    }
+  }
+  async function saveSettings() {
+    const preferences = selectedPreferences();
+    if (!preferences || settingsDisabled || options.isError) return;
     setSettingsError(null);
+    setSaving(true);
+    try {
+      await remember(preferences);
+      if (settingsOnly) onClose();
+    } catch {
+      /* remember reports the account-scoped error. */
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function start(prepared?: PreparedMicrophone) {
+    const preferences = selectedPreferences();
+    if (!preferences || settingsOnly || settingsDisabled || options.isError)
+      return;
+    setSettingsError(null);
+    setCallPreferences(preferences);
     await voice.start(
       preferences,
       isGrok ? "xai_realtime" : undefined,
-      async () => {
-        if (
-          !startingActor ||
-          useAuthStore.getState().user?.id !== startingActor
-        )
-          throw new Error("Your account changed. Start voice again.");
-        // The session request carries these preferences and revalidates access
-        // and funding. An unchanged saved selection needs no settings round trip.
-        if (
-          savedPreferences &&
-          (Object.keys(preferences) as (keyof VoicePreferences)[]).every(
-            (key) => preferences[key] === savedPreferences[key],
-          )
-        )
-          return;
-        try {
-          const settings = await nyxBotApi.updateSettings({
-            voice: preferences,
-          });
-          if (useAuthStore.getState().user?.id !== startingActor)
-            throw new Error("Your account changed. Start voice again.");
-          // Only the server-confirmed response replaces the original actor's
-          // cache. A later panel remount must see the preferences just saved.
-          queryClient.setQueryData(
-            nyxBotQueryKeys.settings(startingActor),
-            settings,
-          );
-        } catch {
-          if (useAuthStore.getState().user?.id === startingActor)
-            setSettingsError(
-              "Voice preferences could not be saved. Please try again.",
-            );
-          throw new Error("Voice preferences could not be saved.");
-        }
-      },
+      () => remember(preferences),
       ...(prepared ? ([prepared] as const) : []),
     );
   }
@@ -329,6 +394,7 @@ export function VoicePanel({
   );
   useEffect(() => {
     if (
+      settingsOnly ||
       retrying ||
       !preferencesReady ||
       !preparation ||
@@ -341,7 +407,17 @@ export function VoicePanel({
     const timer = setTimeout(() => {
       attempted.current = preparation;
       if (preparation.isClosed) return;
-      if (preferencesError || options.isError || !option?.available) {
+      if (
+        preferencesError ||
+        options.isError ||
+        !option?.available ||
+        (savedPreferences?.voice &&
+          !option.voice.voices.some(
+            (item) => item.id === savedPreferences.voice,
+          )) ||
+        (option.voice.protocol === "xai_realtime" &&
+          savedPreferences?.input_mode === "automatic")
+      ) {
         preparation.close();
         setSettingsError(
           preferencesError
@@ -357,6 +433,8 @@ export function VoicePanel({
     return () => clearTimeout(timer);
   }, [
     preparation,
+    settingsOnly,
+    savedPreferences,
     retrying,
     preferencesReady,
     preferencesError,
@@ -439,7 +517,10 @@ export function VoicePanel({
   );
   if (onViewChange)
     return (
-      <section aria-label="Voice conversation" className="text-12">
+      <section
+        aria-label={settingsOnly ? "Voice settings" : "Voice conversation"}
+        className="text-12"
+      >
         <div className="flex min-h-9 flex-wrap items-center gap-1 border-b border-hairline pb-1.5">
           <span role="status" className="min-w-0 flex-1 text-primary">
             {active
@@ -647,7 +728,7 @@ export function VoicePanel({
             variant={voice.holding ? "primary" : "outline"}
             aria-label="Hold to talk"
             aria-pressed={voice.holding}
-            disabled={voice.starting || microphoneMuted}
+            disabled={!canTalk}
             onPointerDown={(e) => {
               if (e.button !== 0) return;
               e.currentTarget.setPointerCapture?.(e.pointerId);
@@ -660,7 +741,7 @@ export function VoicePanel({
             onKeyDown={(e) => {
               if (e.key === " " || e.key === "Enter") {
                 e.preventDefault();
-                voice.hold(true);
+                if (!e.repeat) voice.hold(true);
               }
             }}
             onKeyUp={() => voice.hold(false)}
@@ -703,14 +784,18 @@ export function VoicePanel({
         aria-label="Minimized voice call"
         className="fixed bottom-6 right-4 z-40 flex max-w-[calc(100vw-2rem)] flex-wrap items-center gap-2 rounded-xl border border-border bg-card p-3 shadow-lg"
       >
-        <span role="status">{status}</span>
-        <span aria-label="Call duration" className="font-mono tabular-nums">
-          {timer}
-        </span>
+        {!settingsOnly && (
+          <>
+            <span role="status">{status}</span>
+            <span aria-label="Call duration" className="font-mono tabular-nums">
+              {timer}
+            </span>
+          </>
+        )}
         {inputMode === "push_to_talk" && (
           <Button
             aria-label="Hold to talk"
-            disabled={voice.starting || microphoneMuted}
+            disabled={!canTalk}
             aria-pressed={voice.holding}
             onPointerDown={(e) => {
               e.currentTarget.setPointerCapture(e.pointerId);
@@ -722,7 +807,7 @@ export function VoicePanel({
             onKeyDown={(e) => {
               if (e.key === " " || e.key === "Enter") {
                 e.preventDefault();
-                voice.hold(true);
+                if (!e.repeat) voice.hold(true);
               }
             }}
             onKeyUp={() => voice.hold(false)}
@@ -753,15 +838,21 @@ export function VoicePanel({
     );
   return (
     <section
-      aria-label="Voice conversation"
+      aria-label={settingsOnly ? "Voice settings" : "Voice conversation"}
       className="max-h-[50dvh] overflow-y-auto rounded-xl border border-border bg-card p-3 text-12 shadow-sm"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-15 font-semibold">Talk to your assistant</h2>
-        <span role="status">{status}</span>
-        <span aria-label="Call duration" className="font-mono tabular-nums">
-          {timer}
-        </span>
+        <h2 className="text-15 font-semibold">
+          {settingsOnly ? "Voice settings" : "Talk to your assistant"}
+        </h2>
+        {!settingsOnly && (
+          <>
+            <span role="status">{status}</span>
+            <span aria-label="Call duration" className="font-mono tabular-nums">
+              {timer}
+            </span>
+          </>
+        )}
         {active && (
           <Button
             variant="ghost"
@@ -785,6 +876,12 @@ export function VoicePanel({
           Close
         </Button>
       </div>
+      {settingsOnly && (
+        <p className="mt-2 text-muted-foreground">
+          Saved for your account across conversations. Changes apply to your
+          next call.
+        </p>
+      )}
       {!active && (
         <p className="mt-2 text-muted-foreground">
           Audio goes to {isGrok ? "xAI through NyxID" : "OpenAI"}. NyxID keeps
@@ -826,6 +923,11 @@ export function VoicePanel({
               onChange={(e) => setSelected(e.target.value)}
               className="ml-2 h-8 rounded-lg border border-input bg-background px-3"
             >
+              {!option && (
+                <option value="" disabled>
+                  Choose a voice source
+                </option>
+              )}
               {choices.map((o) => (
                 <option
                   key={`${o.service_id}:${o.connection_id ?? o.key_source}:${o.model}`}
@@ -926,7 +1028,15 @@ export function VoicePanel({
         </p>
       )}
       <div className="mt-4 flex flex-wrap gap-2">
-        {!active ? (
+        {settingsOnly ? (
+          <Button
+            variant="primary"
+            disabled={!option?.available || settingsDisabled || options.isError}
+            onClick={() => void saveSettings()}
+          >
+            {saving ? "Saving…" : "Save voice settings"}
+          </Button>
+        ) : !active ? (
           <Button
             variant="primary"
             disabled={!option?.available || settingsDisabled || options.isError}
@@ -941,6 +1051,7 @@ export function VoicePanel({
           <>
             {inputMode === "push_to_talk" && (
               <Button
+                disabled={!canTalk}
                 aria-pressed={voice.holding}
                 onPointerDown={(e) => {
                   e.currentTarget.setPointerCapture(e.pointerId);
@@ -952,7 +1063,7 @@ export function VoicePanel({
                 onKeyDown={(e) => {
                   if (e.key === " " || e.key === "Enter") {
                     e.preventDefault();
-                    voice.hold(true);
+                    if (!e.repeat) voice.hold(true);
                   }
                 }}
                 onKeyUp={() => voice.hold(false)}
@@ -993,7 +1104,7 @@ export function VoicePanel({
       <p className="mt-2 text-muted-foreground">
         If the assistant hears its own voice, use headphones or Hold to talk.
       </p>
-      {!onViewChange && (
+      {!settingsOnly && !onViewChange && (
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
           {(["user", "assistant"] as const).map((speaker) => (
             <div
@@ -1020,7 +1131,7 @@ export function VoicePanel({
           ))}
         </div>
       )}
-      {tasks}
+      {!settingsOnly && tasks}
     </section>
   );
 }

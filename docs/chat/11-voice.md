@@ -667,7 +667,7 @@ cleanup and Stop continue when the feature flag is disabled.
 
 | Route | Closed request / safe result |
 | --- | --- |
-| `GET /voice/options?conversation_id=...` | Authorized realtime services and valid connection/binding choices, adapter, verified models/voices, availability reason, lane prices and billing owner label. Metadata only, no credential provisioning side effects. |
+| `GET /voice/options?conversation_id=...` | Authorized realtime services and valid connection/binding choices, adapter, verified models/voices, availability reason, lane prices and billing owner label. Omit `conversation_id` for account settings before a draft exists; own connections are then personal only. Both forms require a first-party human and the voice feature. Metadata only, no credential provisioning side effects; start reauthorizes against the actual thread. |
 | Existing `POST /drafts` | Create a normal private thread for selected agent before the first call if necessary. |
 | `POST /conversations/{id}/voice-sessions` | `{client_request_id,preferences:{service_id,connection_id?,key_source,model,voice,input_mode,language?,notify_on_completion},sdp_offer}`. OpenAI SDP required, xAI forbidden. Returns `{session,sdp_answer}`; the safe session DTO carries state, timing and revision, and options disclose limits. It does not change the thread's NyxAgent profile. |
 | `GET /conversations/{id}/voice-sessions/{sid}` | Authoritative safe state and task IDs for reconnect. No provider IDs, SDP, key IDs or transcript dump. |
@@ -1238,6 +1238,84 @@ Set global/per-replica admission limits from load tests, independent of text-tur
 permits. A voice call does not hold a backend turn permit while merely chatting.
 Backpressure and long result narration must not delay receipt of Stop/mute.
 
+### Startup latency review (2026-10-26)
+
+Voice preferences belong to the person and persist across conversations and
+logins. The composer chevron opens Voice settings, which saves through the shared
+account settings cache; unchanged preferences skip the write. Opening settings
+does not create a draft or acquire microphone resources. On first use, when no
+preferences are saved, the voice waveform opens settings before a call can
+start. Changes during an active call apply to the next call.
+
+With saved preferences, the composer waveform starts the call without a second
+Start action. Its click immediately requests microphone access, creates/resumes
+the local audio context and preloads the lazy voice bundle. After permission
+succeeds, draft creation and any draft model update run before handoff to the
+panel. This preserves the no-draft-on-permission-denial contract. Preparation
+survives the composer's draft-adoption remount through an explicit handoff;
+navigation, logout, cancellation and failed handoff release resources, including
+microphone tracks acquired after cancellation. Voice and dictation retain the
+same exclusive capture owner and selected physical microphone. Grok reuses the
+prepared context; both transports retain the activity meter and playback resume.
+
+The panel validates the saved connection, model, voice and input mode against
+the actual thread's available options before starting automatically. Unavailable
+saved choices produce an actionable settings error without silently substituting
+another provider. The start request carries the effective preferences and the
+server independently authorizes the actual thread and connection. Starting with
+unchanged saved preferences does not rewrite them. Explicitly changed selections
+retain the existing account-fenced save before provider admission. No provider
+session is created before local microphone and audio setup succeeds.
+
+OpenAI still requires microphone capture, a complete ICE offer, server admission,
+provider creation and sideband attachment, then browser negotiation and the
+authenticated control snapshot. The UI stays Connecting until both
+`session.started` and an active control snapshot arrive, in either order. Grok
+requires capture, worklet/loopback setup, admission, then a control socket whose
+replica resolves credentials and establishes/configures the upstream session.
+After the active state is durable, Grok wakes the existing authenticated snapshot
+path immediately instead of waiting for its next one-second poll. This removes
+up to roughly one polling interval of avoidable startup wait, excluding database
+and network time; it is not a measured production speedup.
+
+The panel distinguishes Opening microphone, Preparing audio, Connecting and
+Reconnecting. Hold to talk stays disabled until capture is ready in both full
+and minimized views. A lost control connection disables capture immediately,
+clears the held state, and requires a fresh press after reconnection in manual
+mode. Automatic input resumes only after control readiness is restored.
+
+Local browser User Timing entries named `nyxid.voice.startup.preparation`,
+`.microphone`, `.audio`, `.server`, `.connecting` and `.total` record completed
+startup phases. They contain only durations and fixed phase names, are replaced
+on the next attempt, and are not sent to analytics. Total starts at the composer waveform
+click and ends at capture readiness, including draft/model work, lazy loading,
+option discovery and the microphone permission prompt. Preparation measures the
+time before the transport client starts; local microphone/context preparation
+overlaps that work, so the microphone phase measures only the remaining wait.
+OpenAI's server phase includes provider creation/sideband attachment; Grok's provider setup occurs
+after POST and is included in connecting. A failed or cancelled attempt has no
+successful total. Reproduce with microphone permission already granted when
+comparing against the budgets above. In browser developer tools:
+
+```js
+performance.getEntriesByType("measure")
+  .filter(({ name }) => name.startsWith("nyxid.voice.startup."))
+  .map(({ name, duration }) => ({ phase: name, milliseconds: Math.round(duration) }))
+```
+
+The next latency work should distinguish capture readiness from caption and
+reply latency. Transcript checkpoints are processed on the coordinator's
+one-second tick, and persisted captions are read by a separate one-second
+control-snapshot tick. Together these can add nearly two seconds of scheduling
+delay before a partial transcript becomes visible, beyond provider transcription
+and database time. OpenAI also seals input after a one-second fragment quiet
+window; this protects ordered, complete utterances used for delegation. A future
+coalesced caption push should preserve the session authorization checks and
+durable transcript authority while separating presentation updates from that
+seal window. Simply increasing both poll rates would also multiply database,
+authorization and billing work. Browser/device audio and paid-provider latency
+still require real-session measurements; fixtures do not establish those times.
+
 ## 15. Failures and observability
 
 | Failure | Required behavior |
@@ -1482,8 +1560,10 @@ inside the same composer surface with status, microphone mute, speaker mute and
 End. Settings, tasks, resume, conflict/rejoin and Grok Hold to talk remain
 accessible. Prices, payer and billing explanations live under **Credit usage** in
 voice settings, outside the active controls. The waveform intentionally requests
-microphone permission and starts the exact available saved/default configuration
-after source validation. OpenAI defaults to Automatic hands-free input;
+microphone permission and starts the exact available saved configuration
+after source validation. First use opens account settings before capture. The
+composer chevron opens the same account editor, including before a thread exists;
+it saves defaults without starting media. Changes there apply to the next call. OpenAI defaults to Automatic hands-free input;
 an explicit saved mode remains authoritative and Grok requires Hold to talk. An
 unavailable saved source never silently selects another paid provider. The
 secondary Voice settings action in the microphone popup opens configuration

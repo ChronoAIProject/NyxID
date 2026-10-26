@@ -1,3 +1,4 @@
+import { voicePreferences } from "@/test/voice-fixture";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -23,6 +24,7 @@ const state = vi.hoisted(() => ({
   override: null as NyxAgentAccessMode | null,
   staleCard: false,
   voice: false,
+  savedVoice: true,
   voiceMounts: 0,
   voiceEnds: 0,
 }));
@@ -55,7 +57,7 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
   useNyxBotAgents: () => ({ data: { agents: [{ ...agent, can_use: !state.destroyed, access_mode_override: state.override }] } }),
   selectedAgentOf: (rows: unknown[]) => rows[0],
   nyxBotOf: (rows: unknown[]) => rows[0],
-  useNyxBotSettings: () => ({ data: { access_mode: state.mode } }),
+  useNyxBotSettings: () => ({ data: { access_mode: state.mode, voice: state.savedVoice ? voicePreferences : null } }),
   useUpdateNyxBotSettings: () => ({ isPending: false, mutateAsync: vi.fn() }),
   useNyxAgentModels: () => ({ data: [{ id: "nyxagent/chat", label: "chat", available: true }], isPending: false }),
   useChangeNyxAgentModel: () => ({ isPending: false, mutateAsync: vi.fn() }),
@@ -102,6 +104,7 @@ beforeEach(() => {
     },
   });
   state.voice = false;
+  state.savedVoice = true;
   state.voiceMounts = 0;
   state.voiceEnds = 0;
   state.search = {};
@@ -177,20 +180,21 @@ vi.mock("./lazy-voice-panel", async () => {
       panelId,
       onViewChange,
       onClose,
+      settingsOnly,
     }: {
       threadId: string;
       panelId: string;
-      onViewChange: (view: unknown) => void;
+      onViewChange?: (view: unknown) => void;
+      settingsOnly?: boolean;
       onClose: () => void;
     }) => {
       useEffect(() => {
+        if (settingsOnly) return;
         state.voiceMounts++;
-        return () => {
-          state.voiceEnds++;
-        };
-      }, []);
+        return () => { state.voiceEnds++; };
+      }, [settingsOnly]);
       useEffect(() => {
-        onViewChange({
+        onViewChange?.({
           threadId,
           panelId,
           actorId: useAuthStore.getState().user?.id,
@@ -199,6 +203,7 @@ vi.mock("./lazy-voice-panel", async () => {
           activity: { input: 0.2, output: 0, bands: [], playbackMs: 0 },
         });
       }, [threadId, panelId, onViewChange]);
+      if (settingsOnly) return <section aria-label="Mock voice settings"><button onClick={onClose}>Close settings fixture</button></section>;
       return (
         <section aria-label="Mock voice session">
           <button onClick={onClose}>Close voice fixture</button>
@@ -284,4 +289,15 @@ it("parent keeps one mounted call on repeated opens and clears media across clos
     </QueryClientProvider>,
   );
   expect(state.voiceEnds).toBe(4);
+});
+
+it("first voice use opens account settings without capture or a call", async () => {
+  state.voice = true;
+  state.savedVoice = false;
+  useAuthStore.setState({ user: { id: "first-voice-owner" } as NonNullable<ReturnType<typeof useAuthStore.getState>["user"]> });
+  render(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Open voice call" }));
+  expect(await screen.findByLabelText("Mock voice settings")).toBeInTheDocument();
+  expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+  expect(state.voiceMounts).toBe(0);
 });

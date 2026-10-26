@@ -15,6 +15,7 @@ import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { nyxAgentConversationSchema } from "@/schemas/assistant-nyxagent";
+import { createUploadDraft } from "@/lib/assistant/uploads";
 
 const id = `nyxa-${"a".repeat(32)}`;
 vi.mock("@/lib/assistant/uploads", async (original) => ({
@@ -46,6 +47,23 @@ beforeEach(() => {
 afterEach(() => {
   client.clear();
   vi.restoreAllMocks();
+});
+
+it("opens voice settings from the chevron without starting a call or creating a draft", async () => {
+  const onVoiceSettings = vi.fn();
+  const onVoice = vi.fn();
+  vi.mocked(createUploadDraft).mockClear();
+  render(<QueryClientProvider client={client}><NyxAgentComposer
+    active={false} sending={false} ownerUserId="owner" draftKey="screen:nyxagent:assistant"
+    scope={{ kind: "conversations" }} onSend={onSend} onStop={async () => {}}
+    onVoice={onVoice} onVoiceSettings={onVoiceSettings}
+  /></QueryClientProvider>);
+  const user = userEvent.setup({ skipHover: true });
+  await user.click(screen.getByRole("button", { name: /Thinking and permissions/ }));
+  await user.click(screen.getByRole("menuitem", { name: "Voice settings" }));
+  expect(onVoiceSettings).toHaveBeenCalledOnce();
+  expect(onVoice).not.toHaveBeenCalled();
+  expect(createUploadDraft).not.toHaveBeenCalled();
 });
 
 async function draftWithUpload() {

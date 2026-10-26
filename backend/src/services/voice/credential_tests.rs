@@ -128,6 +128,40 @@ async fn options(f: &Fixture) -> Value {
     .unwrap()
 }
 
+#[tokio::test]
+async fn account_voice_settings_discovery_needs_no_thread_and_preserves_platform_acl() {
+    Box::pin(async {
+        let (f, service) = fixture("account_voice_settings_discovery").await;
+        let own = connection(&f, &service, "personal-voice").await;
+        let conversations = f.state.db.collection::<bson::Document>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        );
+        conversations.delete_many(doc! {}).await.unwrap();
+        let advertised = serde_json::to_value(
+            assistant_voice::settings_options(&f.state.db, &f.state.encryption_keys, &f.owner)
+                .await.unwrap(),
+        ).unwrap();
+        let choices = advertised.as_array().unwrap();
+        assert!(choices.iter().any(|o| o["key_source"] == "platform"));
+        assert!(choices.iter().any(|o| o["connection_id"] == own));
+        assert!(choices.iter().all(|o| o["billing_owner"] == "acting_person"));
+        assert_eq!(conversations.count_documents(doc! {}).await.unwrap(), 0);
+        assert_eq!(f.state.db.collection::<bson::Document>(
+            crate::models::assistant_voice_session::COLLECTION_NAME,
+        ).count_documents(doc! {}).await.unwrap(), 0);
+        f.state.db.collection::<DownstreamService>(SERVICES).update_one(
+            doc! {"_id":&service.id},
+            doc! {"$set":{"platform_key.audience":"restricted", "platform_key.allowed_owner_ids":[]}},
+        ).await.unwrap();
+        let restricted = serde_json::to_value(
+            assistant_voice::settings_options(&f.state.db, &f.state.encryption_keys, &f.owner)
+                .await.unwrap(),
+        ).unwrap();
+        assert!(restricted.as_array().unwrap().iter().all(|o| o["key_source"] != "platform"));
+        assert!(restricted.as_array().unwrap().iter().any(|o| o["connection_id"] == own));
+    }).await;
+}
+
 pub(super) async fn connection(f: &Fixture, service: &DownstreamService, slug: &str) -> String {
     let endpoint = Uuid::new_v4().to_string();
     let id = Uuid::new_v4().to_string();
