@@ -966,10 +966,45 @@ within twenty-four hours. Expired or invalid sources settle durably, including
 poison queue heads. A failed turn retains the genuine failure/partial/stopped
 policy; successful silence closes each eligible source without a send.
 
-The agent's own threads are also told, in the owner's turn instructions,
-what its other threads are answering right now (thread title and question
-excerpt, the same question marked), so it does not start that work again;
-channel threads never get this note, so no chat hears about another.
+### Grounded cross-thread task status
+
+Owner turns may receive other-thread title/question excerpts for duplicate-work
+**discovery only**. These do not prove that work is running. Stable instructions
+require `nyxid__task_status` evidence before reporting progress, completion or
+failure, and require “unknown” when evidence is absent or stale. Guests receive
+neither this note nor the status tool.
+
+`nyxid__task_status` is a read-only native tool for live owner turns. It reads only
+the acting person's private threads of the **same agent**, including that agent's
+hidden voice task threads. NyxBot does not gain cross-specialist or organization
+member history through it; its existing team tools retain their authority.
+Optional `thread_id` (visible or execution thread), `turn_id` and `limit` narrow
+the bounded result. Each item correlates the visible and execution thread, turn,
+voice request and result message where available. `result_message_id` belongs to
+the visible thread; `execution_result_message_id` belongs to the execution thread.
+Before voice publication only the latter is available. It reports queued, running,
+awaiting acknowledgement, completed, failed, stopped or unknown; the last
+completed activity label and time; a ≤600-character settled answer excerpt or
+stable error; start/update/settled timestamps (null when unavailable). No tool
+arguments, raw tool results, credential material or acknowledgement content are
+included. Answer excerpts are explicitly untrusted quoted data.
+
+The tool is callable only from a private owner thread (not a channel or group).
+It rechecks the caller's live turn and current conversation key. A guest,
+stopped/stale turn or rotated key cannot use it. Queries are on demand, bounded
+to 20 recent threads and three settled turns per thread, returning at most 20
+items and a truncation indicator. Unfiltered reply scans cover only each thread's
+last 200 message sequences; an exact `turn_id` uses the turn index instead. A stale heartbeat/lease reports unknown rather
+than repeating an “in progress” claim. There are no new reads on unrelated turns.
+
+Voice result publication uses one transaction for the visible reply and the
+request's `result_message_id` receipt. Racing runtime/sweeper publishers return
+the same receipt. Old replicas' replies already in the visible thread are adopted
+without copying. Refused/expired/cancelled requests can lack a hidden assistant
+reply; those now publish a fixed failure with a stable code, including legacy
+cancelled rows, instead of remaining silent and occupying the bounded delivery
+sweep. This does not replay execution. Speech retains its existing at-most-once
+send receipt; persisted delivery is not proof the caller heard the audio.
 
 ## 13. No-break guarantees
 

@@ -74,14 +74,21 @@ pub fn valid_name(name: &str) -> bool {
         && name.as_bytes()[0].is_ascii_alphanumeric()
 }
 
-/// What the agent's other threads are answering right now (title, question
-/// excerpt, question key), so it does not do the same work twice. Bounded.
+pub struct OtherThreadExcerpt {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub title: String,
+    pub question: Option<String>,
+    pub question_key: Option<String>,
+}
+
+/// Bounded duplicate-work discovery, not proof of execution progress.
 pub async fn in_progress(
     db: &Database,
     owner: &str,
     agent_id: &str,
     exclude: &str,
-) -> AppResult<Vec<(String, Option<String>, Option<String>)>> {
+) -> AppResult<Vec<OtherThreadExcerpt>> {
     let fresh = bson::DateTime::from_chrono(
         Utc::now() - chrono::Duration::seconds(super::assistant_nyxagent::ACTIVE_TURN_TTL_SECS),
     );
@@ -91,7 +98,7 @@ pub async fn in_progress(
             doc! {"user_id": owner, "agent_id": agent_id, "_id": {"$ne": exclude},
             "group_id": bson::Bson::Null, "active_turn.started_at": {"$gt": fresh}},
         )
-        .projection(doc! {"title": 1, "active_turn.question": 1, "active_turn.question_key": 1})
+        .projection(doc! {"title": 1, "active_turn.turn_id": 1, "active_turn.question": 1, "active_turn.question_key": 1})
         .limit(5)
         .await?
         .try_collect()
@@ -100,13 +107,20 @@ pub async fn in_progress(
         .iter()
         .map(|row| {
             let turn = row.get_document("active_turn").ok();
-            (
-                row.get_str("title").unwrap_or_default().to_owned(),
-                turn.and_then(|turn| turn.get_str("question").ok())
+            OtherThreadExcerpt {
+                thread_id: row.get_str("_id").unwrap_or_default().to_owned(),
+                turn_id: turn
+                    .and_then(|turn| turn.get_str("turn_id").ok())
+                    .unwrap_or_default()
+                    .to_owned(),
+                title: row.get_str("title").unwrap_or_default().to_owned(),
+                question: turn
+                    .and_then(|turn| turn.get_str("question").ok())
                     .map(str::to_owned),
-                turn.and_then(|turn| turn.get_str("question_key").ok())
+                question_key: turn
+                    .and_then(|turn| turn.get_str("question_key").ok())
                     .map(str::to_owned),
-            )
+            }
         })
         .collect())
 }

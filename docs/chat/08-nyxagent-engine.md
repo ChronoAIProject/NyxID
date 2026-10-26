@@ -529,7 +529,16 @@ NyxBot-only native tools (`nyxid__` prefix): `spawn_subagent`, `message_subagent
 `destroy_subagent`, `create_group`, `list_groups`, `post_to_group`,
 `update_group`, `delete_group`, `settings_link`, `channel_bot_setup_link`,
 `connect_channel_bot`, `link_channel_bot`, `list_channel_agents`,
-`disconnect_channel_bot`. Every agent has `remember` and
+`disconnect_channel_bot`. Every agent also has the owner-turn-only, read-only
+`task_status` tool: bounded correlated execution evidence for the acting person's
+other private threads of that same agent (including hidden voice tasks). Guests
+cannot list or call it. It returns thread/turn/request/result IDs, state, last
+completed activity label, bounded settled answer or stable error, and timestamps.
+Stale/absent evidence is unknown; question excerpts must never substantiate progress
+claims. The stable instruction fingerprint includes this rule, so resumed sessions
+receive it too. The tool is not offered to external MCP callers. See
+[the cross-thread contract](09-nyxbot-orchestrator.md#grounded-cross-thread-task-status) for scope
+and limits. Every agent has `remember` and
 `forget` (which refuses obvious credential shapes); its memory notes are
 supplied in each turn's input and are not part of stable instructions. A specialist calling a NyxBot-only tool gets
 `orchestrator_only`. Grants resolve slugs or IDs through the owner's MCP catalog.

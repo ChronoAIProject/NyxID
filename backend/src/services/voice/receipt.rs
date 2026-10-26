@@ -166,6 +166,8 @@ mod tests {
 
     fn request(state: RequestState, id: &str, message_id: &str) -> VoiceRequest {
         VoiceRequest {
+            started_at: None,
+            terminal_error_code: None,
             async_operation_pending: false,
             id: id.into(),
             user_id: "owner".into(),
