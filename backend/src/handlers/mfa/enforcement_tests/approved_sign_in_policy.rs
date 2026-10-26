@@ -569,7 +569,7 @@ async fn qr_policy_agent_key_protocols_and_bound_browser_handoffs_obey_live_revi
                     if revoke {
                         assert!(matches!(delivery, Err(AppError::AgentKeyLoginDenied)));
                         let row = state.db.collection::<bson::Document>(crate::models::agent_key_login_request::COLLECTION_NAME)
-                            .find_one(doc! {"device_code_hmac": device::hmac_hex(state.auth_device_hmac_key.as_slice(), request.device_code.as_bytes())})
+                            .find_one(doc! {"device_code_hmac": device::hmac_hex(state.auth_device_hmac_key.as_slice(), format!("agent-key-login:{}", request.device_code).as_bytes())})
                             .await.unwrap().unwrap();
                         assert_eq!(row.get_str("status").unwrap(), "denied");
                         assert!(row.get_datetime("purge_at").is_ok());
