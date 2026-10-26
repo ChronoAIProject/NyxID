@@ -647,6 +647,7 @@ pub async fn approve(
         .as_deref()
         .map(|ip| hmac_hex(hmac_key, ip.as_bytes()));
     let policy_used = mfa_policy_revision.is_some();
+    let policy_default = mfa_policy_revision.as_deref() == Some(app_policy::DEFAULT_REVISION);
     let session_id = {
         let db_owned = db.clone();
         let input = input.clone();
@@ -721,7 +722,7 @@ pub async fn approve(
         Some(serde_json::json!({
             "session_id": session_id,
             "request_id": row.id,
-            "mfa_policy": policy_used.then_some("approved_sign_in"),
+            "mfa_policy": policy_used.then_some("approved_sign_in"), "policy_default": policy_default,
         })),
         input.approver_ip.clone(),
         input.approver_user_agent.clone(),

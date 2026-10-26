@@ -31,9 +31,15 @@ pub struct ProfileConfigResponse {
     pub onboarding: OnboardingStateResponse,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct SecurityPreferencesResponse {
     pub skip_mfa_for_approved_sign_ins: bool,
+}
+
+impl Default for SecurityPreferencesResponse {
+    fn default() -> Self {
+        crate::models::user::SecurityPreferences::default().into()
+    }
 }
 
 impl From<crate::models::user::SecurityPreferences> for SecurityPreferencesResponse {

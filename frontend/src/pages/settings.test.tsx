@@ -171,11 +171,40 @@ describe.each(["/settings", "/assistant"] as const)(
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
 
-    it("requires two-factor authentication before enabling the exception", async () => {
-      useAuthStore.setState({ user: { ...useAuthStore.getState().user!, mfa_enabled: false } });
+    it("shows the resolved default on and saves an explicit opt-out", async () => {
+      useAuthStore.setState({ user: { ...useAuthStore.getState().user!, profile_config: { security: { skip_mfa_for_approved_sign_ins: true } } } as User });
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
+        ? new Response(String(options?.body), { headers: { "Content-Type": "application/json" } })
+        : original(url, options));
       await open(route, "security");
-      expect(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" })).toBeDisabled();
-      expect(screen.getByText(/Enable two-factor authentication first/)).toBeInTheDocument();
+      const toggle = screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" });
+      expect(toggle).toHaveAttribute("aria-checked", "true");
+      expect(screen.getByText(/Enabled by default/)).toBeInTheDocument();
+      await userEvent.click(toggle);
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
+      expect(transport).toHaveBeenCalledWith("/api/v1/users/me/security", expect.objectContaining({
+        method: "PUT", body: JSON.stringify({ skip_mfa_for_approved_sign_ins: false }),
+      }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it("saves either choice without two-factor authentication", async () => {
+      useAuthStore.setState({ user: { ...useAuthStore.getState().user!, mfa_enabled: false } });
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
+        ? new Response(String(options?.body), { headers: { "Content-Type": "application/json" } })
+        : original(url, options));
+      await open(route, "security");
+      const toggle = screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" });
+      expect(toggle).toBeEnabled();
+      expect(screen.getByText(/Takes effect when two-factor authentication is on/)).toBeInTheDocument();
+      await userEvent.click(toggle);
+      await userEvent.click(screen.getByRole("button", { name: "Enable for app sign-ins" }));
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+      await userEvent.click(toggle);
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
+      expect(screen.queryByRole("region", { name: "Verify this session" })).not.toBeInTheDocument();
     });
 
     it("keeps the saved value and shows a failed save", async () => {

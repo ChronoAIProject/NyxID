@@ -426,13 +426,15 @@ credential identity and scopes remain equal.
   from `78cb26b3^`, exercised by `installedScanner.test.ts`. This proves source/parser
   compatibility, not physical-iPhone behavior.
 
-## Optional MFA exception for app-approved sign-ins
+## MFA skip for app-approved sign-ins
 
 `PUT /api/v1/users/me/security` accepts only
 `{"skip_mfa_for_approved_sign_ins": true|false}` from a first-party human.
 `GET /users/me` exposes that boolean in `profile_config.security`. Absent policy
-is off. Enabling requires enrolled MFA and a live verified session; disabling
-requires no step-up. Disabling MFA clears the preference.
+is on, including accounts created before this preference existed. Only an explicit
+false disables it. Turning it back on for an MFA-enabled account requires a live
+verified session; disabling requires no step-up. Accounts without MFA can save
+either choice. Disabling MFA preserves the preference and rotates its revision.
 
 This covers legacy and v2 account QR login, v2 Agent Key grants and bound browser
 handoffs, request-only/persistent app identity, and dedicated Agent Key login.
@@ -451,8 +453,14 @@ Denied undelivered sessions/refresh tokens and child credentials are revoked;
 delivery ciphertext is cleared and cleanup is audited. Completed sessions retain
 normal expiry/revocation; turning off prevents further exempt derivation.
 
-Upgrade all backend replicas before publishing the switch or enabling it. Old
-replicas cannot deserialize the new session exemption. Before a backend rollback,
+Missing revisions use a reserved nil UUID generation without a migration. The
+transaction fence accepts an absent boolean as on and always rejects explicit
+false. The first preference change or MFA-disable revision invalidates nil-stamped
+grants. Audits distinguish default policy use with `policy_default: true`.
+
+Use a coordinated traffic cutover to a fully upgraded backend fleet before
+publishing the frontend. Default-on approvals immediately write the new exemption;
+old replicas cannot deserialize it and may return 500 during a mixed-fleet rollout. Before a backend rollback,
 revoke every session matching `mfa_exemption: "approved_sign_in_policy"` and drain
 outstanding exempt grants/proofs. Old readers ignore grant revision fields and
 fail closed for unverified approval authority.

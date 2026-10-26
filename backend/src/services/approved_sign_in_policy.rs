@@ -1,4 +1,4 @@
-//! Opt-in MFA exception, scoped to explicitly approved sign-in protocols.
+//! Account-controlled MFA exception for explicitly approved sign-in protocols.
 use bson::{Document, doc};
 use mongodb::{ClientSession, Database};
 
@@ -11,11 +11,18 @@ use crate::{
     },
 };
 
+/// Missing preferences use this generation until the first explicit change.
+pub const DEFAULT_REVISION: &str = "00000000-0000-0000-0000-000000000000";
+
+pub fn effective_revision(policy: &SecurityPreferences) -> &str {
+    policy.revision.as_deref().unwrap_or(DEFAULT_REVISION)
+}
+
 pub fn permits(user: &User, verified: bool, revision: Option<&str>) -> bool {
     let policy = &user.profile_config.security;
     match revision {
         Some(revision) => {
-            policy.skip_mfa_for_approved_sign_ins && policy.revision.as_deref() == Some(revision)
+            policy.skip_mfa_for_approved_sign_ins && effective_revision(policy) == revision
         }
         None => session_authority::may_derive(user.mfa_enabled, verified),
     }
@@ -47,11 +54,10 @@ pub async fn authorize(
         return Ok(None);
     }
     let policy = &user.profile_config.security;
-    let revision = policy
-        .revision
-        .as_deref()
-        .filter(|_| policy.skip_mfa_for_approved_sign_ins)
-        .ok_or(AppError::MfaStepUpRequired)?;
+    if !policy.skip_mfa_for_approved_sign_ins {
+        return Err(AppError::MfaStepUpRequired);
+    }
+    let revision = effective_revision(policy);
     if let Some(expected) = authority.app_policy_revision {
         if expected.to_string() != revision {
             return Err(AppError::MfaStepUpRequired);
@@ -88,14 +94,22 @@ pub async fn fence(
     let Some(revision) = revision else {
         return Ok(());
     };
+    let mut filter = doc! {
+        "_id": actor, "is_active": true, "user_type": {"$ne": "org"},
+        "$or": [
+            {"profile_config.security.skip_mfa_for_approved_sign_ins": true},
+            {"profile_config.security.skip_mfa_for_approved_sign_ins": {"$exists": false}},
+        ],
+    };
+    if revision == DEFAULT_REVISION {
+        filter.insert("profile_config.security.revision", bson::Bson::Null);
+    } else {
+        filter.insert("profile_config.security.revision", revision);
+    }
     let result = db
         .collection::<Document>(USERS)
         .update_one(
-            doc! {
-                "_id": actor, "is_active": true, "user_type": {"$ne": "org"},
-                "profile_config.security.skip_mfa_for_approved_sign_ins": true,
-                "profile_config.security.revision": revision,
-            },
+            filter,
             doc! {"$set": {"profile_config.security.use_nonce": uuid::Uuid::new_v4().to_string()}},
         )
         .session(&mut *tx)
@@ -157,8 +171,8 @@ pub async fn save(
         let user = db.collection::<User>(USERS).find_one(doc! {"_id": actor, "is_active": true})
             .session(&mut *tx).await?.ok_or_else(|| AppError::Unauthorized("Account is unavailable".into()))?;
         super::auth_service::ensure_person_user(&user)?;
-        if *enabled && !user.mfa_enabled {
-            return Err(AppError::ValidationError("Enable two-factor authentication before skipping MFA for app sign-ins".into()));
+        if user.profile_config.security.skip_mfa_for_approved_sign_ins == *enabled {
+            return Ok(user.profile_config.security);
         }
         if *enabled && user.mfa_enabled {
             session_authority::require_derived_mfa(DerivedMfaAuthority::new(true, authority.verified))?;
@@ -171,7 +185,6 @@ pub async fn save(
             if result.matched_count != 1 { return Err(AppError::MfaStepUpRequired); }
         }
         let mut policy = user.profile_config.security;
-        if policy.skip_mfa_for_approved_sign_ins == *enabled { return Ok(policy); }
         policy.skip_mfa_for_approved_sign_ins = *enabled;
         policy.revision = Some(uuid::Uuid::new_v4().to_string());
         policy.changed_at = Some(chrono::Utc::now());

@@ -1,15 +1,31 @@
 # Configurable MFA for QR sign-ins
 
-Status: design approved by Opus QR MFA policy reviewer on 2026-10-26; implementation in progress.
+Status: revised to default-on after the user's clarification on 2026-10-26.
+The earlier default-off implementation passed all nine policy tests at
+`724bff133`; the default-on revision is undergoing runtime validation and renewed
+Opus review in [PR #2047](https://github.com/ChronoAIProject/NyxID/pull/2047).
+
+## Investigation evidence
+
+The deployed frontend's `build-version.json` and backend `/health` both reported
+commit `2ab239cecbda` (backend v0.73.1), which contains merged #2042. This was an
+implementation gap: the setting was a static label and approved sign-in
+derivation still required a verified parent. The actual `/login` MFA screen
+also lacked a way to open its existing QR sign-in panel.
+
+The installed mobile client's approval screens submit the request before
+handling a server `2003 mfa_step_up_required` error. The saved server policy can
+therefore permit approval without a mobile protocol change. This source check
+does not substitute for installed-phone acceptance after deployment.
 
 ## Corrected requirement
 
-The account holder can enable a real security setting to skip NyxID MFA for
-QR/app-approved sign-ins. This includes approving from an already authenticated
+QR/app-approved sign-ins skip NyxID MFA by default unless the account holder
+explicitly turns off a real security toggle. This includes an already authenticated
 legacy or mobile-exempt phone session without entering an authenticator code.
 The static **Always enabled** status introduced in #2042 does not implement this
-preference. The earlier plan's verified-parent-only interpretation is superseded
-by the user's clarification on 2026-10-26.
+preference. The user's clarification on 2026-10-26 requires a saved default-on
+toggle and supersedes the earlier default-off interpretation.
 
 Scanning identifies a request. The signed-in person must still explicitly approve
 the request, and public codes alone never authorize a sign-in. Password/social
@@ -18,13 +34,14 @@ their existing checks.
 
 ## Agreed behavior
 
-- Store a per-person `skip_mfa_for_approved_sign_ins` preference, defaulting to false when
-  absent. Show a working switch in Settings -> Security, including the shared
+- Store a per-person `skip_mfa_for_approved_sign_ins` preference, defaulting to true when
+  absent at any level of the profile. Show a working switch in Settings -> Security, including the shared
   assistant account panel. An older backend must not appear to support a switch
   it cannot persist. QR scans and typed request codes use the same approval protocol.
-- Enabling the exception requires enrolled MFA and the account holder's verified session. This is a one-time setting change, not a check on every QR sign-in.
-  Disabling needs no step-up. Sid-less bearers cannot use the exception; accounts
-  without MFA cannot enable it and never receive an exemption marker. Use the existing current-session step-up UI when needed. API keys, delegated
+- Turning it back on after an explicit off requires the account holder's verified session when MFA is enrolled. A no-op true save needs no step-up.
+  Disabling needs no step-up, and accounts without MFA can save either value.
+  Sid-less bearers cannot use the exception; accounts without MFA never receive
+  an exemption marker. Use the existing current-session step-up UI when needed. API keys, delegated
   credentials, OAuth clients, organizations and service accounts cannot change it.
 - With the setting enabled, completed first-party human sessions can approve QR
   requests without an extra MFA prompt. Preserve real MFA evidence separately
@@ -41,7 +58,7 @@ their existing checks.
 - Check live policy at approval and at final credential delivery. Disabling the
   setting blocks outstanding bypass-dependent grants/proofs from completing.
   Completed sessions retain their fixed expiry and may be revoked normally.
-  Disabling MFA clears the setting and rotates its revision.
+  Disabling MFA preserves the choice and rotates its revision.
   Rotate a policy revision on changes so disabling/re-enabling cannot revive stale proofs.
 - Make the policy check and final write conflict with a concurrent setting
   change. A read-only snapshot of the preference is not a sufficient fence.
@@ -50,8 +67,8 @@ their existing checks.
 
 ## Verification
 
-- Mount the setting endpoint and prove absent/off/on persistence, human-only
-  authority, MFA confirmation for an enrolled account, and metadata-only audit.
+- Mount the setting endpoint and prove absent defaults on, explicit off/on persistence, human-only
+  authority, MFA confirmation only when re-enabling for an enrolled account, and metadata-only audit.
 - Run the real device approval/delivery flow for an MFA account with an unassured
   legacy/mobile-exempt parent: off refuses; on succeeds; issued authority records
   a QR exemption and can authenticate/refresh without becoming MFA-verified.
@@ -75,4 +92,6 @@ After publication/deployment, inspect the frontend build metadata and backend
 health commit, then exercise an MFA-enabled account with the setting both off
 and on using the installed phone app. The visible acceptance result is a saved
 switch and a QR sign-in that completes without a phone or browser MFA prompt
-when the exception is enabled.
+by default, and the same approval requires MFA after the owner turns the toggle off.
+Use a coordinated traffic cutover to a fully upgraded backend fleet: old replicas
+cannot deserialize the new exemption, and default-on approvals write it immediately.

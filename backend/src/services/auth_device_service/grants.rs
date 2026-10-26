@@ -79,6 +79,7 @@ pub async fn approve_with_agent_key(
     };
     let mut transaction = db.client().start_session().await?;
     let policy_used = mfa_policy_revision.is_some();
+    let policy_default = mfa_policy_revision.as_deref() == Some(app_policy::DEFAULT_REVISION);
     {
         let db_owned = db.clone();
         let hmac_owned = Zeroizing::new(hmac_key.to_vec());
@@ -121,7 +122,7 @@ pub async fn approve_with_agent_key(
         Some(input.user_id),
         "auth_device_code_approved".into(),
         Some(
-            serde_json::json!({"request_id": row.id, "auth_kind": "agent_key", "mfa_policy": policy_used.then_some("approved_sign_in"), "api_key_id": key_id, "credential_id": credential_id}),
+            serde_json::json!({"request_id": row.id, "auth_kind": "agent_key", "mfa_policy": policy_used.then_some("approved_sign_in"), "policy_default": policy_default, "api_key_id": key_id, "credential_id": credential_id}),
         ),
         input.approver_ip,
         input.approver_user_agent,

@@ -39,8 +39,9 @@ export function ApprovedSignInPolicy() {
           </label>
           <p id="skip-approved-sign-in-description" className="text-12 text-muted-foreground">
             Approve QR or typed sign-in codes from a signed-in NyxID app or browser without
-            another authenticator code. Approve only codes shown on your own screen.
-            {!user?.mfa_enabled && " Enable two-factor authentication first to use this setting."}
+            another authenticator code. Enabled by default; turn this off to require MFA
+            for these approvals. Approve only codes shown on your own screen.
+            {!user?.mfa_enabled && " Takes effect when two-factor authentication is on."}
           </p>
           {!policy && <p className="text-12 text-muted-foreground">This server does not support changing this setting yet.</p>}
         </div>
@@ -48,7 +49,7 @@ export function ApprovedSignInPolicy() {
           id="skip-approved-sign-in-mfa"
           aria-describedby="skip-approved-sign-in-description"
           checked={policy?.skip_mfa_for_approved_sign_ins ?? false}
-          disabled={!policy || (!user?.mfa_enabled && !policy.skip_mfa_for_approved_sign_ins) || save.isPending || !!stepUp.prompt}
+          disabled={!policy || save.isPending || !!stepUp.prompt}
           onCheckedChange={(enabled) => {
             setError(null);
             if (enabled) setConfirmAccount(accountId ?? null);

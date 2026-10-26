@@ -328,7 +328,8 @@ async fn complete_identity(
         "login_request_identity_verified".into(),
         Some(
             serde_json::json!({"request_id": row.request_id, "keep_signed_in": row.keep_signed_in,
-                "method": method, "mfa_verified": row.mfa_verified, "mfa_policy": row.mfa_policy_revision.as_ref().map(|_| "approved_sign_in")}),
+                "method": method, "mfa_verified": row.mfa_verified, "mfa_policy": row.mfa_policy_revision.as_ref().map(|_| "approved_sign_in"),
+                "policy_default": row.mfa_policy_revision.as_deref() == Some(crate::services::approved_sign_in_policy::DEFAULT_REVISION)}),
         ),
         Some(ip),
         ua,

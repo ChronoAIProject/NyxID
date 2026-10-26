@@ -315,7 +315,7 @@ pub async fn approve_app_identity(
         Some(actor.id),
         "login_request_app_identity_approved".into(),
         Some(
-            serde_json::json!({"request_id": request.id, "approval_id": id, "mfa_policy": revision.map(|_| "approved_sign_in")}),
+            serde_json::json!({"request_id": request.id, "approval_id": id, "mfa_policy": revision.map(|_| "approved_sign_in"), "policy_default": revision == Some(app_policy::DEFAULT_REVISION)}),
         ),
         input.approver_ip.clone(),
         input.approver_user_agent.clone(),

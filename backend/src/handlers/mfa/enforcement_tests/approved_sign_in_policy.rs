@@ -75,6 +75,78 @@ async fn change(
     saved.revision.unwrap_or_default()
 }
 
+async fn enable_fixture_policy(
+    state: &AppState,
+    id: &str,
+    verified: &token_service::IssuedTokens,
+    default_on: bool,
+) -> String {
+    if default_on {
+        state
+            .db
+            .collection::<bson::Document>(USERS)
+            .update_one(
+                doc! {"_id": id},
+                doc! {"$unset": {"profile_config.security": ""}},
+            )
+            .await
+            .unwrap();
+        policy::DEFAULT_REVISION.into()
+    } else {
+        change(state, id, verified, true).await
+    }
+}
+
+#[test]
+fn qr_policy_missing_model_shapes_default_on_and_explicit_false_is_preserved() {
+    assert!(
+        crate::models::user::UserProfileConfig::default()
+            .security
+            .skip_mfa_for_approved_sign_ins
+    );
+    for shape in ["profile", "security", "field", "nonce", "revision"] {
+        let mut row = bson::to_document(&test_user(
+            &uuid::Uuid::new_v4().to_string(),
+            UserType::Person,
+        ))
+        .unwrap();
+        match shape {
+            "profile" => {
+                row.remove("profile_config");
+            }
+            "security" => {
+                row.get_document_mut("profile_config")
+                    .unwrap()
+                    .remove("security");
+            }
+            "field" => {
+                row.get_document_mut("profile_config")
+                    .unwrap()
+                    .insert("security", doc! {});
+            }
+            "nonce" => {
+                row.get_document_mut("profile_config")
+                    .unwrap()
+                    .insert("security", doc! {"use_nonce": "used"});
+            }
+            _ => {
+                row.get_document_mut("profile_config").unwrap().insert(
+                    "security",
+                    doc! {"revision": uuid::Uuid::new_v4().to_string()},
+                );
+            }
+        }
+        let user: User = bson::from_document(row).unwrap();
+        assert!(
+            user.profile_config.security.skip_mfa_for_approved_sign_ins,
+            "{shape}"
+        );
+    }
+    let policy: crate::models::user::SecurityPreferences =
+        bson::from_document(doc! {"skip_mfa_for_approved_sign_ins": false}).unwrap();
+    assert!(!policy.skip_mfa_for_approved_sign_ins);
+}
+
 async fn mfa_fixture(
     name: &str,
 ) -> (
@@ -172,7 +244,9 @@ async fn qr_policy_setting_is_mounted_persisted_and_requires_verified_enable_onl
     let unknown = client
         .put(&endpoint)
         .bearer_auth(&verified.access_token)
-        .json(&json!({"skip_mfa_for_approved_sign_ins": true, "revision": "forged"}))
+        .json(
+            &json!({"skip_mfa_for_approved_sign_ins": true, "revision": policy::DEFAULT_REVISION}),
+        )
         .send()
         .await
         .unwrap();
@@ -277,6 +351,15 @@ async fn qr_policy_setting_is_mounted_persisted_and_requires_verified_enable_onl
 
 #[tokio::test]
 async fn qr_policy_legacy_and_v2_deliver_honest_browser_and_cli_authority() {
+    exercise_account_policy(false).await;
+}
+
+#[tokio::test]
+async fn qr_policy_default_legacy_and_v2_need_no_mfa() {
+    exercise_account_policy(true).await;
+}
+
+async fn exercise_account_policy(default_on: bool) {
     let (state, id, verified, phone) = mfa_fixture("qr_policy_delivery").await;
     let (base, server) = serve(state.clone()).await;
     let client = reqwest::Client::new();
@@ -295,7 +378,12 @@ async fn qr_policy_legacy_and_v2_deliver_honest_browser_and_cli_authority() {
         }
         for v2 in [false, true] {
             for browser in [false, true] {
-                change(&state, &id, &verified, false).await;
+                if !default_on {
+                    change(&state, &id, &verified, false).await;
+                }
+                if default_on {
+                    enable_fixture_policy(&state, &id, &verified, true).await;
+                }
                 let request = if v2 {
                     device::initiate_v2(
                         &state.db,
@@ -325,8 +413,31 @@ async fn qr_policy_legacy_and_v2_deliver_honest_browser_and_cli_authority() {
                         phone_authority,
                     )
                 };
-                assert!(matches!(approve().await, Err(AppError::MfaStepUpRequired)));
-                let revision = change(&state, &id, &verified, true).await;
+                let revision = if default_on {
+                    let saved = policy::save(
+                        &state.db,
+                        &id,
+                        true,
+                        phone_authority,
+                        &crate::services::audit_service::AuditActor {
+                            user_id: id.clone(),
+                            ip_address: None,
+                            user_agent: None,
+                            api_key_id: None,
+                            api_key_name: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    assert!(
+                        saved.revision.is_none(),
+                        "default true save must be a no-op without MFA"
+                    );
+                    policy::DEFAULT_REVISION.to_owned()
+                } else {
+                    assert!(matches!(approve().await, Err(AppError::MfaStepUpRequired)));
+                    change(&state, &id, &verified, true).await
+                };
                 let mut sidless = phone_authority;
                 sidless.session_id = None;
                 assert!(matches!(
@@ -438,6 +549,17 @@ async fn qr_policy_legacy_and_v2_deliver_honest_browser_and_cli_authority() {
                     LEGACY_CODES
                 });
                 let row = rows.find_one(doc! {"device_code_hmac": device::hmac_hex(state.auth_device_hmac_key.as_slice(), request.device_code.as_bytes())}).await.unwrap().unwrap();
+                if default_on {
+                    let user = state
+                        .db
+                        .collection::<User>(USERS)
+                        .find_one(doc! {"_id": &id})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(user.profile_config.security.skip_mfa_for_approved_sign_ins);
+                    assert!(user.profile_config.security.revision.is_none());
+                }
                 assert!(!row.mfa_assured);
                 assert_eq!(row.mfa_policy_revision.as_deref(), Some(revision.as_str()));
             }
@@ -451,7 +573,7 @@ async fn qr_policy_legacy_and_v2_deliver_honest_browser_and_cli_authority() {
 async fn qr_policy_revocation_blocks_pending_delivery_and_off_on_never_revives_it() {
     let (state, id, verified, phone) = mfa_fixture("qr_policy_revoke").await;
     for browser in [false, true] {
-        change(&state, &id, &verified, true).await;
+        enable_fixture_policy(&state, &id, &verified, true).await;
         let request = device::initiate_v2(
             &state.db,
             state.auth_device_hmac_key.as_slice(),
@@ -520,6 +642,15 @@ async fn qr_policy_revocation_blocks_pending_delivery_and_off_on_never_revives_i
 
 #[tokio::test]
 async fn qr_policy_agent_key_protocols_and_bound_browser_handoffs_obey_live_revision() {
+    exercise_agent_policy(false).await;
+}
+
+#[tokio::test]
+async fn qr_policy_default_agent_key_protocols_and_handoffs_need_no_mfa() {
+    exercise_agent_policy(true).await;
+}
+
+async fn exercise_agent_policy(default_on: bool) {
     let (state, id, verified, phone) = mfa_fixture("qr_policy_agent").await;
     crate::services::role_service::seed_system_roles(&state.db)
         .await
@@ -530,7 +661,7 @@ async fn qr_policy_agent_key_protocols_and_bound_browser_handoffs_obey_live_revi
                 if rule15 && handoff {
                     continue;
                 }
-                change(&state, &id, &verified, true).await;
+                let revision = enable_fixture_policy(&state, &id, &verified, default_on).await;
                 if rule15 {
                     let request = agent::request(
                         &state.db,
@@ -554,6 +685,9 @@ async fn qr_policy_agent_key_protocols_and_bound_browser_handoffs_obey_live_revi
                     )
                     .await
                     .unwrap();
+                    let row = state.db.collection::<bson::Document>(crate::models::agent_key_login_request::COLLECTION_NAME)
+                        .find_one(doc! {"device_code_hmac": device::hmac_hex(state.auth_device_hmac_key.as_slice(), format!("agent-key-login:{}", request.device_code).as_bytes())}).await.unwrap().unwrap();
+                    assert_eq!(row.get_str("mfa_policy_revision").unwrap(), revision);
                     if revoke {
                         change(&state, &id, &verified, false).await;
                     }
@@ -599,6 +733,12 @@ async fn qr_policy_agent_key_protocols_and_bound_browser_handoffs_obey_live_revi
                     )
                     .await
                     .unwrap();
+                    let approved = state.db.collection::<AuthDeviceCode>(DEVICE_CODES)
+                        .find_one(doc! {"device_code_hmac": device::hmac_hex(state.auth_device_hmac_key.as_slice(), request.device_code.as_bytes())}).await.unwrap().unwrap();
+                    assert_eq!(
+                        approved.mfa_policy_revision.as_deref(),
+                        Some(revision.as_str())
+                    );
                     let browser_code = if handoff {
                         Some(
                             code::browser_handoff(
@@ -616,6 +756,19 @@ async fn qr_policy_agent_key_protocols_and_bound_browser_handoffs_obey_live_revi
                         change(&state, &id, &verified, false).await;
                     }
                     if let Some(minted) = browser_code {
+                        let bound = state
+                            .db
+                            .collection::<crate::models::login_code::LoginCode>(
+                                crate::models::login_code::COLLECTION_NAME,
+                            )
+                            .find_one(doc! {"_id": &minted.id})
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(
+                            bound.mfa_policy_revision.as_deref(),
+                            Some(revision.as_str())
+                        );
                         let result = code::redeem(
                             &state.db,
                             &state.config,
@@ -769,7 +922,7 @@ async fn qr_policy_replacing_a_handoff_preserves_the_grant_and_new_code() {
 #[tokio::test]
 async fn qr_policy_marker_cannot_exempt_an_unbound_login_code() {
     let (state, id, verified, _) = mfa_fixture("qr_policy_unbound_code").await;
-    let revision = change(&state, &id, &verified, true).await;
+    let revision = enable_fixture_policy(&state, &id, &verified, true).await;
     let minted = code::mint(
         &state.db,
         state.auth_device_hmac_key.as_slice(),
@@ -828,6 +981,15 @@ async fn qr_policy_marker_cannot_exempt_an_unbound_login_code() {
 
 #[tokio::test]
 async fn qr_policy_app_identity_preserves_request_only_and_persistent_provenance() {
+    exercise_app_policy(false).await;
+}
+
+#[tokio::test]
+async fn qr_policy_default_app_identity_needs_no_mfa() {
+    exercise_app_policy(true).await;
+}
+
+async fn exercise_app_policy(default_on: bool) {
     use crate::{
         handlers::login_approval as handler,
         models::login_approval::{COLLECTION_NAME as APPROVALS, LoginApproval, LoginFlow},
@@ -836,7 +998,7 @@ async fn qr_policy_app_identity_preserves_request_only_and_persistent_provenance
     let (state, id, verified, phone) = mfa_fixture("qr_policy_app_identity").await;
     for keep in [false, true] {
         for revoke_at in ["never", "before_identity", "before_decision"] {
-            change(&state, &id, &verified, true).await;
+            let revision = enable_fixture_policy(&state, &id, &verified, default_on).await;
             let request = device::initiate_v2(
                 &state.db,
                 state.auth_device_hmac_key.as_slice(),
@@ -924,7 +1086,10 @@ async fn qr_policy_app_identity_preserves_request_only_and_persistent_provenance
                 .unwrap();
             assert!(proof_row.verified);
             assert!(!proof_row.mfa_verified);
-            assert!(proof_row.mfa_policy_revision.is_some());
+            assert_eq!(
+                proof_row.mfa_policy_revision.as_deref(),
+                Some(revision.as_str())
+            );
             if keep {
                 let cookie = response_headers
                     .get_all(header::SET_COOKIE)
@@ -981,66 +1146,166 @@ async fn qr_policy_app_identity_preserves_request_only_and_persistent_provenance
 }
 
 #[tokio::test]
-async fn qr_policy_cannot_precede_mfa_enrollment_and_disabling_mfa_resets_it() {
-    let (state, id) = fixture("qr_policy_mfa_lifecycle").await;
-    crate::test_utils::init_test_audit_chain_hmac_key();
-    let tokens = parent(&state, &id, true).await;
-    let audit = crate::services::audit_service::AuditActor {
-        user_id: id.clone(),
-        ip_address: None,
-        user_agent: None,
-        api_key_id: None,
-        api_key_name: None,
-    };
-    assert!(matches!(
-        policy::save(&state.db, &id, true, authority(&tokens, true), &audit).await,
-        Err(AppError::ValidationError(_))
-    ));
-    // The test helper enrolls with no pre-existing sessions, so revoke the setup
-    // fixture parent before asking the real enrollment path to confirm.
-    state
-        .db
-        .collection::<Session>(SESSIONS)
-        .delete_many(doc! {"user_id": &id})
+async fn qr_policy_toggle_without_mfa_and_mfa_disable_preserve_choice_and_revoke_proofs() {
+    for keep_enabled in [false, true] {
+        let (state, id) = fixture("qr_policy_mfa_lifecycle").await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let tokens = parent(&state, &id, false).await;
+        enable_fixture_policy(&state, &id, &tokens, true).await;
+        let audit = crate::services::audit_service::AuditActor {
+            user_id: id.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        };
+        let off = policy::save(&state.db, &id, false, authority(&tokens, false), &audit)
+            .await
+            .unwrap();
+        let on = policy::save(&state.db, &id, true, authority(&tokens, false), &audit)
+            .await
+            .unwrap();
+        assert!(!off.skip_mfa_for_approved_sign_ins);
+        assert!(on.skip_mfa_for_approved_sign_ins);
+        assert_ne!(off.revision, on.revision);
+        assert_ne!(on.revision.as_deref(), Some(policy::DEFAULT_REVISION));
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"user_id": &id, "event_type": "security_setting_changed"})
+                .await
+                .unwrap(),
+            2
+        );
+        state
+            .db
+            .collection::<Session>(SESSIONS)
+            .delete_many(doc! {"user_id": &id})
+            .await
+            .unwrap();
+        let recovery = enroll(&state, &id).await;
+        let verified = parent(&state, &id, true).await;
+        let phone = parent(&state, &id, false).await;
+        let revision = if keep_enabled {
+            enable_fixture_policy(&state, &id, &verified, true).await
+        } else {
+            change(&state, &id, &verified, false).await
+        };
+        let pending = if keep_enabled {
+            let request = device::initiate_v2(
+                &state.db,
+                state.auth_device_hmac_key.as_slice(),
+                Default::default(),
+                true,
+            )
+            .await
+            .unwrap();
+            device::approve(
+                &state.db,
+                &state.config,
+                &state.jwt_keys,
+                &state.encryption_keys,
+                state.auth_device_hmac_key.as_slice(),
+                input(&id, &request),
+                authority(&phone, false),
+            )
+            .await
+            .unwrap();
+            Some(request)
+        } else {
+            None
+        };
+        mfa_service::disable_totp_with_code(
+            &state.db,
+            &state.encryption_keys,
+            &id,
+            &recovery[0],
+            None,
+            Some(&audit),
+        )
         .await
         .unwrap();
-    let recovery = enroll(&state, &id).await;
-    let tokens = parent(&state, &id, true).await;
-    let revision = change(&state, &id, &tokens, true).await;
-    mfa_service::disable_totp_with_code(
-        &state.db,
-        &state.encryption_keys,
-        &id,
-        &recovery[0],
-        None,
-        Some(&audit),
-    )
-    .await
-    .unwrap();
-    let user = state
-        .db
-        .collection::<User>(USERS)
-        .find_one(doc! {"_id": &id})
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!user.mfa_enabled);
-    assert!(!user.profile_config.security.skip_mfa_for_approved_sign_ins);
-    assert_ne!(
-        user.profile_config.security.revision.as_deref(),
-        Some(revision.as_str())
-    );
-    state.db.drop().await.unwrap();
+        let user = state
+            .db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id": &id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!user.mfa_enabled);
+        assert_eq!(
+            user.profile_config.security.skip_mfa_for_approved_sign_ins,
+            keep_enabled
+        );
+        assert_ne!(
+            user.profile_config.security.revision.as_deref(),
+            Some(revision.as_str())
+        );
+        if let Some(request) = pending {
+            assert!(matches!(
+                device::poll_and_prepare(
+                    &state.db,
+                    &state.encryption_keys,
+                    state.auth_device_hmac_key.as_slice(),
+                    &request.device_code
+                )
+                .await,
+                Err(AppError::AuthDeviceCodeDenied)
+            ));
+            let denied = state.db.collection::<AuthDeviceCode>(DEVICE_CODES)
+                .find_one(doc! {"device_code_hmac": device::hmac_hex(state.auth_device_hmac_key.as_slice(), request.device_code.as_bytes())})
+                .await.unwrap().unwrap();
+            assert!(denied.purge_at.is_some());
+            assert_eq!(
+                denied.status,
+                crate::models::auth_device_code::AuthDeviceCodeStatus::Denied
+            );
+            assert!(denied.delivery_access_token_encrypted.is_none());
+            assert!(denied.delivery_refresh_token_encrypted.is_none());
+            assert!(
+                state
+                    .db
+                    .collection::<Session>(SESSIONS)
+                    .find_one(doc! {"_id": &denied.approved_session_id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .revoked
+            );
+            assert_eq!(
+                state
+                    .db
+                    .collection::<bson::Document>(crate::models::refresh_token::COLLECTION_NAME)
+                    .count_documents(
+                        doc! {"session_id": &denied.approved_session_id, "revoked": false}
+                    )
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        state.db.drop().await.unwrap();
+    }
 }
 
 #[tokio::test]
 async fn qr_policy_concurrent_disable_retries_a_stale_delivery_snapshot_and_denies() {
+    exercise_policy_collision(false).await;
+}
+
+#[tokio::test]
+async fn qr_policy_default_concurrent_disable_denies_stale_snapshot() {
+    exercise_policy_collision(true).await;
+}
+
+async fn exercise_policy_collision(default_on: bool) {
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
     let (state, id, verified, phone) = mfa_fixture("qr_policy_collision").await;
-    let revision = change(&state, &id, &verified, true).await;
+    let revision = enable_fixture_policy(&state, &id, &verified, default_on).await;
     let request = device::initiate_v2(
         &state.db,
         state.auth_device_hmac_key.as_slice(),

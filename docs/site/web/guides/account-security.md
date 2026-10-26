@@ -51,7 +51,7 @@ with a phone that is already signed in to NyxID and approve the request.
 This option is also available on the MFA verification screen after password or
 social sign-in. Returning from the QR panel keeps your existing MFA challenge
 available if you prefer to enter a code.
-With **Skip MFA for NyxID app sign-ins** enabled, an already signed-in phone or
+**Skip MFA for NyxID app sign-ins** is on by default. An already signed-in phone or
 browser can approve QR or typed sign-in codes without an extra authenticator
 prompt. With the setting off, an older or mobile-exempt session may need
 **Verify this session** first. A verified approval already carries its MFA
@@ -62,24 +62,29 @@ account**. NyxID retries the account lookup using the delivered browser session;
 it does not redeem the QR code a second time. Sign-in completes after that lookup
 succeeds.
 
-Open **Settings → Security → Two-Factor Authentication** and turn on **Skip MFA
-for NyxID app sign-ins**. The switch is off by default. Enable two-factor
-authentication first; enabling the exception may ask you to verify the current
-session once. The saved preference covers browser QR login, device account and
-Agent Key login, and app verification while approving another device. QR scans
-and typed request codes use the same policy.
+Open **Settings → Security → Two-Factor Authentication** to change **Skip MFA
+for NyxID app sign-ins**. Turn it off to require MFA when an older or mobile
+session approves a QR or typed sign-in code. Turning it back on may ask you to
+verify the current session when MFA is enabled. Accounts without MFA can save
+either choice; it takes effect when two-factor authentication is on. The saved
+preference covers browser QR login, device account and Agent Key login, and app
+verification while approving another device. QR scans and typed request codes
+use the same policy.
 
 Anyone with access to your signed-in app or browser can use this preference to
 approve another sign-in without TOTP, including phone sessions created during
 the mobile MFA rollout. Review each request and approve only codes shown on your
-own screen. Password/social sign-in and ordinary one-time login-code creation
-still use their usual MFA requirements.
+own screen. With mobile MFA off, someone holding your social first factor can
+sign in to the mobile app and use it to approve web QR login by default. Turning
+this switch off closes that path. Password/social web sign-in and ordinary
+one-time login-code creation still use their usual MFA requirements.
 
 Turning the switch off requires no extra MFA and blocks outstanding approvals
 that relied on the exception. Turning it back on cannot revive those approvals.
 Completed sessions remain signed in until their expiry or revocation; use
 **Sign out other sessions** to remove them. Disabling two-factor authentication
-also resets this preference. Older servers show a disabled switch until updated.
+preserves this preference and invalidates pending bypass approvals. Older servers
+show a disabled switch until updated.
 
 ### Disable MFA
 

@@ -649,6 +649,8 @@ pub async fn approve(
     let mfa_policy_revision =
         super::approved_sign_in_policy::authorize(db, actor, authority).await?;
     let policy_used = mfa_policy_revision.is_some();
+    let policy_default =
+        mfa_policy_revision.as_deref() == Some(super::approved_sign_in_policy::DEFAULT_REVISION);
     let row = find_by_user_code(db, hmac_key, user_code).await?;
     if row.status != Status::Pending || row.expires_at <= Utc::now() {
         return Err(decision_error(&row));
@@ -725,7 +727,7 @@ pub async fn approve(
         Some(actor.into()),
         "agent_key_login_approved".into(),
         Some(
-            serde_json::json!({"request_id": request_id, "api_key_id": key_id, "credential_id": credential_id, "key_was_created": created_now, "mfa_policy": policy_used.then_some("approved_sign_in"), "owner_type": owner_type}),
+            serde_json::json!({"request_id": request_id, "api_key_id": key_id, "credential_id": credential_id, "key_was_created": created_now, "mfa_policy": policy_used.then_some("approved_sign_in"), "policy_default": policy_default, "owner_type": owner_type}),
         ),
         approver_ip.map(str::to_owned),
         approver_user_agent.map(str::to_owned),
