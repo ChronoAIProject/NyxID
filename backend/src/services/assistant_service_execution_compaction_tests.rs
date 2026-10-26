@@ -8,7 +8,7 @@ use crate::services::{
 use axum::{body::Body, http::Request, response::Response};
 use tower::ServiceExt;
 
-async fn compact_connection(
+pub(super) async fn compact_connection(
     f: &Fixture,
     owner: &str,
     catalog: &str,
@@ -72,11 +72,16 @@ async fn model_call(
         request = request.header(ACK_HEADER, id);
     }
     let (_, router) = crate::routes::build_router();
-    let response = router
-        .with_state(f.state.clone())
-        .oneshot(request.body(Body::from(body.to_string())).unwrap())
-        .await
-        .unwrap();
+    // Match the server's request task without retaining the fixture's polling
+    // frame. Abandoning this helper still cancels the request.
+    let response = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+        router
+            .with_state(f.state.clone())
+            .oneshot(request.body(Body::from(body.to_string())).unwrap()),
+    ))
+    .await
+    .unwrap()
+    .unwrap();
     let status = response.status().as_u16();
     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await

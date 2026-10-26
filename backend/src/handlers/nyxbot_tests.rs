@@ -427,6 +427,58 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
 }
 
 #[tokio::test]
+async fn channel_service_selection_failure_returns_actionable_reply_without_model_turn() {
+    // Keep the fixture and provider handler futures off the test polling stack.
+    let (state, calls, server) = Box::pin(setup("nyxbot_service_selection_2022")).await;
+    let _server = tokio_util::task::AbortOnDropHandle::new(server);
+    let (row, agent_key) = Box::pin(channel(&state, "gateway")).await;
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"owner_sender_ids":["7"]}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        Box::pin(put_binding(
+            State(state.clone()),
+            Path("bnd_selection".into()),
+            bearer(&agent_key),
+            Json(binding_body(&agent_key, OWNER))
+        ))
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        Box::pin(put_conversation(
+            State(state.clone()),
+            Path(("bnd_selection".into(), PARTITION.into())),
+            bearer(&agent_key)
+        ))
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let input = format!("/service {}\nContinue the search", Uuid::new_v4());
+    let response = Box::pin(respond(
+        &state,
+        &agent_key,
+        &event(&input, "7", "evt-selection"),
+        "evt_selection",
+    ))
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_text(response).await;
+    assert!(body.contains("connection_unavailable"), "{body}");
+    assert!(body.contains("Reconnect it or restore access"), "{body}");
+    assert!(body.contains("response.completed"), "{body}");
+    assert!(calls.lock().await.is_empty());
+}
+
+#[tokio::test]
 async fn gateway_turns_admit_once_answer_only_the_verified_owner_and_keep_context_verbatim() {
     let (state, calls, server) = setup("nyxbot_turns").await;
     let (row, agent_key) = channel(&state, "gateway").await;

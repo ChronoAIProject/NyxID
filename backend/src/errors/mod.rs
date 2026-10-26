@@ -198,6 +198,13 @@ pub enum AppError {
     #[error("Validation error: {0}")]
     ValidationError(String),
 
+    /// Owner selection diagnostics keep the validation_error / 1008 contract.
+    #[error("{reason}: {message}")]
+    ServiceSelectionInvalid {
+        reason: &'static str,
+        message: &'static str,
+    },
+
     /// Authored skill diagnostics retain the existing validation_error / 1008 contract.
     #[error(transparent)]
     SkillDraftValidation(Box<skill_draft::SkillDraftValidation>),
@@ -843,6 +850,7 @@ impl AppError {
             Self::BadRequest(_)
             | Self::CredentialUnavailable(_)
             | Self::ValidationError(_)
+            | Self::ServiceSelectionInvalid { .. }
             | Self::SkillDraftValidation(_) => StatusCode::BAD_REQUEST,
             Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
@@ -1097,7 +1105,9 @@ impl AppError {
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
             Self::DatabaseError(_) => 1007,
-            Self::ValidationError(_) | Self::SkillDraftValidation(_) => 1008,
+            Self::ValidationError(_)
+            | Self::ServiceSelectionInvalid { .. }
+            | Self::SkillDraftValidation(_) => 1008,
             Self::EmailSignupDisabled => 1009,
             Self::SshNodeKeyMissing(_) => 1011,
             Self::SshHostKeyMismatch(_) => 1012,
@@ -1370,7 +1380,9 @@ impl AppError {
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => "rate_limited",
             Self::Internal(_) | Self::PoolAttemptTransport(_) => "internal_error",
             Self::DatabaseError(_) => "database_error",
-            Self::ValidationError(_) | Self::SkillDraftValidation(_) => "validation_error",
+            Self::ValidationError(_)
+            | Self::ServiceSelectionInvalid { .. }
+            | Self::SkillDraftValidation(_) => "validation_error",
             Self::EmailSignupDisabled => "email_signup_disabled",
             Self::SshNodeKeyMissing(_) => "ssh_node_key_missing",
             Self::SshHostKeyMismatch(_) => "ssh_host_key_mismatch",
@@ -1620,6 +1632,9 @@ impl AppError {
             _ => None,
         };
         let details = match &self {
+            AppError::ServiceSelectionInvalid { reason, .. } => {
+                Some(serde_json::json!({"reason": reason}))
+            }
             AppError::SkillDraftValidation(diagnostic) => {
                 Some(serde_json::to_value(diagnostic).expect("fixed skill draft diagnostic"))
             }

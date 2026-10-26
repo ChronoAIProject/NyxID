@@ -345,87 +345,90 @@ async fn actual_managed_http_and_mcp_final_sender_refuses_stop_and_releases_forw
 async fn actual_managed_http_and_mcp_final_sender_refuses_catalog_revocation() {
     refused(true, "catalog").await;
 }
-async fn refused(admitted: bool, drift: &str) {
-    for mcp in [false, true] {
-        let (f, id, catalog) = fixture(false).await;
-        let mut provider = nyxid_service_adapters::test_support::scripted_fixture(
-            "api.telnyx.com",
-            vec![response(true)],
-        )
-        .await;
-        let pause = pause();
-        let hooks = telnyx::TestHooks {
-            client: provider
-                .builder
-                .take()
-                .unwrap()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap(),
-            funded: (!admitted).then(|| pause.clone()),
-            admitted: admitted.then(|| pause.clone()),
-            completed: None,
-        };
-        let pending = telnyx::TEST_HOOKS.scope(hooks, call(&f, &id, mcp));
-        tokio::pin!(pending);
-        tokio::select! { result=&mut pending => panic!("request ended before authority pause: {result:?}"), ()=pause.entered.notified()=>{} }
-        let row = execution(&f).await;
-        assert_eq!(
-            row.state,
-            if admitted {
-                ManagedExecutionState::DispatchAdmitted
+// Keep the shared fixture on the heap while its nested billing request polls.
+fn refused(admitted: bool, drift: &str) -> futures::future::BoxFuture<'_, ()> {
+    Box::pin(async move {
+        for mcp in [false, true] {
+            let (f, id, catalog) = fixture(false).await;
+            let mut provider = nyxid_service_adapters::test_support::scripted_fixture(
+                "api.telnyx.com",
+                vec![response(true)],
+            )
+            .await;
+            let pause = pause();
+            let hooks = telnyx::TestHooks {
+                client: provider
+                    .builder
+                    .take()
+                    .unwrap()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .unwrap(),
+                funded: (!admitted).then(|| pause.clone()),
+                admitted: admitted.then(|| pause.clone()),
+                completed: None,
+            };
+            let pending = telnyx::TEST_HOOKS.scope(hooks, call(&f, &id, mcp));
+            tokio::pin!(pending);
+            tokio::select! { result=&mut pending => panic!("request ended before authority pause: {result:?}"), ()=pause.entered.notified()=>{} }
+            let row = execution(&f).await;
+            assert_eq!(
+                row.state,
+                if admitted {
+                    ManagedExecutionState::DispatchAdmitted
+                } else {
+                    ManagedExecutionState::Funded
+                }
+            );
+            assert!(wallet(&f).await.reserved_credits > Credits::ZERO);
+            if drift == "stop" {
+                f.state
+                    .db
+                    .collection::<Document>("assistant_conversations")
+                    .update_one(
+                        doc! {"_id":&f.row.id},
+                        doc! {"$set":{"active_turn.stop_requested":true}},
+                    )
+                    .await
+                    .unwrap();
             } else {
-                ManagedExecutionState::Funded
+                f.state
+                    .db
+                    .collection::<Document>("downstream_services")
+                    .update_one(
+                        doc! {"_id":catalog},
+                        doc! {"$set":{"platform_key.enabled":false}},
+                    )
+                    .await
+                    .unwrap();
             }
-        );
-        assert!(wallet(&f).await.reserved_credits > Credits::ZERO);
-        if drift == "stop" {
-            f.state
-                .db
-                .collection::<Document>("assistant_conversations")
-                .update_one(
-                    doc! {"_id":&f.row.id},
-                    doc! {"$set":{"active_turn.stop_requested":true}},
-                )
+            pause.resume.notify_one();
+            let error = pending
                 .await
-                .unwrap();
-        } else {
-            f.state
-                .db
-                .collection::<Document>("downstream_services")
-                .update_one(
-                    doc! {"_id":catalog},
-                    doc! {"$set":{"platform_key.enabled":false}},
-                )
-                .await
-                .unwrap();
+                .expect_err("revoked authority must refuse dispatch");
+            assert!(
+                !matches!(error, AppError::ManagedExecutionPending(_)),
+                "proven final refusal must retain its definite rejection classification"
+            );
+            assert_eq!(execution(&f).await.state, ManagedExecutionState::Released);
+            assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
+            assert_eq!(wallet(&f).await.pending_lago_debits, Credits::ZERO);
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+                    .count_documents(doc! {"released":true,"forwarded":false,"status":"failed"})
+                    .await
+                    .unwrap(),
+                3
+            );
+            assert_eq!(receipt_count(&f).await, 0);
+            assert!(matches!(
+                provider.requests.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
         }
-        pause.resume.notify_one();
-        let error = pending
-            .await
-            .expect_err("revoked authority must refuse dispatch");
-        assert!(
-            !matches!(error, AppError::ManagedExecutionPending(_)),
-            "proven final refusal must retain its definite rejection classification"
-        );
-        assert_eq!(execution(&f).await.state, ManagedExecutionState::Released);
-        assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
-        assert_eq!(wallet(&f).await.pending_lago_debits, Credits::ZERO);
-        assert_eq!(
-            f.state
-                .db
-                .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
-                .count_documents(doc! {"released":true,"forwarded":false,"status":"failed"})
-                .await
-                .unwrap(),
-            3
-        );
-        assert_eq!(receipt_count(&f).await, 0);
-        assert!(matches!(
-            provider.requests.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
-    }
+    })
 }
 
 #[tokio::test]
