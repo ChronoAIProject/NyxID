@@ -1,9 +1,9 @@
 use super::auth::{ChangePasswordRequest, ResetPasswordRequest};
 use crate::{
     AppState,
-    crypto::{jwt, password},
+    crypto::{jwt, password, token::generate_random_token},
     models::user::{COLLECTION_NAME as USERS, User, UserType},
-    services::{auth_service, mfa_service, token_service},
+    services::{auth_service, consent_service, mfa_service, oauth_client_service, token_service},
     test_utils::{connect_test_database, test_app_state, test_user},
 };
 use axum::{
@@ -16,6 +16,15 @@ use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+fn ascii_password(bytes: usize) -> String {
+    let mut value = String::with_capacity(bytes);
+    while value.len() < bytes {
+        value.push_str(&generate_random_token());
+    }
+    value.truncate(bytes);
+    value
+}
 
 async fn state(prefix: &str) -> AppState {
     crate::test_utils::init_test_audit_chain_hmac_key();
@@ -115,7 +124,13 @@ async fn change(state: &AppState, token: &str, current: &str, new: &str) -> (Sta
 #[tokio::test]
 async fn password_change_mounted_session_social_reset_invalidation_and_audit() {
     let state = state("password_change_mounted").await;
-    let (user, token) = actor(&state, Some("old"), true).await;
+    let current_password = ascii_password(3);
+    let new_password = format!("{}é", ascii_password(6));
+    let reset_password = generate_random_token();
+    assert_eq!(current_password.len(), 3, "legacy short current password");
+    assert_eq!(new_password.len(), 8);
+    assert_eq!(new_password.chars().count(), 7);
+    let (user, token) = actor(&state, Some(&current_password), true).await;
     let reset = auth_service::initiate_password_reset(&state.db, &user.email)
         .await
         .unwrap()
@@ -149,7 +164,7 @@ async fn password_change_mounted_session_social_reset_invalidation_and_audit() {
         None,
         Some(&cookie),
         None,
-        json!({"current_password":"old", "new_password":"abcdefé"}),
+        json!({"current_password":current_password, "new_password":new_password}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -165,17 +180,17 @@ async fn password_change_mounted_session_social_reset_invalidation_and_audit() {
     assert!(stored.password_reset_token.is_none());
     assert!(stored.password_reset_expires_at.is_none());
     assert!(
-        auth_service::reset_password(&state.db, &reset, "resetpassword")
+        auth_service::reset_password(&state.db, &reset, &reset_password)
             .await
             .is_err()
     );
     assert!(
-        auth_service::authenticate_user(&state.db, &user.email, "abcdefé")
+        auth_service::authenticate_user(&state.db, &user.email, &new_password)
             .await
             .is_ok()
     );
     assert!(
-        auth_service::authenticate_user(&state.db, &user.email, "old")
+        auth_service::authenticate_user(&state.db, &user.email, &current_password)
             .await
             .is_err()
     );
@@ -185,11 +200,11 @@ async fn password_change_mounted_session_social_reset_invalidation_and_audit() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        change(&state, &token, "abcdefé", "abcdefé").await.0,
+        change(&state, &token, &new_password, &new_password).await.0,
         StatusCode::OK
     );
     assert!(
-        auth_service::reset_password(&state.db, &reset, "resetpassword")
+        auth_service::reset_password(&state.db, &reset, &reset_password)
             .await
             .is_err()
     );
@@ -249,8 +264,10 @@ async fn password_change_mounted_session_social_reset_invalidation_and_audit() {
 #[tokio::test]
 async fn password_change_profile_presence_and_input_byte_boundaries() {
     let state = state("password_change_validation").await;
+    let current_password = generate_random_token();
+    let new_password = generate_random_token();
     for social in [false, true] {
-        for credential in [None, Some("oldpassword")] {
+        for credential in [None, Some(current_password.as_str())] {
             let (_, token) = actor(&state, credential, social).await;
             let (status, body) = request(
                 &state,
@@ -267,23 +284,51 @@ async fn password_change_profile_presence_and_input_byte_boundaries() {
             assert!(body.get("password_hash").is_none());
             if credential.is_none() {
                 assert_eq!(
-                    change(&state, &token, "anything", "newpassword").await.0,
+                    change(&state, &token, &current_password, &new_password)
+                        .await
+                        .0,
                     StatusCode::BAD_REQUEST
                 );
             }
         }
     }
-    for (new, accepted) in [
-        ("a".repeat(7), false),
-        ("abcdefé".into(), true),
-        (format!("{}a", "é".repeat(63)), true),
-        ("é".repeat(64), true),
-        (format!("{}abc", "🔐".repeat(31)), true),
-        (format!("{}abcde", "🔐".repeat(31)), false),
-        (format!("{}a", "é".repeat(64)), false),
+    for (new, bytes, accepted) in [
+        (ascii_password(7), 7, false),
+        (format!("{}é", ascii_password(6)), 8, true),
+        (
+            format!("{}{}", ascii_password(1), "é".repeat(63)),
+            127,
+            true,
+        ),
+        (
+            format!("{}{}", ascii_password(2), "é".repeat(63)),
+            128,
+            true,
+        ),
+        (
+            format!("{}{}", ascii_password(3), "🔐".repeat(31)),
+            127,
+            true,
+        ),
+        (
+            format!("{}{}", ascii_password(4), "🔐".repeat(31)),
+            128,
+            true,
+        ),
+        (
+            format!("{}{}", ascii_password(5), "🔐".repeat(31)),
+            129,
+            false,
+        ),
+        (
+            format!("{}{}", ascii_password(1), "é".repeat(64)),
+            129,
+            false,
+        ),
     ] {
-        let (user, token) = actor(&state, Some("oldpassword"), false).await;
-        let (status, body) = change(&state, &token, "oldpassword", &new).await;
+        assert_eq!(new.len(), bytes);
+        let (user, token) = actor(&state, Some(&current_password), false).await;
+        let (status, body) = change(&state, &token, &current_password, &new).await;
         assert_eq!(
             status,
             if accepted {
@@ -303,9 +348,13 @@ async fn password_change_profile_presence_and_input_byte_boundaries() {
             assert!(body["message"].as_str().unwrap().contains("UTF-8 bytes"));
         }
     }
-    let (_, token) = actor(&state, Some("oldpassword"), false).await;
-    for current in ["".to_string(), "é".repeat(64) + "a", "wrong".into()] {
-        let (status, _) = change(&state, &token, &current, "newpassword").await;
+    let (_, token) = actor(&state, Some(&current_password), false).await;
+    for current in [
+        String::new(),
+        format!("{}{}", ascii_password(1), "é".repeat(64)),
+        generate_random_token(),
+    ] {
+        let (status, _) = change(&state, &token, &current, &new_password).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }
@@ -313,8 +362,10 @@ async fn password_change_profile_presence_and_input_byte_boundaries() {
 #[tokio::test]
 async fn password_change_rejects_non_human_and_untrusted_credentials() {
     let state = state("password_change_authority").await;
-    let (user, token) = actor(&state, Some("oldpassword"), false).await;
-    let body = json!({"current_password":"oldpassword", "new_password":"newpassword"});
+    let current_password = generate_random_token();
+    let new_password = generate_random_token();
+    let (user, token) = actor(&state, Some(&current_password), false).await;
+    let body = json!({"current_password":current_password, "new_password":new_password});
     assert_eq!(
         request(
             &state,
@@ -329,7 +380,48 @@ async fn password_change_rejects_non_human_and_untrusted_credentials() {
         .0,
         StatusCode::UNAUTHORIZED
     );
-    let oauth = jwt::generate_oauth_access_token(
+    let (client, _) = oauth_client_service::create_client(
+        &state.db,
+        "Password change third-party",
+        &["https://example.test/callback".into()],
+        "confidential",
+        &user.id,
+        "",
+        "account:read",
+        crate::models::oauth_client::ScopeProvenance::Explicit,
+        false,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
+    let missing_client = Uuid::new_v4().to_string();
+    for client_id in [&missing_client, &client.id] {
+        let unbound_oauth = jwt::generate_oauth_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &Uuid::parse_str(&user.id).unwrap(),
+            "account:read",
+            None,
+            None,
+            None,
+            None,
+            None,
+            client_id,
+        )
+        .unwrap();
+        let (status, body) = change(&state, &unbound_oauth, &current_password, &new_password).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(body["error_code"], 1001);
+    }
+    let consent = consent_service::grant_consent(&state.db, &user.id, &client.id, "account:read")
+        .await
+        .unwrap();
+    let reference = consent_service::ensure_issuance_reference(&state.db, &consent)
+        .await
+        .unwrap();
+    let oauth = jwt::generate_oauth_access_token_with_consent(
         &state.jwt_keys,
         &state.config,
         &Uuid::parse_str(&user.id).unwrap(),
@@ -339,13 +431,25 @@ async fn password_change_rejects_non_human_and_untrusted_credentials() {
         None,
         None,
         None,
-        "third-party",
+        &client.id,
+        Some(&reference),
     )
     .unwrap();
-    assert_eq!(
-        change(&state, &oauth, "oldpassword", "newpassword").await.0,
-        StatusCode::FORBIDDEN
-    );
+    let (status, profile) = request(
+        &state,
+        "GET",
+        "/users/me",
+        Some(&oauth),
+        None,
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{profile}");
+    assert_eq!(profile["id"], user.id);
+    let (status, body) = change(&state, &oauth, &current_password, &new_password).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error_code"], 1002);
     let delegated = jwt::generate_delegated_access_token(
         &state.jwt_keys,
         &state.config,
@@ -379,7 +483,7 @@ async fn password_change_rejects_non_human_and_untrusted_credentials() {
     .unwrap()
     .access_token;
     for rejected in [&delegated, &service] {
-        let (status, body) = change(&state, rejected, "oldpassword", "newpassword").await;
+        let (status, body) = change(&state, rejected, &current_password, &new_password).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(body["error_code"], 1002);
     }
@@ -418,11 +522,11 @@ async fn password_change_rejects_non_human_and_untrusted_credentials() {
         },
     )
     .unwrap();
-    let (status, body) = change(&state, &relay, "oldpassword", "newpassword").await;
+    let (status, body) = change(&state, &relay, &current_password, &new_password).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["error_code"], 1002);
     assert_eq!(
-        change(&state, &key.full_key, "oldpassword", "newpassword")
+        change(&state, &key.full_key, &current_password, &new_password)
             .await
             .0,
         StatusCode::FORBIDDEN
@@ -433,7 +537,7 @@ async fn password_change_rejects_non_human_and_untrusted_credentials() {
         .update_one(doc! {"_id": &user.id}, doc! {"$set": {"user_type":"org"}})
         .await
         .unwrap();
-    let (status, body) = change(&state, &token, "oldpassword", "newpassword").await;
+    let (status, body) = change(&state, &token, &current_password, &new_password).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["error_code"], 1403);
     state
@@ -445,7 +549,7 @@ async fn password_change_rejects_non_human_and_untrusted_credentials() {
         )
         .await
         .unwrap();
-    let (status, body) = change(&state, &token, "oldpassword", "newpassword").await;
+    let (status, body) = change(&state, &token, &current_password, &new_password).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(body["error_code"], 1001);
 }
@@ -459,7 +563,10 @@ async fn password_change_shared_user_throttle_counts_success_and_precedes_hash_v
     .await;
     let mut state = state("password_change_user_limit").await;
     state.config.trusted_proxy_ips = vec!["127.0.0.1".parse().unwrap()];
-    let (_, token) = actor(&state, Some("oldpassword"), false).await;
+    let current_password = generate_random_token();
+    let wrong_password = generate_random_token();
+    let new_password = generate_random_token();
+    let (_, token) = actor(&state, Some(&current_password), false).await;
     let other_replica = test_app_state(state.db.clone());
     for attempt in 0..5 {
         let replica = if attempt % 2 == 0 {
@@ -467,7 +574,11 @@ async fn password_change_shared_user_throttle_counts_success_and_precedes_hash_v
         } else {
             &other_replica
         };
-        let current = if attempt == 0 { "oldpassword" } else { "wrong" };
+        let current = if attempt == 0 {
+            &current_password
+        } else {
+            &wrong_password
+        };
         assert_eq!(
             request(
                 replica,
@@ -476,7 +587,7 @@ async fn password_change_shared_user_throttle_counts_success_and_precedes_hash_v
                 Some(&token),
                 None,
                 Some(&format!("192.0.2.{}", attempt + 1)),
-                json!({"current_password":current, "new_password":"oldpassword"})
+                json!({"current_password":current, "new_password":current_password})
             )
             .await
             .0,
@@ -487,13 +598,17 @@ async fn password_change_shared_user_throttle_counts_success_and_precedes_hash_v
             }
         );
     }
+    // A raw random token is not an Argon2 hash; throttling must prevent verification.
     state
         .db
         .collection::<User>(USERS)
-        .update_many(doc! {}, doc! {"$set": {"password_hash":"malformed"}})
+        .update_many(
+            doc! {},
+            doc! {"$set": {"password_hash":generate_random_token()}},
+        )
         .await
         .unwrap();
-    let (status, body) = change(&other_replica, &token, "oldpassword", "newpassword").await;
+    let (status, body) = change(&other_replica, &token, &current_password, &new_password).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(body["error_code"], 1005);
 }
@@ -506,6 +621,8 @@ async fn password_change_shared_ip_throttle_ignores_untrusted_forwarding() {
     )
     .await;
     let state = state("password_change_ip_limit").await;
+    let current_password = generate_random_token();
+    let new_password = generate_random_token();
     let mut tokens = vec![];
     for _ in 0..5 {
         tokens.push(actor(&state, None, false).await.1);
@@ -524,39 +641,57 @@ async fn password_change_shared_ip_throttle_ignores_untrusted_forwarding() {
             Some(&tokens[attempt / 4]),
             None,
             Some(&format!("192.0.2.{}", attempt + 1)),
-            json!({"current_password":"anything", "new_password":"newpassword"}),
+            json!({"current_password":current_password, "new_password":new_password}),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
+    // A raw random token is not an Argon2 hash; throttling must prevent verification.
     state
         .db
         .collection::<User>(USERS)
-        .update_many(doc! {}, doc! {"$set": {"password_hash":"malformed"}})
+        .update_many(
+            doc! {},
+            doc! {"$set": {"password_hash":generate_random_token()}},
+        )
         .await
         .unwrap();
-    let (status, body) = change(&other_replica, &tokens[0], "anything", "newpassword").await;
+    let (status, body) = change(&other_replica, &tokens[0], &current_password, &new_password).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(body["error_code"], 1005);
 }
 
 #[test]
 fn password_requests_debug_is_redacted() {
+    let current_password = generate_random_token();
+    let new_password = generate_random_token();
+    let token = generate_random_token();
     let change: ChangePasswordRequest = serde_json::from_value(
-        json!({"current_password":"secret-old", "new_password":"secret-new"}),
+        json!({"current_password":current_password, "new_password":new_password}),
     )
     .unwrap();
     let reset: ResetPasswordRequest =
-        serde_json::from_value(json!({"token":"secret-token", "new_password":"secret-new"}))
-            .unwrap();
-    assert_eq!(format!("{change:?}"), "ChangePasswordRequest { .. }");
-    assert_eq!(format!("{reset:?}"), "ResetPasswordRequest { .. }");
+        serde_json::from_value(json!({"token":token, "new_password":new_password})).unwrap();
+    let change_debug = format!("{change:?}");
+    let reset_debug = format!("{reset:?}");
+    for debug in [&change_debug, &reset_debug] {
+        for secret in [&current_password, &new_password, &token] {
+            assert!(
+                !debug.contains(secret.as_str()),
+                "request Debug exposed credential material"
+            );
+        }
+    }
+    assert_eq!(change_debug, "ChangePasswordRequest { [REDACTED] }");
+    assert_eq!(reset_debug, "ResetPasswordRequest { [REDACTED] }");
 }
 
 #[tokio::test]
 async fn password_change_pending_mfa_is_not_a_first_party_human_session() {
     let state = state("password_change_pending_mfa").await;
-    let (user, _) = actor(&state, Some("oldpassword"), false).await;
+    let current_password = generate_random_token();
+    let new_password = generate_random_token();
+    let (user, _) = actor(&state, Some(&current_password), false).await;
     let setup = mfa_service::setup_totp(&state.db, &state.encryption_keys, &user.id, &user.email)
         .await
         .unwrap();
@@ -585,7 +720,7 @@ async fn password_change_pending_mfa_is_not_a_first_party_human_session() {
         None,
         None,
         None,
-        json!({"email":user.email, "password":"oldpassword", "client":"web"}),
+        json!({"email":user.email, "password":current_password, "client":"web"}),
     )
     .await;
     assert_eq!(body["error_code"], 2002, "{status}: {body}");
@@ -608,7 +743,7 @@ async fn password_change_pending_mfa_is_not_a_first_party_human_session() {
         (
             "POST",
             "/auth/password/change",
-            json!({"current_password":"oldpassword", "new_password":"newpassword"}),
+            json!({"current_password":current_password, "new_password":new_password}),
         ),
         (
             "POST",
@@ -680,7 +815,7 @@ async fn password_change_pending_mfa_is_not_a_first_party_human_session() {
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(body["error_code"], 1001);
     assert!(
-        auth_service::authenticate_user(&state.db, &user.email, "oldpassword")
+        auth_service::authenticate_user(&state.db, &user.email, &current_password)
             .await
             .is_ok()
     );
@@ -689,10 +824,13 @@ async fn password_change_pending_mfa_is_not_a_first_party_human_session() {
 #[tokio::test]
 async fn password_change_concurrent_mounted_requests_have_one_winner() {
     let state = state("password_change_mounted_race").await;
-    let (user, token) = actor(&state, Some("oldpassword"), false).await;
+    let current_password = generate_random_token();
+    let first_password = generate_random_token();
+    let second_password = generate_random_token();
+    let (user, token) = actor(&state, Some(&current_password), false).await;
     let (first, second) = tokio::join!(
-        change(&state, &token, "oldpassword", "firstnewpassword"),
-        change(&state, &token, "oldpassword", "secondnewpassword"),
+        change(&state, &token, &current_password, &first_password),
+        change(&state, &token, &current_password, &second_password),
     );
     assert_eq!(
         [first.0, second.0]
@@ -703,9 +841,9 @@ async fn password_change_concurrent_mounted_requests_have_one_winner() {
         "{first:?} {second:?}"
     );
     let (winner, loser, rejected) = if first.0 == StatusCode::OK {
-        ("firstnewpassword", "secondnewpassword", &second)
+        (first_password.as_str(), second_password.as_str(), &second)
     } else {
-        ("secondnewpassword", "firstnewpassword", &first)
+        (second_password.as_str(), first_password.as_str(), &first)
     };
     match rejected.0 {
         StatusCode::BAD_REQUEST => {
@@ -728,18 +866,26 @@ async fn password_change_concurrent_mounted_requests_have_one_winner() {
     let hash = stored.password_hash.as_deref().unwrap();
     assert!(password::verify_password(winner, hash).unwrap());
     assert!(!password::verify_password(loser, hash).unwrap());
-    assert!(!password::verify_password("oldpassword", hash).unwrap());
+    assert!(!password::verify_password(&current_password, hash).unwrap());
 }
 
 #[tokio::test]
 async fn password_change_reset_route_uses_server_byte_policy() {
     let state = state("password_change_reset_policy").await;
-    let (user, _) = actor(&state, Some("oldpassword"), false).await;
+    let current_password = generate_random_token();
+    let new_password = format!("{}é", ascii_password(6));
+    assert_eq!(new_password.len(), 8);
+    assert_eq!(new_password.chars().count(), 7);
+    let (user, _) = actor(&state, Some(&current_password), false).await;
     let token = auth_service::initiate_password_reset(&state.db, &user.email)
         .await
         .unwrap()
         .unwrap();
-    for new in ["a".repeat(7), "é".repeat(64) + "a"] {
+    for (new, bytes) in [
+        (ascii_password(7), 7),
+        (format!("{}{}", ascii_password(1), "é".repeat(64)), 129),
+    ] {
+        assert_eq!(new.len(), bytes);
         let (status, body) = request(
             &state,
             "POST",
@@ -760,12 +906,12 @@ async fn password_change_reset_route_uses_server_byte_policy() {
         None,
         None,
         None,
-        json!({"token":token, "new_password":"abcdefé"}),
+        json!({"token":token, "new_password":new_password}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(
-        auth_service::authenticate_user(&state.db, &user.email, "abcdefé")
+        auth_service::authenticate_user(&state.db, &user.email, &new_password)
             .await
             .is_ok()
     );
@@ -777,7 +923,7 @@ async fn password_change_reset_route_uses_server_byte_policy() {
             None,
             None,
             None,
-            json!({"token":token, "new_password":"abcdefé"})
+            json!({"token":token, "new_password":new_password})
         )
         .await
         .0,
@@ -795,7 +941,7 @@ async fn password_change_reset_route_uses_server_byte_policy() {
             None,
             None,
             None,
-            json!({"token":token, "new_password":"abcdefé"})
+            json!({"token":token, "new_password":new_password})
         )
         .await
         .0,
@@ -814,7 +960,11 @@ async fn password_change_cancels_pending_proofs_but_retains_completed_mfa_sessio
         auth_device_service, login_approval_service, session_authority::DerivedMfaAuthority,
     };
     let state = state("password_change_pending_authority").await;
-    let (user, _) = actor(&state, Some("oldpassword"), false).await;
+    let current_password = generate_random_token();
+    let new_password = generate_random_token();
+    let pending_current = generate_random_token();
+    let pending_legacy = generate_random_token();
+    let (user, _) = actor(&state, Some(&current_password), false).await;
     let setup = mfa_service::setup_totp(&state.db, &state.encryption_keys, &user.id, &user.email)
         .await
         .unwrap();
@@ -863,7 +1013,7 @@ async fn password_change_cancels_pending_proofs_but_retains_completed_mfa_sessio
     let pending_id = token_service::create_mfa_pending_session_for_password(
         &state.db,
         &live_user,
-        &hash_token("pending-current"),
+        &hash_token(&pending_current),
     )
     .await
     .unwrap();
@@ -875,7 +1025,7 @@ async fn password_change_cancels_pending_proofs_but_retains_completed_mfa_sessio
         .unwrap()
         .unwrap();
     legacy.insert("_id", Uuid::new_v4().to_string());
-    legacy.insert("token_hash", hash_token("pending-legacy"));
+    legacy.insert("token_hash", hash_token(&pending_legacy));
     legacy.insert("user_agent", "mfa_pending");
     legacy.remove("purpose");
     state
@@ -905,7 +1055,13 @@ async fn password_change_cancels_pending_proofs_but_retains_completed_mfa_sessio
         .await
         .unwrap();
     assert!(!approval.verified && !approval.keep_signed_in);
-    let (status, body) = change(&state, &current.access_token, "oldpassword", "newpassword").await;
+    let (status, body) = change(
+        &state,
+        &current.access_token,
+        &current_password,
+        &new_password,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(
         state
@@ -921,7 +1077,7 @@ async fn password_change_cancels_pending_proofs_but_retains_completed_mfa_sessio
         state
             .db
             .collection::<Session>(SESSIONS)
-            .find_one(doc! {"token_hash":hash_token("pending-legacy")})
+            .find_one(doc! {"token_hash":hash_token(&pending_legacy)})
             .await
             .unwrap()
             .unwrap()
@@ -937,7 +1093,7 @@ async fn password_change_cancels_pending_proofs_but_retains_completed_mfa_sessio
             .unwrap()
             .closed
     );
-    for pending in ["pending-current", "pending-legacy"] {
+    for pending in [&pending_current, &pending_legacy] {
         let (status, body) = request(
             &state,
             "POST",
@@ -955,7 +1111,7 @@ async fn password_change_cancels_pending_proofs_but_retains_completed_mfa_sessio
         token_service::create_mfa_pending_session_for_password(
             &state.db,
             &live_user,
-            &hash_token("stale-new-proof")
+            &hash_token(&generate_random_token())
         )
         .await
         .is_err()

@@ -3,9 +3,10 @@
 Original plan status: APPROVED by Opus 5.5 through the connected OpenRouter service
 (`anthropic/claude-opus-5.5`, generation `gen-1792986323-K5kLDBKixDtam8UuxcYh`).
 All six initial review findings were addressed before approval.
-Implementation is complete and accepted after the primary agent's personal code
-and evidence review. Primary review findings R1–R5, the R1 lifecycle
+The original-base implementation was accepted after the primary agent's personal
+code and evidence review. Primary review findings R1–R5, the R1 lifecycle
 follow-through, and R1b are resolved. Final validation evidence is recorded below.
+Integration with newer main has its own review and validation record below.
 The user authorized committing, pushing and opening a pull request after
 completion. Publication also includes checking integration with the current
 `main` branch and resolving any conflicts before opening the pull request.
@@ -18,7 +19,7 @@ settings automatically explain this behavior. Accounts without a stored password
 do not display Change Password. Accounts with a stored password have a working
 password-change action, including accounts linked to a social provider.
 
-## Verified starting point
+## Original-base starting point
 
 - Ordinary browser QR login uses the legacy account-only device request and
   poll-web routes, preserving installed mobile client compatibility. See
@@ -42,7 +43,7 @@ password-change action, including accounts linked to a social provider.
   backend route. Completing this action is included to avoid leaving a broken
   form for users who do have a password.
 
-## Implementation contract
+## Original approved implementation contract
 
 1. Audit the legacy browser QR path, v2 account grants, and request-only/persistent
    app identity verification. Preserve installed-client request/response formats,
@@ -152,7 +153,7 @@ password-change action, including accounts linked to a social provider.
   nor implementer may delegate or spawn further agents. Do not claim theoretical
   absence of all risk; require evidence for each concrete acceptance condition.
 
-## Review sequence
+## Original review sequence
 
 1. Opus 5.5 reviews this plan and the relevant source. It returns APPROVE or
    REVISE with concrete findings, including any conflict between user intent and
@@ -358,4 +359,60 @@ still allowed. Shared authenticated-purpose policy supersedes the earlier
 marker-only cookie filter. Main's enrollment, disable/recovery, session/token
 fences and social mobile rollout semantics remain in force.
 
-Integration validation evidence will be recorded below after final checks.
+The primary personally reviewed the integrated production changes, including
+pending-proof revocation and reset/change races. The QR regression locates the
+delivered browser session by its cookie token hash, independently of the source
+phone session and the intermediate approval session.
+
+### Defaults verified in the integrated code
+
+- Settings displays **Skip MFA for NyxID app sign-ins — Always enabled** in
+  Studio and the shared assistant account panel. A delivered, approved browser
+  session does not request another factor after its profile is confirmed.
+- `auth:mobile-mfa` defaults to false. Mobile social redirects and native social
+  token exchange therefore bypass MFA unless a live user/organization override
+  enables the flag. Email/password mobile login continues to require MFA for
+  enrolled accounts.
+- A phone session that used the mobile social exemption can authenticate, but
+  needs verified authority before approving another device. The browser's
+  automatic exemption does not remove this approval gate.
+
+### Integrated validation
+
+- Full frontend suite: 6,682 passed across 610 files. Focused authentication,
+  QR, settings, consent and MFA suite: 257 passed across 15 files.
+- TypeScript, full frontend lint, production build, Rust formatting and whitespace
+  checks passed. The regenerated wizard bundle matches its 178 source files and
+  five extra inputs; source hash `3630747ae7bd35215ed42627f88e7678970ef9c48a04b75cbf26afd1e97f4496`.
+- Final backend validation uses [PR #2042 CI](https://github.com/ChronoAIProject/NyxID/actions/runs/40277035395)
+  at code commit `2d663e9c5458e2620af46ce34615cec9ce444e79`. Its test archive built
+  successfully. The inventory contains 10,437 tests, of which 10,424 match the
+  ordinary run and 13 are pre-existing ignored tests. All password-change, QR
+  MFA and mobile-default regressions match and are not ignored.
+- The first integrated runtime run completed all 10,424 selected tests: 10,422
+  passed and two failed. The approved-QR browser regression, mobile social
+  default/override regressions, password byte boundaries, credential CAS and
+  pending-proof revocation checks passed. The failures were stale expectations
+  for the shared redacted Debug format and an OAuth fixture without the active
+  client/consent required by main. The correction preserves valid third-party
+  credential denial coverage rather than accepting an unauthenticated fixture
+  as proof of that boundary.
+- CodeQL reported 27 hardcoded cryptographic-value annotations in synthetic
+  test credentials. Correction uses runtime-generated credentials, preserving
+  byte boundaries, historic short-password verification and shared race inputs.
+  No security queries or workflows are suppressed. The primary reviewed the
+  correction: missing/unbound OAuth authority must return 401/1001; a client
+  with live protected consent must authenticate to the mounted profile route
+  before password change returns 403/1002. Debug assertions follow main's
+  shared redaction contract and exclude all generated credentials.
+- Final acceptance requires the corrected revision's runtime and security
+  checks to pass. Its run and final results are tracked in
+  [PR #2042](https://github.com/ChronoAIProject/NyxID/pull/2042)'s Test Plan.
+
+The duplicate local backend build was cancelled after exhausting available RAM;
+it produced no accepted runtime evidence. The primary stopped only its owned
+worker/build processes and dedicated MongoDB (PID 56050, port 61275), then removed
+that database directory. Local cancellation and cleanup records are
+`/tmp/nyxid-qr-integration3-local-cancelled.json` and
+`/tmp/nyxid-qr-integration3-mongo-cleanup.json`. Final backend acceptance is based
+on the CI results above, which compile and execute the published code revision.

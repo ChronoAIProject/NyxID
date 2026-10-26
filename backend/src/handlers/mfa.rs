@@ -1007,7 +1007,10 @@ mod tests {
 
     #[tokio::test]
     async fn first_factor_challenge_has_no_cookie_or_management_authority_over_http() {
-        use crate::crypto::{password, token::hash_token};
+        use crate::crypto::{
+            password,
+            token::{generate_random_token, hash_token},
+        };
         use crate::models::session::{MFA_CHALLENGES, Session, SessionPurpose};
         use axum::{
             Router,
@@ -1020,10 +1023,10 @@ mod tests {
             .await
             .unwrap();
         let id = uuid::Uuid::new_v4().to_string();
-        let password_text = "correct-horse-battery-staple";
+        let password_text = generate_random_token();
         let mut actor = test_user(&id, UserType::Person);
         actor.mfa_enabled = true;
-        actor.password_hash = Some(password::hash_password(password_text).unwrap());
+        actor.password_hash = Some(password::hash_password(&password_text).unwrap());
         let email = actor.email.clone();
         db.collection::<User>(USERS)
             .insert_one(actor)
@@ -1058,7 +1061,7 @@ mod tests {
             "_id":uuid::Uuid::new_v4().to_string(),"user_id":&id,"telegram_enabled":true,"telegram_chat_id":1_i64,
             "push_enabled":false,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
         }).await.unwrap();
-        let recovery = "0123456789abcdef0123456789abcdef";
+        let recovery = uuid::Uuid::new_v4().simple().to_string();
         let row = MfaFactor {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: id.clone(),
@@ -1072,7 +1075,7 @@ mod tests {
             ),
             secret_context_version: None,
             recovery_codes: Some(serde_json::json!([
-                password::hash_password(recovery).unwrap()
+                password::hash_password(&recovery).unwrap()
             ])),
             last_totp_counter: None,
             is_verified: true,
@@ -1157,13 +1160,14 @@ mod tests {
         legacy.id = uuid::Uuid::new_v4().to_string();
         legacy.purpose = None;
         legacy.user_agent = Some("mfa_pending".into());
-        legacy.token_hash = hash_token("legacy-pending-token");
+        let legacy_token = generate_random_token();
+        legacy.token_hash = hash_token(&legacy_token);
         let legacy_id = legacy.id.clone();
         db.collection::<Session>("sessions")
             .insert_one(legacy)
             .await
             .unwrap();
-        for pending in [token, "legacy-pending-token"] {
+        for pending in [token, legacy_token.as_str()] {
             for path in ["/api/v1/users/me", "/api/v1/users/me/preferences/analytics"] {
                 let status = client
                     .get(format!("{base}{path}"))
@@ -1330,11 +1334,11 @@ mod tests {
         assert_eq!(replay.status(), reqwest::StatusCode::UNAUTHORIZED);
         // The existing inline password-login surface also accepts new-format
         // recovery codes; it must not retain the old ten-character limit.
-        let inline = "fedcba9876543210fedcba9876543210";
+        let inline = uuid::Uuid::new_v4().simple().to_string();
         db.collection::<bson::Document>(MFA_FACTORS)
             .update_one(
                 doc! {"user_id":&id},
-                doc! {"$push":{"recovery_codes":password::hash_password(inline).unwrap()}},
+                doc! {"$push":{"recovery_codes":password::hash_password(&inline).unwrap()}},
             )
             .await
             .unwrap();
@@ -1349,11 +1353,11 @@ mod tests {
         // Hold a real completed HTTP login before returning its response. A
         // completed revoke must invalidate that session even if the response
         // carrying its cookie reaches the client later.
-        let held_code = "aabbccddaabbccddaabbccddaabbccdd";
+        let held_code = uuid::Uuid::new_v4().simple().to_string();
         db.collection::<bson::Document>(MFA_FACTORS)
             .update_one(
                 doc! {"user_id":&id},
-                doc! {"$push":{"recovery_codes":password::hash_password(held_code).unwrap()}},
+                doc! {"$push":{"recovery_codes":password::hash_password(&held_code).unwrap()}},
             )
             .await
             .unwrap();
@@ -1409,8 +1413,9 @@ mod tests {
         );
         // Already issued first-factor proofs cannot finish after revoke/reset,
         // nor after disable followed by a successor enrollment.
+        let replacement_password = generate_random_token();
         for invalidation in ["revoke", "reset", "disable_reenroll"] {
-            let mut submission_code = "11223344112233441122334411223344".to_owned();
+            let mut submission_code = uuid::Uuid::new_v4().simple().to_string();
             db.collection::<bson::Document>(MFA_FACTORS).update_one(doc! {"user_id":&id,"is_active":true},
                 doc! {"$push":{"recovery_codes":password::hash_password(&submission_code).unwrap()}}).await.unwrap();
             let raw = crate::crypto::token::generate_random_token();
@@ -1436,14 +1441,14 @@ mod tests {
                     crate::services::auth_service::reset_password(
                         &db,
                         &token,
-                        "replacement-password",
+                        &replacement_password,
                     )
                     .await
                     .unwrap();
                 }
                 _ => {
                     let proof =
-                        mfa_service::prepare_totp_disable(&db, &id, Some("replacement-password"))
+                        mfa_service::prepare_totp_disable(&db, &id, Some(&replacement_password))
                             .await
                             .unwrap();
                     mfa_service::disable_totp(
