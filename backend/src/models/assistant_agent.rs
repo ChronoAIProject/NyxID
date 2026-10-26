@@ -47,7 +47,8 @@ pub enum GuestAccess {
     Read,
     /// Reads, creates and acts (GET, HEAD, OPTIONS, POST), never changes or
     /// removes what exists (PUT, PATCH, DELETE, or an operation its spec
-    /// marks as deleting or replacing data).
+    /// marks as deleting or replacing data). A compiled NyxID append-only
+    /// attestation may permit a POST despite its destructive marker.
     #[default]
     Use,
     /// Everything the specialist may do with the service.
@@ -113,6 +114,12 @@ pub struct AssistantAgent {
     /// Stored beside grants so older grant writers cannot erase restrictions.
     #[serde(default)]
     pub operation_scopes: super::agent_operation_scope::OperationScopes,
+    /// Guest-only intersection; an empty selection withholds a service. Old
+    /// readers ignore these fields and still deserialize the unchanged level enum.
+    #[serde(default)]
+    pub guest_operation_scopes: super::agent_operation_scope::OperationScopes,
+    #[serde(default)]
+    pub guest_operation_scope_revisions: BTreeMap<String, i64>,
     /// Untrusted guidance; sibling fields survive older grant writers.
     #[serde(default)]
     pub skills: Vec<super::catalog_skill_revision::SkillReference>,

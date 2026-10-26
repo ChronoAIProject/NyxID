@@ -481,6 +481,7 @@ async fn authorize_operation(
             catalog_id,
             method,
             Some(&path),
+            Default::default(),
         ),
     )
     .await?;

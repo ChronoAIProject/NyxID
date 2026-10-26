@@ -39,6 +39,7 @@ pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
     "assistant:org-agents",
     "assistant:operation-scopes",
+    "assistant:guest-operation-scopes",
     "assistant:machine-capabilities",
     "assistant:machine-contexts",
     "assistant:live-turn-gate",
