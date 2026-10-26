@@ -1450,7 +1450,9 @@ mod tests {
             .collection::<Session>(SESSIONS)
             .find_one(doc! {
                 "user_id": &user_id,
-                "_id": { "$ne": &approved_session_id },
+                "token_hash": crate::crypto::token::hash_token(
+                    cookie_pair.strip_prefix("nyx_session=").expect("session cookie token")
+                ),
             })
             .await
             .expect("query browser session")
