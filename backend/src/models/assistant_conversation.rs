@@ -270,6 +270,10 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelRefusal {
+    #[serde(default)]
+    pub http_status: Option<u16>,
+    #[serde(default)]
+    pub error_code: Option<u32>,
     pub code: String,
     pub attempt_id: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

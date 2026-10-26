@@ -68,6 +68,7 @@ impl Registry {
             saved_login_ids: vec![],
             created_by: "user".into(),
             model: "nyxagent/channel".into(),
+            owner_model_route: None,
             access_mode_override: None,
             home_conversation_id: None,
             memory: vec![],

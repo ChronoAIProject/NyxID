@@ -316,6 +316,8 @@ fn billing_attribution_recovers_wrapped_causes_only_with_current_evidence() {
     ] {
         assert_eq!(refusal_code(&error), Some(code));
         turn.model_refusal = Some(ModelRefusal {
+            http_status: None,
+            error_code: None,
             code: code.into(),
             attempt_id: "attempt".into(),
             at: now,
@@ -347,6 +349,55 @@ fn billing_attribution_recovers_wrapped_causes_only_with_current_evidence() {
         attribute(&TurnError::new("nyxid_error"), turn, now).code,
         "nyxid_error"
     );
+}
+
+#[test]
+fn guest_1995_failure_reason_requires_recent_unambiguous_evidence() {
+    use crate::models::assistant_conversation::ModelRefusal;
+    use crate::services::assistant_model_observer::failure_reason;
+    let now = Utc::now();
+    let mut row = stale_test_row(now);
+    let turn = row.active_turn.as_mut().unwrap();
+    let upstream = TurnError::new("turn_failed");
+    let fallback = |turn: &ActiveTurn, at| {
+        let reason = failure_reason(&upstream, turn, at).unwrap();
+        assert_eq!(reason.source, "nyxagent");
+        assert_eq!(reason.code, "turn_failed");
+        assert!(reason.nyxid_error_code.is_none());
+    };
+    fallback(turn, now);
+    let error = AppError::ApiKeyScopeForbidden("SECRET body".into());
+    turn.model_attempt_id = Some("current".into());
+    turn.model_refusal = Some(ModelRefusal {
+        code: error.error_key().into(),
+        attempt_id: "current".into(),
+        at: now,
+        http_status: Some(error.status_code().as_u16()),
+        error_code: Some(error.error_code()),
+    });
+    let reason = failure_reason(&upstream, turn, now).unwrap();
+    assert_eq!(reason.source, "nyxid");
+    assert_eq!(reason.stage, "model_proxy");
+    assert_eq!(reason.code, "api_key_scope_forbidden");
+    assert_eq!(reason.http_status, Some(403));
+    assert_eq!(reason.nyxid_error_code, Some(9000));
+    assert!(!serde_json::to_string(&reason).unwrap().contains("SECRET"));
+    fallback(turn, now + chrono::Duration::seconds(121));
+    fallback(turn, now - chrono::Duration::seconds(1));
+    turn.model_attribution_uncertain = true;
+    fallback(turn, now);
+    turn.model_attribution_uncertain = false;
+    turn.model_attempt_id = Some("newer".into());
+    fallback(turn, now);
+    turn.model_attempt_id = Some("current".into());
+    // Rolling replicas may write the old refusal shape without status/codes.
+    let mut old = bson::to_document(turn.model_refusal.as_ref().unwrap()).unwrap();
+    old.remove("http_status");
+    old.remove("error_code");
+    turn.model_refusal = Some(bson::from_document(old).unwrap());
+    fallback(turn, now);
+    assert!(failure_reason(&TurnError::internal("cancelled", "stop"), turn, now).is_none());
+    assert!(failure_reason(&TurnError::new("SECRET unsafe arbitrary prose"), turn, now).is_none());
 }
 
 #[test]

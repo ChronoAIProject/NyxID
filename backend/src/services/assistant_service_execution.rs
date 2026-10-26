@@ -39,6 +39,7 @@ pub use bootstrap::{begin_model_attempt, finish_model_attempt};
 mod authority;
 pub use authority::connection_binding;
 mod availability;
+mod guest_model;
 mod http;
 mod receipts;
 mod request_identity;

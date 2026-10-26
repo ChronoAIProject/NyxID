@@ -337,11 +337,17 @@ function CapacityDetails({ attempts, capacityWaitMs }: { readonly attempts?: num
 
 /** Metadata-only diagnostics of a failed turn, with a copyable ID. */
 function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
+  const failure = detail.failureReason;
+  const failureLabel = failure ? [failure.source, failure.stage, failure.code,
+    failure.http_status != null ? `HTTP ${failure.http_status}` : null,
+    failure.nyxid_error_code != null ? `NyxID ${failure.nyxid_error_code}` : null,
+  ].filter(Boolean).join(" / ") : null;
   const diagnosticId = [
     `turn ${detail.turnId}`,
     detail.attempts != null ? `attempts ${detail.attempts}` : null,
     detail.capacityWaitMs != null ? `capacity_wait_ms ${detail.capacityWaitMs}` : null,
     detail.upstreamCode ? `upstream ${detail.upstreamCode}` : null,
+    failureLabel ? `cause ${failureLabel}` : null,
     detail.responseId ? `response ${detail.responseId}` : null,
     detail.upstreamRequestId ? `request ${detail.upstreamRequestId}` : null,
   ]
@@ -354,6 +360,7 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
         <CapacityDetails attempts={detail.attempts} capacityWaitMs={detail.capacityWaitMs} />
         <dt>stage</dt>
         <dd>{detail.stage}</dd>
+        {failureLabel ? <><dt>cause</dt><dd>{failureLabel}</dd></> : null}
         {detail.httpStatus != null ? (
           <>
             <dt>http</dt>

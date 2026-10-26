@@ -456,6 +456,11 @@ pub enum AppError {
     #[error("API key scope forbidden: {0}")]
     ApiKeyScopeForbidden(String),
 
+    #[error(
+        "Guest model route is not authorized. Ask the owner to run this agent with its configured model first; guests cannot select or approve another model connection."
+    )]
+    GuestModelRouteRequired,
+
     #[error("API key scope inactive")]
     ApiKeyScopeInactive,
 
@@ -845,7 +850,7 @@ impl AppError {
         )
     }
 
-    fn status_code(&self) -> StatusCode {
+    pub(crate) fn status_code(&self) -> StatusCode {
         match self {
             Self::RefreshRefused { source, .. } => source.status_code(),
             Self::VoiceStartFailed(failure) => failure.source.status_code(),
@@ -945,7 +950,7 @@ impl AppError {
             Self::PendingCredentialCiphertextTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::PendingCredentialPubkeyAwaiting(_) => StatusCode::NOT_FOUND,
             Self::PendingCredentialQueueFull(_) => StatusCode::TOO_MANY_REQUESTS,
-            Self::ApiKeyScopeForbidden(_) => StatusCode::FORBIDDEN,
+            Self::ApiKeyScopeForbidden(_) | Self::GuestModelRouteRequired => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeInactive => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeNotFound(_) => StatusCode::NOT_FOUND,
             Self::ApiKeyScopePlanNotFound(_) => StatusCode::NOT_FOUND,
@@ -1186,7 +1191,7 @@ impl AppError {
             }
             Self::PendingCredentialPubkeyAwaiting(_) => PENDING_CREDENTIAL_PUBKEY_AWAITING_CODE,
             Self::PendingCredentialQueueFull(_) => PENDING_CREDENTIAL_QUEUE_FULL_CODE,
-            Self::ApiKeyScopeForbidden(_) => 9000,
+            Self::ApiKeyScopeForbidden(_) | Self::GuestModelRouteRequired => 9000,
             Self::ApiKeyScopeInactive => 9001,
             Self::ApiKeyScopeNotFound(_) => 9002,
             Self::ApiKeyScopePlanNotFound(_) => 9003,
@@ -1465,6 +1470,7 @@ impl AppError {
             Self::PendingCredentialPubkeyAwaiting(_) => "pending_credential_pubkey_awaiting",
             Self::PendingCredentialQueueFull(_) => "pending_credential_queue_full",
             Self::ApiKeyScopeForbidden(_) => "api_key_scope_forbidden",
+            Self::GuestModelRouteRequired => "guest_model_route_required",
             Self::ApiKeyScopeInactive => "api_key_scope_inactive",
             Self::ApiKeyScopeNotFound(_) => "api_key_scope_not_found",
             Self::ApiKeyScopePlanNotFound(_) => "api_key_scope_plan_not_found",
