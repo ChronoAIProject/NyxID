@@ -63,8 +63,9 @@ pub(super) async fn route(
             "master":authority.master_credential,"revision":authority.master_credential_revision,
             "override":override_key.map(|key| (key.api_key_id, key.credential_epoch))})
     } else {
-        use sha2::{Digest, Sha256};
-        json!({"master_revision":hex::encode(Sha256::digest(&target.service.credential_encrypted))})
+        // The catalog master credential route is identified by its catalog
+        // service (bound below); never derive identity from credential material.
+        json!({"master": true})
     };
     Ok(OwnerModelRoute {
         profile: profile.to_owned(),
