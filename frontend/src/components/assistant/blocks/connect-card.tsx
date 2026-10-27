@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { ExternalLink, KeyRound, Loader2, RefreshCw } from "lucide-react";
@@ -256,7 +257,7 @@ export function ConnectCard({
     Boolean(block.footer);
 
   return (
-    <section className="rounded-xl border border-border/70 bg-card">
+    <section className={`${STATUS_CARD_MAX_W} rounded-xl border border-border/70 bg-card`}>
       <div className="flex items-center gap-3 px-4 py-3">
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
           <ServiceIcon

@@ -16,14 +16,14 @@ test("the manual NyxBot demo URL works without test initialization and survives 
 }) => {
   await page.goto("/assistant?mock=1&nyxbot=1");
   await expect(
-    page.getByRole("button", { name: "New agent", exact: true }).first(),
+    page.getByRole("button", { name: "Create new agent", exact: true }).first(),
   ).toBeVisible();
   await sendMessage(page, "connect to my github");
   const link = page.getByRole("link", { name: "Connect GitHub", exact: true });
   await expect(link).toBeVisible();
   await page.reload();
   await expect(
-    page.getByRole("button", { name: "New agent", exact: true }).first(),
+    page.getByRole("button", { name: "Create new agent", exact: true }).first(),
   ).toBeVisible();
   await link.click();
   const dialog = page.getByRole("dialog", { name: "Connect a service" });

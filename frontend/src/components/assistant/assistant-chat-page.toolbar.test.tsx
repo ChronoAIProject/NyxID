@@ -84,7 +84,7 @@ vi.mock("./nyxbot-agent-panels", () => ({
 vi.mock("./nyxbot-agent-details", () => ({ AgentDetailsSheet: () => null }));
 vi.mock("./nyxbot-home", () => ({ NyxBotHome: () => <div>Home</div> }));
 vi.mock("./working-context-panel", () => ({ WorkingContextPanel: () => null }));
-vi.mock("./machine-desktop-panel", () => ({ ConversationMachineDesktops: () => null }));
+vi.mock("./machine-desktop-panel", () => ({ ConversationMachineDesktops: () => null, MachinePane: () => null, MachinePaneToggle: () => null }));
 vi.mock("./chat-message", () => ({ ChatMessageList: ({ session, renderMessage }: {
   session?: { messages: { id: string }[] }; renderMessage?: (message: { id: string }) => ReactNode;
 }) => session?.messages.filter((message) => message.id.startsWith("nyxagent-acknowledgement:"))

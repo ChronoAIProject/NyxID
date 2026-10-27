@@ -1,4 +1,5 @@
 import { Check, CircleAlert, Clock3, Radio, Workflow } from "lucide-react";
+import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { CmaGlyph } from "@/components/service-icons/cma";
 import { cn } from "@/lib/utils";
 import { isCmaOperationPending, type CmaOperation } from "@/schemas/cma-operation";
@@ -68,7 +69,7 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
     <section
       aria-label="CMA delegation"
       data-cma-operation={operation.id}
-      className="relative my-3 overflow-hidden rounded-2xl border border-white/10 bg-[#111211] text-zinc-100 shadow-lg shadow-black/10"
+      className={`${STATUS_CARD_MAX_W} relative my-3 overflow-hidden rounded-2xl border border-white/10 bg-[#111211] text-zinc-100 shadow-lg shadow-black/10`}
     >
       <div aria-hidden className="pointer-events-none absolute -right-16 -top-28 h-52 w-72 rounded-full bg-[#c6ef68]/[0.06] blur-3xl" />
       <div className="relative p-4 sm:p-5">
