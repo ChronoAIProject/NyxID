@@ -24,7 +24,7 @@
   "head": "1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
   "plan_gate": "ASTRA_PLAN_APPROVED",
   "reviewer_error": "Failed to authenticate: OAuth session expired and could not be refreshed",
-  "astra_review": "exact_candidate_personal_review_complete_A_R21_copy_and_A_R22_validation_open",
+  "astra_review": "SOURCE_REVIEW_COMPLETE_feature_plus_exact_A_R21_patch_A_R22_scope_and_I07_gap_personally_reviewed",
   "opus_implementation_gate": "SUPERSEDED_BY_USER",
   "acceptance": {
     "T1": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
@@ -35,14 +35,14 @@
     "T6": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
     "T7": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
     "G1": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
-    "G2": "PARTIAL_PASS_A_R21_completion_copy_and_A_R22_current_row_regression_open",
+    "G2": "PARTIAL_PASS_A_R21_SOURCE_REVIEW_COMPLETE_runtime_and_A_R22_exact_execution_pending",
     "G3": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
     "L1": "open",
     "L2": "open",
     "L3": "open",
-    "I-07": "OPEN_combined_router_commit_and_owner_auth_tests_required"
+    "I-07": "OPEN_integration_test_gap_actual_production_router_real_credentials_and_payload_rejection_proof_required"
   },
-  "updated_at": "2026-10-27T05:09:11.965017+00:00",
+  "updated_at": "2026-10-27T06:54:49.206175+00:00",
   "test_environment": {
     "cargo_target": "/Users/chronoai/Desktop/projects/nyxid/target",
     "cargo_build_jobs": 2,
@@ -601,7 +601,7 @@
     "A-R21",
     "A-R22"
   ],
-  "build_window": "released_coordinator_hold_no_heavy_command_queued",
+  "build_window": "HOLD_Automation_current_Artifacts_next_Telegram_later_narrow_window_no_heavy_command_queued",
   "resource_state": "coordinator_fourth_reclaim_and_explicit_package_only_profile_clearance",
   "resolved_findings": [
     "A-R04",
@@ -633,7 +633,7 @@
     "docs/TELEGRAM_NEW.md": "023ceffd122369199f4e23a722cbe91ac26c7a176c91aa3797c8304e44ee3f79"
   },
   "next_backend_command": "CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test --manifest-path backend/Cargo.toml telegram_new --no-run",
-  "implementer_state": "same_sol_idle_source_ready_awaiting_explicit_backend_window",
+  "implementer_state": "same_sol_evidence_correction_completed_source_ready_runtime_pending",
   "finding_closure_evidence": {
     "A-R01": {
       "binary_sha256": "1060f46cade1f49edbd68242d003eab3cb90f52609a12b0fb5eaaedf412f9ee1",
@@ -709,7 +709,7 @@
   },
   "current_reviewer_agent_id": "01a17a9b-2cf3-79e3-9177-1aa759f5eb61",
   "followup_candidate": {
-    "state": "source_reviewed_execution_pending_uncommitted",
+    "state": "SOURCE_REVIEW_COMPLETE_LOCAL_VALIDATION_COMPLETE_false_uncommitted",
     "files": {
       "backend/src/services/telegram_new_connect.rs": "e2518da7899d5df5ca37dc895dfb918b54b05ef370e4189ee335e0f1d0b4418a",
       "backend/src/services/telegram_new_tests.rs": "e4b87725278874aedfed2d385d1383c5c2bc833bea0a71dde441455d1a22761c"
@@ -718,6 +718,38 @@
       "services::telegram_new_tests::telegram_new_creation_webhook_completes_without_consent_or_browser_connect",
       "services::nyxbot_channel_query_service::tests::current_channels_rank_live_then_latest_before_limiting_and_order_ties"
     ],
-    "no_new_backend_window": true
+    "no_new_backend_window": true,
+    "reviewer_agent_id": "01a17a9b-2cf3-79e3-9177-1aa759f5eb61",
+    "reviewed_at": "2026-10-27T06:54:49.206175+00:00",
+    "surroundings_reviewed": [
+      "finish_request registration and installation ready_for_test",
+      "channel_connect_link_service complete",
+      "nyxbot channel_bot_watch success/owner-verification/failure",
+      "nyxbot_channel_query_service list_current and exact regression",
+      "production route/auth composition and current fixture limitations"
+    ],
+    "runtime_validation": "pending_new_explicit_backend_window",
+    "new_production_defects": []
+  },
+  "source_review_complete": true,
+  "local_validation_complete": false,
+  "integration_review": {
+    "id": "I-07",
+    "classification": "integration_test_gap_not_established_runtime_defect",
+    "source_review": "complete_for_separate_mounts_and_existing_auth_boundaries",
+    "existing_evidence_limit": "Telegram manual start_http routes; Artifacts direct owner_response helper",
+    "required_seam": "routes::build_router_with_state/private.with_state/tower::ServiceExt::oneshot",
+    "required_auth": "real signed or persisted credentials, never injected AuthUser",
+    "combined_commit": null,
+    "execution": "not_run",
+    "matrix": "docs/plans/2026-10-27-telegram-signoff.md#i-07-missing-production-router-integration-evidence"
+  },
+  "provider_recovery": {
+    "agent_id": "01a17afc-03c3-74f3-8206-1235e8b89954",
+    "prior_turn": "terminal_transport_error_after_5_retries",
+    "action": "same_persistent_session_resumed_no_replacement",
+    "result": "evidence_only_correction_completed",
+    "reported_evidence_sha256": "1b13296be8397cf7f3d62dc08837e96ea04fa0178fa7de335b7111bfa1c1d3fa",
+    "personally_verified": true
   }
 }
