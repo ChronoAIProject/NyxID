@@ -32,6 +32,8 @@
   "sol": {
     "agent_id": "01a17b03-c22c-7c50-a038-27bf595a74fd",
     "session_id": "01a17b03-c22e-7503-ae21-ef4d38050be9",
+    "provider_session_id": "01a17b03-c43f-74f3-b98c-beb00d71c256",
+    "provider_session_verified_at": "2026-10-27T03:58:24Z",
     "provider": "codex",
     "model": "gpt-6.1-sol",
     "effort": "xhigh",

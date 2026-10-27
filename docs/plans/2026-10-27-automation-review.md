@@ -312,6 +312,7 @@ handoff reports the containing commit SHA and `git show --stat` totals.
 - `docs/NYXBOT_SCHEDULES.md`
 - `docs/plans/2026-10-27-automation-review.md`
 - `docs/plans/2026-10-27-automation-status.json`
+
 - `frontend/src/pages/automations.test.tsx`
 - `frontend/src/pages/automations.tsx`
 - `frontend/src/schemas/automations.ts`
@@ -566,3 +567,12 @@ Exact files changed for F-7:
 - `backend/src/services/trigger_schedule/continuation.rs`
 - `docs/plans/2026-10-27-automation-review.md`
 - `docs/plans/2026-10-27-automation-status.json`
+
+## Astra personal review bookkeeping: Heca runtime identity
+
+The Sol implementer remains the original Heca agent and session
+`01a17b03-c22e-7503-ae21-ef4d38050be9` in the required worktree. Heca status
+verified provider `codex`, model `gpt-6.1-sol`, `x_high` effort, `full-access`
+mode, and provider session `01a17b03-c43f-74f3-b98c-beb00d71c256` at
+`2026-10-27T03:58:24Z`. The provider session identifier is recorded separately
+from the Heca session identifier; no session replacement was inferred.
