@@ -465,7 +465,12 @@ BASE_URL=http://localhost:3001
 FRONTEND_URL=http://localhost:3000
 JWT_PRIVATE_KEY_PATH=keys/private.pem
 JWT_PUBLIC_KEY_PATH=keys/public.pem
-JWT_ISSUER=nyxid
+JWT_ISSUER=http://localhost:3001   # Defaults to BASE_URL, not "nyxid"; pin during migration
+JWT_AUDIENCE=                       # Optional; defaults to BASE_URL (dedicated/client audiences unchanged)
+BASE_URL_ALIASES=                   # Optional comma-separated HTTPS API origins, no paths
+FRONTEND_URL_ALIASES=               # Optional comma-separated HTTPS browser origins
+COOKIE_DOMAIN_ALIASES=              # Optional configured cookie domains selected by trusted request host
+                                    # No aliases means existing behavior; see docs/DOMAIN_MIGRATION.md
 JWT_ACCESS_TTL_SECS=900             # 15 min
 JWT_REFRESH_TTL_SECS=604800         # 7 days, ROLLING: every refresh rotates the token and restarts the TTL,
                                     # so an active CLI never needs a browser re-login. Reuse of a rotated

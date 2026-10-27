@@ -22,8 +22,11 @@ pub(super) const MANAGER_ALLOWED_UPDATES: [&str; 5] = [
 pub(super) fn validate_manager_webhook(
     webhook: &serde_json::Value,
     callback: &str,
+    config: &crate::config::AppConfig,
 ) -> AppResult<()> {
-    if webhook["url"] != callback
+    if !webhook["url"]
+        .as_str()
+        .is_some_and(|url| config.same_base_url(url, callback))
         || !MANAGER_ALLOWED_UPDATES.iter().all(|kind| {
             webhook["allowed_updates"]
                 .as_array()
@@ -179,7 +182,7 @@ impl TelegramNewService<'_> {
         let webhook = self.api.call(token, "getWebhookInfo", json!({})).await?;
         if webhook["url"]
             .as_str()
-            .is_some_and(|existing| !existing.is_empty() && existing != callback)
+            .is_some_and(|existing| !existing.is_empty() && !self.config.same_base_url(existing, &callback))
         {
             return Err(AppError::Conflict("This manager already has a webhook for another application or environment. Use a dedicated manager.".into()));
         }
@@ -194,7 +197,7 @@ impl TelegramNewService<'_> {
         super::platform_bot_config_service::admit_manager_admin(self.db, actor, first_party, &id.to_string()).await?;
         self.api.call(token, "setWebhook", json!({"url": callback, "secret_token": secret, "allowed_updates": MANAGER_ALLOWED_UPDATES, "max_connections": 1})).await?;
         let webhook = self.api.call(token, "getWebhookInfo", json!({})).await?;
-        validate_manager_webhook(&webhook, &callback)?;
+        validate_manager_webhook(&webhook, &callback, self.config)?;
         super::platform_bot_config_service::finalize_manager_delivery(self.db, actor, first_party, &id.to_string(),
             old.get("observation_started_at").map(str::to_owned).unwrap_or_else(|| chrono::Utc::now().timestamp().to_string())).await?;
         Ok(())
@@ -333,5 +336,25 @@ impl TelegramNewService<'_> {
                 .await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod domain_alias_tests {
+    use super::*;
+    #[test]
+    fn domain_alias_manager_webhook_requires_the_exact_callback_and_updates() {
+        let mut config = crate::test_utils::test_app_config();
+        config.base_url = "https://new.example".into();
+        let callback = "https://new.example/api/v1/channels/telegram/manager";
+        let mut webhook = json!({"url":"https://old.example/api/v1/channels/telegram/manager", "allowed_updates":MANAGER_ALLOWED_UPDATES});
+        assert!(validate_manager_webhook(&webhook, callback, &config).is_err());
+        config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        assert!(validate_manager_webhook(&webhook, callback, &config).is_ok());
+        webhook["url"] = json!("https://old.example/api/v1/channels/telegram/other");
+        assert!(validate_manager_webhook(&webhook, callback, &config).is_err());
+        webhook["url"] = json!(callback);
+        webhook["allowed_updates"] = json!([]);
+        assert!(validate_manager_webhook(&webhook, callback, &config).is_err());
     }
 }

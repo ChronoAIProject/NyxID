@@ -8,6 +8,11 @@ const errorSchema = z.object({
 });
 
 export const channelBotDiagnosticsSchema = z.object({
+  discord_gateway: z.object({
+    state: z.string(),
+    reason: z.string().nullable(),
+    updated_at: z.string(),
+  }).optional(),
   last_inbound_at: z.string().nullable(),
   last_inbound_source: z.string().nullable(),
   last_outbound_at: z.string().nullable(),

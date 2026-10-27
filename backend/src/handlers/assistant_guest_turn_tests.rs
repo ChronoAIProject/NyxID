@@ -4,6 +4,9 @@ use crate::services::assistant_authority_tests::{connected, direct_fixture, orch
 use axum::{Extension, routing::any};
 use tower::ServiceExt;
 
+#[path = "assistant_owner_model_tests.rs"]
+mod owner_model_tests;
+
 async fn callback_proxy(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -87,12 +90,62 @@ async fn guest_1995_never_learns_a_route_from_a_guest() {
     .await;
 }
 
+#[tokio::test]
+async fn guest_1995_fresh_catalog_master_route_bootstraps_without_owner() {
+    Box::pin(guest_pipeline(false, &["bootstrap_master"])).await;
+}
+
+#[tokio::test]
+async fn guest_1995_existing_thread_platform_profile_bootstraps_without_owner() {
+    Box::pin(guest_pipeline(false, &["bootstrap_legacy"])).await;
+}
+
+#[tokio::test]
+async fn guest_1995_fresh_platform_connection_bootstraps_without_owner() {
+    Box::pin(guest_pipeline(false, &["bootstrap_platform"])).await;
+}
+
+#[tokio::test]
+async fn guest_1995_fresh_byok_route_needs_owner_and_has_safe_reply() {
+    Box::pin(guest_pipeline(false, &["bootstrap_byok"])).await;
+}
+
 async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
     let f = if nyxbot {
         Box::pin(orchestrator_fixture("guest_1995_nyxbot")).await
     } else {
         Box::pin(direct_fixture("guest_1995_pipeline")).await
     };
+    let bootstrap = scenarios
+        .iter()
+        .any(|scenario| scenario.starts_with("bootstrap_"));
+    let model_slug = if bootstrap {
+        "chrono-llm-public"
+    } else {
+        "guest-model"
+    };
+    let model_path = if bootstrap {
+        "responses"
+    } else {
+        "v1/responses"
+    };
+    let model_name = if bootstrap { "gpt-5.6-sol" } else { "test" };
+    if scenarios.contains(&"bootstrap_legacy") {
+        // Existing threads keep their configured profile when the agent's
+        // default changes. Bootstrap must follow that server-recorded turn.
+        f.state
+            .db
+            .collection::<bson::Document>("assistant_agents")
+            .update_one(
+                doc! {"_id":&f.chat.agent_id},
+                doc! {"$set":{"model":"nyxagent/research","owner_model_route":{
+                    "profile":"nyxagent/research","catalog_service_id":"other-profile-catalog",
+                    "connection_id":bson::Bson::Null,"operation":"other-profile-operation","execution":"other-profile-execution"
+                }}},
+            )
+            .await
+            .unwrap();
+    }
     let key = crate::services::key_service::get_api_key(
         &f.state.db,
         &f.owner,
@@ -162,12 +215,30 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                     "conversation_id":&conversation,"kind":"input_admission"
                 }).await.unwrap();
             }
-            let response = callbacks.clone().oneshot(Request::builder().method("POST").uri("/api/v1/proxy/s/guest-model/v1/responses")
-                .header("authorization", bearer.clone()).header("content-type", "application/json")
+            let response = callbacks.clone().oneshot(Request::builder().method("POST").uri(format!("/api/v1/proxy/s/{model_slug}/{model_path}"))
+                .header("authorization", bearer.clone()).header("content-type", "application/json").header("accept", "*/*")
                 .body(Body::from(input_source.lock().await.to_string())).unwrap()).await.unwrap();
             let status = response.status().as_u16();
             let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             observations.push(json!({"stage":"model","status":status,"body":serde_json::from_slice::<Value>(&bytes).unwrap()}));
+            if scenario.starts_with("bootstrap_") && scenario != "bootstrap_byok" {
+                for (slug, path, model, store, override_method) in [
+                    ("unrelated-owner-model", model_path, model_name, false, false),
+                    (model_slug, model_path, "unrelated-model", false, false),
+                    (model_slug, "v1/models", model_name, false, false),
+                    (model_slug, model_path, model_name, true, false),
+                    (model_slug, model_path, model_name, false, true),
+                    (model_slug, "v1/responses", model_name, false, false),
+                ] {
+                    let mut request = Request::builder().method("POST").uri(format!("/api/v1/proxy/s/{slug}/{path}"))
+                        .header("authorization", bearer.clone()).header("content-type", "application/json").header("accept", "*/*");
+                    if override_method { request = request.header("x-http-method-override", "DELETE"); }
+                    let response = callbacks.clone().oneshot(request.body(Body::from(json!({
+                        "model":model,"store":store,"input":"unrelated generation","stream":false
+                    }).to_string())).unwrap()).await.unwrap();
+                    assert_eq!(response.status(), StatusCode::FORBIDDEN, "bootstrap probe {slug}/{path}, model={model}");
+                }
+            }
             if scenario == "probes" {
                 // The exact same authenticated key and live turn can use only
                 // the owner-established route, not another owner BYOK account.
@@ -181,7 +252,7 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                     ("guest-model", "v1/responses", "test", false, true),
                 ] {
                     let mut request = Request::builder().method("POST").uri(format!("/api/v1/proxy/s/{slug}/{path}"))
-                        .header("authorization", bearer.clone()).header("content-type", "application/json");
+                        .header("authorization", bearer.clone()).header("content-type", "application/json").header("accept", "*/*");
                     if override_method { request = request.header("x-http-method-override", "DELETE"); }
                     let response = callbacks.clone().oneshot(request.body(Body::from(json!({
                         "model":model,"store":store,"input":"unrelated generation","stream":false
@@ -208,7 +279,14 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
     }));
     let server = register_upstream(&f.state, agent).await;
     let provider = wiremock::MockServer::start().await;
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
+    let mut provider_mock = wiremock::Mock::given(wiremock::matchers::method("POST"));
+    if bootstrap {
+        provider_mock = provider_mock.and(wiremock::matchers::header(
+            "authorization",
+            "Bearer test-only-master",
+        ));
+    }
+    provider_mock
         .respond_with(
             wiremock::ResponseTemplate::new(200)
                 .set_body_json(json!({"id":"model-response","output":[]})),
@@ -217,7 +295,7 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         .await;
     let mut model = crate::models::downstream_service::test_helpers::dummy_service();
     model.id = Uuid::new_v4().to_string();
-    model.slug = "guest-model".into();
+    model.slug = model_slug.into();
     model.base_url = provider.uri();
     model.auth_method = "none".into();
     model.requires_user_credential = false;
@@ -226,6 +304,20 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         serde_json::from_value(json!({"wire_protocol":"openai_responses","model_list":true}))
             .unwrap(),
     );
+    if bootstrap {
+        model.auth_method = "bearer".into();
+        model.service_category = "internal".into();
+        model.credential_encrypted = f
+            .state
+            .encryption_keys
+            .encrypt(b"test-only-master")
+            .await
+            .unwrap();
+        if scenarios.contains(&"bootstrap_platform") {
+            model.platform_key =
+                Some(serde_json::from_value(json!({"enabled":true,"audience":"public"})).unwrap());
+        }
+    }
     f.state
         .db
         .collection::<DownstreamService>(SERVICES)
@@ -242,6 +334,56 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         )
         .await
         .unwrap();
+    if scenarios.contains(&"bootstrap_platform") {
+        f.state.db.collection::<bson::Document>("user_services").update_one(doc!{"_id":&connection},
+            doc!{"$set":{"credential_binding":"platform","auth_method":"bearer","source":"auto_provision"}}).await.unwrap();
+    }
+    if bootstrap {
+        use crate::services::user_api_key_service::{CreateApiKeyParams, create_api_key};
+        let key = create_api_key(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.owner,
+            CreateApiKeyParams {
+                label: "owner BYOK",
+                credential_type: "bearer",
+                credential: "test-only-byok",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut unrelated = model.clone();
+        unrelated.id = Uuid::new_v4().to_string();
+        unrelated.slug = "unrelated-owner-model".into();
+        unrelated.platform_key = None;
+        unrelated.service_category = "connection".into();
+        unrelated.requires_user_credential = true;
+        unrelated.credential_encrypted.clear();
+        f.state
+            .db
+            .collection::<DownstreamService>(SERVICES)
+            .insert_one(&unrelated)
+            .await
+            .unwrap();
+        let other = connected(&f.state.db, &f.owner, &unrelated.slug, &provider.uri()).await;
+        f.state.db.collection::<bson::Document>("user_services").update_one(doc!{"_id":other},
+            doc!{"$set":{"catalog_service_id":unrelated.id,"credential_binding":"user","auth_method":"bearer","api_key_id":&key.id}}).await.unwrap();
+        if scenarios.contains(&"bootstrap_byok") {
+            f.state.db.collection::<bson::Document>("user_services").update_one(doc!{"_id":&connection},
+                doc!{"$set":{"credential_binding":"user","auth_method":"bearer","api_key_id":&key.id}}).await.unwrap();
+        }
+    }
     if scenarios.contains(&"probes") {
         let mut unrelated = model.clone();
         unrelated.id = Uuid::new_v4().to_string();
@@ -330,14 +472,36 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
             .unwrap()
             .get("owner_model_route")
             .cloned();
-        *model_input.lock().await =
-            json!({"model":"test","store": scenario == "stateful","input":"test","stream":false});
+        *model_input.lock().await = json!({"model":model_name,"store": scenario == "stateful","input":"test","stream":false});
+        model_input.lock().await["client_metadata"] = json!({
+            "root_turn_id":Uuid::new_v4().to_string(),"session_id":Uuid::new_v4().to_string(),
+            "thread_id":Uuid::new_v4().to_string(),"turn_id":Uuid::new_v4().to_string(),
+            "x-codex-installation-id":"test-installation","x-codex-turn-metadata":"{}",
+            "x-codex-window-id":Uuid::new_v4().to_string(),
+        });
         f.state
             .db
             .collection::<bson::Document>("service_approval_configs")
             .delete_many(doc! {})
             .await
             .unwrap();
+        if !guest {
+            // This synthetic, non-platform model route has an existing owner
+            // approval. Codex metadata retains legacy write classification for
+            // owners; it must not silently bypass the writes-only default.
+            crate::services::approval_service::set_service_approval_config(
+                &f.state.db,
+                &f.owner,
+                &model.id,
+                "model",
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        }
         if scenario == "approval" {
             // The HTTP proxy resolves approval policy by catalog service ID;
             // the saved connection ID only binds execution authority.
@@ -354,7 +518,14 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
             .await
             .unwrap();
         }
-        if matches!(scenario, "catalog" | "catalog_unbound" | "owner_catalog") {
+        if matches!(
+            scenario,
+            "catalog"
+                | "catalog_unbound"
+                | "owner_catalog"
+                | "bootstrap_master"
+                | "bootstrap_legacy"
+        ) {
             f.state
                 .db
                 .collection::<bson::Document>("user_services")
@@ -433,6 +604,11 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         .await
         .unwrap();
         if guest {
+            let current = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+            assert!(
+                current.owner_model_route == row.owner_model_route,
+                "guest must not create or replace a thread route"
+            );
             let route_after = f
                 .state
                 .db
@@ -488,7 +664,7 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         }
         let expected = match scenario {
             "approval" => Some((403, "api_key_scope_forbidden", 9000)),
-            "stateful" | "missing_input" | "unbound" | "catalog_unbound" => {
+            "stateful" | "missing_input" | "unbound" | "catalog_unbound" | "bootstrap_byok" => {
                 Some((403, "guest_model_route_required", 9000))
             }
             "concurrency" => Some((429, "service_concurrency_limited", 12600)),
@@ -502,7 +678,18 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                 "{scenario} must be refused before reaching the provider"
             );
             assert_eq!(reply.status, "failed", "{scenario}: {calls}");
-            assert_eq!(reply.error_code.as_deref(), Some("assistant_unavailable"));
+            let mapped = if code == "guest_model_route_required" {
+                code
+            } else {
+                "assistant_unavailable"
+            };
+            assert_eq!(reply.error_code.as_deref(), Some(mapped));
+            if code == "guest_model_route_required" {
+                assert_eq!(
+                    completed["error"]["message"],
+                    "This assistant isn't available to guests yet."
+                );
+            }
             assert_eq!(reply.upstream_error_code.as_deref(), Some("turn_failed"));
             assert_eq!(reply.error_detail.as_ref().unwrap().stage, "stream");
             let reason = reply

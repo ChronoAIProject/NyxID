@@ -1540,6 +1540,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn domain_alias_refresh_rotation_survives_api_cutover() {
+        let db = crate::test_utils::connect_transaction_test_database("domain_alias_refresh").await;
+        let mut config = test_app_config();
+        config.base_url = "https://old.example".into();
+        config.jwt_issuer = config.base_url.clone();
+        let keys = cached_test_jwt_keys();
+        let user = Uuid::new_v4().to_string();
+        seed_user(&db, &user).await;
+        let issued = Box::pin(create_session_and_issue_tokens(
+            &db, &config, &keys, &user, None, None,
+        ))
+        .await
+        .unwrap();
+        config.domain_aliases.base_urls = vec![config.base_url.clone()];
+        config.base_url = "https://new.example".into();
+        config.jwt_issuer = config.base_url.clone();
+        let refreshed = Box::pin(refresh_tokens(
+            &db,
+            &config,
+            &keys,
+            &issued.refresh_token,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(refreshed.session_id, issued.session_id);
+        for token in [&refreshed.access_token, &refreshed.refresh_token] {
+            let claims = jwt::verify_token(&keys, &config, token).unwrap();
+            assert_eq!(claims.iss, config.jwt_issuer);
+            assert_eq!(claims.aud, config.base_url);
+            assert_eq!(claims.sub, user);
+        }
+    }
+
+    #[tokio::test]
     async fn test_refresh_tokens_rotates_refresh_token() {
         let Some(db) = connect_test_database("token_svc").await else {
             return;

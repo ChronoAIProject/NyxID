@@ -361,6 +361,19 @@ describe("canonical chat presentation", () => {
     expect(writeText).toHaveBeenCalledWith("turn turn-1 / upstream turn_failed / cause nyxid / model_proxy / api_key_scope_forbidden / HTTP 403 / NyxID 9000 / response resp_1 / request req-1");
   });
 
+  it("explains a missing guest model route only in the owner's diagnostic details", () => {
+    render(<ChatMessageBubble message={{ ...BASE, status: "error",
+      error: "This assistant isn't available to guests yet.",
+      errorDetail: { stage: "stream", turnId: "turn-guest", continuations: 0, failureReason: {
+        source: "nyxid", stage: "model_proxy", code: "guest_model_route_required",
+        http_status: 403, nyxid_error_code: 9000,
+      } },
+    }} />);
+    expect(screen.getByText("This assistant isn't available to guests yet.")).toBeVisible();
+    fireEvent.click(screen.getByText("Details"));
+    expect(screen.getByText("Send one message to this agent as its owner using its configured model to record the route for guest replies.")).toBeVisible();
+  });
+
   it("shows thinking treatment only for a content-free streaming message", () => {
     const { container, rerender } = render(
       <ChatMessageBubble

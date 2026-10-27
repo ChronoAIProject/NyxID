@@ -2804,3 +2804,39 @@ async fn continuity_local_activation_failure_reports_setup_interrupted_and_retir
     upstream.abort();
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn domain_alias_saved_gateway_issuer_accepts_overlap_but_never_destination_drift() {
+    let (mut state, row, _, server, upstream) = fixture("domain_alias_release").await;
+    state.config.jwt_issuer = "https://old.example".into();
+    let reserved = reserve(&state, &row).await;
+    release::dispatch(&state.db, &reserved).await.unwrap();
+    release::retire_attempt(&state, &reserved.id, ReleaseReason::SetupFailed)
+        .await
+        .unwrap();
+    mount_remote(&server, &reserved, 1).await;
+    state.config.jwt_issuer = "https://new.example".into();
+    assert_eq!(
+        release::observe(&state, &reserved).await.unwrap(),
+        release::Observation::DestinationChanged
+    );
+    state.config.domain_aliases.base_urls = vec!["https://old.example".into()];
+    assert!(matches!(
+        release::observe(&state, &reserved).await.unwrap(),
+        release::Observation::Matching { .. }
+    ));
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .update_one(
+            doc! {"slug":"cmaeg"},
+            doc! {"$set":{"base_url":"https://different-gateway.example"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        release::observe(&state, &reserved).await.unwrap(),
+        release::Observation::DestinationChanged
+    );
+    upstream.abort();
+}

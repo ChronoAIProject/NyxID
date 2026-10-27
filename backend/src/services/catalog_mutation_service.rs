@@ -12,6 +12,7 @@ use mongodb::{
 #[derive(Clone)]
 pub struct Authority {
     pub catalog_base_url: String,
+    pub catalog_base_aliases: Vec<String>,
     pub actor: AuditActor,
     /// Captured from the authenticated request, never inferred from a user row.
     pub first_party_human: bool,
@@ -207,7 +208,7 @@ pub async fn commit_update(
                 return Err(AppError::Forbidden("Tool credential and destination are frozen; ask an Admin".into()));
             }
             if let Ok(url) = fields.get_str("icon_url") {
-                let id = super::catalog_icon_service::asset_id(&authority.catalog_base_url, url)?;
+                let id = super::catalog_icon_service::asset_id_with_aliases(&authority.catalog_base_url, &authority.catalog_base_aliases, url)?;
                 super::catalog_icon_service::require_asset(db, id, Some(&mut *session)).await?;
             }
             if let Some(rules) = fields.get("anonymous_endpoints") {

@@ -25,6 +25,15 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc};
 use zeroize::Zeroizing;
 
+// A closed, locally attributed refusal is safe channel output. The persisted
+// turn remains failed with its owner-visible diagnostic; provider prose is
+// never converted into a reply this way.
+fn guest_route_refusal(error: Option<&engine::TurnError>) -> Option<&str> {
+    error
+        .filter(|error| error.code == "guest_model_route_required")
+        .map(|error| error.message.as_str())
+}
+
 pub fn webhook_url(state: &AppState, b: &Binding) -> String {
     format!(
         "{}/api/v1/webhooks/call-adapters/{}",
@@ -120,7 +129,8 @@ async fn ingress_correlated_inner(
                     .key,
                 &b.account_id,
             )?;
-            protocol::verify_twilio(
+            protocol::verify_twilio_configured(
+                &state.config,
                 headers,
                 &send
                     .map(|id| format!("{}/sms-receipts/{id}", webhook_url(&state, &b)))
@@ -527,8 +537,31 @@ pub(crate) async fn turn_with_history(
             },
         )
         .await;
-        let complete =
-            relay.await.unwrap_or(false) && result.as_ref().is_some_and(|s| s.error.is_none());
+        let relayed = relay.await.unwrap_or(false);
+        let guest_refusal = result
+            .as_ref()
+            .and_then(|s| guest_route_refusal(s.error.as_ref()));
+        let mut complete = relayed
+            && result
+                .as_ref()
+                .is_some_and(|s| s.error.is_none() || guest_refusal.is_some());
+        if complete && let Some(refusal) = guest_refusal {
+            complete = session::fence(&state, &worker_session).await.is_ok()
+                && matches!(
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        terminal.send(Output {
+                            turn_id: terminal_turn_id.clone(),
+                            generation: worker_session.generation,
+                            text: refusal.into(),
+                            last: false,
+                            error: false,
+                        }),
+                    )
+                    .await,
+                    Ok(Ok(()))
+                );
+        }
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             terminal.send(Output {
@@ -582,13 +615,16 @@ async fn sms_turn(
     let Some(settled) = worker.await.map_err(|_| AppError::AssistantTurnRequired)? else {
         return Ok(());
     };
-    if settled.error.is_some() {
+    let guest_refusal = guest_route_refusal(settled.error.as_ref());
+    if settled.error.is_some() && guest_refusal.is_none() {
         return Ok(());
     }
     let current = session::load(&state, &s.id).await?;
     session::fence(&state, &current).await?;
     let r = binding::live(&state, &b).await?;
-    let text = if profiles::sms_parts(b.profile, &settled.text).is_ok() {
+    let text = if let Some(refusal) = guest_refusal {
+        refusal.into()
+    } else if profiles::sms_parts(b.profile, &settled.text).is_ok() {
         settled.text
     } else {
         "This answer exceeds the SMS limit. Please ask a more specific question.".into()
@@ -788,7 +824,12 @@ pub async fn authenticate_socket(
     let r = binding::live(state, b).await?;
     if b.profile == Profile::TwilioRelay {
         let (_, secret) = protocol::twilio_key(&r.key, &b.account_id)?;
-        protocol::verify_twilio_upgrade(headers, &websocket_url(state, b, s, raw)?, secret)?;
+        protocol::verify_twilio_upgrade_configured(
+            &state.config,
+            headers,
+            &websocket_url(state, b, s, raw)?,
+            secret,
+        )?;
     }
     carrier::prove_call(state, b, &r, &s.provider_call_id, &s.from, &s.to).await?;
     Ok(())

@@ -571,7 +571,11 @@ pub(crate) async fn verify_manager(
         .api
         .call(token, "getWebhookInfo", serde_json::json!({}))
         .await?;
-    super::telegram_new_admin::validate_manager_webhook(&webhook, &service.manager_callback())?;
+    super::telegram_new_admin::validate_manager_webhook(
+        &webhook,
+        &service.manager_callback(),
+        service.config,
+    )?;
     let current = get(service.db, id).await?;
     require_telegram_manager(&current)?;
     if current.generation != generation || current.deleted_at.is_some() {
