@@ -416,11 +416,46 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         expected_rows: &'a [Vec<bson::Document>],
         expected_calls: &'a [String],
         private_markers: &'a [String],
+        content_revision: &'a str,
     ) -> futures::future::BoxFuture<'a, ()> {
+        fn assert_private_json(value: &Value, private_markers: &[String], content_revision: &str) {
+            let assert_private_text = |text: &str| {
+                assert!(
+                    !text.contains(content_revision)
+                        && private_markers.iter().all(|marker| !text.contains(marker)),
+                    "refusal disclosed saved artifact metadata in a JSON key or string"
+                );
+            };
+            match value {
+                Value::Object(fields) => {
+                    for (key, value) in fields {
+                        assert_private_text(key);
+                        assert_private_json(value, private_markers, content_revision);
+                    }
+                }
+                Value::Array(values) => {
+                    for value in values {
+                        assert_private_json(value, private_markers, content_revision);
+                    }
+                }
+                Value::String(text) => assert_private_text(text),
+                Value::Number(number) => {
+                    if let Ok(revision) = content_revision.parse::<serde_json::Number>() {
+                        assert_ne!(number, &revision, "refusal disclosed the numeric revision");
+                    }
+                }
+                Value::Null | Value::Bool(_) => {}
+            }
+        }
+
         Box::pin(async move {
+            use crate::errors::{AppError, access_denial::CredentialType};
+
+            let status = response.status();
             let body = axum::body::to_bytes(response.into_body(), 1024)
                 .await
                 .unwrap();
+            assert!(!content_revision.is_empty());
             assert!(!body.windows(MP4.len()).any(|bytes| bytes == MP4));
             assert!(!body.windows(12).any(|bytes| bytes == &MP4[4..16]));
             for marker in private_markers {
@@ -431,6 +466,55 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
                         .any(|bytes| bytes == marker.as_bytes()),
                     "refusal disclosed saved artifact metadata or encoded bytes"
                 );
+            }
+            if status == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+                // The mounted zero-byte body limit rejects before AppError handling.
+                assert_eq!(
+                    &body[..],
+                    b"Failed to buffer the request body: length limit exceeded"
+                );
+            } else {
+                let error: Value = serde_json::from_slice(&body).expect("JSON AppError refusal");
+                let envelope = error.as_object().expect("AppError object envelope");
+                assert!(envelope.keys().all(|key| matches!(
+                    key.as_str(),
+                    "error" | "error_code" | "message" | "details"
+                )));
+                let public_error = match error["error"].as_str().expect("public error key") {
+                    "unauthorized" => AppError::Unauthorized(String::new()),
+                    "authentication_failed" => AppError::AuthenticationFailed(String::new()),
+                    "token_expired" => AppError::TokenExpired,
+                    "forbidden" if envelope.contains_key("details") => {
+                        let credential_type = match error["details"]["credential_type"].as_str() {
+                            Some("api_key") => CredentialType::ApiKey,
+                            Some("delegated") => CredentialType::Delegated,
+                            Some("service_account") => CredentialType::ServiceAccount,
+                            Some("relay") => CredentialType::Relay,
+                            _ => panic!("unexpected credential refusal details"),
+                        };
+                        AppError::unsupported_credential("", credential_type)
+                    }
+                    "forbidden" => AppError::Forbidden(String::new()),
+                    "not_found" => AppError::NotFound(String::new()),
+                    "attachment_expired" => AppError::AssistantAttachmentExpired,
+                    _ => panic!("unexpected refusal error key"),
+                };
+                assert_eq!(status, public_error.status_code());
+                let expected = public_error.response_body();
+                assert_eq!(
+                    error["error_code"].as_u64(),
+                    Some(u64::from(expected.error_code))
+                );
+                assert!(error["message"].is_string());
+                // Details must exactly match the fixed authentication reason or
+                // credential guidance; extra fields and nested metadata fail.
+                assert_eq!(envelope.get("details"), expected.details.as_ref());
+                if status == axum::http::StatusCode::GONE {
+                    assert_eq!(error["message"], expected.message);
+                }
+                // Numeric public codes such as 12101 are compared as whole numbers,
+                // while revision strings remain forbidden in every key/string leaf.
+                assert_private_json(&error, private_markers, content_revision);
             }
             let rows = saved_associations(&a.f.state.db).await;
             assert!(
@@ -550,7 +634,6 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         source.id.clone(),
         source.operation_id.clone().expect("the saved operation ID"),
         manifest.source_result_identity.clone(),
-        manifest.content_revision.clone(),
         attachment
             .artifact
             .filename
@@ -610,6 +693,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &expired_associations,
         &calls_before_refusals,
         &private_markers,
+        &manifest.content_revision,
     )
     .await;
     let expired_recovery = app
@@ -631,6 +715,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &expired_associations,
         &calls_before_refusals,
         &private_markers,
+        &manifest.content_revision,
     )
     .await;
     a.f.state
@@ -667,6 +752,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
+        &manifest.content_revision,
     )
     .await;
     let foreign = uuid::Uuid::new_v4().to_string();
@@ -712,6 +798,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
+        &manifest.content_revision,
     )
     .await;
 
@@ -748,6 +835,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
+        &manifest.content_revision,
     )
     .await;
 
@@ -778,6 +866,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
+        &manifest.content_revision,
     )
     .await;
 
@@ -839,6 +928,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
             &associations,
             &calls_before_refusals,
             &private_markers,
+            &manifest.content_revision,
         )
         .await;
     }
@@ -868,6 +958,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
+        &manifest.content_revision,
     )
     .await;
 
@@ -893,6 +984,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
+        &manifest.content_revision,
     )
     .await;
 
@@ -918,6 +1010,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
+        &manifest.content_revision,
     )
     .await;
 
@@ -940,6 +1033,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
+        &manifest.content_revision,
     )
     .await;
 
@@ -965,6 +1059,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
             &associations,
             &calls_before_refusals,
             &private_markers,
+            &manifest.content_revision,
         )
         .await;
     }
@@ -992,6 +1087,7 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &associations,
         &calls_before_refusals,
         &private_markers,
+        &manifest.content_revision,
     )
     .await;
     assert_eq!(a.calls.lock().unwrap().len(), calls_before_recovery);
