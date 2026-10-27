@@ -9,7 +9,7 @@
   "frozen_plan_path": "docs/plans/2026-10-27-automation-implementation.freeze-5e3469b2.md",
   "historical_plan_sha256": "0633146fbe464aa94fd6a3a98ba7c0a2b4ef0ce00da147bc5bc2741cbbfb96d4",
   "historical_frozen_plan_path": "docs/plans/2026-10-27-automation-implementation.freeze-0633146f.md",
-  "current_commit": "55249c7b5",
+  "current_commit": "2434ffc8c",
   "user_amendment": "SUPERSEDES Opus plan and final implementation gates; pure Astra-Sol workflow authorized.",
   "opus": {
     "agent_id": "01a17aa2-d74e-7151-9efa-b40638c3befb",
