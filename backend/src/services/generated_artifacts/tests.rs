@@ -13,6 +13,81 @@ fn watch() -> AsyncServiceOperation {
         "delivery":{"origin":"user","platform_reply":{"kind":"web_only"}},"operation_id":"operation2037","artifact_mode":sandbox::MODE,"state":"waiting","attempts":0,"lease_id":"lease2037","lease_until":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(60)),"created_at":bson::DateTime::now(),"deadline":bson::DateTime::from_chrono(Utc::now()+Duration::hours(2)),"poll_at":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::hours(4))}).unwrap()
 }
 #[test]
+fn generated_artifact_metadata_omits_absent_fields_but_persists_populated_bson() {
+    assert!(bson::to_document(&Metadata::default()).unwrap().is_empty());
+    let expiry = Utc::now();
+    let metadata = Metadata {
+        filename: Some("result.mp4".into()),
+        source: Some("sandbox".into()),
+        source_watch_id: Some("watch".into()),
+        source_turn_id: Some("turn".into()),
+        source_operation_id: Some("operation".into()),
+        source_result_identity: Some("identity".into()),
+        source_status_version: Some("17".into()),
+        content_revision: Some("2".into()),
+        preview_kind: Some("video".into()),
+        expires_at: Some(expiry),
+    };
+    let stored = bson::to_document(&metadata).unwrap();
+    assert_eq!(stored.len(), 10);
+    assert_eq!(stored.get_str("source_operation_id").unwrap(), "operation");
+    assert_eq!(stored.get_str("content_revision").unwrap(), "2");
+    assert_eq!(
+        stored.get_datetime("expires_at").unwrap(),
+        &bson::DateTime::from_chrono(expiry)
+    );
+    let restored: Metadata = bson::from_document(stored.clone()).unwrap();
+    assert_eq!(bson::to_document(&restored).unwrap(), stored);
+    let legacy: Metadata = bson::from_document(doc! {}).unwrap();
+    assert!(bson::to_document(&legacy).unwrap().is_empty());
+    let legacy = TurnAttachment {
+        artifact: Metadata::default(),
+        chat_delivery: None,
+        image_input: None,
+        image_inspection: None,
+        origin: "tool".into(),
+        pages: None,
+        id: "legacy-image".into(),
+        content_type: "image/png".into(),
+        size: 42,
+        label: "legacy tool".into(),
+    };
+    let stored_legacy = bson::to_document(&legacy).unwrap();
+    for key in stored.keys() {
+        assert!(!stored_legacy.contains_key(key), "absent metadata: {key}");
+    }
+    let response = serde_json::to_value(
+        crate::handlers::assistant_nyxagent::AttachmentResponse::from(legacy.clone()),
+    )
+    .unwrap();
+    for key in [
+        "filename",
+        "source",
+        "result_version",
+        "preview_kind",
+        "expires_at",
+    ] {
+        assert!(
+            response.get(key).is_none(),
+            "absent response metadata: {key}"
+        );
+    }
+    let populated = TurnAttachment {
+        artifact: metadata,
+        ..legacy
+    };
+    let flattened = bson::to_document(&populated).unwrap();
+    for (key, value) in stored {
+        assert_eq!(flattened.get(&key), Some(&value));
+    }
+    let response = serde_json::to_value(
+        crate::handlers::assistant_nyxagent::AttachmentResponse::from(populated),
+    )
+    .unwrap();
+    assert_eq!(response["filename"], "result.mp4");
+    assert_eq!(response["result_version"], "2");
+}
+#[test]
 fn generated_summary_selects_metadata_and_discards_process_streams() {
     let mut value: serde_json::Value = serde_json::from_str(&body(
         "/private/path-marker/file-marker.bin",

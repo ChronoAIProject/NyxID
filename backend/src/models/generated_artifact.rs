@@ -7,16 +7,29 @@ pub const DELIVERIES: &str = "assistant_artifact_deliveries";
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Metadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_watch_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_result_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_status_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub content_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub preview_kind: Option<String>,
-    #[serde(default, with = "super::bson_datetime::optional")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "super::bson_datetime::optional"
+    )]
     pub expires_at: Option<DateTime<Utc>>,
 }
 impl std::fmt::Debug for Metadata {

@@ -130,10 +130,15 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
 }
 #[derive(Serialize)]
 pub struct AttachmentResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
     filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     result_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     preview_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     expires_at: Option<DateTime<Utc>>,
     expired: bool,
     image_input: Option<String>,
