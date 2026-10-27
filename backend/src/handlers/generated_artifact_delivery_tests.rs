@@ -907,96 +907,119 @@ async fn generated_artifact_worker_fences_lifecycle_version_across_result_fetch(
 #[tokio::test]
 async fn generated_artifact_malformed_status_is_terminal_before_or_after_result_fetch() {
     const MALFORMED: &str = "__malformed_json_after_result_status__";
+    check_artifact_malformed_initial_status(MALFORMED).await;
+    check_artifact_malformed_post_result_status(MALFORMED).await;
+    check_ordinary_async_malformed_status(MALFORMED).await;
+}
 
-    // A malformed initial successful status is terminal for an admitted
-    // generated watch and never reaches the result operation.
-    let initial = boxed_generated().await;
-    initial.submit().await;
-    *initial.status_override.lock().unwrap() = Some(json!(MALFORMED));
-    complete(&initial).await;
-    let initial_watch = initial.watch().await;
-    assert_eq!(initial_watch.reason.as_deref(), Some("artifact_invalid"));
-    assert_eq!(
-        initial
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|path| path.ends_with("/result"))
-            .count(),
-        0
-    );
-    assert_eq!(
-        initial
-            .f
-            .state
-            .db
-            .collection::<bson::Document>(ARTIFACTS)
-            .count_documents(doc! {})
+// Construct each phase separately so its debug poll frame is released before
+// the next phase enters the nested MCP/proxy/Mongo sweep calls.
+fn check_artifact_malformed_initial_status(
+    malformed: &'static str,
+) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        // A malformed initial successful status is terminal for an admitted
+        // generated watch and never reaches the result operation.
+        let initial = boxed_generated().await;
+        initial.submit().await;
+        *initial.status_override.lock().unwrap() = Some(json!(malformed));
+        complete(&initial).await;
+        let initial_watch = initial.watch().await;
+        assert_eq!(initial_watch.reason.as_deref(), Some("artifact_invalid"));
+        assert_eq!(
+            initial
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|path| path.ends_with("/result"))
+                .count(),
+            0
+        );
+        assert_eq!(
+            initial
+                .f
+                .state
+                .db
+                .collection::<bson::Document>(ARTIFACTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    })
+}
+
+fn check_artifact_malformed_post_result_status(
+    malformed: &'static str,
+) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        // A malformed successful post-result status also settles terminally. A
+        // second sweep cannot reclaim it, so the result is fetched exactly once.
+        let after = boxed_generated().await;
+        after.submit().await;
+        *after.after_result_status.lock().unwrap() = Some(json!(malformed));
+        complete(&after).await;
+        let first_calls = after.calls.lock().unwrap().clone();
+        assert_eq!(
+            first_calls
+                .iter()
+                .filter(|path| path.ends_with("/result"))
+                .count(),
+            1
+        );
+        let after_watch = after.watch().await;
+        assert_eq!(after_watch.reason.as_deref(), Some("artifact_invalid"));
+        assert!(after_watch.artifact_result.is_none());
+        assert!(after_watch.result_encrypted.is_none());
+        assert_eq!(
+            after
+                .f
+                .state
+                .db
+                .collection::<bson::Document>(ARTIFACTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        after.due().await;
+        Box::pin(async_operations::sweep(&after.f.state))
             .await
-            .unwrap(),
-        0
-    );
+            .unwrap();
+        let second_calls = after.calls.lock().unwrap().clone();
+        assert_eq!(
+            second_calls
+                .iter()
+                .filter(|path| path.ends_with("/result"))
+                .count(),
+            1
+        );
+    })
+}
 
-    // A malformed successful post-result status also settles terminally. A
-    // second sweep cannot reclaim it, so the result is fetched exactly once.
-    let after = boxed_generated().await;
-    after.submit().await;
-    *after.after_result_status.lock().unwrap() = Some(json!(MALFORMED));
-    complete(&after).await;
-    let first_calls = after.calls.lock().unwrap().clone();
-    assert_eq!(
-        first_calls
-            .iter()
-            .filter(|path| path.ends_with("/result"))
-            .count(),
-        1
-    );
-    let after_watch = after.watch().await;
-    assert_eq!(after_watch.reason.as_deref(), Some("artifact_invalid"));
-    assert!(after_watch.artifact_result.is_none());
-    assert!(after_watch.result_encrypted.is_none());
-    assert_eq!(
-        after
-            .f
-            .state
-            .db
-            .collection::<bson::Document>(ARTIFACTS)
-            .count_documents(doc! {})
+fn check_ordinary_async_malformed_status(
+    malformed: &'static str,
+) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        // Ordinary async watches keep the existing retryable malformed-status
+        // contract; only admitted generated watches settle terminally.
+        let ordinary = AsyncFixture::new().await;
+        ordinary.submit().await;
+        *ordinary.status_override.lock().unwrap() = Some(json!(malformed));
+        ordinary.due().await;
+        Box::pin(async_operations::sweep(&ordinary.f.state))
             .await
-            .unwrap(),
-        0
-    );
-    after.due().await;
-    Box::pin(async_operations::sweep(&after.f.state))
-        .await
-        .unwrap();
-    let second_calls = after.calls.lock().unwrap().clone();
-    assert_eq!(
-        second_calls
-            .iter()
-            .filter(|path| path.ends_with("/result"))
-            .count(),
-        1
-    );
-
-    // Ordinary async watches keep the existing retryable malformed-status
-    // contract; only admitted generated watches settle terminally.
-    let ordinary = AsyncFixture::new().await;
-    ordinary.submit().await;
-    *ordinary.status_override.lock().unwrap() = Some(json!(MALFORMED));
-    ordinary.due().await;
-    Box::pin(async_operations::sweep(&ordinary.f.state))
-        .await
-        .unwrap();
-    let ordinary_watch = ordinary.watch().await;
-    assert_eq!(
-        (
-            ordinary_watch.state.as_str(),
-            ordinary_watch.reason.as_deref()
-        ),
-        ("waiting", None)
-    );
+            .unwrap();
+        let ordinary_watch = ordinary.watch().await;
+        assert_eq!(
+            (
+                ordinary_watch.state.as_str(),
+                ordinary_watch.reason.as_deref()
+            ),
+            ("waiting", None)
+        );
+    })
 }
 
 #[tokio::test]
