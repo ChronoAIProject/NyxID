@@ -193,6 +193,7 @@ describe("NyxAgent server-backed transport", () => {
       id: "watch-1", turn_id: "turn", kind: "cma_response", operation_id: "resp_agt_test_1",
       agent_id: "agt_test", idempotency_key: "request-1", status: "in_progress", phase: null,
       state: "waiting", reason: null, monitor_name: "NyxBot", created_at: start, checked_at: afterReset,
+      cma_url: "https://bot.chrono-ai.fun/agents/agt_test",
     }];
     globalThis.__nyxidAssistantHttpMock = () => json(page);
     const transport = new NyxAgentTransport();
