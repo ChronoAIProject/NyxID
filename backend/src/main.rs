@@ -1439,6 +1439,12 @@ async fn server_main() {
         });
     }
 
+    let discord_shutdown = tokio_util::sync::CancellationToken::new();
+    let discord_worker = tokio::spawn(services::discord_gateway::run(
+        state.clone(),
+        discord_shutdown.clone(),
+    ));
+
     {
         let poll_state = state.clone();
         let poll_interval = if config.channel_poll_interval_secs > 0 {
@@ -1700,7 +1706,22 @@ async fn server_main() {
     tokio::select! {
         result = public_server => result.expect("Public server error"),
         result = internal_server => result.expect("Internal replica server error"),
+        _ = shutdown_signal() => {},
     }
+    discord_shutdown.cancel();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), discord_worker).await;
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// Preserve each legacy domain, including its historical source-byte convention.
