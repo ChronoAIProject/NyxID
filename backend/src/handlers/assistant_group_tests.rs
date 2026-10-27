@@ -1384,10 +1384,9 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
             .followers
             .is_empty()
     );
-    // Expiry is classified at the acknowledged take, not at a clock sampled
-    // before the quiet checks: a follower whose deadline passed by the take
-    // is excluded from the capture (no summary), the others stay, and the
-    // classification is frozen afterwards.
+    // A live claim can expire before delivery. Keep its notification lease
+    // valid while moving the deadline past, so production delivery must reject
+    // the summary because of follower expiry, then remove the claimed follower.
     let at = Utc::now();
     let live = GroupFollower {
         trigger_run_id: None,
@@ -1397,29 +1396,45 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
         created_at: at - chrono::Duration::hours(1),
         expires_at: Some(at + chrono::Duration::hours(1)),
     };
-    let expired_at_take = GroupFollower {
-        trigger_run_id: None,
-        notification: None,
-        conversation_id: "nyxa-other".into(),
-        since_seq: 4,
-        created_at: at - chrono::Duration::hours(24),
-        expires_at: Some(at - chrono::Duration::milliseconds(1)),
-    };
-    let legacy_expired = GroupFollower {
-        trigger_run_id: None,
-        notification: None,
-        conversation_id: "nyxa-legacy".into(),
-        since_seq: 5,
-        created_at: at - chrono::Duration::hours(25),
-        expires_at: None,
-    };
-    let kept = groups::followers_live_at(vec![live.clone(), expired_at_take, legacy_expired], at);
-    assert_eq!(kept.len(), 1);
-    assert_eq!(kept[0].conversation_id, live.conversation_id);
-    assert_eq!(kept[0].since_seq, 3);
+    set_followers(vec![bson::to_document(&live).unwrap()]).await;
+    let (claims, _) = groups::claim_followers_if_quiet(&state.db, OWNER, &group.id)
+        .await
+        .unwrap();
+    assert_eq!(claims.len(), 1);
+    let mut expired = claims.into_iter().next().unwrap();
+    assert_eq!(expired.conversation_id, home.id);
+    assert_eq!(expired.since_seq, live.since_seq);
+    assert!(expired.expiry() > Utc::now());
+    expired.expires_at = Some(Utc::now() - chrono::Duration::minutes(1));
+    set_followers(vec![bson::to_document(&expired).unwrap()]).await;
+    let expired = follower(&group.id).await.unwrap();
+    let notification = expired.notification.as_ref().unwrap();
+    assert!(notification.lease_until > Utc::now());
+    let mut event = team::bound_event("group_settled", "Expired summary".into(), None, None);
+    event.id = notification.event_id.clone();
+    let before = engine::get(&state.db, OWNER, &home.id).await.unwrap();
+    assert!(
+        !groups::deliver_follower(&state.db, OWNER, &group.id, &expired, &event)
+            .await
+            .unwrap()
+    );
+    let after = engine::get(&state.db, OWNER, &home.id).await.unwrap();
     assert_eq!(
-        groups::followers_live_at(vec![live.clone()], at + chrono::Duration::hours(2)).len(),
-        0
+        serde_json::to_value(&after.pending_events).unwrap(),
+        serde_json::to_value(&before.pending_events).unwrap()
+    );
+    assert!(
+        !after
+            .pending_events
+            .iter()
+            .any(|queued| queued.id == event.id)
+    );
+    assert!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .followers
+            .is_empty()
     );
     // Only personal groups take followers; a member turn in a NyxBot-less
     // group snapshots no NyxBot involvement, while a group with NyxBot as a

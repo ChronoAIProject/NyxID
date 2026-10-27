@@ -1425,8 +1425,13 @@ bandwidth measurements are in [validation and measurements](../MACHINE_NODES.md#
 Scheduled and assistant-webhook work enters the same engine with
 `TurnOrigin::Trigger`, `guest = false` and an internal fenced `TurnClaim`.
 `begin_turn` admits that claim inside the conversation/credential transaction;
-the run record and active turn therefore agree even across a crash. This branch
-executes only for trigger turns, adding no database query to ordinary turn start.
+the run record and active turn therefore agree even across a crash. Coordinator
+resumption uses `TurnOrigin::Event` with an internal `TurnClaim` whose
+`continuation` is true. Admission requires the exact owner, run, thread and v2
+queued event, together with live work-lease, trigger-generation and credential
+fences. This trigger-admission branch runs only when an internal claim is present;
+ordinary turns do not perform its run lookup. A claimed event turn drains only
+v2 events for that run, leaving other runs' events and ordinary notices queued.
 Scheduled trigger instructions retain owner authority. Webhook data is untrusted:
 In Auto and Ask every time, `confirmation_policy = changes` (default) enforces owner cards on every changing
 tool call, using the same HTTP/catalog classifier as guest access and explicit
@@ -1442,12 +1447,28 @@ defaults. Dedicated/per-run automation threads are excluded from home adoption
 at creation, turn admission and recovery after deletion.
 
 `ActiveTurn.trigger_run_id` connects settlement and confirmations to metadata-only
-run history. Confirmation requests copy this identity and the active turn ID;
+run history. The server also derives this identity in `ChatAuthority`, group
+followers and their queued events. Group-post registration and the completion
+barrier transaction fence the thread/run handoff versions, so settlement cannot
+complete from a stale snapshot while a follower is registered. Notification keeps
+the follower under a reclaimable, fenced lease; deterministic run-qualified event
+IDs deduplicate replay, and queue acceptance commits with follower removal.
+Trigger-bound followers and events are protected from ordinary capacity eviction.
+Stop and terminal cleanup fence late notification and continuation admission.
+
+A settled coordinator with an attributable follower or event stays
+`waiting(coordinator)` until its exact thread consumes the replies and reaches a
+final result. Each admitted coordinator event continuation atomically consumes
+the run's snapshotted allowance (0–32) and the persisted owner trigger hourly/daily
+budget. Ordinary event-hour and streak guards retain their separate budgets and
+admission path. The run's continuation count, limit and protocol version persist
+across restart. Confirmation requests copy the run identity and active turn ID;
 automation settlement keeps the run waiting until cards are decided, scheduling
 its fallback at the earliest card expiry. The decision transaction wakes the
 work item; settlement reads card state transactionally to avoid lost wakeups. The
 scheduler resumes it as another trigger turn without a second occurrence-budget
-charge. Ordinary browser and chat continuations skip these cards. A failed/lost
+charge or coordinator allowance debit. Ordinary browser and chat continuations
+skip these cards. A failed/lost
 turn is terminal and never replayed. Final replies remain in the transcript;
 optional chat/push delivery claims one outbound attempt. An interrupted, ambiguous
 send is reported as failed rather than retried, since a remote provider cannot
@@ -1466,8 +1487,24 @@ retention do not scan or delete automation rows. Setup links contain only an
 owner-bound watch ID, with prefill fetched after authentication and consumed in
 the trigger-insert transaction. Cron gaps collapse at the first valid instant;
 folds use the earlier instant. Recovery writes one missed-count/bounds summary
-and one audit. Busy/pool/overlap work backs off to 30 seconds; budget exhaustion
-waits for its next UTC budget window, all capped at the initial grace deadline.
+and one audit. Busy/pool/overlap work backs off to 30 seconds. Initial occurrence
+retries and budget deferrals are capped at the dispatch/grace deadline.
+Coordinator waits and temporary owner-budget exhaustion use the run's separate
+`coordinator_deadline`, one hour after dispatch/grace and capped by retention;
+the next applicable UTC reset is bounded by that deadline. Deadline or allowance
+exhaustion records `coordinator_timeout` or `continuation_limit_exceeded`.
+Confirmation waits retain their card-expiry/decision semantics rather than
+inheriting the coordinator bound.
+
+Continuation v2 requires every replica/worker upgraded, an operator drain of both
+schedule and assistant-webhook ingress and old workers, the durable
+`trigger_migrations/continuation-v2.completed_at` marker, and
+`AUTOMATION_CONTINUATION_V2_ENABLED=true`. The flag and marker do not attest that
+old workers were stopped. Migration classifies existing schedule/webhook runs,
+preserves confirmation waits and terminal history, and records unclassifiable
+legacy waits as terminal failures. Before rollback, drain or Stop v2 runs and
+verify no bound work remains with upgraded code. See the activation, migration
+and rollback procedure in [NyxBot schedules](../NYXBOT_SCHEDULES.md#coordinator-completion-and-continuation-v2-operations).
 
 ### Machines in automation turns
 

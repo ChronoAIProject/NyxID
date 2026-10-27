@@ -872,18 +872,6 @@ async fn follow_in_session(
     Ok(())
 }
 
-/// Expiry is classified at the acknowledged take, not at a clock sampled
-/// before the quiet checks' awaits; the result is frozen afterwards.
-pub(crate) fn followers_live_at(
-    followers: Vec<GroupFollower>,
-    at: chrono::DateTime<Utc>,
-) -> Vec<GroupFollower> {
-    followers
-        .into_iter()
-        .filter(|follower| follower.expiry() > at)
-        .collect()
-}
-
 /// The upper bound comes from the same update as the take, so later messages
 /// never enter a summary.
 pub async fn claim_followers_if_quiet(
