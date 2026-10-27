@@ -62,6 +62,15 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
             "trigger_run_overlap",
             false,
         ),
+        // Migration/readiness are global queries, outside a trigger's history
+        // prefix. Equality/$in on protocol and outcome permits bounded legacy
+        // discovery without walking terminal history or another owner's runs.
+        (
+            RUNS,
+            doc! { "continuation_protocol_version": 1, "outcome": 1, "_id": 1 },
+            "trigger_run_continuation_state",
+            false,
+        ),
         (RUNS, doc! { "expires_at": 1 }, "trigger_run_ttl", true),
         (
             BUDGETS,

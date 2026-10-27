@@ -55,9 +55,20 @@ pub async fn source(
     let Some(thread) = run.thread_id.as_deref() else {
         return Ok(None);
     };
+    let Some(conversation) = db
+        .collection::<Document>(THREADS)
+        .find_one(doc! {"_id": thread, "user_id": &run.user_id})
+        .projection(doc! {"pending_events": 1})
+        .session(&mut *session)
+        .await?
+    else {
+        // A dangling group follower is not a resumable coordinator source.
+        return Ok(None);
+    };
     if db
         .collection::<Document>(RUNS)
         .find_one(doc! {"_id":&run.id,"coordinator_capacity_retry":true})
+        .projection(doc! {"_id": 1})
         .session(&mut *session)
         .await?
         .is_some()
@@ -65,7 +76,20 @@ pub async fn source(
         return Ok(Some("event"));
     }
 
-    if db.collection::<Document>(THREADS).find_one(doc! {"_id": thread, "user_id": &run.user_id, "pending_events": {"$elemMatch": {"trigger_run_id": &run.id, "continuation_protocol_version": 2}}}).session(&mut *session).await?.is_some() {
+    if conversation
+        .get_array("pending_events")
+        .is_ok_and(|events| {
+            events.iter().any(|event| {
+                event.as_document().is_some_and(|event| {
+                    event.get_str("trigger_run_id") == Ok(run.id.as_str())
+                        && matches!(
+                            event.get("continuation_protocol_version"),
+                            Some(bson::Bson::Int32(2) | bson::Bson::Int64(2))
+                        )
+                })
+            })
+        })
+    {
         return Ok(Some("event"));
     }
     if db.collection::<Document>(GROUPS).find_one(doc! {"user_id": &run.user_id, "followers": {"$elemMatch": {"conversation_id": thread, "trigger_run_id": &run.id}}}).projection(doc! {"_id":1}).session(session).await?.is_some() {
@@ -288,13 +312,16 @@ pub(crate) async fn migrate_checked(
     if db.collection::<Document>(MIGRATIONS).find_one_and_update(doc!{"_id":MIGRATION_ID,"$or":[{"lease_until":null},{"lease_until":{"$lte":date(Utc::now())}}]},doc!{"$set":{"fence":&fence,"lease_until":date(Utc::now()+Duration::minutes(5)),"drain_started_at":date(drain_started_at)},"$unset":{"completed_at":""}}).await?.is_none() {return Err(AppError::Conflict("automation_migration_busy".into()))}
     let mut cursor = String::new();
     loop {
-        let batch:Vec<TriggerRun>=db.collection::<TriggerRun>(RUNS).find(doc!{"_id":{"$gt":&cursor},"outcome":{"$in":["pending","started","waiting"]},"continuation_protocol_version":{"$ne":2}}).sort(doc!{"_id":1}).limit(100).await?.try_collect().await?;
+        let batch:Vec<Document>=db.collection::<Document>(RUNS).find(doc!{"_id":{"$gt":&cursor},"outcome":{"$in":["pending","started","waiting"]},"continuation_protocol_version":{"$in":[null,0]}}).projection(doc!{"_id":1}).sort(doc!{"_id":1}).limit(100).await?.try_collect().await?;
         if batch.is_empty() {
             break;
         }
         for candidate in batch {
-            cursor = candidate.id.clone();
-            let context = (db.clone(), candidate.id, fence.clone());
+            cursor = candidate
+                .get_str("_id")
+                .map_err(|_| AppError::Internal("Migration run identity missing".into()))?
+                .into();
+            let context = (db.clone(), cursor.clone(), fence.clone());
             // Terminal audit is part of classification. Retry definite audit
             // head/owner-fence collisions as well as Mongo write conflicts;
             // unknown commits retry COMMIT only, never terminal side effects.
@@ -305,6 +332,20 @@ pub(crate) async fn migrate_checked(
             )
             .await?;
         }
+    }
+    if db
+        .collection::<Document>(RUNS)
+        .find_one(doc! {
+            "outcome": {"$in": ["pending", "started", "waiting"]},
+            "continuation_protocol_version": {"$nin": [null, 0, 2]},
+        })
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict(
+            "automation_migration_protocol_unsupported".into(),
+        ));
     }
     let mut cursor = String::new();
     loop {
@@ -380,13 +421,28 @@ pub(crate) async fn migrate_run_in_session(
     };
     let Some(trigger) = db
         .collection::<Trigger>(TRIGGERS)
-        .find_one(doc! {"_id": &run.trigger_id, "user_id": &run.user_id,
-        "delivery.type": "assistant"})
+        .find_one(doc! {"_id": &run.trigger_id, "user_id": &run.user_id})
         .session(&mut *session)
         .await?
     else {
-        return Ok(());
+        // The batch cursor must not hide an orphan or changed target behind a
+        // completed readiness marker. Reconcile the target and retry; progress
+        // for this run remains uncommitted.
+        return Err(AppError::Conflict(
+            "automation_migration_trigger_unavailable".into(),
+        ));
     };
+    if !matches!(&trigger.delivery, TriggerDelivery::Assistant { .. }) {
+        // Pending non-assistant deliveries remain reachable through the legacy
+        // scheduler and need no continuation stamp. An in-flight assistant
+        // whose target changed must be reconciled before readiness is sealed.
+        if run.outcome == RunOutcome::Pending {
+            return Ok(());
+        }
+        return Err(AppError::Conflict(
+            "automation_migration_trigger_unavailable".into(),
+        ));
+    }
     let settings = db
         .collection::<crate::models::assistant_settings::AssistantSettings>(
             crate::models::assistant_settings::COLLECTION_NAME,
@@ -407,11 +463,22 @@ pub(crate) async fn migrate_run_in_session(
     if run.trigger_generation.is_none() {
         run.trigger_generation = Some(trigger.updated_at);
     }
-    let mut ambiguous = false;
+    let mut terminal_reason = None;
     if run.outcome == RunOutcome::Waiting {
         if !run.waiting_for.is_empty() {
-            run.wait_kind = Some(crate::models::trigger_run::RunWaitKind::Confirmation);
-            run.coordinator_wait = None;
+            if db
+                .collection::<Document>(THREADS)
+                .find_one(doc! {"_id": &run.thread_id, "user_id": &run.user_id})
+                .projection(doc! {"_id": 1})
+                .session(&mut *session)
+                .await?
+                .is_some()
+            {
+                run.wait_kind = Some(crate::models::trigger_run::RunWaitKind::Confirmation);
+                run.coordinator_wait = None;
+            } else {
+                terminal_reason = Some("thread_deleted");
+            }
         } else if let Some(source) = source(db, &run, session).await? {
             run.wait_kind = Some(crate::models::trigger_run::RunWaitKind::Coordinator);
             run.reason = Some("coordinator_pending".into());
@@ -425,10 +492,10 @@ pub(crate) async fn migrate_run_in_session(
                 deadline_at: run.coordinator_deadline.expect("initialized deadline"),
             });
         } else {
-            ambiguous = true;
+            terminal_reason = Some("legacy_wait_unclassified");
         }
     }
-    if !ambiguous
+    if terminal_reason.is_none()
         && matches!(run.outcome, RunOutcome::Started | RunOutcome::Waiting)
         && let Some(thread) = &run.thread_id
     {
@@ -475,7 +542,7 @@ pub(crate) async fn migrate_run_in_session(
             "automation_migration_run_changed".into(),
         ));
     }
-    if ambiguous {
+    if let Some(reason) = terminal_reason {
         // Stamp v2 before normal terminal cleanup reads the run. Terminal
         // state, history, audit, work removal and progress commit together.
         let finished = Box::pin(super::finish_update(
@@ -483,7 +550,7 @@ pub(crate) async fn migrate_run_in_session(
             doc! {"_id": &run.id, "user_id": &run.user_id, "trigger_id": &run.trigger_id,
             "outcome": "waiting", "turn_id": &run.turn_id, "continuation_protocol_version": 2},
             RunOutcome::Failed,
-            Some("legacy_wait_unclassified"),
+            Some(reason),
             "",
             session,
         ))
@@ -507,7 +574,7 @@ pub(crate) async fn migrate_run_in_session(
         db.collection::<Document>(MIGRATIONS)
             .update_one(
                 doc! {"_id": format!("continuation-v2:ambiguous:{}", run.id)},
-                doc! {"$setOnInsert": {"run_id": &run.id, "reason": "legacy_wait_unclassified"}},
+                doc! {"$setOnInsert": {"run_id": &run.id, "reason": reason}},
             )
             .upsert(true)
             .session(&mut *session)

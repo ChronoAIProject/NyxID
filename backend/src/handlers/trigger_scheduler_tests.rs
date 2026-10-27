@@ -35,6 +35,20 @@ type Calls = Arc<Mutex<Vec<Call>>>;
 /// A NyxAgent stand-in answering every turn with one completed reply.
 async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     let db = connect_transaction_test_database(name).await;
+    setup_with_database(db).await
+}
+
+async fn setup_with_database(
+    db: mongodb::Database,
+) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+    db.collection::<Document>(schedules::continuation::MIGRATIONS)
+        .update_one(
+            doc! {"_id": schedules::continuation::MIGRATION_ID},
+            doc! {"$setOnInsert": {"completed_at": schedules::date(Utc::now())}},
+        )
+        .upsert(true)
+        .await
+        .unwrap();
     engine::ensure_indexes(&db).await.unwrap();
     db.collection(USERS)
         .insert_one(test_user(OWNER, UserType::Person))
@@ -3976,3 +3990,8 @@ async fn invocation_mounted_routes_enforce_credentials_flags_and_recover_lost_re
 }
 
 include!("trigger_scheduler_completion_tests.rs");
+
+mod acceptance {
+    use super::*;
+    include!("trigger_scheduler_acceptance_tests.rs");
+}

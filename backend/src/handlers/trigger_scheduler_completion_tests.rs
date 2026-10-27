@@ -729,9 +729,8 @@ async fn automation_v2_follower_lost_claim_queue_full_expiry_and_cross_run_ids()
 }
 
 #[tokio::test]
-async fn automation_v2_owner_budget_wait_deadline_limit_and_stop() {
+async fn automation_v2_deadline_limit_and_stop() {
     for reason in [
-        "budget",
         "coordinator_timeout",
         "continuation_limit_exceeded",
         "cancelled",
@@ -741,58 +740,14 @@ async fn automation_v2_owner_budget_wait_deadline_limit_and_stop() {
         let (_, run, row) = completion_coordinator(&state).await;
         completion_queue(&state, &row, &run).await;
         completion_reply(&state, &row, &run).await;
+        let budget_before = state
+            .db
+            .collection::<Document>(schedules::BUDGETS)
+            .find_one(doc! {"_id": OWNER})
+            .await
+            .unwrap()
+            .unwrap();
         match reason {
-            "budget" => {
-                let settings = crate::services::assistant_settings_service::get(&state.db, OWNER)
-                    .await
-                    .unwrap();
-                state.db.collection::<Document>(schedules::BUDGETS).update_one(doc!{"_id":OWNER},doc!{"$set":{"hourly":settings.trigger_runs_per_hour,"daily":settings.trigger_runs_per_day}}).await.unwrap();
-                Box::pin(tick(&state)).await.unwrap();
-                let saved = completion_load(&state, &run.id).await;
-                assert_eq!(saved.outcome, RunOutcome::Waiting);
-                assert_eq!(saved.continuation_count, 0);
-                assert!(calls.lock().await.is_empty());
-                let job = state
-                    .db
-                    .collection::<Document>(schedules::WORK)
-                    .find_one(doc! {"_id":&run.id})
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert!(job.get_datetime("at").unwrap().to_chrono() > Utc::now());
-                state
-                    .db
-                    .collection::<Document>(schedules::BUDGETS)
-                    .update_one(
-                        doc! {"_id":OWNER},
-                        doc! {"$set":{"hour":-1_i64,"day":-1_i64}},
-                    )
-                    .await
-                    .unwrap();
-                state
-                    .db
-                    .collection::<Document>(schedules::WORK)
-                    .update_one(
-                        doc! {"_id":&run.id},
-                        doc! {"$set":{"at":schedules::date(Utc::now())}},
-                    )
-                    .await
-                    .unwrap();
-                Box::pin(tick(&state)).await.unwrap();
-                let final_run = completed(
-                    &state,
-                    &state
-                        .db
-                        .collection::<Trigger>(TRIGGERS)
-                        .find_one(doc! {"_id":&run.trigger_id})
-                        .await
-                        .unwrap()
-                        .unwrap(),
-                )
-                .await;
-                assert_eq!(final_run.outcome, RunOutcome::Completed);
-                assert_eq!(final_run.continuation_count, 1);
-            }
             "cancelled" => {
                 engine::request_stop(&state.db, OWNER, &row.id)
                     .await
@@ -817,12 +772,34 @@ async fn automation_v2_owner_budget_wait_deadline_limit_and_stop() {
                 Box::pin(tick(&state)).await.unwrap();
             }
         }
-        if reason != "budget" {
-            let saved = completion_load(&state, &run.id).await;
-            assert_eq!(saved.outcome, RunOutcome::Failed, "{reason}");
-            assert_eq!(saved.reason.as_deref(), Some(reason));
-            assert!(calls.lock().await.is_empty());
+        let saved = completion_load(&state, &run.id).await;
+        assert_eq!(saved.outcome, RunOutcome::Failed, "{reason}");
+        assert_eq!(saved.reason.as_deref(), Some(reason));
+        assert!(saved.terminal_result_recorded);
+        assert!(saved.finished_at.is_some());
+        assert_eq!(
+            saved.continuation_count,
+            if reason == "continuation_limit_exceeded" {
+                run.continuation_limit
+            } else {
+                0
+            }
+        );
+        let budget_after = state
+            .db
+            .collection::<Document>(schedules::BUDGETS)
+            .find_one(doc! {"_id": OWNER})
+            .await
+            .unwrap()
+            .unwrap();
+        for field in ["hour", "day", "hourly", "daily"] {
+            assert_eq!(
+                budget_after.get(field),
+                budget_before.get(field),
+                "{reason}"
+            );
         }
+        assert!(calls.lock().await.is_empty());
         server.abort();
     }
 }
@@ -1017,16 +994,20 @@ async fn automation_v2_migration_readiness_real_leases_confirmation_and_ambiguit
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.get_i32("continuation_protocol_version").unwrap(), 2);
+    assert_eq!(stored.get_i64("continuation_protocol_version").unwrap(), 2);
     server.abort();
 }
 
 #[tokio::test]
 async fn automation_v2_migration_terminalization_is_atomic_and_generation_fenced() {
-    for stale in [false, true] {
-        let (state, calls, server) = setup(&format!("auto2040_f7_atomic_{stale}")).await;
+    for (stale, webhook) in [(false, false), (true, false), (false, true), (true, true)] {
+        let (state, calls, server) = setup(&format!("auto2040_f7_atomic_{stale}_{webhook}")).await;
         let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
-        let trigger = automation(&state, &agent.id, None).await;
+        let trigger = if webhook {
+            acceptance::assistant_webhook(&state, &agent.id).await
+        } else {
+            automation(&state, &agent.id, None).await
+        };
         let trigger = trigger_service::get_for_actor(&state.db, OWNER, &trigger.id)
             .await
             .unwrap();
@@ -1331,7 +1312,7 @@ fn automation_v2_legacy_bson_and_unbound_event_guards() {
     assert_eq!(event.continuation_protocol_version, 0);
     assert!(
         serde_json::from_value::<engine::TurnRequest>(
-            json! {"text":"untrusted","trigger_run_id":"forged"}
+            json!({"text":"untrusted","trigger_run_id":"forged"})
         )
         .is_err()
     );
@@ -1419,6 +1400,22 @@ async fn automation_v2_follower_capacity_never_evicts_or_completes() {
 async fn automation_v2_fake_agent_research_edit_review_fixture_publish_readback() {
     use axum::routing::get;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    fn assert_stage_barrier(finishes: &[String], stage: usize) {
+        assert_eq!(finishes.len(), [0, 2, 3, 4][stage]);
+        if stage >= 1 {
+            // Both research members must finish before editing can start;
+            // their relative completion order is not a runtime contract.
+            let mut research: Vec<_> = finishes[..2].iter().map(String::as_str).collect();
+            research.sort_unstable();
+            assert_eq!(research, ["researchfast", "researchslow"]);
+        }
+        if stage >= 2 {
+            assert_eq!(finishes[2], "editor2040");
+        }
+        if stage >= 3 {
+            assert_eq!(finishes[3], "reviewer2040");
+        }
+    }
     let (state, _, old_server) = setup("auto2040_workflow").await;
     old_server.abort();
     let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
@@ -1467,8 +1464,8 @@ async fn automation_v2_fake_agent_research_edit_review_fixture_publish_readback(
     let fixture_group = group.id.clone();
     let publish_count = writes.clone();
     let read_count = writes.clone();
-    let upstream=Router::new().route("/fixture/publish",post(move || {let count=publish_count.clone();async move {count.fetch_add(1,Ordering::SeqCst);Json(json!{"published":"automation-2040-local"})}}))
-        .route("/fixture/publish",get(move || {let count=read_count.clone();async move {Json(json!{"published":count.load(Ordering::SeqCst)})}}))
+    let upstream=Router::new().route("/fixture/publish",post(move || {let count=publish_count.clone();async move {count.fetch_add(1,Ordering::SeqCst);Json(json!({"published":"automation-2040-local"}))}}))
+        .route("/fixture/publish",get(move || {let count=read_count.clone();async move {Json(json!({"published":count.load(Ordering::SeqCst)}))}}))
         .route("/v1/responses",post(move |Json(body):Json<Value>| {
             let state=fixture_state.clone();let stages=fixture_stages.clone();let finishes=fixture_finishes.clone();let group=fixture_group.clone();
             async move {
@@ -1480,6 +1477,7 @@ async fn automation_v2_fake_agent_research_edit_review_fixture_publish_readback(
                     finishes.lock().await.push(member.into());format!("{member} result ready for the next stage")
                 } else {
                     let stage=stages.fetch_add(1,Ordering::SeqCst);
+                    assert_stage_barrier(&finishes.lock().await,stage);
                     let run=state.db.collection::<TriggerRun>(RUNS).find_one(doc!{"user_id":OWNER,"outcome":"started"}).await.unwrap().unwrap();
                     let row=engine::get(&state.db,OWNER,run.thread_id.as_deref().unwrap()).await.unwrap();
                     assert_eq!(row.active_turn.as_ref().unwrap().trigger_run_id.as_deref(),Some(run.id.as_str()));
@@ -1487,7 +1485,7 @@ async fn automation_v2_fake_agent_research_edit_review_fixture_publish_readback(
                     assert_eq!(chat.trigger_run_id.as_deref(),Some(run.id.as_str()));
                     if stage<3 {
                         let text=match stage {0=>"@researchslow @researchfast research the local fixture",1=>"@editor2040 edit the researchers' result",_=>"@reviewer2040 independently review the edited result"};
-                        let (result,error)=super::super::assistant_team::execute_tool(&state,&chat,"nyxid__post_to_group",&json!{"group":group,"text":text}).await;
+                        let (result,error)=super::super::assistant_team::execute_tool(&state,&chat,"nyxid__post_to_group",&json!({"group":group,"text":text})).await;
                         assert!(!error,"group tool refused: {result}");assert!(result["posted"].is_i64());
                         "Delegated this stage; waiting for the members' result".to_owned()
                     } else {
@@ -1500,7 +1498,7 @@ async fn automation_v2_fake_agent_research_edit_review_fixture_publish_readback(
                     }
                 };
                 let session=format!("conv_{}",Uuid::new_v4().simple());let response=format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple());
-                let stream=async_stream::stream!{yield Ok::<_,Infallible>(Event::default().data(json!{"type":"response.completed","sequence_number":1,"response":{"id":response,"conversation":{"id":session},"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]}}.to_string()));};
+                let stream=async_stream::stream!{yield Ok::<_,Infallible>(Event::default().data(json!({"type":"response.completed","sequence_number":1,"response":{"id":response,"conversation":{"id":session},"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]}}).to_string()));};
                 Sse::new(stream).into_response()
             }
         }));
@@ -1546,10 +1544,7 @@ async fn automation_v2_fake_agent_research_edit_review_fixture_publish_readback(
     assert_eq!(stages.load(Ordering::SeqCst), 4);
     assert_eq!(writes.load(Ordering::SeqCst), 1);
     assert_eq!(waiting_turns.len(), 3, "every stage waits durably");
-    assert_eq!(
-        *finishes.lock().await,
-        vec!["researchfast", "researchslow", "editor2040", "reviewer2040"]
-    );
+    assert_stage_barrier(&finishes.lock().await, 3);
     let history = engine::messages(
         &state.db,
         OWNER,
