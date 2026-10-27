@@ -162,7 +162,7 @@ const turnMetadataSchema = z.object({
   channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish(),
 });
 export const nyxAgentMessageSchema = z.object({
-  artifact_delivery: z.object({state: z.string(),count: z.number().int().nonnegative(),recovery_available: z.boolean()}).nullable().optional(),
+  artifact_delivery: z.object({state: z.string(),count: z.number().int().nonnegative(),recovery_available: z.boolean(),rejected: z.array(z.object({index: z.number().int().nonnegative().max(7), filename: z.string(), reason: z.enum(["invalid", "too_large", "unavailable", "missing"])})).max(8).default([])}).nullable().optional(),
   platform_origin: platformTurnOriginSchema.nullish(),
   recovery: nyxAgentRecoverySchema.nullable().optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),

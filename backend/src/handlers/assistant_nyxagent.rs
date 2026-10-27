@@ -495,9 +495,32 @@ pub struct TurnMetadataResponse {
 
 #[derive(Serialize)]
 pub struct ArtifactDeliveryResponse {
+    rejected: Vec<RejectedArtifactResponse>,
     state: String,
     count: usize,
     recovery_available: bool,
+}
+
+#[derive(Serialize)]
+pub struct RejectedArtifactResponse {
+    index: usize,
+    filename: String,
+    reason: &'static str,
+}
+impl From<crate::models::generated_artifact::RejectedFile> for RejectedArtifactResponse {
+    fn from(file: crate::models::generated_artifact::RejectedFile) -> Self {
+        use crate::models::generated_artifact::RejectionReason;
+        Self {
+            index: file.index,
+            filename: file.filename,
+            reason: match file.reason {
+                RejectionReason::Invalid => "invalid",
+                RejectionReason::TooLarge => "too_large",
+                RejectionReason::Unavailable => "unavailable",
+                RejectionReason::Missing => "missing",
+            },
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -900,6 +923,7 @@ pub async fn history(
             artifact_deliveries
                 .remove(&message.id)
                 .map(|s| ArtifactDeliveryResponse {
+                    rejected: s.rejected.into_iter().map(Into::into).collect(),
                     state: s.state,
                     count: s.count,
                     recovery_available: s.recovery_available,

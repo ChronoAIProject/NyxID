@@ -1557,8 +1557,27 @@ credential, grant, billing, concurrency and destination checks. Its larger body
 limit is scoped to that result operation; status and legacy results remain
 16 KiB. `succeeded` plus `result_available` is a source claim. The adapter also
 checks `ExecuteResponse.success` and the nullable `output.files` contract;
-a nonzero script exit can still contain verified files. File errors, invalid
-base64, excess limits or malformed media reject the whole file set.
+a nonzero script exit can still contain verified files. Within the supported
+response envelope, a file error, invalid base64, oversized file or malformed
+media produces a sanitized indexed “generated but not delivered” outcome while
+valid peers are delivered. Rejected bytes do not consume the accepted-total
+allowance. The owner sees every parsed rejection; process streams, paths and
+file content never enter model context.
+
+The supported response envelope is at most 13 MiB (13 × 1,048,576 bytes) and
+eight entries. Each decoded file is at most 8 MiB; accepted decoded bytes total
+at most 9 MiB. Images retain their stricter 5 MiB ceiling. An oversized transport
+or more than eight entries refuses the whole envelope with an explicit owner
+failure; files outside this envelope are not processed or silently truncated.
+The shared process byte budget remains 192 MiB of weighted permits. The worker
+holds a 22 MiB payload reservation (13 MiB response + 9 MiB accepted output),
+charged as 44 MiB of permits at the existing 2× weight, through decode/encryption/
+persist. Owner egress has its own weighted reservation through body lifetime.
+Settled owner replies retain bounded failure/rejection metadata after watch TTL,
+without retaining source ciphertext or granting recovery authority. Real Sandbox
+acceptance must confirm the producer's result envelope fits these bounds; larger
+producer sets require a manifest/per-file acquisition follow-up, not a raised
+in-memory ceiling.
 
 The worker checks the exact operation status before and after reading bytes.
 A `410` or elapsed source expiry prevents publication. SHA-256 over the operation

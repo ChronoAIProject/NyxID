@@ -236,12 +236,28 @@ fn sandbox_files_contract_and_structured_visual_track_validation() {
     }
     for content in ["YQ", "YQ==\n", "!@==", "YR=="] {
         let value = json!({"success":true,"output":{"stdout":"","stderr":"","exit_code":0,"files":[{"path":"file","content":content}]}});
-        assert!(sandbox::parse(&value.to_string(), "op").is_err());
+        let result = sandbox::parse(&value.to_string(), "op").unwrap();
+        assert!(result.files.is_empty());
+        assert_eq!(result.rejected.len(), 1);
+        assert!(matches!(
+            result.rejected[0].reason,
+            crate::models::generated_artifact::RejectionReason::Invalid
+        ));
     }
     let mut value: serde_json::Value = serde_json::from_str(&body("x.png", PNG)).unwrap();
     value["output"]["files"][0]["error"] = json!("cannot read");
-    assert!(sandbox::parse(&value.to_string(), "op").is_err());
-    assert!(sandbox::parse(&body("x.bin", &vec![0; sandbox::FILE_BYTES + 1]), "op").is_err());
+    let result = sandbox::parse(&value.to_string(), "op").unwrap();
+    assert!(result.files.is_empty());
+    assert!(matches!(
+        result.rejected[0].reason,
+        crate::models::generated_artifact::RejectionReason::Unavailable
+    ));
+    let result = sandbox::parse(&body("x.bin", &vec![0; sandbox::FILE_BYTES + 1]), "op").unwrap();
+    assert!(result.files.is_empty());
+    assert!(matches!(
+        result.rejected[0].reason,
+        crate::models::generated_artifact::RejectionReason::TooLarge
+    ));
     let mut too_many: serde_json::Value = serde_json::from_str(&body("x.png", PNG)).unwrap();
     too_many["output"]["files"] = json!(vec![too_many["output"]["files"][0].clone(); 9]);
     assert!(matches!(
@@ -338,6 +354,14 @@ async fn seeded_until(
     keys: &EncryptionKeys,
     source_expiry: DateTime<Utc>,
 ) -> (AsyncServiceOperation, AssistantConversation) {
+    seeded_body(db, keys, source_expiry, &body("../../movie.mp4", MP4)).await
+}
+async fn seeded_body(
+    db: &Database,
+    keys: &EncryptionKeys,
+    source_expiry: DateTime<Utc>,
+    result_body: &str,
+) -> (AsyncServiceOperation, AssistantConversation) {
     let mut w = watch();
     w.expires_at = w.expires_at.max(source_expiry + Duration::hours(1));
     w.conversation_id = format!("nyxa-{}", Uuid::new_v4().simple());
@@ -354,11 +378,7 @@ async fn seeded_until(
         .await
         .unwrap();
     let reservation = byte_budget::reserve(sandbox::RESERVATION).await.unwrap();
-    let result = sandbox::parse(
-        &body("../../movie.mp4", MP4),
-        w.operation_id.as_deref().unwrap(),
-    )
-    .unwrap();
+    let result = sandbox::parse(result_body, w.operation_id.as_deref().unwrap()).unwrap();
     persist(
         db,
         keys,
@@ -1264,7 +1284,10 @@ async fn generated_artifact_new_operation_has_new_identity_and_failed_result_pre
     // A failed result of the new operation cannot modify the old attachment.
     let mut failed: serde_json::Value = serde_json::from_str(&body("new.mp4", MP4)).unwrap();
     failed["output"]["files"][0]["error"] = json!("read failed");
-    assert!(sandbox::parse(&failed.to_string(), next.operation_id.as_deref().unwrap()).is_err());
+    let failed_result =
+        sandbox::parse(&failed.to_string(), next.operation_id.as_deref().unwrap()).unwrap();
+    assert!(failed_result.files.is_empty());
+    assert_eq!(failed_result.rejected.len(), 1);
     assert_eq!(
         db.collection::<Document>(ATTACHMENTS)
             .find_one(doc! {"_id":&old_id})
@@ -1381,4 +1404,71 @@ async fn conversation_delete_removes_encrypted_pending_artifacts_and_saved_assoc
         );
     }
     db.drop().await.unwrap();
+}
+
+#[test]
+fn generated_file_rejections_preserve_good_peers_and_accepted_budget() {
+    use crate::models::generated_artifact::RejectionReason;
+    let encoded = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let entry = |path: &str, content: String| json!({"path":path,"content":content});
+    let good = entry("good.png", encoded(PNG));
+    let invalid = entry("/private/secret-path/bad.png", encoded(b"invalid-image"));
+    let oversized = entry("too-big.bin", encoded(&vec![0; sandbox::FILE_BYTES + 1]));
+    for entries in [
+        vec![invalid.clone(), good.clone(), oversized.clone()],
+        vec![oversized, good.clone(), invalid],
+    ] {
+        let wire = json!({"success":true,"output":{"stdout":"private-stream","stderr":"","exit_code":0,"files":entries}}).to_string();
+        assert!(wire.len() < sandbox::RESPONSE_BYTES);
+        let result = sandbox::parse(&wire, "op").unwrap();
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].index, 1);
+        assert_eq!(&*result.files[0].bytes, PNG);
+        assert_eq!(result.rejected.len(), 2);
+        assert_eq!(result.rejected[0].index, 0);
+        assert_eq!(result.rejected[1].index, 2);
+        assert!(
+            result
+                .rejected
+                .iter()
+                .any(|r| matches!(r.reason, RejectionReason::TooLarge))
+        );
+        assert!(
+            result
+                .rejected
+                .iter()
+                .any(|r| matches!(r.reason, RejectionReason::Invalid))
+        );
+        assert!(
+            !serde_json::to_string(&result.rejected)
+                .unwrap()
+                .contains("private")
+        );
+        assert!(!result.summary.contains("good.png"));
+        assert!(!result.summary.contains("private"));
+    }
+    // Four rejected MiB may be decoded for validation, but do not consume the
+    // accepted-total allowance or hide the final small valid peer.
+    for invalid_first in [true, false] {
+        let rejected = entry("bad.png", encoded(&vec![0; 4 * 1024 * 1024]));
+        let accepted = entry("good.bin", encoded(&vec![42; 5 * 1024 * 1024]));
+        let entries = if invalid_first {
+            vec![rejected, accepted, good.clone()]
+        } else {
+            vec![accepted, good.clone(), rejected]
+        };
+        let wire = json!({"success":true,"output":{"stdout":"","stderr":"","exit_code":0,"files":entries}}).to_string();
+        assert!(wire.len() <= sandbox::RESPONSE_BYTES);
+        let result = sandbox::parse(&wire, "op").unwrap();
+        assert_eq!(result.files.len(), 2);
+        assert_eq!(result.rejected.len(), 1);
+        assert!(matches!(
+            result.rejected[0].reason,
+            RejectionReason::Invalid | RejectionReason::TooLarge
+        ));
+        assert_eq!(
+            result.files.iter().map(|f| f.bytes.len()).sum::<usize>(),
+            5 * 1024 * 1024 + PNG.len()
+        );
+    }
 }

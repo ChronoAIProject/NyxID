@@ -228,7 +228,7 @@ pub async fn persist(
         return Err(AppError::AssistantAttachmentExpired);
     }
     let mut rows = Vec::new();
-    for (index, file) in result.files.iter().enumerate() {
+    for file in &result.files {
         let mut row = PendingArtifact {
             id: Uuid::new_v4().to_string(),
             watch_id: w.id.clone(),
@@ -237,7 +237,7 @@ pub async fn persist(
             turn_id: w.turn_id.clone(),
             operation_id: operation.into(),
             source_result_identity: result.identity.clone(),
-            artifact_index: index,
+            artifact_index: file.index,
             filename: file.filename.clone(),
             source_path: file.source_path.clone(),
             content_type: file.content_type.into(),
@@ -268,6 +268,7 @@ pub async fn persist(
         rows.push(row);
     }
     let manifest = ResultManifest {
+        rejected: result.rejected.clone(),
         source_result_identity: result.identity.clone(),
         source_status_version: status.version.clone(),
         content_revision: "1".into(),
@@ -540,6 +541,13 @@ pub async fn bind_in_session(
     // A rejected/missing result still delivers its bounded failure event. It
     // has no verified file lineage and must not create a recovery association.
     if w.artifact_result.is_none() {
+        db.collection::<Document>(WATCHES)
+            .update_one(
+                doc! {"_id":&w.id,"state":"queued"},
+                doc! {"$set":{"artifact_event_turn_id":&turn.turn_id}},
+            )
+            .session(&mut *session)
+            .await?;
         return Ok(());
     }
     let (attachments, reason) =
@@ -679,6 +687,60 @@ pub async fn associate_in_session(
     Ok(())
 }
 
+/// Persist failure/rejection copy with the owner reply, independently of watch
+/// TTL. This grants neither source access nor a verified recovery association.
+pub async fn settled_outcome_in_session(
+    db: &Database,
+    row: &AssistantConversation,
+    session: &mut ClientSession,
+) -> AppResult<Option<crate::models::generated_artifact::SavedOutcome>> {
+    let Some(id) = super::async_service_operation::event_id(row) else {
+        return Ok(None);
+    };
+    let Some(w) = db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .find_one(doc! {
+            "_id":id,"user_id":&row.user_id,"conversation_id":&row.id,
+            "state":{"$in":["queued","delivered"]},
+        })
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(None);
+    };
+    if w.artifact_mode.is_none() {
+        return Ok(None);
+    }
+    let turn = row.active_turn.as_ref().ok_or_else(invalid)?;
+    if !admitted(&w)
+        || turn.origin != TurnOrigin::Event
+        || w.artifact_event_turn_id.as_deref() != Some(turn.turn_id.as_str())
+    {
+        return Err(invalid());
+    }
+    let (state, rejected) = match w.artifact_result {
+        Some(manifest) => (manifest.delivery_reason, manifest.rejected),
+        None => (
+            match w.reason.as_deref() {
+                Some("artifact_too_large") => "artifact_too_large",
+                Some("result_expired") => "result_expired",
+                _ => "source_verification_failed",
+            }
+            .into(),
+            Vec::new(),
+        ),
+    };
+    Ok(Some(crate::models::generated_artifact::SavedOutcome {
+        state,
+        rejected,
+        count: turn
+            .attachments
+            .iter()
+            .filter(|a| a.artifact.source_watch_id.as_deref() == Some(id))
+            .count(),
+    }))
+}
+
 mod recovery;
 pub use recovery::{
     recover, recover_for_chat, recovery_confirmation_arguments, recovery_definition,
@@ -708,6 +770,7 @@ pub struct DeliveryState {
     pub state: String,
     pub count: usize,
     pub recovery_available: bool,
+    pub rejected: Vec<crate::models::generated_artifact::RejectedFile>,
 }
 pub async fn delivery_states(
     db: &Database,
@@ -733,8 +796,32 @@ pub async fn delivery_states(
         .flat_map(|d| d.attachment_ids.iter().cloned())
         .collect();
     let expired = super::assistant_upload_retention::expired_ids(db, user, &attachment_ids).await?;
-    let mut states = std::collections::HashMap::new();
+    let saved_messages: Vec<crate::models::assistant_message::AssistantMessage> = db
+        .collection(crate::models::assistant_message::COLLECTION_NAME)
+        .find(
+            doc! {"_id":{"$in":messages},"user_id":user,"conversation_id":conversation,
+            "role":"assistant","origin":"event"},
+        )
+        .await?
+        .try_collect()
+        .await?;
+    let mut states: std::collections::HashMap<String, DeliveryState> = saved_messages
+        .into_iter()
+        .filter_map(|message| Some((message.id, message.turn_metadata?.artifact_delivery?)))
+        .map(|(id, outcome)| {
+            (
+                id,
+                DeliveryState {
+                    state: outcome.state,
+                    count: outcome.count,
+                    rejected: outcome.rejected,
+                    recovery_available: false,
+                },
+            )
+        })
+        .collect();
     for delivery in deliveries {
+        let watch = watches.iter().find(|w| w.id == delivery.watch_id);
         let state = if delivery.expires_at <= Utc::now()
             || delivery
                 .attachment_ids
@@ -759,11 +846,17 @@ pub async fn delivery_states(
                 })
                 .unwrap_or("delivery_failed")
         };
+        let rejected = watch
+            .and_then(|w| w.artifact_result.as_ref())
+            .map(|m| m.rejected.clone())
+            .or_else(|| states.get(&delivery.message_id).map(|s| s.rejected.clone()))
+            .unwrap_or_default();
         states.insert(
             delivery.message_id,
             DeliveryState {
                 state: state.into(),
                 count: delivery.attachment_ids.len(),
+                rejected,
                 recovery_available: matches!(
                     state,
                     "delivery_pending" | "delivery_failed" | "delivery_capacity_exhausted"

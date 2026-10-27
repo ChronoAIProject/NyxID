@@ -61,3 +61,47 @@ it.each([
   expect(screen.getByRole("status")).toHaveTextContent(copy);
   expect(screen.queryByRole("button")).not.toBeInTheDocument();
 });
+
+it("renders every indexed rejection alongside delivered peers without upstream text", () => {
+  render(
+    <ArtifactDelivery
+      delivery={{
+        ...delivery,
+        state: "materialized",
+        count: 1,
+        recoveryAvailable: false,
+        rejected: [
+          { index: 0, filename: "bad.png", reason: "invalid" },
+          { index: 2, filename: "bad.png", reason: "unavailable" },
+        ],
+      }}
+    />,
+  );
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "1 verified file attached",
+  );
+  expect(
+    screen.getByText(/File 1 \(bad.png\): generated but not delivered/),
+  ).toBeVisible();
+  expect(
+    screen.getByText(/File 3 \(bad.png\): generated but not delivered/),
+  ).toBeVisible();
+  expect(screen.queryByRole("button")).not.toBeInTheDocument();
+});
+it.each(["source_verification_failed", "artifact_too_large"])(
+  "never calls an unverified %s result verified or recoverable",
+  (state) => {
+    render(
+      <ArtifactDelivery
+        delivery={{ ...delivery, state, recoveryAvailable: false }}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "No files were attached",
+    );
+    expect(screen.getByRole("status")).not.toHaveTextContent(
+      "result is verified",
+    );
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  },
+);

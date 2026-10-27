@@ -3601,6 +3601,7 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                artifact_delivery: None,
                                 failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),
                                 channel_delivery:None,
                                 attempts: detail.attempts, capacity_wait_ms: detail.capacity_wait_ms,
@@ -3726,6 +3727,7 @@ async fn finish_turn_inner(
                     .map(|turn| turn.also_deliver.clone())
                     .unwrap_or_default();
                 super::generated_artifacts::associate_in_session(&db, &current, &message_id, session).await?;
+                turn_metadata.artifact_delivery = super::generated_artifacts::settled_outcome_in_session(&db, &current, session).await?;
                 super::async_service_operation::delivered_in_session(&db, &current, session).await?;
                 if let Some(request_id) = current.active_turn.as_ref().and_then(|t| t.voice_request_id.as_ref()) {
                     let async_pending = super::async_service_operation::pending_voice_in_session(&db, request_id, session).await?;

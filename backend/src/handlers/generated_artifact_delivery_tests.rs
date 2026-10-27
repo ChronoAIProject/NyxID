@@ -1470,6 +1470,65 @@ fn check_artifact_catalog_revalidation(
         )
         .await;
 
+        let message =
+            a.f.state
+                .db
+                .collection::<crate::models::assistant_message::AssistantMessage>(
+                    crate::models::assistant_message::COLLECTION_NAME,
+                )
+                .find_one(
+                    doc! {"user_id":&a.f.row.user_id,"conversation_id":&a.f.row.id,
+                    "turn_id":&event.active_turn.as_ref().unwrap().turn_id,"role":"assistant"},
+                )
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            message
+                .turn_metadata
+                .as_ref()
+                .unwrap()
+                .artifact_delivery
+                .as_ref()
+                .unwrap()
+                .state,
+            "source_verification_failed"
+        );
+        // Simulate Mongo TTL deleting exactly the now-eligible terminal watch.
+        a.f.state.db.collection::<bson::Document>(WATCHES).update_one(doc! {"_id":&watch.id},
+            doc! {"$set":{"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::seconds(1))}}).await.unwrap();
+        assert_eq!(
+            a.f.state
+                .db
+                .collection::<bson::Document>(WATCHES)
+                .delete_many(doc! {"_id":&watch.id,
+                "state":"delivered","expires_at":{"$lte":bson::DateTime::now()}})
+                .await
+                .unwrap()
+                .deleted_count,
+            1
+        );
+        let states = artifacts::delivery_states(
+            &a.f.state.db,
+            &a.f.row.user_id,
+            &a.f.row.id,
+            &[message.id.clone()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(states[&message.id].state, "source_verification_failed");
+        assert!(!states[&message.id].recovery_available);
+        assert_eq!(
+            a.f.state
+                .db
+                .collection::<bson::Document>(DELIVERIES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(a.calls.lock().unwrap().len(), calls);
+
         assert_eq!(
             a.f.state
                 .db
@@ -1571,4 +1630,116 @@ async fn generated_artifact_worker_reserves_shared_budget_before_result_body_and
             .unwrap(),
         0
     );
+}
+
+#[tokio::test]
+async fn generated_artifact_worker_delivers_valid_peers_and_settles_envelope_refusals() {
+    check_artifact_partial_worker("mixed").await;
+    check_artifact_partial_worker("overcount").await;
+    check_artifact_partial_worker("transport_limit").await;
+}
+fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let a = boxed_generated().await;
+        let valid = a.output.lock().unwrap()["output"]["files"][0].clone();
+        let files = match case {
+            "overcount" => json!(vec![valid; 9]),
+            "transport_limit" => {
+                json!([{"path":"huge.bin","content":"x".repeat(artifacts::sandbox::RESPONSE_BYTES)}])
+            }
+            _ => json!([
+                {"path":"/private/bad.mp4","content":"bm90LW1wNA=="},
+                valid,
+                {"path":"/private/bad.mp4","error":"private-error-marker"}
+            ]),
+        };
+        a.output.lock().unwrap()["output"]["files"] = files;
+        a.submit().await;
+        complete(&a).await;
+        let calls = a.calls.lock().unwrap().len();
+        Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
+        assert_eq!(a.calls.lock().unwrap().len(), calls);
+        finish(&a, &a.f.row, "submitted").await;
+        let event = admit_event(&a).await;
+        let attachments = &event.active_turn.as_ref().unwrap().attachments;
+        assert_eq!(attachments.len(), usize::from(case == "mixed"));
+        if case == "mixed" {
+            let (mime, bytes) = engine::read_attachment(
+                &a.f.state.db,
+                &a.f.state.encryption_keys,
+                &a.f.owner,
+                &event.id,
+                &attachments[0].id,
+            )
+            .await
+            .unwrap();
+            assert_eq!(mime, "video/mp4");
+            assert_eq!(bytes, MP4);
+        } else {
+            assert_eq!(
+                a.watch().await.reason.as_deref(),
+                Some("artifact_too_large")
+            );
+            assert_eq!(
+                a.f.state
+                    .db
+                    .collection::<bson::Document>(ARTIFACTS)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        finish(&a, &event, "File delivery has settled.").await;
+        let axum::Json(history) = crate::handlers::assistant_nyxagent::history(
+            axum::extract::State(a.f.state.clone()),
+            crate::test_utils::test_auth_user(&a.f.owner),
+            axum::extract::Path(event.id.clone()),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap();
+        let history = serde_json::to_value(history).unwrap();
+        let message = history["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| {
+                m["role"] == "assistant"
+                    && m["turn_id"] == event.active_turn.as_ref().unwrap().turn_id
+            })
+            .unwrap();
+        let outcome = &message["artifact_delivery"];
+        assert_eq!(
+            outcome["state"],
+            if case == "mixed" {
+                "materialized"
+            } else {
+                "artifact_too_large"
+            }
+        );
+        assert_eq!(outcome["recovery_available"], false);
+        assert_eq!(outcome["count"], usize::from(case == "mixed"));
+        if case == "mixed" {
+            assert_eq!(
+                outcome["rejected"],
+                json!([
+                    {"index":0,"filename":"bad.mp4","reason":"invalid"},
+                    {"index":2,"filename":"bad.mp4","reason":"unavailable"}
+                ])
+            );
+        } else {
+            assert_eq!(
+                a.f.state
+                    .db
+                    .collection::<bson::Document>(DELIVERIES)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        assert!(!outcome.to_string().contains("private"));
+        assert_eq!(a.calls.lock().unwrap().len(), calls);
+    })
 }

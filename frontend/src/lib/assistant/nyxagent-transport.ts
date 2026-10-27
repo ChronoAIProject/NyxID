@@ -611,7 +611,7 @@ export class NyxAgentTransport {
       const failed = message.status === "failed" && message.error_code !== "cancelled";
       const view: ChatMessage = {
         recovery: message.recovery,
-        artifactDelivery: message.artifact_delivery && id ? {state: message.artifact_delivery.state,count: message.artifact_delivery.count,recoveryAvailable: message.artifact_delivery.recovery_available,endpoint: `${path(id)}/messages/${encodeURIComponent(message.id)}/artifact-delivery`} : undefined,
+        artifactDelivery: message.artifact_delivery && id ? {state: message.artifact_delivery.state,count: message.artifact_delivery.count,rejected: message.artifact_delivery.rejected,recoveryAvailable: message.artifact_delivery.recovery_available,endpoint: `${path(id)}/messages/${encodeURIComponent(message.id)}/artifact-delivery`} : undefined,
         id: message.id,
         feedback: message.feedback ?? undefined,
         role: message.role,
@@ -671,7 +671,7 @@ export class NyxAgentTransport {
         if (cached && cached.id === id && cached.settled === settled) return cached.view;
         const view: ChatMessage = {
           recovery: settled?.recovery,
-          artifactDelivery: settled?.artifact_delivery && id ? {state: settled.artifact_delivery.state,count: settled.artifact_delivery.count,recoveryAvailable: settled.artifact_delivery.recovery_available,endpoint: `${path(id)}/messages/${encodeURIComponent(settled.id)}/artifact-delivery`} : undefined,
+          artifactDelivery: settled?.artifact_delivery && id ? {state: settled.artifact_delivery.state,count: settled.artifact_delivery.count,rejected: settled.artifact_delivery.rejected,recoveryAvailable: settled.artifact_delivery.recovery_available,endpoint: `${path(id)}/messages/${encodeURIComponent(settled.id)}/artifact-delivery`} : undefined,
           id: message.id,
           role: settled?.role ?? message.role,
           feedback: settled?.feedback ?? undefined,

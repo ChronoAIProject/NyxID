@@ -1,4 +1,5 @@
 //! Operation-scoped Sandbox adapter. Never interprets a URL or upstream MIME.
+use crate::models::generated_artifact::{RejectedFile, RejectionReason};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -101,6 +102,7 @@ struct RetrievedFile {
     size: Option<u64>,
 }
 pub struct File {
+    pub index: usize,
     pub filename: String,
     pub source_path: String,
     pub content_type: &'static str,
@@ -110,6 +112,7 @@ pub struct File {
 }
 pub struct ResultFiles {
     pub files: Vec<File>,
+    pub rejected: Vec<RejectedFile>,
     pub identity: String,
     pub summary: Zeroizing<String>,
     pub success: bool,
@@ -180,6 +183,7 @@ pub fn parse(body: &str, operation: &str) -> Checked<ResultFiles> {
         }
     })?;
     let mut files = Vec::new();
+    let mut rejected = Vec::new();
     let mut total = 0usize;
     let mut hash = Sha256::new();
     part(&mut hash, b"nyxid-sandbox-result-v1");
@@ -191,46 +195,39 @@ pub fn parse(body: &str, operation: &str) -> Checked<ResultFiles> {
             return Err("artifact_too_large");
         }
         for (index, entry) in entries.into_iter().enumerate() {
-            if entry.error.is_some() {
-                return Err("artifact_invalid");
-            }
-            let encoded = entry.content.ok_or("artifact_invalid")?;
-            let remaining = FILE_BYTES.min(TOTAL_BYTES.saturating_sub(total));
-            let encoded_max = remaining
-                .div_ceil(3)
-                .checked_mul(4)
-                .ok_or("artifact_too_large")?;
-            if encoded.len() > encoded_max {
-                return Err("artifact_too_large");
-            }
-            let bytes = Zeroizing::new(
-                STANDARD
-                    .decode(encoded.as_bytes())
-                    .map_err(|_| "artifact_invalid")?,
-            );
-            if bytes.is_empty() {
-                return Err("artifact_invalid");
-            }
-            if bytes.len() > remaining {
-                return Err("artifact_too_large");
-            }
-            total = total.checked_add(bytes.len()).ok_or("artifact_too_large")?;
             let name = filename(&entry.path, index);
-            let (content_type, preview) = verified_type(&name, &bytes)?;
-            // Upstream size is diagnostic only; decoded size is authoritative.
-            let _declared_size_mismatch = entry.size.is_some_and(|size| size != bytes.len() as u64);
-            part(&mut hash, name.as_bytes());
-            part(&mut hash, content_type.as_bytes());
-            part(&mut hash, &bytes);
-            let sha256 = hex::encode(Sha256::digest(&*bytes));
-            files.push(File {
-                filename: name,
-                source_path: bounded(&entry.path, 512).into(),
-                content_type,
-                preview,
-                bytes,
-                sha256,
-            });
+            match decode_file(
+                entry,
+                index,
+                name.clone(),
+                TOTAL_BYTES.saturating_sub(total),
+            ) {
+                Ok(file) => {
+                    // Charge only verified accepted bytes. A rejected image or
+                    // malformed peer must not hide a later small valid file.
+                    total = total
+                        .checked_add(file.bytes.len())
+                        .ok_or("artifact_too_large")?;
+                    part(&mut hash, file.filename.as_bytes());
+                    part(&mut hash, file.content_type.as_bytes());
+                    part(&mut hash, &file.bytes);
+                    files.push(file);
+                }
+                Err(reason) => {
+                    part(&mut hash, b"rejected");
+                    part(&mut hash, name.as_bytes());
+                    part(&mut hash, reason.as_bytes());
+                    rejected.push(RejectedFile {
+                        index,
+                        filename: name,
+                        reason: match reason {
+                            "artifact_too_large" => RejectionReason::TooLarge,
+                            "result_unavailable" => RejectionReason::Unavailable,
+                            _ => RejectionReason::Invalid,
+                        },
+                    });
+                }
+            }
         }
     }
     let summary = Zeroizing::new(
@@ -243,11 +240,55 @@ pub fn parse(body: &str, operation: &str) -> Checked<ResultFiles> {
     );
     Ok(ResultFiles {
         files,
+        rejected,
         identity: hex::encode(hash.finalize()),
         summary,
         success: result.success,
     })
 }
+fn decode_file(
+    entry: RetrievedFile,
+    index: usize,
+    name: String,
+    remaining: usize,
+) -> Checked<File> {
+    if entry.error.is_some() {
+        return Err("result_unavailable");
+    }
+    let encoded = entry.content.ok_or("artifact_invalid")?;
+    let remaining = FILE_BYTES.min(remaining);
+    let encoded_max = remaining
+        .div_ceil(3)
+        .checked_mul(4)
+        .ok_or("artifact_too_large")?;
+    if encoded.len() > encoded_max {
+        return Err("artifact_too_large");
+    }
+    let bytes = Zeroizing::new(
+        STANDARD
+            .decode(encoded.as_bytes())
+            .map_err(|_| "artifact_invalid")?,
+    );
+    if bytes.is_empty() {
+        return Err("artifact_invalid");
+    }
+    if bytes.len() > remaining {
+        return Err("artifact_too_large");
+    }
+    let (content_type, preview) = verified_type(&name, &bytes)?;
+    let _declared_size_mismatch = entry.size.is_some_and(|size| size != bytes.len() as u64);
+    let sha256 = hex::encode(Sha256::digest(&*bytes));
+    Ok(File {
+        index,
+        filename: name,
+        source_path: bounded(&entry.path, 512).into(),
+        content_type,
+        preview,
+        bytes,
+        sha256,
+    })
+}
+
 fn bounded(text: &str, max: usize) -> &str {
     let mut end = text.len().min(max);
     while !text.is_char_boundary(end) {
