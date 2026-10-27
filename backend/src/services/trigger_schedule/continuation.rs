@@ -74,36 +74,136 @@ pub async fn source(
     Ok(None)
 }
 
-/// Claims the completion barrier before any terminal projection/delivery. The
-/// conversation write serializes against Stop and follower-to-event handoffs.
+/// Claims the completion barrier before any terminal projection/delivery.
+/// Both dispositions (waiting and no work) fence registration and Stop.
 pub async fn mark_coordinator_waiting(db: &Database, run: &TriggerRun) -> AppResult<bool> {
     if run.continuation_protocol_version != 2 {
         return Ok(false);
     }
     let work_db = db.clone();
     let saved = run.clone();
-    let audit_db = db.clone();
-    let db = work_db;
     let mut session = db.client().start_session().await?;
-    let (waiting,changed) = session.start_transaction().and_run2(async move |session| {
-        let result: AppResult<(bool,bool)> = async {
-            let Some(live) = db.collection::<TriggerRun>(RUNS).find_one(doc! {"_id": &saved.id, "outcome":"started", "turn_id": &saved.turn_id, "result_claimed": {"$ne":true}}).session(&mut *session).await? else { return Ok((true,false)) };
-            let Some(source) = source(&db, &live, session).await? else { return Ok((false,false)) };
-            let thread=live.thread_id.as_deref().ok_or_else(||AppError::Conflict("trigger_thread_missing".into()))?;
-            if db.collection::<Document>(THREADS).update_one(doc!{"_id":thread,"user_id":&live.user_id,"$or":[{"active_turn":null},{"active_turn.turn_id":&live.turn_id,"active_turn.stop_requested":{"$ne":true}}]},doc!{"$addToSet":{"coordinator_run_ids":&live.id}}).session(&mut *session).await?.matched_count != 1 {return Err(AppError::Conflict("trigger_thread_changed".into()))}
-
-            let wait = CoordinatorWait { thread_id: live.thread_id.clone().ok_or_else(|| AppError::Conflict("trigger_thread_missing".into()))?, source: source.into(), deadline_at: live.coordinator_deadline.unwrap_or(live.deadline + Duration::hours(1)).min(live.expires_at) };
-            db.collection::<TriggerRun>(RUNS).update_one(doc! {"_id": &live.id, "outcome":"started", "turn_id": &live.turn_id}, doc! {"$set": {"outcome":"waiting", "wait_kind":"coordinator", "coordinator_wait": bson::to_bson(&wait).map_err(|_| AppError::Internal("Encode coordinator wait".into()))?, "waiting_for":[], "reason":"coordinator_pending"}}).session(&mut *session).await?;
-            db.collection::<Document>(WORK).update_one(doc! {"_id":&live.id},doc! {"$set":{"at":date(Utc::now()),"fence":"","deferrals":0}}).session(&mut *session).await?;
-            Ok((true,true))
-        }.await;
-        transactions::transaction_result(result)
-    }).await.map_err(transactions::map_transaction_error)?;
+    let (waiting, changed) = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            transactions::transaction_result(
+                mark_coordinator_waiting_in_session(&work_db, &saved, session).await,
+            )
+        })
+        .await
+        .map_err(transactions::map_transaction_error)?;
 
     if changed {
-        audit(&audit_db,&run.user_id,"trigger_run_waiting",doc!{"run_id":&run.id,"trigger_id":&run.trigger_id,"reason":"coordinator_pending","thread_id":&run.thread_id,"deadline":run.coordinator_deadline.map(date)}).await;
+        audit(db,&run.user_id,"trigger_run_waiting",doc!{"run_id":&run.id,"trigger_id":&run.trigger_id,"reason":"coordinator_pending","thread_id":&run.thread_id,"deadline":run.coordinator_deadline.map(date)}).await;
     }
     Ok(waiting)
+}
+
+/// Shared transaction body also lets the race fixture hold a real stale Mongo
+/// snapshot. Every registration and every barrier writes thread then run.
+pub(crate) async fn mark_coordinator_waiting_in_session(
+    db: &Database,
+    run: &TriggerRun,
+    session: &mut ClientSession,
+) -> AppResult<(bool, bool)> {
+    let mut identity = doc! {
+        "_id": &run.id,
+        "user_id": &run.user_id,
+        "outcome": "started",
+        "turn_id": &run.turn_id,
+        "continuation_protocol_version": 2,
+        "result_claimed": {"$ne": true},
+        "terminal_result_recorded": {"$ne": true},
+    };
+    let Some(live) = db
+        .collection::<TriggerRun>(RUNS)
+        .find_one(identity.clone())
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok((true, false));
+    };
+    let thread = live
+        .thread_id
+        .as_deref()
+        .ok_or_else(|| AppError::Conflict("trigger_thread_missing".into()))?;
+    identity.insert("thread_id", thread);
+
+    // These must be actual writes even when coordinator_run_ids already holds
+    // this run. A handoff committed after our snapshot then causes a transient
+    // write conflict, and and_run2 retries the whole source check.
+    if db
+        .collection::<Document>(THREADS)
+        .update_one(
+            doc! {"_id": thread, "user_id": &live.user_id, "$or": [
+                {"active_turn": null},
+                {"active_turn.turn_id": &live.turn_id, "active_turn.stop_requested": {"$ne": true}},
+            ]},
+            doc! {"$inc": {"automation_handoff_version": 1_i64},
+            "$addToSet": {"coordinator_run_ids": &live.id}},
+        )
+        .session(&mut *session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(AppError::Conflict("trigger_thread_changed".into()));
+    }
+    if db
+        .collection::<Document>(RUNS)
+        .update_one(
+            identity.clone(),
+            doc! {"$inc": {"handoff_version": 1_i64},
+            "$set": {"coordinator_handoff_closed": true}},
+        )
+        .session(&mut *session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(AppError::Conflict("trigger_run_unavailable".into()));
+    }
+
+    // The seal persists across the no-work -> terminal-projection gap. A late
+    // registration cannot commit after this decision. admit_turn reopens it
+    // only with the next exact run/turn/work claim.
+    let Some(source) = source(db, &live, session).await? else {
+        return Ok((false, false));
+    };
+    let wait = CoordinatorWait {
+        thread_id: thread.into(),
+        source: source.into(),
+        deadline_at: live
+            .coordinator_deadline
+            .unwrap_or(live.deadline + Duration::hours(1))
+            .min(live.expires_at),
+    };
+    if db
+        .collection::<TriggerRun>(RUNS)
+        .update_one(
+            identity,
+            doc! {"$set": {
+                "outcome": "waiting", "wait_kind": "coordinator",
+                "coordinator_wait": bson::to_bson(&wait)
+                    .map_err(|_| AppError::Internal("Encode coordinator wait".into()))?,
+                "waiting_for": [], "reason": "coordinator_pending",
+            }},
+        )
+        .session(&mut *session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(AppError::Conflict("trigger_run_unavailable".into()));
+    }
+    db.collection::<Document>(WORK)
+        .update_one(
+            doc! {"_id": &live.id},
+            doc! {"$set": {"at": date(Utc::now()), "fence": "", "deferrals": 0}},
+        )
+        .session(session)
+        .await?;
+    Ok((true, true))
 }
 
 pub fn exhausted(run: &TriggerRun, now: DateTime<Utc>) -> Option<&'static str> {
@@ -371,7 +471,9 @@ pub async fn defer_group_capacity(
 ) -> AppResult<()> {
     db.collection::<Document>(RUNS)
         .update_one(
-            doc! {"_id":run,"user_id":owner,"thread_id":thread,"outcome":"started"},
+            doc! {"_id":run,"user_id":owner,"thread_id":thread,"outcome":"started",
+            "coordinator_handoff_closed":{"$ne":true},"result_claimed":{"$ne":true},
+            "terminal_result_recorded":{"$ne":true}},
             doc! {"$set":{"coordinator_capacity_retry":true}},
         )
         .await?;

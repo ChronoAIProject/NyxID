@@ -241,6 +241,372 @@ async fn automation_v2_completion_barrier_claim_restart_and_selective_drain() {
     server.abort();
 }
 
+/// Hold an actual empty-source snapshot across registration, and separately
+/// recheck committed Stop/terminal state. No ordering relies on sleeps.
+#[tokio::test]
+async fn automation_v2_completion_barrier_fences_registration_and_stop() {
+    for winner in ["registration", "barrier", "stop", "terminal"] {
+        let (state, calls, server) = setup(&format!("auto2040_f4_{winner}")).await;
+        let (_, run, row) = completion_coordinator(&state).await;
+        let group = completion_groups::create(
+            &state.db,
+            OWNER,
+            "Completion F4 race fixture",
+            &[row.agent_id.clone().unwrap()],
+            "nyxbot",
+        )
+        .await
+        .unwrap();
+
+        if winner == "barrier" {
+            // The empty-source decision commits first. Registration must also
+            // fail in the gap before the run's separate terminal projection.
+            assert!(
+                !continuation_v2::mark_coordinator_waiting(&state.db, &run)
+                    .await
+                    .unwrap()
+            );
+            let saved = completion_load(&state, &run.id).await;
+            assert_eq!(saved.outcome, RunOutcome::Started);
+            assert!(!saved.terminal_result_recorded);
+        } else {
+            let mut session = state.db.client().start_session().await.unwrap();
+            session
+                .start_transaction()
+                .read_concern(mongodb::options::ReadConcern::snapshot())
+                .await
+                .unwrap();
+            assert!(
+                continuation_v2::source(&state.db, &run, &mut session)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            if winner == "registration" {
+                completion_groups::append_following(
+                    &state.db,
+                    OWNER,
+                    &group.id,
+                    "agent",
+                    None,
+                    "Handoff committed after the completion snapshot",
+                    &[],
+                    Vec::new(),
+                    Some((&row.id, Some(&run.id))),
+                )
+                .await
+                .unwrap();
+            } else if winner == "stop" {
+                engine::request_stop(&state.db, OWNER, &row.id)
+                    .await
+                    .unwrap();
+            } else {
+                schedules::finish(
+                    &state.db,
+                    &run.id,
+                    RunOutcome::Completed,
+                    None,
+                    &state.config.frontend_url,
+                )
+                .await
+                .unwrap();
+            }
+            if winner == "registration" {
+                let error = continuation_v2::mark_coordinator_waiting_in_session(
+                    &state.db,
+                    &run,
+                    &mut session,
+                )
+                .await
+                .expect_err("a stale registration snapshot must not commit a barrier decision");
+                assert!(
+                    matches!(&error, AppError::DatabaseError(error)
+                    if error.contains_label("TransientTransactionError")),
+                    "{error}"
+                );
+                let _ = session.abort_transaction().await;
+            } else {
+                // Stop/terminal cleanup has committed. A fresh transaction
+                // must suppress settlement at the live-run predicate; no
+                // transient error is needed to prove this terminal ordering.
+                session.abort_transaction().await.unwrap();
+                session.start_transaction().await.unwrap();
+                assert_eq!(
+                    continuation_v2::mark_coordinator_waiting_in_session(
+                        &state.db,
+                        &run,
+                        &mut session,
+                    )
+                    .await
+                    .unwrap(),
+                    (true, false)
+                );
+                session.commit_transaction().await.unwrap();
+            }
+        }
+
+        if winner == "registration" {
+            // Fresh production settlement rechecks the committed follower and
+            // waits without terminal projection or outbound delivery.
+            completion_reply(&state, &row, &run).await;
+            let waiting = completion_load(&state, &run.id).await;
+            assert_eq!(waiting.outcome, RunOutcome::Waiting);
+            assert_eq!(waiting.wait_kind, Some(RunWaitKind::Coordinator));
+            assert!(!waiting.terminal_result_recorded);
+            assert!(!waiting.result_claimed);
+            assert!(waiting.finished_at.is_none());
+            assert_eq!(
+                completion_groups::get(&state.db, OWNER, &group.id)
+                    .await
+                    .unwrap()
+                    .followers
+                    .len(),
+                1
+            );
+            // The persisted seal must reopen only with the next admitted turn.
+            completion_queue(&state, &row, &run).await;
+            let claim = continuation_v2::claim_event(&state.db, OWNER, &row.id, &run.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let next = engine::begin_turn(
+                &state.db,
+                OWNER,
+                completion_start(&row.id, TurnOrigin::Event, Some(claim)),
+                &state.encryption_keys,
+            )
+            .await
+            .unwrap();
+            completion_groups::append_following(
+                &state.db,
+                OWNER,
+                &group.id,
+                "agent",
+                None,
+                "The next exact turn may delegate again",
+                &[],
+                Vec::new(),
+                Some((&next.id, Some(&run.id))),
+            )
+            .await
+            .unwrap();
+            // The opposite Stop ordering: the next barrier commits waiting
+            // first, then Stop removes both its follower and queued event.
+            let next_run = completion_load(&state, &run.id).await;
+            let (followers, _) =
+                completion_groups::claim_followers_if_quiet(&state.db, OWNER, &group.id)
+                    .await
+                    .unwrap();
+            let follower = followers.into_iter().next().unwrap();
+            let mut event = team::bound_event(
+                "group_settled",
+                "Queued result before Stop".into(),
+                None,
+                None,
+            )
+            .for_trigger(Some(&run.id));
+            event.id = follower.notification.as_ref().unwrap().event_id.clone();
+            engine::push_events(&state.db, OWNER, &next.id, vec![event.clone()])
+                .await
+                .unwrap();
+            assert!(
+                continuation_v2::mark_coordinator_waiting(&state.db, &next_run)
+                    .await
+                    .unwrap()
+            );
+            engine::request_stop(&state.db, OWNER, &next.id)
+                .await
+                .unwrap();
+            assert!(
+                !completion_groups::deliver_follower(
+                    &state.db, OWNER, &group.id, &follower, &event,
+                )
+                .await
+                .unwrap(),
+                "a follower claim captured before Stop cannot requeue work"
+            );
+            settled(
+                &state,
+                &next,
+                &next_run.id,
+                "Late completion after Stop",
+                None,
+            )
+            .await;
+            let stopped = completion_load(&state, &run.id).await;
+            assert_eq!(stopped.outcome, RunOutcome::Failed);
+            assert_eq!(stopped.reason.as_deref(), Some("cancelled"));
+            assert!(stopped.terminal_result_recorded);
+            assert!(
+                completion_groups::get(&state.db, OWNER, &group.id)
+                    .await
+                    .unwrap()
+                    .followers
+                    .is_empty()
+            );
+            let thread = engine::get(&state.db, OWNER, &next.id).await.unwrap();
+            assert!(!thread.coordinator_run_ids.contains(&run.id));
+            assert!(
+                thread
+                    .pending_events
+                    .iter()
+                    .all(|event| event.trigger_run_id.as_deref() != Some(run.id.as_str()))
+            );
+        } else {
+            let before = completion_groups::get(&state.db, OWNER, &group.id)
+                .await
+                .unwrap();
+            assert!(
+                completion_groups::append_following(
+                    &state.db,
+                    OWNER,
+                    &group.id,
+                    "agent",
+                    None,
+                    "A late handoff must roll back",
+                    &[],
+                    Vec::new(),
+                    Some((&row.id, Some(&run.id))),
+                )
+                .await
+                .is_err()
+            );
+            let after = completion_groups::get(&state.db, OWNER, &group.id)
+                .await
+                .unwrap();
+            assert_eq!(after.message_count, before.message_count);
+            assert!(after.followers.is_empty());
+            if winner == "barrier" {
+                completion_reply(&state, &row, &run).await;
+            }
+            let terminal = completion_load(&state, &run.id).await;
+            assert_eq!(
+                terminal.outcome,
+                if winner == "stop" {
+                    RunOutcome::Failed
+                } else {
+                    RunOutcome::Completed
+                }
+            );
+            assert!(terminal.terminal_result_recorded);
+            if winner == "stop" {
+                assert_eq!(terminal.reason.as_deref(), Some("cancelled"));
+            }
+            assert!(
+                continuation_v2::mark_coordinator_waiting(&state.db, &run)
+                    .await
+                    .unwrap(),
+                "late settlement must not revive a terminal run"
+            );
+            assert_eq!(
+                completion_load(&state, &run.id).await.outcome,
+                terminal.outcome
+            );
+            let thread = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+            assert!(!thread.coordinator_run_ids.contains(&run.id));
+            assert!(
+                thread
+                    .pending_events
+                    .iter()
+                    .all(|event| event.trigger_run_id.as_deref() != Some(run.id.as_str()))
+            );
+        }
+        assert!(calls.lock().await.is_empty());
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn automation_v2_trigger_update_persists_protocol_and_preserves_other_states() {
+    let (state, calls, server) = setup("auto2040_f5_update").await;
+    let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    for (status, assistant, previous, expected) in [
+        (TriggerStatus::Active, true, 0, 2),
+        (TriggerStatus::Disabled, true, 0, 0),
+        (TriggerStatus::Disabled, true, 2, 2),
+        (TriggerStatus::Active, false, 0, 0),
+        (TriggerStatus::Disabled, false, 0, 0),
+        (TriggerStatus::Active, false, 2, 2),
+    ] {
+        let trigger = automation(&state, &agent.id, None).await;
+        if previous == 0 {
+            // Legacy documents lack this field. Read the serde-defaulted row
+            // back so update exercises its real exact-document predicate.
+            state
+                .db
+                .collection::<Document>(TRIGGERS)
+                .update_one(
+                    doc! {"_id": &trigger.id},
+                    doc! {"$unset": {"continuation_protocol_version": ""}},
+                )
+                .await
+                .unwrap();
+        }
+        let current = state
+            .db
+            .collection::<Trigger>(TRIGGERS)
+            .find_one(doc! {"_id": &trigger.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.continuation_protocol_version, previous);
+        let delivery = if assistant {
+            current.delivery.clone()
+        } else {
+            TriggerDelivery::Notification
+        };
+        let updated = trigger_service::update(
+            &state.db,
+            &state.encryption_keys,
+            &current,
+            trigger_service::UpdateInput {
+                label: Some("Protocol update F5 fixture".into()),
+                status: Some(status),
+                delivery: Some(delivery.clone()),
+                schedule: None,
+                overlap: None,
+            },
+        )
+        .await
+        .unwrap()
+        .trigger;
+        let stored = state
+            .db
+            .collection::<Document>(TRIGGERS)
+            .find_one(doc! {"_id": &trigger.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.contains_key("continuation_protocol_version"));
+        let reloaded: Trigger = bson::from_document(stored).unwrap();
+        assert_eq!(updated.continuation_protocol_version, expected);
+        assert_eq!(reloaded.continuation_protocol_version, expected);
+        assert_eq!(reloaded.status, status);
+        assert_eq!(reloaded.delivery, delivery);
+        assert_eq!(reloaded.updated_at, updated.updated_at);
+        assert!(reloaded.updated_at > current.updated_at);
+        assert!(matches!(
+            trigger_service::update(
+                &state.db,
+                &state.encryption_keys,
+                &current,
+                trigger_service::UpdateInput {
+                    label: Some("Stale generation must be rejected".into()),
+                    status: None,
+                    delivery: None,
+                    schedule: None,
+                    overlap: None,
+                },
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+        trigger_service::delete(&state.db, &reloaded).await.unwrap();
+    }
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+}
+
 #[tokio::test]
 async fn automation_v2_follower_lost_claim_queue_full_expiry_and_cross_run_ids() {
     let (state, _, server) = setup("auto2040_follower").await;

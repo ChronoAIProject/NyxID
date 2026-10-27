@@ -1008,6 +1008,7 @@ async fn admit_turn_inner(
         "waiting_for": [],
         "wait_kind": null,
         "coordinator_wait": null,
+        "coordinator_handoff_closed": false,
     };
     if coordinator {
         set.insert("continuation_count", run.continuation_count + 1);

@@ -797,11 +797,34 @@ async fn follow_in_session(
     filter.insert("created_by_user_id", bson::Bson::Null);
     let groups = db.collection::<AssistantGroup>(GROUPS);
     if let Some(run) = trigger_run_id {
-        if db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME).update_one(doc!{"_id":conversation_id,"user_id":owner,"active_turn.trigger_run_id":run,"active_turn.stop_requested":{"$ne":true}},doc!{"$inc":{"automation_handoff_version":1_i64}}).session(&mut *session).await?.matched_count != 1 {return Err(AppError::AssistantTurnRequired)}
+        if db
+            .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":conversation_id,"user_id":owner,
+                "active_turn.trigger_run_id":run,"active_turn.stop_requested":{"$ne":true}},
+                doc! {"$inc":{"automation_handoff_version":1_i64}},
+            )
+            .session(&mut *session)
+            .await?
+            .matched_count
+            != 1
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
         // Serialize registration against terminal/Stop settlement. The caller
         // identity was derived from its live turn, never the tool body.
-        let changed = db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
-            .update_one(doc! {"_id":run,"user_id":owner,"thread_id":conversation_id,"outcome":"started","continuation_protocol_version":2},doc! {"$inc":{"handoff_version":1_i64},"$set":{"coordinator_capacity_retry":false}}).session(&mut *session).await?;
+        let changed = db
+            .collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":run,"user_id":owner,"thread_id":conversation_id,
+                "outcome":"started","continuation_protocol_version":2,
+                "coordinator_handoff_closed":{"$ne":true},"result_claimed":{"$ne":true},
+                "terminal_result_recorded":{"$ne":true}},
+                doc! {"$inc":{"handoff_version":1_i64},
+                "$set":{"coordinator_capacity_retry":false}},
+            )
+            .session(&mut *session)
+            .await?;
         if changed.matched_count != 1 {
             return Err(AppError::Conflict("trigger_run_unavailable".into()));
         }

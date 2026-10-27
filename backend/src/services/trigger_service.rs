@@ -494,6 +494,7 @@ pub async fn update(
                     "label": &saved.label,
                     "status": bson::to_bson(&saved.status).map_err(serialization_error)?,
                     "delivery": bson::to_bson(&saved.delivery).map_err(serialization_error)?,
+                    "continuation_protocol_version": saved.continuation_protocol_version,
                     "delivery_secret_encrypted": encrypted,
                     "secret_context_versions":bson::to_bson(&saved.secret_context_versions).map_err(serialization_error)?,
                     "delivery_key_id": &saved.delivery_key_id,

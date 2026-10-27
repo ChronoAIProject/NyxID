@@ -95,7 +95,7 @@ below; neither sibling branch is imported.
 
 - Verified active plan and frozen revision 3 SHA-256 `5e3469b2754b8ca8127519c19ba1349049288f70371c4d9a2de5a1a761799fc7` before source edits. The plan header's historical “revision: 2” is preserved because the exact approved bytes are authoritative.
 - Pre-edit shared runtime notification attempted via Heca `heca_agent_send_prompt` with `notify_on_finish=true` to coordinator `01a17a8a-e916-77a0-a565-083ca25e2aa3` and Astra PM `01a17a9b-50b4-7e41-bb3b-dcbbf6204ad3`. Both rejected by Heca caller ACL: “a caller may act only on itself, agents it spawned, or (as an orchestrator or team lead) the fleet / its team.” Notification remains undelivered; no approval inferred and no additional agent created. Contracts are documented above and in session commentary.
-- Implementation approval remains **NOT STARTED**, reserved for Astra's personal complete-diff review.
+- Astra implementation review is **IN PROGRESS**; approval remains **PENDING** and reserved for Astra's personal complete-diff review.
 
 ### Shared build resource window
 
@@ -263,7 +263,7 @@ CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=
 
 After the first focused results, run the remaining applicable ordinary-event,
 channel, authority and lifecycle regressions, and re-run only affected checks
-for fixes. Astra's `ASTRA_IMPLEMENTATION_APPROVED` gate is **NOT STARTED** and
+for fixes. Astra's `ASTRA_IMPLEMENTATION_APPROVED` gate is **PENDING** and
 must identify the exact accepted commit after all required evidence passes.
 
 ### Exact changed files in the draft handoff
@@ -370,3 +370,104 @@ acceptance rows above. The focused regression should run first when the
 coordinator/shared-window handoff permits backend work. No backend process was
 started or queued, and no lock, shared target, approval gate or agent topology
 was changed.
+
+## Astra personal review revision: F-4, F-5 and F-6
+
+Revision base: `4683f9d76874768300ebb01d4b5c724f661b43c6`. The containing
+commit's exact SHA is reported in the same-session handoff. The active plan and
+frozen revision-3 bytes retain SHA-256
+`5e3469b2754b8ca8127519c19ba1349049288f70371c4d9a2de5a1a761799fc7`.
+Astra review remains **IN PROGRESS**, implementation approval **PENDING**.
+
+**F-4 source fix.** `mark_coordinator_waiting` now delegates to one shared
+transaction body that fences both dispositions, including no source. Before
+checking `source`, it performs actual `$inc` writes on the exact owner's thread
+(`automation_handoff_version`) and the exact started run/turn (`handoff_version`),
+checks each matched count, and seals that turn's registrations with the internal
+`coordinator_handoff_closed` field. Follower registration writes these same
+documents, so a handoff committed after the barrier's read snapshot conflicts
+with its write. The existing `and_run2` wrapper preserves Mongo transient error
+labels through `transaction_result` and retries the entire decision.
+
+The seal remains set when an empty-source barrier commits, closing the gap
+before terminal projection. `follow_in_session` rejects sealed, result-claimed,
+or terminal-projected runs, rolling back the group message, allocated sequence,
+and thread writes with its transaction. A late group-capacity marker follows the
+same seal/result predicates. Only the existing exact run/turn/work admission
+transaction reopens the seal for a new turn. The barrier's live-run predicate
+also excludes terminal-projected runs; a stale or terminal run suppresses further
+settlement without creating a wait. No existing runtime signature or client
+field changed. Owner/thread/run/turn checks, Stop checks, origin admission,
+security fences and Permissions ownership remain in place.
+
+**F-4/F-6 regression.**
+`automation_v2_completion_barrier_fences_registration_and_stop` uses the existing
+transaction-topology guard and unique managed fixture databases. Its ordering
+is controlled by real Mongo sessions and completed writes; it contains no
+sleep-based synchronization. These are drafted assertions, **not executed
+results**:
+
+| Ordering | Assertion in the focused regression |
+| --- | --- |
+| Empty-source snapshot, then follower registration commits, then stale barrier writes | An explicit snapshot transaction receives `TransientTransactionError`; a fresh production settlement finds the follower and records coordinator waiting with no terminal result or delivery claim. |
+| Empty-source barrier commits, then registration attempts before terminal projection | Registration fails and its message count/follower changes roll back; normal completion subsequently records a terminal result. |
+| Stop or terminal cleanup commits, then the barrier rechecks | The earlier read transaction is ended and a fresh session returns `(true, false)` at the live-run predicate. No transient error is required for these committed terminal cases (F-6). Late registration rolls back and late barriers cannot revive the run. |
+| Exact continuation admission, then another group registration | Admission reopens the seal and the next turn successfully registers a follower for the same run. |
+| Waiting barrier commits, then Stop cleans up, then a captured follower claim and completion arrive | Stop records `failed/cancelled`, removes the follower, queued event and tracked run ID; the old claim cannot requeue work and late completion cannot revive the run. |
+
+Static ordering review: registration and the barrier write the same thread/run
+documents. Stop's cancellation and terminal cleanup write those same identities
+transactionally. A transaction that retains an older snapshot must conflict when
+it attempts these writes; a fresh recheck sees the terminal outcome and returns
+without a barrier decision. A no-work barrier that wins first keeps its seal
+until terminalization or the next exact admission. The fixture keeps the
+registration conflict assertion separate from the already-committed terminal
+recheck, as requested in F-6.
+
+**F-5 source fix and regression.** `trigger_service::update` now includes
+`continuation_protocol_version` in its existing transactional `$set` under
+`exact_document_predicate(&source)`. The active-assistant readiness decision's
+version therefore reaches MongoDB and the returned committed generation.
+`automation_v2_trigger_update_persists_protocol_and_preserves_other_states`
+reloads raw BSON after a real update, asserts the field is present and the
+returned/reloaded versions agree, checks the resulting status/delivery/generation,
+and rejects a stale-current update. Six cases cover an absent legacy field
+upgraded to v2 for active assistant delivery, disabled assistant versions 0/2,
+active and disabled notification version 0, and retention of an existing v2
+version when changing to notification delivery. This regression is also
+**unexecuted**.
+
+### Lightweight validation for F-4 through F-6
+
+No Cargo command or backend test/build/link process was run or queued. The
+shared backend window remains held by another stream. Direct formatting uses
+the repository's Rust 2024 edition; workspace Cargo formatting, focused tests
+and clippy remain for coordinator clearance through the shared-window handoff.
+No frontend file changed in this revision, so earlier frontend results are not
+reported as newly rerun checks.
+
+| Command / inspection | Result | Evidence |
+| --- | --- | --- |
+| `rustfmt --edition 2024 --check backend/src/services/trigger_schedule/continuation.rs backend/src/services/assistant_group_service.rs backend/src/services/trigger_schedule.rs backend/src/handlers/trigger_scheduler_completion_tests.rs backend/src/services/trigger_service.rs` | PASS, exit 0 | `/tmp/nyxid-automation-2040-f4-f6-rustfmt.log` |
+| `git diff --check`; staged and committed equivalents | PASS, exit 0 | `/tmp/nyxid-automation-2040-f4-f6-diff-check.log`; repeated at commit |
+| Status JSON parse and `astra_review` / `notify_on_finish` assertions | PASS | `/tmp/nyxid-automation-2040-f4-f6-status-check.log` |
+| Static source inspection | No duplicate/misplaced fields found in touched constructors; new `CoordinatorWait` and `UpdateInput` literals match their declarations; existing `ChatAuthority`, `AgentEvent`, `GroupFollower`, and changed append/follower call sites rechecked | Manual inspection of the cumulative automation diff and surrounding constructors; not Rust type checking |
+| Transaction/type/lifetime inspection | Session borrows use established reborrow patterns; production retry closure owns cloned database/run; borrowed thread comes from a live local run; raw seal survives field-preserving migration updates; F-5 retains the exact-document predicate | Manual inspection of service/fixture code and Mongo driver/error helpers; no compiler or runtime result claimed |
+
+Remaining validation: execute the two new regressions and the earlier F-1 test
+first when the coordinator releases a backend window, then the existing focused
+automation/confirmation/event/Stop checks and required clippy. All backend types,
+`Send` bounds, transaction retry behavior, fixture assumptions and open acceptance
+rows still require executable evidence. No implementation approval is recorded.
+`notify_on_finish=true` remains enabled in status and on the completion
+notification attempt; delivery outcome is reported in the session handoff.
+
+Exact files changed in this revision:
+
+- `backend/src/handlers/trigger_scheduler_completion_tests.rs`
+- `backend/src/services/assistant_group_service.rs`
+- `backend/src/services/trigger_schedule.rs`
+- `backend/src/services/trigger_schedule/continuation.rs`
+- `backend/src/services/trigger_service.rs`
+- `docs/plans/2026-10-27-automation-review.md`
+- `docs/plans/2026-10-27-automation-status.json`
