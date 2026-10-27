@@ -139,176 +139,10 @@ async fn generated_artifact_recovery_audits_http_direct_and_wrapped_requests_wit
 
 #[tokio::test]
 async fn generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after_disable() {
-    let legacy = AsyncFixture::new().await;
-    assert!(legacy.submit().await.artifact_mode.is_none());
-    complete(&legacy).await;
-    assert_eq!(
-        legacy
-            .f
-            .state
-            .db
-            .collection::<bson::Document>(ARTIFACTS)
-            .count_documents(doc! {})
-            .await
-            .unwrap(),
-        0
-    );
+    check_artifact_flag_off_legacy().await;
     let a = boxed_generated().await;
-    let w = a.submit().await;
-    assert_eq!(w.artifact_mode.as_deref(), Some(artifacts::sandbox::MODE));
-    enabled(&a, false).await;
-    complete(&a).await;
-    assert_eq!(a.watch().await.artifact_result.as_ref().unwrap().count, 1);
-    finish(&a, &a.f.row, "submitted").await;
-    let event = admit_event(&a).await;
-    let attachment = event.active_turn.as_ref().unwrap().attachments[0].clone();
-    assert_eq!(attachment.origin, "generated_artifact");
-    let context = watches::input_context(&a.f.state.db, &a.f.state.encryption_keys, &event)
-        .await
-        .unwrap();
-    assert!(context.contains("materialized"));
-    assert!(!context.contains("/tmp/movie.mp4"));
-    assert!(!context.contains(&base64::engine::general_purpose::STANDARD.encode(MP4)));
-    finish(&a, &event, "The retained result is attached.").await;
-    let messages: Vec<crate::models::assistant_message::AssistantMessage> = a.f.state.db
-        .collection(crate::models::assistant_message::COLLECTION_NAME)
-        .find(doc! {"conversation_id":&event.id,"role":"assistant","turn_id":&event.active_turn.as_ref().unwrap().turn_id})
-        .await.unwrap().try_collect().await.unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].attachments[0].id, attachment.id);
-    let delivery =
-        a.f.state
-            .db
-            .collection::<crate::models::generated_artifact::Delivery>(DELIVERIES)
-            .find_one(doc! {"_id":&messages[0].id})
-            .await
-            .unwrap()
-            .unwrap();
-    assert_eq!(delivery.attachment_ids, vec![attachment.id.clone()]);
-    let calls = a.calls.lock().unwrap().len();
-    for _ in 0..2 {
-        let axum::Json(acknowledgement) = crate::handlers::assistant_nyxagent::artifact_delivery(
-            axum::extract::State(a.f.state.clone()),
-            crate::test_utils::test_auth_user(&a.f.owner),
-            axum::extract::Path((event.id.clone(), messages[0].id.clone())),
-            axum::body::Bytes::new(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(acknowledgement, json!({"status":"materialized"}));
-    }
-    assert!(
-        crate::handlers::assistant_nyxagent::artifact_delivery(
-            axum::extract::State(a.f.state.clone()),
-            crate::test_utils::test_auth_user(&a.f.owner),
-            axum::extract::Path((event.id.clone(), messages[0].id.clone())),
-            axum::body::Bytes::from_static(b"{}"),
-        )
-        .await
-        .is_err()
-    );
-    let (mime, bytes) = engine::read_attachment(
-        &a.f.state.db,
-        &a.f.state.encryption_keys,
-        &a.f.owner,
-        &event.id,
-        &attachment.id,
-    )
-    .await
-    .unwrap();
-    assert_eq!(mime, "video/mp4");
-    assert_eq!(bytes, MP4);
-    // A natural-language turn can recover only the preceding server association.
-    let next = engine::begin_turn(
-        &a.f.state.db,
-        &a.f.owner,
-        &user_start(&event.id, "Recover the preceding result"),
-        &a.f.state.encryption_keys,
-    )
-    .await
-    .unwrap();
-    let auth = authenticate(&a.f).await;
-    let chat = auth.chat.as_ref().unwrap();
-    assert!(
-        artifacts::recover_for_chat(
-            &a.f.state.db,
-            &a.f.state.encryption_keys,
-            chat,
-            &json!({"watch_id":w.id})
-        )
-        .await
-        .is_err()
-    );
-    artifacts::recover_for_chat(&a.f.state.db, &a.f.state.encryption_keys, chat, &json!({}))
-        .await
-        .unwrap();
-    let mut guest = chat.clone();
-    guest.guest = true;
-    assert!(
-        artifacts::recover_for_chat(
-            &a.f.state.db,
-            &a.f.state.encryption_keys,
-            &guest,
-            &json!({})
-        )
-        .await
-        .is_err()
-    );
-    set_access_mode(
-        &a.f,
-        crate::models::assistant_settings::AccessMode::AskEveryTime,
-    )
-    .await;
-    let refusal = result(
-        direct_call(&a.f, &auth, "nyx__artifact_delivery", json!({})).await,
-        true,
-    )
-    .await;
-    assert_eq!(refusal["error"], "acknowledgement_required");
-    let card = acks::history(&a.f.state.db, &a.f.owner, &event.id)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|card| {
-            card.tool_name.as_deref() == Some("nyx__artifact_delivery") && card.status == "pending"
-        })
-        .unwrap();
-    finish(&a, &next, "Please review the recovery action.").await;
-    acks::decide(&a.f.state.db, &a.f.owner, &event.id, &card.id, true)
-        .await
-        .unwrap();
-    let mut approved = user_start(&event.id, "Continue the approved recovery");
-    approved.acknowledgement_id = Some(card.id.clone());
-    let continued = engine::begin_turn(
-        &a.f.state.db,
-        &a.f.owner,
-        &approved,
-        &a.f.state.encryption_keys,
-    )
-    .await
-    .unwrap();
-    let auth = authenticate(&a.f).await;
-    // The action remains {} even on approval continuation. Both the card and
-    // original recovery source come from server-written message associations.
-    let response = call(&a.f, &auth, "nyx__artifact_delivery", json!({})).await;
-    let envelope: Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), 100_000)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(envelope["result"]["isError"], false, "{envelope}");
-    assert_eq!(
-        acks::history(&a.f.state.db, &a.f.owner, &event.id)
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|row| row.id == card.id)
-            .unwrap()
-            .status,
-        "used"
-    );
-    finish(&a, &continued, "Recovered the saved attachments.").await;
+    let (w, event, calls) = check_admitted_artifact_drain(&a).await;
+    check_artifact_chat_recovery(&a, &w, &event).await;
     assert_eq!(
         a.calls.lock().unwrap().len(),
         calls,
@@ -332,6 +166,219 @@ async fn generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after
             .unwrap()
             .is_none()
     );
+}
+
+// Construct each phase outside the test driver. The combined debug poll frame
+// otherwise stays on the stack throughout the nested MCP/proxy/BSON calls.
+fn check_artifact_flag_off_legacy() -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async {
+        let legacy = AsyncFixture::new().await;
+        assert!(legacy.submit().await.artifact_mode.is_none());
+        complete(&legacy).await;
+        assert_eq!(
+            legacy
+                .f
+                .state
+                .db
+                .collection::<bson::Document>(ARTIFACTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    })
+}
+
+fn check_admitted_artifact_drain(
+    a: &AsyncFixture,
+) -> futures::future::BoxFuture<
+    '_,
+    (
+        AsyncServiceOperation,
+        crate::models::assistant_conversation::AssistantConversation,
+        usize,
+    ),
+> {
+    Box::pin(async move {
+        let w = a.submit().await;
+        assert_eq!(w.artifact_mode.as_deref(), Some(artifacts::sandbox::MODE));
+        enabled(a, false).await;
+        complete(a).await;
+        assert_eq!(a.watch().await.artifact_result.as_ref().unwrap().count, 1);
+        finish(a, &a.f.row, "submitted").await;
+        let event = admit_event(a).await;
+        let attachment = event.active_turn.as_ref().unwrap().attachments[0].clone();
+        assert_eq!(attachment.origin, "generated_artifact");
+        let context = watches::input_context(&a.f.state.db, &a.f.state.encryption_keys, &event)
+            .await
+            .unwrap();
+        assert!(context.contains("materialized"));
+        assert!(!context.contains("/tmp/movie.mp4"));
+        assert!(!context.contains(&base64::engine::general_purpose::STANDARD.encode(MP4)));
+        finish(a, &event, "The retained result is attached.").await;
+        let messages: Vec<crate::models::assistant_message::AssistantMessage> =
+            a.f.state
+                .db
+                .collection(crate::models::assistant_message::COLLECTION_NAME)
+                .find(doc! {
+                    "conversation_id": &event.id,
+                    "role": "assistant",
+                    "turn_id": &event.active_turn.as_ref().unwrap().turn_id,
+                })
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].attachments[0].id, attachment.id);
+        let delivery =
+            a.f.state
+                .db
+                .collection::<crate::models::generated_artifact::Delivery>(DELIVERIES)
+                .find_one(doc! {"_id":&messages[0].id})
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(delivery.attachment_ids, vec![attachment.id.clone()]);
+        let calls = a.calls.lock().unwrap().len();
+        for _ in 0..2 {
+            let axum::Json(acknowledgement) =
+                crate::handlers::assistant_nyxagent::artifact_delivery(
+                    axum::extract::State(a.f.state.clone()),
+                    crate::test_utils::test_auth_user(&a.f.owner),
+                    axum::extract::Path((event.id.clone(), messages[0].id.clone())),
+                    axum::body::Bytes::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(acknowledgement, json!({"status":"materialized"}));
+        }
+        assert!(
+            crate::handlers::assistant_nyxagent::artifact_delivery(
+                axum::extract::State(a.f.state.clone()),
+                crate::test_utils::test_auth_user(&a.f.owner),
+                axum::extract::Path((event.id.clone(), messages[0].id.clone())),
+                axum::body::Bytes::from_static(b"{}"),
+            )
+            .await
+            .is_err()
+        );
+        let (mime, bytes) = engine::read_attachment(
+            &a.f.state.db,
+            &a.f.state.encryption_keys,
+            &a.f.owner,
+            &event.id,
+            &attachment.id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(mime, "video/mp4");
+        assert_eq!(bytes, MP4);
+        (w, event, calls)
+    })
+}
+
+fn check_artifact_chat_recovery<'a>(
+    a: &'a AsyncFixture,
+    w: &'a AsyncServiceOperation,
+    event: &'a crate::models::assistant_conversation::AssistantConversation,
+) -> futures::future::BoxFuture<'a, ()> {
+    Box::pin(async move {
+        // A natural-language turn can recover only the preceding server association.
+        let next = engine::begin_turn(
+            &a.f.state.db,
+            &a.f.owner,
+            &user_start(&event.id, "Recover the preceding result"),
+            &a.f.state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        assert!(next.active_turn.as_ref().unwrap().platform_reply.is_none());
+        let auth = authenticate(&a.f).await;
+        let chat = auth.chat.as_ref().unwrap();
+        assert!(
+            artifacts::recover_for_chat(
+                &a.f.state.db,
+                &a.f.state.encryption_keys,
+                chat,
+                &json!({"watch_id":w.id})
+            )
+            .await
+            .is_err()
+        );
+        artifacts::recover_for_chat(&a.f.state.db, &a.f.state.encryption_keys, chat, &json!({}))
+            .await
+            .unwrap();
+        let mut guest = chat.clone();
+        guest.guest = true;
+        assert!(
+            artifacts::recover_for_chat(
+                &a.f.state.db,
+                &a.f.state.encryption_keys,
+                &guest,
+                &json!({})
+            )
+            .await
+            .is_err()
+        );
+        set_access_mode(
+            &a.f,
+            crate::models::assistant_settings::AccessMode::AskEveryTime,
+        )
+        .await;
+        let refusal = result(
+            direct_call(&a.f, &auth, "nyx__artifact_delivery", json!({})).await,
+            true,
+        )
+        .await;
+        assert_eq!(refusal["error"], "acknowledgement_required");
+        let card = acks::history(&a.f.state.db, &a.f.owner, &event.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|card| {
+                card.tool_name.as_deref() == Some("nyx__artifact_delivery")
+                    && card.status == "pending"
+            })
+            .unwrap();
+        finish(a, &next, "Please review the recovery action.").await;
+        acks::decide(&a.f.state.db, &a.f.owner, &event.id, &card.id, true)
+            .await
+            .unwrap();
+        let mut approved = user_start(&event.id, "Continue the approved recovery");
+        approved.acknowledgement_id = Some(card.id.clone());
+        let continued = engine::begin_turn(
+            &a.f.state.db,
+            &a.f.owner,
+            &approved,
+            &a.f.state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        let auth = authenticate(&a.f).await;
+        // The action remains {} even on approval continuation. Both the card and
+        // original recovery source come from server-written message associations.
+        let response = call(&a.f, &auth, "nyx__artifact_delivery", json!({})).await;
+        let envelope: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 100_000)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(envelope["result"]["isError"], false, "{envelope}");
+        assert_eq!(
+            acks::history(&a.f.state.db, &a.f.owner, &event.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|row| row.id == card.id)
+                .unwrap()
+                .status,
+            "used"
+        );
+        finish(a, &continued, "Recovered the saved attachments.").await;
+    })
 }
 
 #[tokio::test]

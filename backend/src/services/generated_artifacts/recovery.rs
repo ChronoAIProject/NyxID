@@ -87,7 +87,9 @@ async fn initiating_message(
         || row.reply_channel.is_some()
         || row.group_request_id.is_some()
         || turn.origin != TurnOrigin::User
-        || turn.platform_reply != Some(PlatformReplyRouting::WebOnly)
+        // Ordinary owner Web admission stores no platform reply destination;
+        // async completion delivery stores an explicit WebOnly destination.
+        || !matches!(turn.platform_reply, None | Some(PlatformReplyRouting::WebOnly))
         || turn.platform_origin.is_some()
         || turn.channel_adapter_origin.is_some()
         || turn.invocation_id.is_some()
