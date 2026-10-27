@@ -148,7 +148,13 @@ pub(super) async fn held_admission(
     let (parts, body) = request.into_parts();
     let body = axum::body::to_bytes(body, 64 * 1024).await.unwrap();
     let selected = engine::get(&state.db, &chat.user_id, &chat.conversation_id).await?;
-    assert_eq!(selected.agent_id, chat.agent_id);
+    assert_eq!(
+        selected
+            .agent_id
+            .as_deref()
+            .expect("selected conversation has an agent"),
+        chat.agent_id.as_str()
+    );
     assert_eq!(selected.credential_api_key_id, chat.api_key_id);
     assert_eq!(
         selected.active_turn.as_ref().unwrap().turn_id.as_str(),
