@@ -1,0 +1,3 @@
+services::assistant_service_execution::tests::permissions::codex_callback_projected_read_path_keeps_exact_negative_approvals: test
+
+1 test, 0 benchmarks

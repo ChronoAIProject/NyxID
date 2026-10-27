@@ -1,0 +1,6 @@
+
+running 1 test
+test services::assistant_service_execution::tests::permissions::codex_metadata_does_not_admit_stateful_provider_or_unknown_effects ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10457 filtered out; finished in 0.01s
+

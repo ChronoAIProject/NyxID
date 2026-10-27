@@ -1,0 +1,288 @@
+{
+  "updated_at": "2026-10-27T06:35:20+00:00",
+  "implementation_commit": "493b5c2dc012cc4de80c00f33f7cddf489cb316d",
+  "binary_path": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+  "binary_sha256": "1a7b23cd3b1383e9605841ad62aa6ecb4811aae9c85fb96ba3deba900d3e02bb",
+  "source_manifest_sha256": "bb3574cd8d716990b2203a284265b5c6bcf98eeedefa839ecb4f2afc2e48b88f",
+  "records": [
+    {
+      "command": [
+        "cargo",
+        "--config",
+        "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+        "test",
+        "-p",
+        "nyxid",
+        "codex_",
+        "--no-run"
+      ],
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 576.86,
+      "start_free_GiB": 19.271,
+      "min_free_GiB": 15.375,
+      "end_free_GiB": 17.207,
+      "log": "/tmp/nyxid-permissions-r3-current-compile-1.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-current-compile-1.argv.jsonl",
+      "label": "current-compile-1",
+      "results": []
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--config",
+        "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+        "--manifest-path",
+        "backend/Cargo.toml",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 101,
+      "resource_stop": false,
+      "elapsed_seconds": 379.86,
+      "start_free_GiB": 18.896,
+      "min_free_GiB": 16.947,
+      "end_free_GiB": 17.967,
+      "log": "/tmp/nyxid-permissions-r3-current-clippy.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-current-clippy.argv.jsonl",
+      "label": "current-clippy",
+      "results": []
+    },
+    {
+      "command": [
+        "cargo",
+        "--config",
+        "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 15.2,
+      "start_free_GiB": 17.963,
+      "min_free_GiB": 17.963,
+      "end_free_GiB": 17.967,
+      "log": "/tmp/nyxid-permissions-r3-final-fmt.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-final-fmt.argv.jsonl",
+      "label": "final-fmt",
+      "results": []
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--config",
+        "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+        "--manifest-path",
+        "backend/Cargo.toml",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 361.22,
+      "start_free_GiB": 17.961,
+      "min_free_GiB": 16.965,
+      "end_free_GiB": 17.979,
+      "log": "/tmp/nyxid-permissions-r3-final-clippy.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-final-clippy.argv.jsonl",
+      "label": "final-clippy",
+      "results": []
+    },
+    {
+      "command": [
+        "cargo",
+        "--config",
+        "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+        "test",
+        "-p",
+        "nyxid",
+        "codex_",
+        "--no-run"
+      ],
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 579.84,
+      "start_free_GiB": 17.978,
+      "min_free_GiB": 14.556,
+      "end_free_GiB": 16.976,
+      "log": "/tmp/nyxid-permissions-r3-final-compile.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-final-compile.argv.jsonl",
+      "label": "final-compile",
+      "results": []
+    },
+    {
+      "command": [
+        "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+        "services::assistant_service_execution::tests::permissions::codex_callback_guest_does_not_gain_owner_model_consent",
+        "--exact",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 12.15,
+      "start_free_GiB": 17.976,
+      "min_free_GiB": 17.976,
+      "end_free_GiB": 17.976,
+      "log": "/tmp/nyxid-permissions-r3-final-guest-direct.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-final-guest-direct.argv.jsonl",
+      "identity": {
+        "verified_at_UTC": "2026-10-27T06:10:42+00:00",
+        "measurement": "verified after guest/Codex runs and during broader run; no feature source mutation or heavy compilation between these executions",
+        "binary_sha256": "1a7b23cd3b1383e9605841ad62aa6ecb4811aae9c85fb96ba3deba900d3e02bb",
+        "source_manifest_sha256": "bb3574cd8d716990b2203a284265b5c6bcf98eeedefa839ecb4f2afc2e48b88f",
+        "source_manifest_path": "/tmp/nyxid-permissions-r3-final-source-manifest.sha256",
+        "staged_11_files_match": true,
+        "selected_entries": 1,
+        "inventory": "/tmp/nyxid-permissions-r3-final-guest-direct.inventory.log"
+      },
+      "label": "final-guest-direct",
+      "results": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10457 filtered out; finished in 2.57s"
+      ]
+    },
+    {
+      "command": [
+        "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+        "codex_",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 134.44,
+      "start_free_GiB": 17.974,
+      "min_free_GiB": 17.935,
+      "end_free_GiB": 17.948,
+      "log": "/tmp/nyxid-permissions-r3-final-codex-direct.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-final-codex-direct.argv.jsonl",
+      "identity": {
+        "verified_at_UTC": "2026-10-27T06:10:42+00:00",
+        "measurement": "verified after guest/Codex runs and during broader run; no feature source mutation or heavy compilation between these executions",
+        "binary_sha256": "1a7b23cd3b1383e9605841ad62aa6ecb4811aae9c85fb96ba3deba900d3e02bb",
+        "source_manifest_sha256": "bb3574cd8d716990b2203a284265b5c6bcf98eeedefa839ecb4f2afc2e48b88f",
+        "source_manifest_path": "/tmp/nyxid-permissions-r3-final-source-manifest.sha256",
+        "staged_11_files_match": true,
+        "selected_entries": 24,
+        "inventory": "/tmp/nyxid-permissions-r3-final-codex-direct.inventory.log"
+      },
+      "label": "final-codex-direct",
+      "results": [
+        "test result: ok. 23 passed; 0 failed; 1 ignored; 0 measured; 10434 filtered out; finished in 133.92s"
+      ]
+    },
+    {
+      "command": [
+        "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+        "services::assistant_service_execution::tests",
+        "services::assistant_authority_tests",
+        "services::assistant_access_mode_tests",
+        "services::assistant_acknowledgement_service",
+        "services::agent_operation_scope_tests",
+        "assistant_operation_scope",
+        "services::security_readiness_service::tests",
+        "denied_owner_action_queues_plain_narration_without_an_execution_continuation",
+        "specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them",
+        "guest_access_follows_spec_markers",
+        "llm_method_overrides_never_retain_read_approval_classification",
+        "new_user_stateless_llm_generation_does_not_wait_or_create_approval_settings",
+        "--test-threads=2"
+      ],
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 652.19,
+      "start_free_GiB": 17.948,
+      "min_free_GiB": 17.715,
+      "end_free_GiB": 18.675,
+      "log": "/tmp/nyxid-permissions-r3-final-regression-direct.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-final-regression-direct.argv.jsonl",
+      "identity": {
+        "verified_at_UTC": "2026-10-27T06:10:42+00:00",
+        "measurement": "verified after guest/Codex runs and during broader run; no feature source mutation or heavy compilation between these executions",
+        "binary_sha256": "1a7b23cd3b1383e9605841ad62aa6ecb4811aae9c85fb96ba3deba900d3e02bb",
+        "source_manifest_sha256": "bb3574cd8d716990b2203a284265b5c6bcf98eeedefa839ecb4f2afc2e48b88f",
+        "source_manifest_path": "/tmp/nyxid-permissions-r3-final-source-manifest.sha256",
+        "staged_11_files_match": true,
+        "selected_entries": 157,
+        "inventory": "/tmp/nyxid-permissions-r3-final-regression-direct.inventory.log"
+      },
+      "label": "final-regression-direct",
+      "results": [
+        "test result: ok. 156 passed; 0 failed; 1 ignored; 0 measured; 10301 filtered out; finished in 651.18s"
+      ]
+    },
+    {
+      "command": [
+        "cargo",
+        "--config",
+        "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 13.63,
+      "start_free_GiB": 18.83,
+      "min_free_GiB": 18.83,
+      "end_free_GiB": 18.83,
+      "log": "/tmp/nyxid-permissions-r3-post-tests-fmt.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-post-tests-fmt.argv.jsonl",
+      "label": "post-tests-fmt",
+      "results": []
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--config",
+        "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+        "--manifest-path",
+        "backend/Cargo.toml",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 365.97,
+      "start_free_GiB": 18.829,
+      "min_free_GiB": 16.825,
+      "end_free_GiB": 17.839,
+      "log": "/tmp/nyxid-permissions-r3-post-tests-clippy.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-post-tests-clippy.argv.jsonl",
+      "label": "post-tests-clippy",
+      "results": []
+    }
+  ],
+  "actual_backend_clippy_cargo": {
+    "at_UTC": "2026-10-27T06:24:42Z",
+    "pid": 12703,
+    "pgid": 12701,
+    "name": "cargo",
+    "argv": [
+      "/Users/chronoai/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+      "check",
+      "--config",
+      "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+      "--manifest-path",
+      "backend/Cargo.toml",
+      "--all-targets"
+    ]
+  },
+  "final_free_GiB": 17.836,
+  "external_gates_open": [
+    "Astra exact-commit personal approval",
+    "Live callback shape and deployed NyxAgent/NyxID versions",
+    "Live Lark/Web informational and denial acceptance",
+    "Real administrator readiness activation/save",
+    "Deployed five-operation execution acceptance",
+    "Combined integration acceptance"
+  ]
+}

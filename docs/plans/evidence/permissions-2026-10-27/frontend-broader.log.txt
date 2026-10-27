@@ -1,0 +1,15 @@
+
+> frontend@0.73.1 test
+> NODE_ENV=test vitest run src/lib/assistant src/components/assistant/agent-operation-scopes.test.tsx src/components/assistant/agent-operation-scopes.request.test.tsx src/components/dashboard/api-key-detail/operation-scope-card.test.tsx src/hooks/use-assistant-key-actions.test.tsx
+
+(node:3596) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+ RUN  v4.1.4 /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions/frontend
+
+
+ Test Files  56 passed (56)
+      Tests  615 passed (615)
+   Start at  09:44:16
+   Duration  11.31s (transform 8.04s, setup 19.94s, import 14.55s, tests 8.82s, environment 22.45s)
+

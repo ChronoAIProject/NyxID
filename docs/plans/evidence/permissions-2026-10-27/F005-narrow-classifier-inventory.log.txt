@@ -1,0 +1,3 @@
+services::assistant_service_execution::tests::permissions::codex_metadata_does_not_admit_stateful_provider_or_unknown_effects: test
+
+1 test, 0 benchmarks

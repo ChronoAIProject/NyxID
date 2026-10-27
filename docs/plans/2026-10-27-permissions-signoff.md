@@ -1,22 +1,91 @@
 # Permissions issue sign-off — #2004 and #2007
 
-## Draft publication and integration hold — 2026-10-27
+## Astra narrow local validation complete — 2026-10-27T12:41:02.142395+00:00
+
+**SOURCE_REVIEW_COMPLETE; LOCAL_VALIDATION_COMPLETE** for source
+`7185b5ef7eb56194b2e1cbf42f045536a9cb7847`. The complete prior source review is carried forward;
+Astra personally inspected the fresh build, both exact nonzero test inventories,
+actual test logs, formatting, required Clippy, compiler arguments, source/binary
+identity and final process-quiescence records. This closes the F-005 test-coverage
+gap. No production or test source changed during this batch.
+
+Reviewer: GPT-6-Astra PM, Heca `01a17a9b-5082-7b83-8171-2e791e9fd01e`.
+The retained Sol was verified as codex / gpt-6.1-sol / x_high / full-access,
+agent `01a17b00-1ad2-7cc0-ada4-61d925daac94`, provider session
+`01a17b00-1c46-7753-a330-f48a830666bd`. Execution HEAD was documentation-only
+`dd83cc01fbb8bf1f6a70bab6c330f765ade90d59` above the source commit.
+
+| Required check | Actual result | Archived evidence |
+| --- | --- | --- |
+| Fresh configured `cargo test -p nyxid codex_ --no-run` | Exit 0; 633.15 seconds | [Build log](evidence/permissions-2026-10-27/F005-narrow-compile.log.txt), [runner](evidence/permissions-2026-10-27/F005-narrow-compile.json) |
+| Exact `codex_metadata_does_not_admit_stateful_provider_or_unknown_effects` | 1 passed, 0 failed, 0 ignored; inventory exactly 1 | [Test log](evidence/permissions-2026-10-27/F005-narrow-classifier.log.txt), [identity/command](evidence/permissions-2026-10-27/F005-narrow-classifier.json) |
+| Exact `codex_callback_projected_read_path_keeps_exact_negative_approvals` | 1 passed, 0 failed, 0 ignored; inventory exactly 1 | [Test log](evidence/permissions-2026-10-27/F005-narrow-permission.log.txt), [identity/command](evidence/permissions-2026-10-27/F005-narrow-permission.json) |
+| Configured `cargo fmt --all --check` | Exit 0; 13.65 seconds | [Runner](evidence/permissions-2026-10-27/F005-narrow-fmt.json) |
+| `cargo clippy --config <shared-config> --manifest-path backend/Cargo.toml --all-targets -- -D warnings` | Exit 0; 353.86 seconds | [Clippy log](evidence/permissions-2026-10-27/F005-narrow-clippy.log.txt), [runner](evidence/permissions-2026-10-27/F005-narrow-clippy.json), [actual argv](evidence/permissions-2026-10-27/F005-narrow-clippy.argv.jsonl) |
+
+Both exact test names have prefix
+`services::assistant_service_execution::tests::permissions::` and ran from
+`/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions/backend`
+with `--exact --test-threads=1`. The other commands ran from the owning worktree
+root. The [complete validation record](evidence/permissions-2026-10-27/F005-narrow-validation.json)
+contains the full command vectors, absolute config/runner paths, working
+directories, exact inventories and before/after source/binary checks.
+
+Fresh binary SHA-256: `1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875`.
+The 11-file source manifest SHA-256 remains
+`d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c`.
+Astra independently matched every entry to `7185b5ef7eb56194b2e1cbf42f045536a9cb7847` and to
+the clean working tree, and separately verified the binary bytes. The historical
+169 unique passes / 0 failures / 2 ignored remain bound to `493b5c2` and its
+original tests. These two current executions overlap that inventory and are not
+added to a new unique-test total. Frontend evidence is carried forward unchanged.
+
+The isolated Mongo8 fixture on port 27471 passed strict writable-primary and
+transaction commit/readback plus abort/readback checks. Retained Mongo PID 34439
+matches its historical `nofile=65536` launch record; this is explicitly launch
+evidence, not a live limit query. All new runner commands used nofile 65536.
+The first three Mongo probe-script attempts failed due to shell helper/return
+semantics; their logs are preserved with the corrected strict readback probe.
+No application assertion or readiness condition was weakened.
+
+The shared target/jobs=2/config were preserved. Actual package compiler argv
+has no debuginfo/incremental or optimization/assertion/overflow override; actual
+Clippy backend Cargo retains the config and all targets. Minimum free disk was
+11.702 GiB; no guard fired. Astra independently confirmed zero heavy/backend-test
+processes at release and 15.524 GiB free. The backend window was released before
+this documentation work; no additional standalone command is queued.
+
+**Both #2004 and #2007 remain BLOCKED. ASTRA_IMPLEMENTATION_APPROVED is not
+granted.** Current-main reconciliation, combined I-05/I-06 and each ticket's
+applicable live/deployed acceptance remain open. The coordinator accepted the
+[bounded reconciliation direction](2026-10-27-permissions-main-reconciliation.md)
+and has assigned source-only work in its isolated integration checkout to the
+same Sol; original feature source stays frozen. Those forthcoming changes need
+personal review and their own final-source validation.
+
+Byte-preserving copies of the current records and carried-forward evidence are
+in the [archive index](evidence/permissions-2026-10-27/index.json), with [file hashes](evidence/permissions-2026-10-27/SHA256SUMS).
+Original `/tmp` paths inside copied records identify execution locations.
+
+## Draft publication checkpoint — 2026-10-27
 
 The coordinator published [draft PR #2058](https://github.com/ChronoAIProject/NyxID/pull/2058)
 to `main` at `7185b5ef7eb56194b2e1cbf42f045536a9cb7847` on
 `fix/assistant-permissions-2004-2007`. That commit contains the previously
 reviewed six-line replacement-key regression; earlier references below to its
-uncommitted state describe the source-review checkpoint. Its execution remains
-pending the later narrow Permissions window. The 169-pass and Clippy evidence
-remains bound to the earlier tested source and original test set.
+uncommitted state describe the source-review checkpoint. Its narrow execution
+is now complete as recorded above. The historical 169-pass and Clippy evidence remains bound to the earlier tested source and
+original test set.
 
 The coordinator reports that GitHub marks this draft as conflicting with
-current `main`. Reconciliation is OPEN for later integration work; it has not
-been attempted and is separate from the accepted source review. Permissions
-remains on backend HOLD until explicit coordinator clearance. Both issue
-verdicts remain BLOCKED for the applicable local, live and combined gates.
+current `main`. The original branch remains unchanged. The isolated integration
+merge is now `26154051327a9b5692a63ad234eab7601853fb31`; its authority
+resolution has been inspected, while new interaction tests and final combined
+validation remain open. The standalone backend window has been released. Both
+issue verdicts remain BLOCKED for reconciliation acceptance and the applicable
+live/combined gates.
 
-## Astra final source review — 2026-10-27T07:38:15Z
+## Historical Astra source-review checkpoint — 2026-10-27T07:38:15Z
 
 Astra personally reread the complete exact implementation commit
 `493b5c2dc012cc4de80c00f33f7cddf489cb316d` and its surrounding production
@@ -62,7 +131,7 @@ Retained Sol provider session: 01a17b00-1c46-7753-a330-f48a830666bd
 | --- | --- |
 | Base commit | b1dd6548ade04ec4f0051203e1353796331c7f87 |
 | Approved plan SHA-256 | c9a687732f634a997c193935e423e2aa423a8bbebbb658292a64b760cbba47da |
-| Implementation commit | 493b5c2dc012cc4de80c00f33f7cddf489cb316d; exact source review complete; narrow test-only follow-up validation pending |
+| Current validated source | 7185b5ef7eb56194b2e1cbf42f045536a9cb7847; source review and local validation complete; feature implementation is 493b5c2dc012cc4de80c00f33f7cddf489cb316d |
 | Current imported prerequisite commit | 21907f8360482ae39dcc2e3371805c270c3368af, local cherry-pick of coordinator-approved source 336405f8e667ea2eb2c6513effec3d15fd960b02 |
 | Prerequisite source identity | 336405f8e667ea2eb2c6513effec3d15fd960b02, exactly four boolean-only files, 8 insertions/8 deletions; imported without feature changes |
 | Astra pre-lint working-tree candidate manifest | a15e661d2f120971e5f51737c1d02bc00ad2041c59f448e4caa450d3d4f368fb over the 11 changed source/test/fixture files |
@@ -72,23 +141,23 @@ The implementation is committed as `493b5c2dc012cc4de80c00f33f7cddf489cb316d`
 after prerequisite `21907f8360482ae39dcc2e3371805c270c3368af`. Sol’s final
 validation record below remains bound to that exact commit and binary. Astra's
 source review of the exact commit is complete, but the implementation approval
-marker remains pending the narrow test-only follow-up validation.
+marker remains pending current-main reconciliation acceptance and the applicable
+live/combined ticket gates; the narrow test-only validation has passed.
 
 I attest that Astra personally read the complete exact commit and the narrow
 working-tree test-only follow-up, plus the relevant surrounding production
 code, including the projected HTTP authorization order, request classifier,
 acknowledgement/continuation paths, frontend error-envelope handling and
 operation-scope form state. The exact commit's prior local checks are bound by
-the verified 11-file committed manifest and binary identity below. The new
-test-only follow-up has not yet been executed because no backend window is
-available.
+the verified 11-file committed manifest and binary identity below. The test-only
+follow-up has now passed both exact tests and the required fresh build, formatting and Clippy checks as recorded above.
 
 ## Verdicts
 
 | Issue | Verdict | Reason |
 | --- | --- | --- |
-| #2004 — [Bug][NyxBot] Ask every time 下模型 POST responses 批准后反复生成新审批，阻断普通 Lark 问答 | BLOCKED | Final-source compile, F-001, focused Codex and broader execution/authority/scope/readiness checks, formatting and all-target Clippy passed; exact implementation commit exists. Live callback/deployed-version evidence, live Lark/Web acceptance, combined integration and Astra exact-commit approval remain open. |
-| #2007 — [Bug][NyxBot] 操作权限保存被 security_readiness_unavailable 阻断，UI 仅提示稍后重试 | BLOCKED | Readiness UX/draft retention and final-source local operation-scope/readiness/backend execution checks passed; exact implementation commit exists. Real administrator readiness activation, deployed five-operation execution acceptance, combined integration and Astra exact-commit approval remain open. |
+| #2004 — [Bug][NyxBot] Ask every time 下模型 POST responses 批准后反复生成新审批，阻断普通 Lark 问答 | BLOCKED | Final-source compile, F-001, focused Codex and broader execution/authority/scope/readiness checks, formatting and all-target Clippy passed; exact implementation commit exists. Source review and narrow local validation are complete. Current-main reconciliation, live callback/deployed-version evidence, live Lark/Web acceptance, combined I-05/I-06 and final implementation approval remain open. |
+| #2007 — [Bug][NyxBot] 操作权限保存被 security_readiness_unavailable 阻断，UI 仅提示稍后重试 | BLOCKED | Readiness UX/draft retention and final-source local operation-scope/readiness/backend execution checks passed; exact implementation commit exists. Source review and narrow local validation are complete. Current-main reconciliation, real administrator readiness activation, deployed five-operation execution acceptance, applicable combined integration and final implementation approval remain open. |
 
 These are issue-level sign-off verdicts, not implementation approval. Neither
 ticket is described as complete.
@@ -237,7 +306,7 @@ the unsaved draft.
 | F-001: guest callback escaped under default Use | Added narrow guest model-generation rejection before assistant admission and provider effect; preserved ordinary guest paths and owner callbacks | Current rebuilt binary passed the exact default-Use guest no-egress regression and the focused `codex_` batch; live callback/version and deployed ingress acceptance remain open |
 | F-002: guard-order wording overstated credential lifecycle coverage | Evidence now states shared target/billing/credential preparation may precede the guard; approval/card/wait/injection/forwarding/dispatch/provider effects remain after it | Resolved documentation-only |
 | F-003: method override compatibility | Traced raw proxy and LLM gateway guest override rejection, guest inability to consume owner cards, and owner destructive exact approvals | Resolved; final-source broader run includes the five targeted denial/guest/override checks and the owner destructive regression |
-| F-005: metadata replacement-key regression coverage | The committed predicate already enforces the exact seven-field closed set. Sol removed the redundant production refactor and retained only the six-line regression that replaces the required metadata key with an unknown key at unchanged cardinality. | SOURCE_REVIEW_COMPLETE; LOCAL_VALIDATION_COMPLETE pending narrow test/rebuild, fmt and required Clippy |
+| F-005: metadata replacement-key regression coverage | The committed predicate already enforces the exact seven-field closed set. Sol removed the redundant production refactor and retained only the six-line regression that replaces the required metadata key with an unknown key at unchanged cardinality. | RESOLVED: SOURCE_REVIEW_COMPLETE and LOCAL_VALIDATION_COMPLETE at 7185b5ef; both exact regressions, fresh build, fmt and required Clippy passed |
 | P-001/P-005: NyxAgentAdmission marker could not safely cross callback hop | Removed marker/bypass design; callback is independently authenticated and classified | Resolved in plan/source |
 | P-006: denial continuation could create a second model card or effect | Added web/Lark/duplicate/concurrent/expiry/cancellation regressions with no-effect assertions | Final-source focused and broader runs passed; live denial acceptance remains open |
 | P-007: readiness 503 was collapsed to generic copy | Added exact numeric-code/key-qualified mapping, bounded trace and draft-retention coverage | Frontend checks passed; live/admin readiness open |
@@ -246,12 +315,14 @@ the unsaved draft.
 
 ## Smallest remaining blockers and ownership
 
-1. Narrow local validation — coordinator/Sol. Rebuild the changed test source
-   in a returned Permissions window, run the exact nonzero replacement-key
-   classifier/permission selection, then run only the affected required fmt and
-   all-target warnings-denied Clippy checks. Bind those results to the retained
-   exact implementation source and test identity; no broad 156-case rerun is
-   required solely for this negative regression.
+1. Current-main reconciliation — coordinator/same Sol/Astra. Preserve main's
+   authorized exact owner-established guest route while retaining unbound guest
+   denial, owner-only consent/bootstrap and pre-egress revalidation. The accepted
+   bounded direction and exact existing/missing tests are in
+   `2026-10-27-permissions-main-reconciliation.md`. Source-only work is now
+   assigned in the isolated integration checkout; original source stays frozen.
+   Review and execute the affected final integration tests after coordinator
+   clearance. The standalone narrow validation is complete.
 2. #2004 external acceptance — issue owner/coordinator. Obtain a sanitized live
    callback trace and deployed NyxAgent/NyxID version identity, then run the
    original Lark/Web informational and denial acceptance.

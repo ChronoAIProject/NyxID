@@ -1,0 +1,30 @@
+
+running 24 tests
+test handlers::codex_connection::tests::verification_requires_complete_bounded_responses_body ... ok
+test handlers::proxy::tests::codex_chat_completions_detection_handles_prefixed_paths ... ok
+test handlers::proxy::tests::codex_transport_deeply_nested ... ok
+test handlers::proxy::tests::codex_transport_false_for_partial_match ... ok
+test handlers::proxy::tests::codex_transport_only_handles_supported_endpoints ... ok
+test handlers::proxy::tests::codex_transport_trailing_and_leading_slashes ... ok
+test api_docs::tests::selectable_login_and_codex_contracts_are_discoverable ... ok
+test handlers::service_pool_ai_tests::pool_ai_codex_node_transport_preserves_headers_and_local_destination ... ok
+test handlers::service_pool_ai_tests::pool_ai_codex_catalog_with_custom_connection_slug_uses_local_destination has been running for over 60 seconds
+test services::assistant_service_execution::tests::journeys::generic_gateway_org_primary_reaches_consent_before_legacy_codex_fallback ... ok
+test services::assistant_service_execution::tests::permissions::codex_callback_fixture_is_inference_and_keeps_body_and_header_bindings ... ok
+test services::assistant_service_execution::tests::permissions::codex_callback_guest_does_not_gain_owner_model_consent ... ok
+test services::assistant_service_execution::tests::permissions::codex_callback_projected_read_path_keeps_exact_negative_approvals ... ok
+test services::assistant_service_execution::tests::permissions::codex_client_metadata_counts_sorted_compact_json_escaping_at_object_limit ... ok
+test services::assistant_service_execution::tests::permissions::codex_client_metadata_enforces_each_scalar_and_utf8_boundary ... ok
+test services::assistant_service_execution::tests::permissions::codex_metadata_does_not_admit_stateful_provider_or_unknown_effects ... ok
+test services::assistant_service_execution::tests::permissions::denial::codex_denial_cancelled_continuation_never_dispatches_or_leaves_a_pending_card ... ok
+test services::assistant_service_execution::tests::permissions::denial::codex_denial_lark_continuation_preserves_the_original_destination ... ok
+test services::assistant_service_execution::tests::permissions::denial::codex_denial_web_continuation_is_terminal_without_a_second_model_card ... ok
+test handlers::service_pool_ai_tests::pool_ai_codex_catalog_with_custom_connection_slug_uses_local_destination ... ok
+test services::codex_connection_service::tests::concurrent_import_and_failed_provision_leave_no_partial_resources ... ok
+test services::codex_connection_service::tests::import_replacement_and_verification_bind_exact_credential_epoch_and_live_service ... ok
+test services::platform_public_contract_service::tests::native_paired::real_codex_native_v2_discovery_readiness_faq_search_read_signup_answer_use_actual_mcp_funding_and_durable_native_delivery ... ignored, requires coordinated A8 upstream binary/policy and pinned Codex wrapper; all service/provider egress local
+test services::platform_public_proxy_service::tests::schema_adapted_codex_callbacks_obey_pinned_reasoning_grammar ... ok
+test services::codex_connection_service::tests::reconnect_after_provider_disconnect_and_service_delete_preserves_tombstones ... ok
+
+test result: ok. 23 passed; 0 failed; 1 ignored; 0 measured; 10434 filtered out; finished in 133.92s
+

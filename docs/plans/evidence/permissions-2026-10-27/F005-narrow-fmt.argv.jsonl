@@ -1,0 +1,1 @@
+{"at_UTC": "2026-10-27T12:29:08Z", "pid": 73977, "pgid": 73977, "name": "cargo", "argv": ["/opt/homebrew/Cellar/rustup/1.29.0_2/libexec/bin/cargo", "--config", "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml", "fmt", "--all", "--check"]}

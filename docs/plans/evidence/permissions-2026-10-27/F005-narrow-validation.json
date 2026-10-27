@@ -1,0 +1,441 @@
+{
+  "worktree_status": "",
+  "final_head_commit": "dd83cc01fbb8bf1f6a70bab6c330f765ade90d59",
+  "at_UTC": "2026-10-27T12:35:55.304839+00:00",
+  "source_review": "SOURCE_REVIEW_COMPLETE accepted by user; F-005 is test coverage only; production refactor removed",
+  "identity": {
+    "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+    "head_commit": "dd83cc01fbb8bf1f6a70bab6c330f765ade90d59",
+    "binary_path": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+    "binary_sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875",
+    "source_manifest": "/tmp/nyxid-permissions-r3-F005-narrow-source-manifest.sha256",
+    "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+    "compile_record": "/tmp/nyxid-permissions-r3-F005-narrow-compile.json",
+    "config_sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3"
+  },
+  "preflight": {
+    "at_UTC": "2026-10-27T12:15:09.565489+00:00",
+    "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+    "head_commit": "dd83cc01fbb8bf1f6a70bab6c330f765ade90d59",
+    "worktree_clean": true,
+    "head_docs_only_since_source": true,
+    "source_manifest": "/tmp/nyxid-permissions-r3-F005-narrow-source-manifest.sha256",
+    "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+    "feature_files": 11,
+    "config": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+    "config_sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
+    "free_GiB": 15.603,
+    "heavy_processes": [],
+    "owned_backend_processes": [],
+    "new_process_nofile": 65536,
+    "retained_mongo_identity": {
+      "at_UTC": "2026-10-27T12:22:09.179429+00:00",
+      "pid": 34439,
+      "process": "34439 Tue Oct 27 10:26:28 2026     /tmp/nyxid-security-mongo8/mongodb-macos-aarch64--8.0.17/bin/mongod",
+      "startup_log_identity": {
+        "log_line": 6,
+        "timestamp": {
+          "$date": "2026-10-27T10:26:28.591+08:00"
+        },
+        "pid": 34439,
+        "port": 27471,
+        "dbPath": "/tmp/nyxid-permissions-r3-mongo/data"
+      },
+      "retained_launch_nofile": 65536,
+      "limit_evidence_basis": "Existing recorded launch evidence; not a live process-limit query. PID/startup/port/path match the retained fixture.",
+      "limit_evidence_path": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions/docs/plans/2026-10-27-permissions-implementation-evidence.md",
+      "limit_evidence_lines": "324-329",
+      "limit_evidence_document_sha256": "944c08b7505904436b10c887619709b04ab1f93d981aea592d13a1ccbd081da0",
+      "limit_evidence_excerpt": "MongoDB 8 uses the retained dedicated replica set `nyxidPermissionsR3` on\n`127.0.0.1:27471`, data `/tmp/nyxid-permissions-r3-mongo/data`, PID 34439.\nThe first focused run exposed its open-file limit. Only the owned MongoDB\nfixture was gracefully restarted, retaining its data/port, with `ulimit -n\n65536`. All four affected unrelated focused tests passed on the next run.\nPer-test helpers allocate distinct databases; HTTP fixtures use ephemeral",
+      "fixture_restarted": false,
+      "strict_readiness_record": "/tmp/nyxid-permissions-r3-F005-narrow-mongo-4.json"
+    }
+  },
+  "records": [
+    {
+      "command": [
+        "mongosh",
+        "mongodb://127.0.0.1:27471/?replicaSet=nyxidPermissionsR3&serverSelectionTimeoutMS=5000&connectTimeoutMS=5000",
+        "--quiet",
+        "--norc",
+        "--file",
+        "/tmp/nyxid-permissions-r3-F005-narrow-mongo.js"
+      ],
+      "owned_process_group": 69976,
+      "owned_group_survivors": [],
+      "nofile_soft": 65536,
+      "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions",
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 0.5,
+      "start_free_GiB": 15.607,
+      "min_free_GiB": 15.607,
+      "end_free_GiB": 15.607,
+      "log": "/tmp/nyxid-permissions-r3-F005-narrow-mongo-4.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-F005-narrow-mongo-4.argv.jsonl",
+      "label": "mongo-4",
+      "source_binding": {
+        "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+        "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+        "binary_sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875"
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "--config",
+        "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+        "test",
+        "-p",
+        "nyxid",
+        "codex_",
+        "--no-run"
+      ],
+      "owned_process_group": 70008,
+      "owned_group_survivors": [],
+      "nofile_soft": 65536,
+      "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions",
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 633.15,
+      "start_free_GiB": 15.607,
+      "min_free_GiB": 11.702,
+      "end_free_GiB": 14.55,
+      "log": "/tmp/nyxid-permissions-r3-F005-narrow-compile.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-F005-narrow-compile.argv.jsonl",
+      "label": "compile",
+      "source_binding": {
+        "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+        "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+        "binary_sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875"
+      }
+    },
+    {
+      "command": [
+        "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+        "services::assistant_service_execution::tests::permissions::codex_metadata_does_not_admit_stateful_provider_or_unknown_effects",
+        "--exact",
+        "--list"
+      ],
+      "owned_process_group": 73751,
+      "owned_group_survivors": [],
+      "nofile_soft": 65536,
+      "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions/backend",
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 7.65,
+      "start_free_GiB": 14.55,
+      "min_free_GiB": 14.549,
+      "end_free_GiB": 14.549,
+      "log": "/tmp/nyxid-permissions-r3-F005-narrow-classifier-inventory.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-F005-narrow-classifier-inventory.argv.jsonl",
+      "label": "classifier-inventory",
+      "source_binding": {
+        "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+        "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+        "binary_sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875"
+      }
+    },
+    {
+      "command": [
+        "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+        "services::assistant_service_execution::tests::permissions::codex_metadata_does_not_admit_stateful_provider_or_unknown_effects",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "owned_process_group": 73799,
+      "owned_group_survivors": [],
+      "nofile_soft": 65536,
+      "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions/backend",
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 0.1,
+      "start_free_GiB": 14.549,
+      "min_free_GiB": 14.549,
+      "end_free_GiB": 14.549,
+      "log": "/tmp/nyxid-permissions-r3-F005-narrow-classifier.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-F005-narrow-classifier.argv.jsonl",
+      "identity_file": "/tmp/nyxid-permissions-r3-F005-narrow-classifier.identity.json",
+      "identity": {
+        "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+        "head_commit": "dd83cc01fbb8bf1f6a70bab6c330f765ade90d59",
+        "binary_path": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+        "binary_sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875",
+        "source_manifest": "/tmp/nyxid-permissions-r3-F005-narrow-source-manifest.sha256",
+        "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+        "compile_record": "/tmp/nyxid-permissions-r3-F005-narrow-compile.json",
+        "config_sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
+        "test": "services::assistant_service_execution::tests::permissions::codex_metadata_does_not_admit_stateful_provider_or_unknown_effects",
+        "inventory": "/tmp/nyxid-permissions-r3-F005-narrow-classifier-inventory.log",
+        "inventory_entries": [
+          "services::assistant_service_execution::tests::permissions::codex_metadata_does_not_admit_stateful_provider_or_unknown_effects"
+        ],
+        "selected_entries": 1,
+        "test_cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions/backend",
+        "verified_before_UTC": "2026-10-27T12:28:54.826733+00:00",
+        "verified_after_UTC": "2026-10-27T12:28:55.354068+00:00"
+      },
+      "result_lines": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10457 filtered out; finished in 0.01s"
+      ],
+      "label": "classifier",
+      "source_binding": {
+        "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+        "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+        "binary_sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875"
+      }
+    },
+    {
+      "command": [
+        "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+        "services::assistant_service_execution::tests::permissions::codex_callback_projected_read_path_keeps_exact_negative_approvals",
+        "--exact",
+        "--list"
+      ],
+      "owned_process_group": 73805,
+      "owned_group_survivors": [],
+      "nofile_soft": 65536,
+      "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions/backend",
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 0.09,
+      "start_free_GiB": 14.55,
+      "min_free_GiB": 14.549,
+      "end_free_GiB": 14.549,
+      "log": "/tmp/nyxid-permissions-r3-F005-narrow-permission-inventory.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-F005-narrow-permission-inventory.argv.jsonl",
+      "label": "permission-inventory",
+      "source_binding": {
+        "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+        "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+        "binary_sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875"
+      }
+    },
+    {
+      "command": [
+        "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+        "services::assistant_service_execution::tests::permissions::codex_callback_projected_read_path_keeps_exact_negative_approvals",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "owned_process_group": 73809,
+      "owned_group_survivors": [],
+      "nofile_soft": 65536,
+      "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions/backend",
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 4.59,
+      "start_free_GiB": 14.549,
+      "min_free_GiB": 14.549,
+      "end_free_GiB": 15.549,
+      "log": "/tmp/nyxid-permissions-r3-F005-narrow-permission.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-F005-narrow-permission.argv.jsonl",
+      "identity_file": "/tmp/nyxid-permissions-r3-F005-narrow-permission.identity.json",
+      "identity": {
+        "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+        "head_commit": "dd83cc01fbb8bf1f6a70bab6c330f765ade90d59",
+        "binary_path": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+        "binary_sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875",
+        "source_manifest": "/tmp/nyxid-permissions-r3-F005-narrow-source-manifest.sha256",
+        "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+        "compile_record": "/tmp/nyxid-permissions-r3-F005-narrow-compile.json",
+        "config_sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
+        "test": "services::assistant_service_execution::tests::permissions::codex_callback_projected_read_path_keeps_exact_negative_approvals",
+        "inventory": "/tmp/nyxid-permissions-r3-F005-narrow-permission-inventory.log",
+        "inventory_entries": [
+          "services::assistant_service_execution::tests::permissions::codex_callback_projected_read_path_keeps_exact_negative_approvals"
+        ],
+        "selected_entries": 1,
+        "test_cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions/backend",
+        "verified_before_UTC": "2026-10-27T12:28:55.852034+00:00",
+        "verified_after_UTC": "2026-10-27T12:29:00.864546+00:00"
+      },
+      "result_lines": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10457 filtered out; finished in 3.12s"
+      ],
+      "label": "permission",
+      "source_binding": {
+        "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+        "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+        "binary_sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875"
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "--config",
+        "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "owned_process_group": 73977,
+      "owned_group_survivors": [],
+      "nofile_soft": 65536,
+      "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions",
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 13.65,
+      "start_free_GiB": 15.549,
+      "min_free_GiB": 15.549,
+      "end_free_GiB": 15.549,
+      "log": "/tmp/nyxid-permissions-r3-F005-narrow-fmt.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-F005-narrow-fmt.argv.jsonl",
+      "label": "fmt",
+      "source_binding": {
+        "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+        "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+        "binary_sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875"
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--config",
+        "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+        "--manifest-path",
+        "backend/Cargo.toml",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "owned_process_group": 74083,
+      "owned_group_survivors": [],
+      "nofile_soft": 65536,
+      "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions",
+      "exit_code": 0,
+      "resource_stop": false,
+      "elapsed_seconds": 353.86,
+      "start_free_GiB": 15.549,
+      "min_free_GiB": 14.514,
+      "end_free_GiB": 15.525,
+      "log": "/tmp/nyxid-permissions-r3-F005-narrow-clippy.log",
+      "argv_log": "/tmp/nyxid-permissions-r3-F005-narrow-clippy.argv.jsonl",
+      "label": "clippy",
+      "source_binding": {
+        "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+        "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+        "binary_sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875"
+      }
+    }
+  ],
+  "compiler_records": [
+    {
+      "command_label": "compile",
+      "pid": 70128,
+      "name": "rustc",
+      "is_test": true,
+      "codegen_options": [
+        "embed-bitcode=no",
+        "metadata=a43690bd680ea3d5",
+        "extra-filename=-a7bf57b9c4cb166a",
+        "link-arg=-Wl,-rpath,/usr/lib/swift"
+      ],
+      "normal_assertion_overflow_optimization_defaults": true,
+      "argv_file": "/tmp/nyxid-permissions-r3-F005-narrow-compile.argv.jsonl"
+    },
+    {
+      "command_label": "clippy",
+      "pid": 74139,
+      "name": "clippy-driver",
+      "is_test": false,
+      "codegen_options": [
+        "embed-bitcode=no",
+        "metadata=df92461b132cdd37",
+        "extra-filename=-011bc5f614d9bfad",
+        "link-arg=-Wl,-rpath,/usr/lib/swift"
+      ],
+      "normal_assertion_overflow_optimization_defaults": true,
+      "argv_file": "/tmp/nyxid-permissions-r3-F005-narrow-clippy.argv.jsonl"
+    },
+    {
+      "command_label": "clippy",
+      "pid": 74175,
+      "name": "clippy-driver",
+      "is_test": true,
+      "codegen_options": [
+        "embed-bitcode=no",
+        "metadata=259d8cfdafb7823e",
+        "extra-filename=-31812643a791e874",
+        "link-arg=-Wl,-rpath,/usr/lib/swift"
+      ],
+      "normal_assertion_overflow_optimization_defaults": true,
+      "argv_file": "/tmp/nyxid-permissions-r3-F005-narrow-clippy.argv.jsonl"
+    }
+  ],
+  "actual_clippy_backend": {
+    "at_UTC": "2026-10-27T12:29:31Z",
+    "pid": 74085,
+    "pgid": 74083,
+    "name": "cargo",
+    "argv": [
+      "/Users/chronoai/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+      "check",
+      "--config",
+      "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+      "--manifest-path",
+      "backend/Cargo.toml",
+      "--all-targets"
+    ]
+  },
+  "quiescence": {
+    "at_UTC": "2026-10-27T12:35:55.304839+00:00",
+    "owned_groups": [
+      {
+        "label": "mongo-4",
+        "pgid": 69976,
+        "survivors": []
+      },
+      {
+        "label": "compile",
+        "pgid": 70008,
+        "survivors": []
+      },
+      {
+        "label": "classifier-inventory",
+        "pgid": 73751,
+        "survivors": []
+      },
+      {
+        "label": "classifier",
+        "pgid": 73799,
+        "survivors": []
+      },
+      {
+        "label": "permission-inventory",
+        "pgid": 73805,
+        "survivors": []
+      },
+      {
+        "label": "permission",
+        "pgid": 73809,
+        "survivors": []
+      },
+      {
+        "label": "fmt",
+        "pgid": 73977,
+        "survivors": []
+      },
+      {
+        "label": "clippy",
+        "pgid": 74083,
+        "survivors": []
+      }
+    ],
+    "heavy_processes": [],
+    "no_backend_command_queued": true,
+    "free_GiB": 15.524,
+    "mongo_fixture_retained": true
+  },
+  "source_changes": [],
+  "ignored_tests": 0,
+  "historical169": "Historical169 remains bound to its prior source/test set and was not rerun.",
+  "external_gates": "Combined I05/I06, live acceptance and issue verdicts remain OPEN/BLOCKED; no implementation approval claimed.",
+  "probe_harness_history": [
+    "mongo exit1: mongosh lacks assert.commandWorked helper",
+    "mongo-2/mongo-3 exit1: shell commitTransaction returns undefined; commit readback assertion replaced helper-return assertion",
+    "mongo-4 exit0: strict topology and committed/aborted readback verified; existing fixture data preserved"
+  ]
+}

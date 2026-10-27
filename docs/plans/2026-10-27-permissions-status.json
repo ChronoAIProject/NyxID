@@ -32,25 +32,24 @@
       "401 OAuth access token has expired"
     ]
   },
-  "implementation_gate": "SOURCE_REVIEW_COMPLETE_LOCAL_VALIDATION_PENDING",
-  "current_commit": "493b5c2dc012cc4de80c00f33f7cddf489cb316d",
+  "implementation_gate": "SOURCE_REVIEW_COMPLETE_LOCAL_VALIDATION_COMPLETE_FINAL_ACCEPTANCE_BLOCKED",
+  "current_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
   "draft_pr": {
     "url": "https://github.com/ChronoAIProject/NyxID/pull/2058",
     "base": "main",
     "published_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
     "published_by": "coordinator",
     "state": "DRAFT_FINAL_ACCEPTANCE_BLOCKED",
-    "test_follow_up": "Six-line reviewed replacement-key regression committed; execution pending later narrow slot",
+    "test_follow_up": "Six-line replacement-key regression validated by fresh build, both exact affected tests, formatting and required all-target Clippy at source7185; no source change",
     "integration": {
-      "state": "OPEN_MAIN_CONFLICT_RECONCILIATION_PENDING",
+      "state": "OPEN_ISOLATED_MAIN_RECONCILIATION_SOURCE_ONLY_IN_PROGRESS",
       "evidence": "Coordinator reports GitHub conflict with current main; no local reconciliation attempted",
-      "backend": "HOLD_UNTIL_EXPLICIT_COORDINATOR_WINDOW"
+      "backend": "STANDALONE_WINDOW_RELEASED_NO_COMMAND_QUEUED"
     }
   },
   "acceptance_open": [
     "Reconcile draft PR #2058 with current main during later integration work",
-    "Narrow test-only follow-up validation on the exact committed source/binary identity",
-    "Astra implementation approval after narrow local validation and live/combined gates",
+    "Astra implementation approval after reviewed/validated reconciliation and applicable live/combined gates",
     "Live callback shape and deployed NyxAgent/NyxID versions",
     "Live Lark/Web informational and denial acceptance",
     "Real administrator readiness activation/save",
@@ -58,8 +57,8 @@
     "Combined integration acceptance"
   ],
   "implementation_status": {
-    "updated_at": "2026-10-27T07:38:15Z",
-    "state": "SOURCE_REVIEW_COMPLETE; LOCAL_VALIDATION_COMPLETE_PENDING_NARROW_TEST_ONLY_FOLLOW_UP",
+    "updated_at": "2026-10-27T12:41:02.142395+00:00",
+    "state": "SOURCE_REVIEW_COMPLETE; LOCAL_VALIDATION_COMPLETE; FINAL_ACCEPTANCE_BLOCKED",
     "evidence_path": "docs/plans/2026-10-27-permissions-implementation-evidence.md",
     "commit_created": true,
     "checks_passed": [
@@ -72,7 +71,8 @@
       "Focused frontend: 4 files / 63 tests; broader frontend: 56 files / 615 tests; frontend source unchanged",
       "TypeScript npm exec -- tsc -b --pretty false: exit 0; focused ESLint: exit 0",
       "Exact seven-field deterministic fixture: 36/36/36/36/36/697/38 bytes; sorted compact UTF-8 metadata 1121 bytes",
-      "Approved revision-3 plan SHA unchanged; final source manifest matches the exact implementation commit; staged diff whitespace check passed"
+      "Approved revision-3 plan SHA unchanged; final source manifest matches the exact implementation commit; staged diff whitespace check passed",
+      "7185 narrow follow-up: fresh build exit0; two exact tests each1 passed/0 failed/0 ignored; fmt exit0; required all-target Clippy exit0; personally verified inventories, source/binary and argv; no broad rerun"
     ],
     "resource_recovery": {
       "notice_free_GiB": 11.71,
@@ -390,29 +390,6 @@
         "results": []
       }
     ],
-    "resource_hold": {
-      "state": "HOLD_AUTOMATION_OWNS_BACKEND_WINDOW",
-      "reason": "Coordinator last handed the backend window to Automation and explicitly prohibited new Cargo or direct shared-binary tests. Clearance requested; no backend command launched or queued.",
-      "future_cargo_config": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
-      "future_cargo_policy": "Any later backend command requires its coordinator window and the same target/jobs=2/config. Built-in test/build/check use cargo --config <path> <subcommand>; Clippy uses cargo clippy --config <path> --manifest-path backend/Cargo.toml --all-targets -- -D warnings. No command is queued.",
-      "clippy_command_policy": "cargo clippy --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' --manifest-path backend/Cargo.toml --all-targets -- -D warnings; verify the actual backend argv.",
-      "runner_policy_revision": "2026-10-27T04:20:08Z: retained Sol corrected /tmp/nyxid-permissions-r3-run.py to normalize built-in Cargo versus Clippy argument order. Runner not invoked; no backend command/probe queued. Telegram's four baseline nonminimal_bool findings are outside this diff and are not imported.",
-      "runner_prepared_not_invoked": false,
-      "cargo_pid": 42211,
-      "rustc_pid": 42278,
-      "signal": "SIGTERM",
-      "cargo_signal_return": -15,
-      "runner_exit_code": 143,
-      "stopped_at_UTC": "2026-10-27T02:51:06Z",
-      "verified_at_UTC": "2026-10-27T02:51:19Z",
-      "owned_survivors": [],
-      "free_GiB_at_stop": 3.407,
-      "free_GiB_after_exit": 5.406,
-      "evidence": "/tmp/nyxid-permissions-r3-coordinator-hold.json",
-      "no_peer_or_lock_cache_changes": true,
-      "runner_invocation_authorized_at_UTC": "2026-10-27T05:06:00Z",
-      "final_free_GiB": 17.836
-    },
     "F-001": {
       "source": "Astra personal review",
       "valid": true,
@@ -432,8 +409,9 @@
       "reviewed_at_UTC": "2026-10-27T07:38:15Z",
       "commit": "493b5c2dc012cc4de80c00f33f7cddf489cb316d",
       "production_source_matches_commit": true,
-      "working_tree_source_diff": "one test-only six-line replacement-key regression",
-      "reviewer": "GPT-6-Astra PM"
+      "working_tree_source_diff": "none; six-line reviewed regression committed and validated at7185",
+      "reviewer": "GPT-6-Astra PM",
+      "follow_up_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847"
     },
     "sol_status": {
       "agent_id": "01a17b00-1ad2-7cc0-ada4-61d925daac94",
@@ -443,11 +421,11 @@
       "mode": "full-access",
       "worktree_id": "01a17a96-9c05-76b2-89c9-951191466647",
       "provider_session_id": "01a17b00-1c46-7753-a330-f48a830666bd",
-      "state": "idle_test_only_follow_up_pending_explicit_permissions_window",
-      "last_verified_at_UTC": "2026-10-27T05:28:00Z",
-      "latest_prompt": "Remove only redundant request_identity refactor; preserve six-line replacement-key regression; no heavy commands",
+      "state": "running_source_only_isolated_integration",
+      "last_verified_at_UTC": "2026-10-27T12:41:02.142395+00:00",
+      "latest_prompt": "Explicit integration-only exception: resolve main authority merge separately, then missing I05/I06/reconciliation tests; no builds; original feature source frozen",
       "latest_prompt_notify_on_finish": true,
-      "latest_prompt_completed": true
+      "latest_prompt_completed": false
     },
     "F-002": {
       "source": "Astra personal source review",
@@ -472,10 +450,6 @@
       "final_fmt_exit": 0,
       "final_clippy_exit": 0,
       "post_fix_test_binary_rebuilt": true
-    },
-    "final_binary": {
-      "path": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
-      "sha256": "1a7b23cd3b1383e9605841ad62aa6ecb4811aae9c85fb96ba3deba900d3e02bb"
     },
     "implementation_commit": "493b5c2dc012cc4de80c00f33f7cddf489cb316d",
     "final_validation": {
@@ -767,9 +741,9 @@
       ]
     },
     "metadata_key_review": {
-      "updated_at": "2026-10-27T07:38:15Z",
+      "updated_at": "2026-10-27T12:41:02.142395+00:00",
       "reviewed_commit": "493b5c2dc012cc4de80c00f33f7cddf489cb316d",
-      "state": "TEST_ONLY_FOLLOW_UP_VALIDATION_PENDING",
+      "state": "TEST_ONLY_FOLLOW_UP_VALIDATED",
       "assessment": "The committed predicate already enforces the exact closed set through seven-field cardinality, six required valid identifier strings and required scalar turn metadata. F-005 is a negative-regression coverage gap, not a production hardening defect.",
       "changes": "Retain only the six-line test regression that removes x-codex-turn-metadata, inserts unknown and keeps seven fields; production request_identity.rs is byte-for-byte unchanged from 493b5c2.",
       "changed_files": [
@@ -779,30 +753,31 @@
       "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
       "validation": {
         "git_diff_check": "exit 0",
-        "current_source_compile": "pending explicit Permissions window",
-        "affected_classifier_permission_tests": "pending explicit Permissions window",
-        "fmt": "pending explicit Permissions window",
-        "clippy": "pending explicit Permissions window"
+        "current_source_compile": "exit0 at7185",
+        "affected_classifier_permission_tests": "each1 passed/0 failed/0 ignored; nonzero exact inventories",
+        "fmt": "exit0",
+        "clippy": "all-target -D warnings exit0; actual backend config argv verified"
       },
-      "resource_policy": "Automation owns current backend window; no Cargo/direct-binary command started or queued.",
+      "resource_policy": "Standalone window released; no backend command queued; integration source-only handoff active.",
       "historical_validation": "Prior compile, 169 unique local passes, 0 failures, 2 ignored, fmt and Clippy remain valid for the unchanged 493b5c2 production source and its original test set; they do not execute the new six-line test.",
       "notify_on_finish": true,
-      "astra_approval": "SOURCE_REVIEW_COMPLETE; ASTRA_IMPLEMENTATION_APPROVED not yet granted"
+      "astra_approval": "SOURCE_REVIEW_COMPLETE; ASTRA_IMPLEMENTATION_APPROVED not yet granted",
+      "follow_up_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847"
     },
     "F-005": {
       "source": "Astra personal exact-commit review",
       "valid": true,
-      "state": "SOURCE_REVIEW_COMPLETE_LOCAL_VALIDATION_PENDING",
+      "state": "RESOLVED_SOURCE_REVIEW_AND_LOCAL_VALIDATION_COMPLETE",
       "severity": "negative regression coverage gap; no production defect",
       "finding": "The committed predicate already enforces the exact closed set through seven-field cardinality, six required valid identifier strings and the required scalar x-codex-turn-metadata key. The valid gap was the missing seven-field replacement-key regression.",
       "resolution": "Same Sol removed the redundant production refactor and retained only the six-line test regression that removes x-codex-turn-metadata, inserts unknown and retains seven fields; existing negative classifier and exact change-approval assertions remain the behavioral checks.",
-      "evidence": "SOURCE_REVIEW_COMPLETE for 493b5c2; git diff --check exit 0; narrow backend validation remains pending the coordinator window.",
+      "evidence": "Fresh7185 build and two exact nonzero-inventoried classifier/permission tests pass; fmt/required Clippy exit0. See archived F005-narrow-validation.json.",
       "changed_files": [
         "backend/src/services/assistant_service_execution_permissions_tests.rs"
       ],
       "source_manifest": "/tmp/nyxid-permissions-r3-review-source-manifest.sha256",
       "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
-      "astra_approval": "SOURCE_REVIEW_COMPLETE; ASTRA_IMPLEMENTATION_APPROVED remains pending narrow local validation and applicable live/combined ticket gates"
+      "astra_approval": "SOURCE_REVIEW_COMPLETE; LOCAL_VALIDATION_COMPLETE; ASTRA_IMPLEMENTATION_APPROVED withheld for reconciliation and applicable live/combined gates"
     },
     "astra_exact_commit_review": {
       "state": "SOURCE_REVIEW_COMPLETE",
@@ -811,9 +786,88 @@
       "commit": "493b5c2dc012cc4de80c00f33f7cddf489cb316d",
       "scope": "Complete 11-file feature/test/fixture commit and surrounding authorization, classifier, acknowledgement/continuation, error-envelope and operation-scope code",
       "result": "No unresolved production finding; request_identity.rs matches the exact commit byte-for-byte after Sol removed the redundant uncommitted refactor.",
-      "f005": "Negative-regression coverage gap only; retained seven-field replacement-key test is the sole working-tree source diff.",
-      "local_validation": "Pending narrow rebuild/test and affected required fmt/Clippy checks",
+      "f005": "Six-line negative-regression coverage follow-up committed as7185 and validated; production classifier unchanged",
+      "local_validation": "LOCAL_VALIDATION_COMPLETE at7185 using historical unchanged source checks plus required narrow fresh batch",
       "ticket_verdicts": "#2004 BLOCKED; #2007 BLOCKED for live/deployed/combined criteria"
+    },
+    "validated_source_tip": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+    "historical_resource_hold": {
+      "state": "HOLD_AUTOMATION_OWNS_BACKEND_WINDOW",
+      "reason": "Coordinator last handed the backend window to Automation and explicitly prohibited new Cargo or direct shared-binary tests. Clearance requested; no backend command launched or queued.",
+      "future_cargo_config": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+      "future_cargo_policy": "Any later backend command requires its coordinator window and the same target/jobs=2/config. Built-in test/build/check use cargo --config <path> <subcommand>; Clippy uses cargo clippy --config <path> --manifest-path backend/Cargo.toml --all-targets -- -D warnings. No command is queued.",
+      "clippy_command_policy": "cargo clippy --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' --manifest-path backend/Cargo.toml --all-targets -- -D warnings; verify the actual backend argv.",
+      "runner_policy_revision": "2026-10-27T04:20:08Z: retained Sol corrected /tmp/nyxid-permissions-r3-run.py to normalize built-in Cargo versus Clippy argument order. Runner not invoked; no backend command/probe queued. Telegram's four baseline nonminimal_bool findings are outside this diff and are not imported.",
+      "runner_prepared_not_invoked": false,
+      "cargo_pid": 42211,
+      "rustc_pid": 42278,
+      "signal": "SIGTERM",
+      "cargo_signal_return": -15,
+      "runner_exit_code": 143,
+      "stopped_at_UTC": "2026-10-27T02:51:06Z",
+      "verified_at_UTC": "2026-10-27T02:51:19Z",
+      "owned_survivors": [],
+      "free_GiB_at_stop": 3.407,
+      "free_GiB_after_exit": 5.406,
+      "evidence": "/tmp/nyxid-permissions-r3-coordinator-hold.json",
+      "no_peer_or_lock_cache_changes": true,
+      "runner_invocation_authorized_at_UTC": "2026-10-27T05:06:00Z",
+      "final_free_GiB": 17.836
+    },
+    "resource_hold": {
+      "state": "STANDALONE_WINDOW_RELEASED_INTEGRATION_BACKEND_HOLD",
+      "released_at_UTC": "2026-10-27T12:36:14Z",
+      "free_GiB": 15.524,
+      "owned_survivors": [],
+      "command_queued": false,
+      "evidence": "docs/plans/evidence/permissions-2026-10-27/F005-narrow-quiescence.json",
+      "policy": "No additional Cargo/direct-binary/Clippy/frontend build until coordinator final integration source window. Source-only isolated reconciliation explicitly authorized."
+    },
+    "historical_final_binary": {
+      "path": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+      "sha256": "1a7b23cd3b1383e9605841ad62aa6ecb4811aae9c85fb96ba3deba900d3e02bb"
+    },
+    "final_binary": {
+      "path": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+      "sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875",
+      "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+      "note": "Shared path may later be rebuilt; this captured identity binds only the pinned Permissions batch."
+    },
+    "narrow_validation": {
+      "state": "LOCAL_VALIDATION_COMPLETE",
+      "reviewed_at_UTC": "2026-10-27T12:41:02.142395+00:00",
+      "reviewer_agent_id": "01a17a9b-5082-7b83-8171-2e791e9fd01e",
+      "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+      "binary_sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875",
+      "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+      "test_results": {
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "inventory_each": 1
+      },
+      "compile_exit": 0,
+      "fmt_exit": 0,
+      "clippy_exit": 0,
+      "record": "docs/plans/evidence/permissions-2026-10-27/F005-narrow-validation.json",
+      "archive_index": "docs/plans/evidence/permissions-2026-10-27/index.json",
+      "historical_count_note": "169 unique historical passes at493b5c2 carried forward; the two new executions overlap those names and are not added as new unique tests."
+    },
+    "integration_source_handoff": {
+      "state": "SOURCE_ONLY_IN_PROGRESS",
+      "path": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-workstream-integration",
+      "branch": "integration/nyxid-four-workstreams-20261027",
+      "head_before_merge": "5e8812b6f6b6c8137b23f116a910cc39c303a1cf",
+      "merge_head": "dd83cc01fbb8bf1f6a70bab6c330f765ade90d59",
+      "main_commit": "49f5a61214f6a29485471adea8185763e5ef424d",
+      "sol_agent_id": "01a17b00-1ad2-7cc0-ada4-61d925daac94",
+      "sol_session_id": "01a17b00-1c46-7753-a330-f48a830666bd",
+      "notify_on_finish": true,
+      "scope": "Only authority conflict then missing I05/I06/reconciliation tests; separate commits; no production visibility weakening; PM complete personal review pending",
+      "backend_clearance": false,
+      "assessment": "docs/plans/2026-10-27-permissions-main-reconciliation.md",
+      "resolved_merge_commit": "26154051327a9b5692a63ad234eab7601853fb31",
+      "merge_source_assessment": "Astra verified http.rs blob exactly matches examined main, all other imported feature bytes match pinned7185, and the shared test-module import is additive. Interaction test commit/review and combined execution remain pending."
     }
   },
   "sol_session_id_history": [

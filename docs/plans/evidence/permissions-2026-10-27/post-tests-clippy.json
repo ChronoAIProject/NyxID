@@ -1,0 +1,22 @@
+{
+  "command": [
+    "cargo",
+    "clippy",
+    "--config",
+    "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+    "--manifest-path",
+    "backend/Cargo.toml",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "exit_code": 0,
+  "resource_stop": false,
+  "elapsed_seconds": 365.97,
+  "start_free_GiB": 18.829,
+  "min_free_GiB": 16.825,
+  "end_free_GiB": 17.839,
+  "log": "/tmp/nyxid-permissions-r3-post-tests-clippy.log",
+  "argv_log": "/tmp/nyxid-permissions-r3-post-tests-clippy.argv.jsonl"
+}

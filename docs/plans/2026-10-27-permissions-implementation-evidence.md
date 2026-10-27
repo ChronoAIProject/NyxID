@@ -435,3 +435,70 @@ the guest admission branch without an owner card. Owner callbacks continue to
 classify method overrides as destructive exact approvals. Sol found no concrete
 metadata contract defect and changed no files. This was source-only; no Cargo
 command, build, test, check or Clippy run occurred during the Telegram hold.
+
+## Astra narrow local validation complete — 2026-10-27T12:41:02.142395+00:00
+
+**SOURCE_REVIEW_COMPLETE; LOCAL_VALIDATION_COMPLETE** for source
+`7185b5ef7eb56194b2e1cbf42f045536a9cb7847`. The complete prior source review is carried forward;
+Astra personally inspected the fresh build, both exact nonzero test inventories,
+actual test logs, formatting, required Clippy, compiler arguments, source/binary
+identity and final process-quiescence records. This closes the F-005 test-coverage
+gap. No production or test source changed during this batch.
+
+Reviewer: GPT-6-Astra PM, Heca `01a17a9b-5082-7b83-8171-2e791e9fd01e`.
+The retained Sol was verified as codex / gpt-6.1-sol / x_high / full-access,
+agent `01a17b00-1ad2-7cc0-ada4-61d925daac94`, provider session
+`01a17b00-1c46-7753-a330-f48a830666bd`. Execution HEAD was documentation-only
+`dd83cc01fbb8bf1f6a70bab6c330f765ade90d59` above the source commit.
+
+| Required check | Actual result | Archived evidence |
+| --- | --- | --- |
+| Fresh configured `cargo test -p nyxid codex_ --no-run` | Exit 0; 633.15 seconds | [Build log](evidence/permissions-2026-10-27/F005-narrow-compile.log.txt), [runner](evidence/permissions-2026-10-27/F005-narrow-compile.json) |
+| Exact `codex_metadata_does_not_admit_stateful_provider_or_unknown_effects` | 1 passed, 0 failed, 0 ignored; inventory exactly 1 | [Test log](evidence/permissions-2026-10-27/F005-narrow-classifier.log.txt), [identity/command](evidence/permissions-2026-10-27/F005-narrow-classifier.json) |
+| Exact `codex_callback_projected_read_path_keeps_exact_negative_approvals` | 1 passed, 0 failed, 0 ignored; inventory exactly 1 | [Test log](evidence/permissions-2026-10-27/F005-narrow-permission.log.txt), [identity/command](evidence/permissions-2026-10-27/F005-narrow-permission.json) |
+| Configured `cargo fmt --all --check` | Exit 0; 13.65 seconds | [Runner](evidence/permissions-2026-10-27/F005-narrow-fmt.json) |
+| `cargo clippy --config <shared-config> --manifest-path backend/Cargo.toml --all-targets -- -D warnings` | Exit 0; 353.86 seconds | [Clippy log](evidence/permissions-2026-10-27/F005-narrow-clippy.log.txt), [runner](evidence/permissions-2026-10-27/F005-narrow-clippy.json), [actual argv](evidence/permissions-2026-10-27/F005-narrow-clippy.argv.jsonl) |
+
+Both exact test names have prefix
+`services::assistant_service_execution::tests::permissions::` and ran from
+`/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions/backend`
+with `--exact --test-threads=1`. The other commands ran from the owning worktree
+root. The [complete validation record](evidence/permissions-2026-10-27/F005-narrow-validation.json)
+contains the full command vectors, absolute config/runner paths, working
+directories, exact inventories and before/after source/binary checks.
+
+Fresh binary SHA-256: `1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875`.
+The 11-file source manifest SHA-256 remains
+`d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c`.
+Astra independently matched every entry to `7185b5ef7eb56194b2e1cbf42f045536a9cb7847` and to
+the clean working tree, and separately verified the binary bytes. The historical
+169 unique passes / 0 failures / 2 ignored remain bound to `493b5c2` and its
+original tests. These two current executions overlap that inventory and are not
+added to a new unique-test total. Frontend evidence is carried forward unchanged.
+
+The isolated Mongo8 fixture on port 27471 passed strict writable-primary and
+transaction commit/readback plus abort/readback checks. Retained Mongo PID 34439
+matches its historical `nofile=65536` launch record; this is explicitly launch
+evidence, not a live limit query. All new runner commands used nofile 65536.
+The first three Mongo probe-script attempts failed due to shell helper/return
+semantics; their logs are preserved with the corrected strict readback probe.
+No application assertion or readiness condition was weakened.
+
+The shared target/jobs=2/config were preserved. Actual package compiler argv
+has no debuginfo/incremental or optimization/assertion/overflow override; actual
+Clippy backend Cargo retains the config and all targets. Minimum free disk was
+11.702 GiB; no guard fired. Astra independently confirmed zero heavy/backend-test
+processes at release and 15.524 GiB free. The backend window was released before
+this documentation work; no additional standalone command is queued.
+
+**Both #2004 and #2007 remain BLOCKED. ASTRA_IMPLEMENTATION_APPROVED is not
+granted.** Current-main reconciliation, combined I-05/I-06 and each ticket's
+applicable live/deployed acceptance remain open. The coordinator accepted the
+[bounded reconciliation direction](2026-10-27-permissions-main-reconciliation.md)
+and has assigned source-only work in its isolated integration checkout to the
+same Sol; original feature source stays frozen. Those forthcoming changes need
+personal review and their own final-source validation.
+
+Byte-preserving copies of the current records and carried-forward evidence are
+in the [archive index](evidence/permissions-2026-10-27/index.json), with [file hashes](evidence/permissions-2026-10-27/SHA256SUMS).
+Original `/tmp` paths inside copied records identify execution locations.

@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+    "services::assistant_service_execution::tests::permissions::codex_callback_projected_read_path_keeps_exact_negative_approvals",
+    "--exact",
+    "--list"
+  ],
+  "owned_process_group": 73805,
+  "owned_group_survivors": [],
+  "nofile_soft": 65536,
+  "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions/backend",
+  "exit_code": 0,
+  "resource_stop": false,
+  "elapsed_seconds": 0.09,
+  "start_free_GiB": 14.55,
+  "min_free_GiB": 14.549,
+  "end_free_GiB": 14.549,
+  "log": "/tmp/nyxid-permissions-r3-F005-narrow-permission-inventory.log",
+  "argv_log": "/tmp/nyxid-permissions-r3-F005-narrow-permission-inventory.argv.jsonl"
+}

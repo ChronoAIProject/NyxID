@@ -1,0 +1,22 @@
+{
+  "command": [
+    "cargo",
+    "--config",
+    "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+    "fmt",
+    "--all",
+    "--check"
+  ],
+  "owned_process_group": 73977,
+  "owned_group_survivors": [],
+  "nofile_soft": 65536,
+  "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions",
+  "exit_code": 0,
+  "resource_stop": false,
+  "elapsed_seconds": 13.65,
+  "start_free_GiB": 15.549,
+  "min_free_GiB": 15.549,
+  "end_free_GiB": 15.549,
+  "log": "/tmp/nyxid-permissions-r3-F005-narrow-fmt.log",
+  "argv_log": "/tmp/nyxid-permissions-r3-F005-narrow-fmt.argv.jsonl"
+}

@@ -1,0 +1,43 @@
+{
+  "command": [
+    "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+    "services::assistant_service_execution::tests::permissions::codex_metadata_does_not_admit_stateful_provider_or_unknown_effects",
+    "--exact",
+    "--test-threads=1"
+  ],
+  "owned_process_group": 73799,
+  "owned_group_survivors": [],
+  "nofile_soft": 65536,
+  "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions/backend",
+  "exit_code": 0,
+  "resource_stop": false,
+  "elapsed_seconds": 0.1,
+  "start_free_GiB": 14.549,
+  "min_free_GiB": 14.549,
+  "end_free_GiB": 14.549,
+  "log": "/tmp/nyxid-permissions-r3-F005-narrow-classifier.log",
+  "argv_log": "/tmp/nyxid-permissions-r3-F005-narrow-classifier.argv.jsonl",
+  "identity_file": "/tmp/nyxid-permissions-r3-F005-narrow-classifier.identity.json",
+  "identity": {
+    "source_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+    "head_commit": "dd83cc01fbb8bf1f6a70bab6c330f765ade90d59",
+    "binary_path": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+    "binary_sha256": "1fbad9ed97638d877114c88593fb9db5e615eb27cbda66c9cd0eb613cf37d875",
+    "source_manifest": "/tmp/nyxid-permissions-r3-F005-narrow-source-manifest.sha256",
+    "source_manifest_sha256": "d17bfd6a8c9fa611aec069828005328851c68c14842c731112c39bf8b4478c6c",
+    "compile_record": "/tmp/nyxid-permissions-r3-F005-narrow-compile.json",
+    "config_sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
+    "test": "services::assistant_service_execution::tests::permissions::codex_metadata_does_not_admit_stateful_provider_or_unknown_effects",
+    "inventory": "/tmp/nyxid-permissions-r3-F005-narrow-classifier-inventory.log",
+    "inventory_entries": [
+      "services::assistant_service_execution::tests::permissions::codex_metadata_does_not_admit_stateful_provider_or_unknown_effects"
+    ],
+    "selected_entries": 1,
+    "test_cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions/backend",
+    "verified_before_UTC": "2026-10-27T12:28:54.826733+00:00",
+    "verified_after_UTC": "2026-10-27T12:28:55.354068+00:00"
+  },
+  "result_lines": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10457 filtered out; finished in 0.01s"
+  ]
+}

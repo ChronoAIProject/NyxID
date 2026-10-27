@@ -1,0 +1,22 @@
+{
+  "command": [
+    "mongosh",
+    "mongodb://127.0.0.1:27471/?replicaSet=nyxidPermissionsR3&serverSelectionTimeoutMS=5000&connectTimeoutMS=5000",
+    "--quiet",
+    "--norc",
+    "--file",
+    "/tmp/nyxid-permissions-r3-F005-narrow-mongo.js"
+  ],
+  "owned_process_group": 69658,
+  "owned_group_survivors": [],
+  "nofile_soft": 65536,
+  "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-permissions",
+  "exit_code": 1,
+  "resource_stop": false,
+  "elapsed_seconds": 0.49,
+  "start_free_GiB": 15.602,
+  "min_free_GiB": 15.602,
+  "end_free_GiB": 15.602,
+  "log": "/tmp/nyxid-permissions-r3-F005-narrow-mongo-2.log",
+  "argv_log": "/tmp/nyxid-permissions-r3-F005-narrow-mongo-2.argv.jsonl"
+}
