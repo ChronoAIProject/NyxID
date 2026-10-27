@@ -81,6 +81,9 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                 .keys(doc! {"conversation_id":1,"state":1,"message_seq":1})
                 .build(),
             IndexModel::builder()
+                .keys(doc! {"conversation_id":1,"turn_id":1})
+                .build(),
+            IndexModel::builder()
                 .keys(doc! {"state":1,"created_at":1})
                 .build(),
             IndexModel::builder()
@@ -124,6 +127,8 @@ pub async fn enqueue(
         return Err(AppError::ValidationError("Invalid voice request".into()));
     }
     let request = VoiceRequest {
+        started_at: None,
+        terminal_error_code: None,
         async_operation_pending: false,
         id: Uuid::new_v4().to_string(),
         user_id: user.into(),
@@ -322,7 +327,6 @@ pub(crate) async fn publish_result(
     }
     let db = db.clone();
     let request_id = request.id.clone();
-    let existing_result = request.result_message_id.clone();
     let source = source.clone();
     let mut session = db.client().start_session().await?;
     let result = session
@@ -331,21 +335,57 @@ pub(crate) async fn publish_result(
             let db = db.clone();
             let request_id = request_id.clone();
             let source = source.clone();
-            let existing_result = existing_result.clone();
             let result: AppResult<Option<String>> = Box::pin(async {
                 let requests = db.collection::<VoiceRequest>(REQUESTS);
                 let current = requests
-                    .find_one(doc! {"_id":&request_id,"result_message_id":bson::Bson::Null,
-                        "state":{"$in":["completed","cancelled"]}})
+                    .find_one(doc! {"_id":&request_id, "state":{"$in":["completed","cancelled"]}})
                     .session(&mut *session)
                     .await?;
                 let Some(current) = current else {
-                    return Ok(existing_result.clone());
+                    return Ok(None);
                 };
-                if source.turn_id != current.turn_id {
-                    return Ok(existing_result.clone());
+                if current.result_message_id.is_some() { return Ok(current.result_message_id); }
+                if source.turn_id != current.turn_id || source.user_id != current.user_id {
+                    return Ok(None);
                 }
+                // Synthetic failures have seq=0. Resolve again within this
+                // transaction: Stop and worker settlement may have raced the sweep.
+                let source = if source.seq == 0 {
+                    let target = current.task_conversation_id.as_deref().unwrap_or(&current.conversation_id);
+                    if let Some(saved) = db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
+                        "conversation_id":target,"user_id":&current.user_id,"turn_id":&current.turn_id,
+                        "role":"assistant","execution_pending":{"$ne":true},
+                    }).sort(doc! {"seq":-1}).session(&mut *session).await? {
+                        saved
+                    } else {
+                        if db.collection::<bson::Document>(CONVERSATIONS).find_one(doc! {
+                            "_id":target,"user_id":&current.user_id,"active_turn.turn_id":&current.turn_id,
+                        }).projection(doc! {"_id":1}).session(&mut *session).await?.is_some() {
+                            return Ok(None);
+                        }
+                        source
+                    }
+                } else { source };
                 let source = settled_result(&current, source);
+                // Older replicas executed in the visible thread. Adopt their
+                // existing settled reply rather than copying it into that thread twice.
+                if source.conversation_id == current.conversation_id
+                    && db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
+                        "_id": &source.id, "conversation_id": &current.conversation_id,
+                        "user_id": &current.user_id, "turn_id": &current.turn_id,
+                        "role": "assistant", "execution_pending": {"$ne": true},
+                    }).session(&mut *session).await?.is_some()
+                {
+                    if current.async_operation_pending && current.state == RequestState::Cancelled {
+                        db.collection::<AssistantMessage>(MESSAGES).update_one(doc! {"_id": &source.id},
+                            doc! {"$set": {"text": &source.text, "status": &source.status,
+                                "error_code": source.error_code.clone()}}).session(&mut *session).await?;
+                    }
+                    requests.update_one(doc! {"_id": &current.id},
+                        doc! {"$set": {"result_message_id": &source.id}})
+                        .session(&mut *session).await?;
+                    return Ok(Some(source.id));
+                }
                 let thread = db
                     .collection::<AssistantConversation>(CONVERSATIONS)
                     .find_one_and_update(
@@ -398,6 +438,10 @@ pub(crate) async fn publish_result(
                     })
                     .session(&mut *session)
                     .await?;
+                db.collection::<AssistantMessage>(MESSAGES).update_one(
+                    doc! {"_id": &current.message_id, "user_id": &source.user_id},
+                    doc! {"$set": {"execution_pending": false}},
+                ).session(&mut *session).await?;
                 requests
                     .update_one(
                         doc! {"_id":&request_id,"result_message_id":bson::Bson::Null},
@@ -571,6 +615,86 @@ pub async fn queued(db: &Database) -> AppResult<Vec<VoiceRequest>> {
         .map_err(Into::into)
 }
 
+/// A terminal admission refusal/expiry has no task reply. Produce a fixed safe
+/// failure for the same transactional publisher instead of silently dropping it.
+pub(crate) async fn result_message(
+    db: &Database,
+    request: &VoiceRequest,
+) -> AppResult<Option<AssistantMessage>> {
+    let message = db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
+        "conversation_id": request.task_conversation_id.as_deref().unwrap_or(&request.conversation_id),
+        "user_id": &request.user_id, "turn_id": &request.turn_id,
+        "role": "assistant", "execution_pending": {"$ne": true},
+    }).sort(doc! {"seq": -1}).await?;
+    if message.is_some() {
+        return Ok(message);
+    }
+    if request.state != RequestState::Cancelled {
+        return Ok(None);
+    }
+    // Stop can mark the request cancelled before its worker saves the final
+    // reply. Do not replace that in-flight reply with a synthetic failure.
+    if db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .find_one(doc! {
+            "_id": request.task_conversation_id.as_deref().unwrap_or(&request.conversation_id),
+            "user_id": &request.user_id, "active_turn.turn_id": &request.turn_id,
+        })
+        .projection(doc! {"_id":1})
+        .await?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    Ok(Some(AssistantMessage {
+        media_event_ids: Vec::new(),
+        media_queue_notice_id: None,
+        media_pending: None,
+        media_bound: None,
+        platform_delivery_recovery_queued: false,
+        platform_reply: None,
+        platform_origin: None,
+        report_to: None,
+        continuation_of: None,
+        retry_of: None,
+        retry_claimed_by: None,
+        activity_count: None,
+        specialist_id: None,
+        steering: None,
+        author: None,
+        id: Uuid::new_v4().to_string(),
+        conversation_id: request
+            .task_conversation_id
+            .clone()
+            .unwrap_or_else(|| request.conversation_id.clone()),
+        user_id: request.user_id.clone(),
+        seq: 0,
+        turn_id: request.turn_id.clone(),
+        role: "assistant".into(),
+        text:
+            "The voice request ended without a recorded result. Check its status before retrying."
+                .into(),
+        status: "failed".into(),
+        error_code: Some(
+            request
+                .terminal_error_code
+                .clone()
+                .unwrap_or_else(|| "cancelled".into()),
+        ),
+        upstream_error_code: None,
+        turn_metadata: None,
+        error_detail: None,
+        created_at: Utc::now(),
+        activities: Vec::new(),
+        activity_total: 0,
+        attachments: Vec::new(),
+        origin: Some(TurnOrigin::Orchestrator),
+        via: Some("voice".into()),
+        voice: None,
+        execution_pending: false,
+    }))
+}
+
 /// Publish settled hidden-task results even when the call ended before the
 /// result arrived. The active runtime performs the same idempotent operation;
 /// this bounded sweep is the restart/call-close safety net.
@@ -579,7 +703,6 @@ pub(crate) async fn publish_completed_results(db: &Database) -> AppResult<()> {
     let requests: Vec<VoiceRequest> = db
         .collection::<VoiceRequest>(REQUESTS)
         .find(doc! {
-            "task_conversation_id": {"$exists": true, "$ne": bson::Bson::Null},
             "state": {"$in": ["completed", "cancelled"]},
             "result_message_id": bson::Bson::Null,
             "created_at": {"$gte": bson::DateTime::from_chrono(recent_cutoff)},
@@ -590,19 +713,7 @@ pub(crate) async fn publish_completed_results(db: &Database) -> AppResult<()> {
         .try_collect()
         .await?;
     for request in requests {
-        let Some(task_id) = request.task_conversation_id.as_deref() else {
-            continue;
-        };
-        let message = db
-            .collection::<AssistantMessage>(MESSAGES)
-            .find_one(doc! {
-                "conversation_id": task_id,
-                "user_id": &request.user_id,
-                "turn_id": &request.turn_id,
-                "role": "assistant",
-                "execution_pending": {"$ne": true},
-            })
-            .await?;
+        let message = result_message(db, &request).await?;
         if let Some(message) = message
             && publish_result(db, &request, &message).await.is_err()
         {
@@ -1001,6 +1112,8 @@ pub(crate) async fn continuation(
     let request = enqueue_in_session(
         db,
         VoiceRequest {
+            started_at: None,
+            terminal_error_code: None,
             async_operation_pending: false,
             id: Uuid::new_v4().to_string(),
             user_id: card.user_id.clone(),

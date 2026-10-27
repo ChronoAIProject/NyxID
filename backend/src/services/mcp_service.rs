@@ -236,6 +236,9 @@ pub struct McpDurableEndpointMetadata {
     /// method says otherwise (NyxID's `x-nyxid-changes-existing`: a POST that
     /// edits, a PUT that only acts); `None` leaves it to the method.
     pub changes_existing: Option<bool>,
+    /// Compiled NyxID overlay only; remote specs cannot assert this.
+    pub append_only: bool,
+    pub append_only_query: Option<&'static serde_json::Map<String, serde_json::Value>>,
     /// The operation comes from a catalog contract (a stored
     /// `ServiceEndpoint` row, or NyxID's hosted overlay, including one an
     /// instance mounts by URL), not a remote spec read at call time. Only
@@ -277,9 +280,34 @@ pub fn operation_effects(
     let destructive = *method == reqwest::Method::DELETE || metadata.destructive;
     OperationEffects {
         reads: reads && !changes && !destructive,
-        uses: !changes && !destructive,
+        // Keep Aevatar's destructive classification for approvals/webhooks.
+        // Only this NyxID contract permits additive guest use despite it.
+        uses: !changes
+            && (!destructive
+                || (metadata.catalog_contract
+                    && metadata.append_only
+                    && *method == reqwest::Method::POST)),
         destructive,
     }
+}
+
+/// Conditions for a compiled append-only attestation. Query parsing refuses
+/// duplicate/ambiguous encodings; no operation or parameter names are policy.
+pub(crate) fn append_query_allowed(
+    required: Option<&serde_json::Map<String, serde_json::Value>>,
+    query: Option<&str>,
+) -> bool {
+    let Some(required) = required else {
+        return true;
+    };
+    let Ok(query) = nyxid_permissions::parse_query(query.unwrap_or_default()) else {
+        return false;
+    };
+    required.iter().all(|(name, value)| {
+        value
+            .as_str()
+            .is_some_and(|value| query.get(name).is_some_and(|actual| actual == value))
+    })
 }
 
 /// Resolve the operation revision published by the owning producer. Missing or
@@ -1767,6 +1795,8 @@ fn service_endpoint_durable_metadata(
                     catalog_contract: true,
                     destructive: marks.destructive,
                     changes_existing: marks.changes_existing,
+                    append_only: marks.append_only,
+                    append_only_query: marks.append_only_query,
                     supports_idempotency_key: endpoint.supports_idempotency_key,
                     operation_generation: endpoint.operation_generation,
                 },
@@ -1788,6 +1818,8 @@ fn mark_catalog_operations(published: &mut ParsedMcpEndpoints, catalog_slug: &st
             &endpoint.name,
         );
         if let Some(metadata) = published.durable_metadata.get_mut(&endpoint.endpoint_id) {
+            metadata.append_only = metadata.catalog_contract && marks.append_only;
+            metadata.append_only_query = marks.append_only_query;
             metadata.destructive |= marks.destructive;
             // Whichever says the operation edits wins.
             metadata.changes_existing = match (metadata.changes_existing, marks.changes_existing) {
@@ -1811,6 +1843,8 @@ fn generic_proxy_endpoints(service_label: &str) -> ParsedMcpEndpoints {
             risk: None,
             destructive: false,
             changes_existing: None,
+            append_only: false,
+            append_only_query: None,
             catalog_contract: false,
             supports_idempotency_key: false,
             // The generic proxy is a NyxID-owned protocol operation. Its
@@ -1905,6 +1939,8 @@ fn parsed_endpoints_to_mcp(parsed: Vec<openapi_parser::ParsedEndpoint>) -> Parse
                 risk: parsed_endpoint.risk,
                 destructive: parsed_endpoint.destructive,
                 changes_existing: parsed_endpoint.changes_existing,
+                append_only: false,
+                append_only_query: None,
                 catalog_contract: false,
                 supports_idempotency_key: parsed_endpoint.supports_idempotency_key,
                 // Remote instance specs have no durable producer revision.
@@ -2760,6 +2796,7 @@ pub fn generate_tool_definitions(
 /// as potentially destructive. Unknown names return `None`.
 pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
     let (read_only, destructive, open_world) = match name {
+        "nyxid__task_status" => (true, false, false),
         "nyx__search_tools"
         | "nyx__discover_services"
         | "nyx__list_connected_services"
@@ -2804,6 +2841,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
 /// Unknown names return `None`.
 pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
     let fixed = match name {
+        "nyxid__task_status" => "Read task execution status",
         "nyx__resource_get" => "Retrieve a source image",
         "nyx__search_tools" => "Search service tools",
         "nyx__call_tool" => "Call a service tool",
@@ -3846,6 +3884,19 @@ impl PreparedProxyCall {
         )
     }
 
+    pub(crate) fn guest_effects(
+        &self,
+        mut metadata: McpDurableEndpointMetadata,
+    ) -> OperationEffects {
+        metadata.append_only &=
+            append_query_allowed(metadata.append_only_query, self.query.as_deref());
+        operation_effects(&self.method, metadata)
+    }
+
+    pub(crate) fn query(&self) -> Option<&str> {
+        self.query.as_deref()
+    }
+
     pub(crate) fn canonical_path(&self) -> AppResult<super::proxy_authorization::CanonicalPath> {
         if self.is_generic_proxy_endpoint {
             super::proxy_authorization::CanonicalPath::from_mcp_literal(&self.path)
@@ -4591,15 +4642,17 @@ pub async fn execute_tool(
     .map(|response| (response.status, response.text))
 }
 
-/// A scoped call authorized one exact operation; never follow a redirect away from it.
+/// Guest and scoped calls authorize one operation; never follow a redirect
+/// away from it. Guest selections are live on the agent, not mirrored on keys.
 fn scoped_execution(exec_ctx: &McpExecContext<'_>, service: &McpToolService) -> bool {
-    exec_ctx.operation_scopes.is_some_and(|scopes| {
-        super::agent_operation_scope_service::is_scoped(
-            scopes,
-            &service.service_id,
-            super::agent_operation_scope_service::mcp_catalog_id(service),
-        )
-    })
+    exec_ctx.assistant_chat.is_some_and(|chat| chat.guest)
+        || exec_ctx.operation_scopes.is_some_and(|scopes| {
+            super::agent_operation_scope_service::is_scoped(
+                scopes,
+                &service.service_id,
+                super::agent_operation_scope_service::mcp_catalog_id(service),
+            )
+        })
 }
 
 // Resolve before polling dispatch so credential/node resolution's debug poll frame
@@ -5432,6 +5485,9 @@ async fn execute_tool_resolved_inner(
             )?;
         }
     }
+    if exec_ctx.assistant_chat.is_some_and(|chat| chat.guest) {
+        super::agent_operation_scope_service::validate_target(&target, prepared.method().as_str())?;
+    }
     let http_client = if scoped_execution(exec_ctx, service)
         && super::resource_adapter::source(
             service,
@@ -5721,12 +5777,12 @@ async fn execute_tool_resolved_inner(
         // Build before the direct/node split, exactly as the REST proxy does.
         if target.service.inject_delegation_token {
             // See the REST proxy: delegated tokens cannot carry operation limits.
-            if exec_ctx
+            if exec_ctx.assistant_chat.is_some_and(|chat| chat.guest) || exec_ctx
                 .operation_scopes
                 .is_some_and(|scopes| !scopes.is_empty())
             {
                 return Err(AppError::ApiKeyScopeForbidden(
-                    "Services that receive a delegation token are unavailable to operation-scoped keys"
+                    "Services that receive a delegation token are unavailable to guests or operation-scoped keys"
                         .into(),
                 ));
             }
@@ -8231,6 +8287,8 @@ mod tests {
                         risk: None,
                         destructive: false,
                         changes_existing: None,
+                        append_only: false,
+                        append_only_query: None,
                         catalog_contract: true,
                         supports_idempotency_key: false,
                         operation_generation: 1,
@@ -14632,5 +14690,114 @@ mod tests {
             assert!(services.is_empty());
             assert!(mcp_service::generate_public_tool_definitions(&services).is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod guest_append_classification_tests {
+    use super::*;
+
+    #[test]
+    fn compiled_append_exception_is_conditional_and_does_not_change_aevatar() {
+        let spec =
+            super::super::catalog_spec_registry::spec_for_slug("api-google-workspace").unwrap();
+        let path = "/v4/spreadsheets/{spreadsheetId}/values/{range}:append";
+        assert_eq!(
+            spec["paths"][path]["post"]["x-aevatar-tool"]["destructive"],
+            true
+        );
+        let marks = super::super::catalog_spec_registry::operation_marks(
+            "api-google-workspace",
+            "POST",
+            path,
+            "renamed",
+        );
+        let metadata = McpDurableEndpointMetadata {
+            catalog_contract: true,
+            destructive: marks.destructive,
+            append_only: marks.append_only,
+            append_only_query: marks.append_only_query,
+            ..Default::default()
+        };
+        assert!(operation_effects(&reqwest::Method::POST, metadata).uses);
+        assert!(operation_effects(&reqwest::Method::POST, metadata).destructive);
+        for (query, allowed) in [
+            (None, false),
+            (Some("insertDataOption=INSERT_ROWS"), true),
+            (Some("insertDataOption=OVERWRITE"), false),
+            (
+                Some("insertDataOption=INSERT_ROWS&insertDataOption=OVERWRITE"),
+                false,
+            ),
+            (Some("insertDataOption=INSERT_ROWS%26x"), false),
+        ] {
+            assert_eq!(
+                append_query_allowed(metadata.append_only_query, query),
+                allowed
+            );
+        }
+        assert!(!operation_effects(&reqwest::Method::DELETE, metadata).uses);
+        assert!(
+            !operation_effects(
+                &reqwest::Method::POST,
+                McpDurableEndpointMetadata {
+                    changes_existing: Some(true),
+                    ..metadata
+                }
+            )
+            .uses
+        );
+        for (method, path) in [
+            ("POST", "/v4/spreadsheets/{spreadsheetId}:batchUpdate"),
+            ("PUT", "/v4/spreadsheets/{spreadsheetId}/values/{range}"),
+            (
+                "POST",
+                "/v4/spreadsheets/{spreadsheetId}/values/{range}:clear",
+            ),
+        ] {
+            let marks = super::super::catalog_spec_registry::operation_marks(
+                "api-google-workspace",
+                method,
+                path,
+                "",
+            );
+            let metadata = McpDurableEndpointMetadata {
+                catalog_contract: true,
+                destructive: marks.destructive,
+                changes_existing: marks.changes_existing,
+                append_only: marks.append_only,
+                ..Default::default()
+            };
+            assert!(!operation_effects(&method.parse().unwrap(), metadata).uses);
+        }
+    }
+
+    #[test]
+    fn remote_append_marker_cannot_widen_or_impersonate_compiled_route() {
+        let mut spec = (*super::super::catalog_spec_registry::spec_for_slug("api-google-sheets")
+            .unwrap())
+        .clone();
+        // This is parsed as a remote/mounted document. Even an exact copy of
+        // NyxID's marker does not make it a compiled contract.
+        spec["paths"]["/v4/spreadsheets/{spreadsheetId}:batchUpdate"]["post"]["x-nyxid-append-only"] =
+            serde_json::json!(true);
+        let mut published =
+            parsed_endpoints_to_mcp(openapi_parser::parse_openapi_spec_value(&spec).unwrap());
+        mark_catalog_operations(&mut published, "api-google-sheets");
+        for endpoint in &published.endpoints {
+            let metadata = published.durable_metadata[&endpoint.endpoint_id];
+            assert!(!metadata.append_only);
+            if endpoint.path.ends_with(":append") || endpoint.path.ends_with(":batchUpdate") {
+                assert!(!operation_effects(&reqwest::Method::POST, metadata).uses);
+            }
+        }
+        let forged = super::super::catalog_spec_registry::operation_marks(
+            "api-google-sheets",
+            "POST",
+            "/arbitrary",
+            "sheets_append_values",
+        );
+        assert!(!forged.append_only);
+        assert!(forged.destructive);
     }
 }

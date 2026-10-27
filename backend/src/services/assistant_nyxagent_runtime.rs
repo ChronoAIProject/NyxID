@@ -446,8 +446,8 @@ pub(crate) fn sanitize_upstream_request_id(value: &str) -> Option<String> {
     .then(|| value.to_owned())
 }
 
-/// What the agent's other threads are working on right now, so it neither
-/// redoes that work nor starts it twice. Lookup failures only omit it.
+/// Question excerpts for discovery only, never execution evidence.
+/// Lookup failures only omit this optional context.
 async fn in_progress_note(
     state: &AppState,
     row: &AssistantConversation,
@@ -464,19 +464,30 @@ async fn in_progress_note(
         .as_ref()
         .and_then(|turn| turn.question_key.as_deref());
     let mut note = String::from(
-        "\n\nYour other threads are working on these right now; do not start the same work \
-        again (if you are asked the same thing, say it is in progress there):",
+        "\n\nOther-thread question excerpts for duplicate-work discovery only (not execution evidence; \
+        consult nyxid__task_status before reporting progress, and say unknown without evidence):",
     );
-    for (title, question, key) in others {
+    for other in others {
         note.push_str(&format!(
             "\n- \"{}\": \"{}\"{}",
-            excerpt(&title, 60).replace('"', "'"),
-            excerpt(question.as_deref().unwrap_or("(working)"), 200).replace('"', "'"),
-            if this.is_some() && key.as_deref() == this {
+            excerpt(&other.title, 60).replace('"', "'"),
+            excerpt(
+                other
+                    .question
+                    .as_deref()
+                    .unwrap_or("(question unavailable)"),
+                200
+            )
+            .replace('"', "'"),
+            if this.is_some() && other.question_key.as_deref() == this {
                 " (the same question as this one)"
             } else {
                 ""
             }
+        ));
+        note.push_str(&format!(
+            " (thread_id {}, turn_id {})",
+            other.thread_id, other.turn_id
         ));
     }
     note

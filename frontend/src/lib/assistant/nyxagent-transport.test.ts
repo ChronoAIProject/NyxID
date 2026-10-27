@@ -2447,3 +2447,36 @@ it.each(["model_interrupted", null, "cancelled"])("reports history-recovered liv
     error_code: "NYXBOT_RUN_ERROR", upstream_error_code: code ?? "other", engine: "nyxagent", stage: "stream",
   }) });
 });
+
+
+it.each([
+  { source: "nyxid", stage: "model_proxy", code: "api_key_scope_forbidden", http_status: 403, nyxid_error_code: 9000 },
+  { source: "nyxagent", stage: "stream", code: "turn_failed", http_status: null, nyxid_error_code: null },
+])("keeps sanitized failure metadata live and after reload ($source)", async (failure) => {
+  const page = history();
+  const transport = new NyxAgentTransport();
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? chunked(sseBytes(runningStatus,
+        { event: "message.started", message_id: "failure-reply", role: "assistant" },
+        { event: "turn.completed", turn_id: "turn", status: "failed",
+          turn_metadata: { failure_reason: failure },
+          error: { code: "assistant_unavailable", message: "fixed copy", upstream_error_code: "turn_failed", stage: "stream" } },
+      ))
+    : json(page);
+  await transport.history(id);
+  const views: import("@/lib/assistant/chat-types").ChatMessage[] = [];
+  const unsubscribe = transport.subscribe(() => {
+    const tail = transport.session(id).messages.at(-1);
+    if (tail) views.push(tail);
+  });
+  await transport.send(id, "hello", vi.fn());
+  unsubscribe();
+  expect(views.some((view) => view.errorDetail?.failureReason?.code === failure.code)).toBe(true);
+  page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "assistant_unavailable",
+    turn_metadata: { failure_reason: failure }, upstream_error_code: "turn_failed",
+    error_detail: { stage: "stream", http_status: 200, upstream_request_id: null, response_id: null,
+      continuations: 0, turn_id: "turn", occurred_at: start } };
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  expect(reloaded.session(id).messages[1]?.errorDetail?.failureReason).toEqual(failure);
+});

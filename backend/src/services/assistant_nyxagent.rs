@@ -3599,6 +3599,7 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),
                                 channel_delivery:None,
                                 attempts: detail.attempts, capacity_wait_ms: detail.capacity_wait_ms,
                             }));
@@ -3646,7 +3647,9 @@ async fn finish_turn_inner(
                     |turn| super::assistant_model_observer::attribute(&error, turn, Utc::now()),
                 ));
                 let turn = current.active_turn.as_ref().expect("matched turn");
-                let turn_metadata = super::assistant_turn_observability::metadata(turn, Utc::now());
+                let mut turn_metadata = super::assistant_turn_observability::metadata(turn, Utc::now());
+                turn_metadata.failure_reason = error.as_ref().and_then(|error|
+                    super::assistant_model_observer::failure_reason(error, turn, Utc::now()));
                 if let Some(error) = error.as_mut() {
                     error.metadata = Some(Box::new(turn_metadata.clone()));
                     if error.code == "capacity_exceeded" {

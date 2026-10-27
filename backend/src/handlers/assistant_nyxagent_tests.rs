@@ -1,4 +1,6 @@
 use super::*;
+#[path = "assistant_guest_turn_tests.rs"]
+mod guest_turn_tests;
 use crate::services::assistant_engine_policy as engine_policy;
 use crate::services::assistant_nyxagent::TurnResult;
 use crate::{

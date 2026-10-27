@@ -91,7 +91,7 @@ async fn hold_operation(
 #[tokio::test]
 async fn invocation_async_final_egress_rechecks_root_and_original_delivery_before_sweep() {
     for mutation in ["cancel", "delete", "terminal", "missing", "delivery"] {
-        let (a, root) = tracked_fixture().await;
+        let (a, root) = Box::pin(tracked_fixture()).await;
         let submitted = a.submit().await;
         assert_eq!(
             submitted.delivery.invocation_id.as_deref(),
@@ -165,16 +165,20 @@ async fn invocation_async_final_egress_rechecks_root_and_original_delivery_befor
 
 #[tokio::test]
 async fn invocation_async_cancel_after_settlement_keeps_only_one_cancel_and_status_cleanup() {
-    let (a, root) = tracked_fixture().await;
+    let (a, root) = Box::pin(tracked_fixture()).await;
     let submitted = a.submit().await;
     finish(&a, &a.f.row, "submitted").await;
     a.f.state.db.collection::<bson::Document>(WATCHES).update_one(
         doc! {"_id":&submitted.id},
         doc! {"$set":{"deadline":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::seconds(1))}},
     ).await.unwrap();
-    invocations::cancel(&a.f.state, &a.f.owner, &root.idempotency_key)
-        .await
-        .unwrap();
+    Box::pin(invocations::cancel(
+        &a.f.state,
+        &a.f.owner,
+        &root.idempotency_key,
+    ))
+    .await
+    .unwrap();
     a.due().await;
     let watch = watches::claim(&a.f.state.db).await.unwrap().unwrap();
     assert_eq!(watch.state, "cancelling");
@@ -221,12 +225,16 @@ async fn invocation_async_cancel_after_settlement_keeps_only_one_cancel_and_stat
 
 #[tokio::test]
 async fn invocation_async_cleanup_capability_cannot_fetch_results_after_cancel() {
-    let (a, root) = tracked_fixture().await;
+    let (a, root) = Box::pin(tracked_fixture()).await;
     a.submit().await;
     finish(&a, &a.f.row, "submitted").await;
-    invocations::cancel(&a.f.state, &a.f.owner, &root.idempotency_key)
-        .await
-        .unwrap();
+    Box::pin(invocations::cancel(
+        &a.f.state,
+        &a.f.owner,
+        &root.idempotency_key,
+    ))
+    .await
+    .unwrap();
     a.due().await;
     let watch = watches::claim(&a.f.state.db).await.unwrap().unwrap();
     assert!(

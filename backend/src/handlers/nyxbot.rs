@@ -3144,6 +3144,9 @@ async fn start_chat_turn(
         Err(AppError::Conflict(_)) | Err(AppError::DatabaseError(_)) if !exists => {
             Ok(Inbound::Busy)
         }
+        Err(AppError::ServiceSelectionInvalid { reason, message }) => {
+            Ok(Inbound::Reply(format!("{reason}: {message}")))
+        }
         Err(error) => Err(error),
     }
 }

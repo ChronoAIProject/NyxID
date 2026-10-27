@@ -2649,6 +2649,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::machine_access::request_context),
         )
         .route(
+            "/nyxagent/agents/{id}/guest-operations",
+            get(handlers::assistant_team::guest_operations),
+        )
+        .route(
+            "/nyxagent/agents/{id}/guest-operations/{service_id}",
+            axum::routing::put(handlers::assistant_team::set_guest_operations),
+        )
+        .route(
             "/nyxagent/agents/{id}/operations",
             get(handlers::assistant_team::agent_operations),
         )

@@ -1,4 +1,5 @@
 pub mod access_denial;
+pub mod refresh;
 pub mod skill_draft;
 pub mod voice_start;
 use axum::http::StatusCode;
@@ -198,6 +199,13 @@ pub enum AppError {
     #[error("Validation error: {0}")]
     ValidationError(String),
 
+    /// Owner selection diagnostics keep the validation_error / 1008 contract.
+    #[error("{reason}: {message}")]
+    ServiceSelectionInvalid {
+        reason: &'static str,
+        message: &'static str,
+    },
+
     /// Authored skill diagnostics retain the existing validation_error / 1008 contract.
     #[error(transparent)]
     SkillDraftValidation(Box<skill_draft::SkillDraftValidation>),
@@ -207,6 +215,13 @@ pub enum AppError {
 
     #[error("Token expired")]
     TokenExpired,
+
+    /// Additive /auth/refresh diagnostics, retaining the underlying contract.
+    #[error("{source}")]
+    RefreshRefused {
+        source: Box<AppError>,
+        reason: refresh::RefreshRefusalReason,
+    },
 
     #[error("MFA required")]
     MfaRequired { session_token: String },
@@ -447,6 +462,11 @@ pub enum AppError {
 
     #[error("API key scope forbidden: {0}")]
     ApiKeyScopeForbidden(String),
+
+    #[error(
+        "Guest model route is not authorized. Ask the owner to run this agent with its configured model first; guests cannot select or approve another model connection."
+    )]
+    GuestModelRouteRequired,
 
     #[error("API key scope inactive")]
     ApiKeyScopeInactive,
@@ -837,12 +857,14 @@ impl AppError {
         )
     }
 
-    fn status_code(&self) -> StatusCode {
+    pub(crate) fn status_code(&self) -> StatusCode {
         match self {
+            Self::RefreshRefused { source, .. } => source.status_code(),
             Self::VoiceStartFailed(failure) => failure.source.status_code(),
             Self::BadRequest(_)
             | Self::CredentialUnavailable(_)
             | Self::ValidationError(_)
+            | Self::ServiceSelectionInvalid { .. }
             | Self::SkillDraftValidation(_) => StatusCode::BAD_REQUEST,
             Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
@@ -936,7 +958,7 @@ impl AppError {
             Self::PendingCredentialCiphertextTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::PendingCredentialPubkeyAwaiting(_) => StatusCode::NOT_FOUND,
             Self::PendingCredentialQueueFull(_) => StatusCode::TOO_MANY_REQUESTS,
-            Self::ApiKeyScopeForbidden(_) => StatusCode::FORBIDDEN,
+            Self::ApiKeyScopeForbidden(_) | Self::GuestModelRouteRequired => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeInactive => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeNotFound(_) => StatusCode::NOT_FOUND,
             Self::ApiKeyScopePlanNotFound(_) => StatusCode::NOT_FOUND,
@@ -1072,6 +1094,7 @@ impl AppError {
 
     pub(crate) fn error_code(&self) -> u32 {
         match self {
+            Self::RefreshRefused { source, .. } => source.error_code(),
             Self::VoiceStartFailed(failure) => failure.source.error_code(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
@@ -1097,7 +1120,9 @@ impl AppError {
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
             Self::DatabaseError(_) => 1007,
-            Self::ValidationError(_) | Self::SkillDraftValidation(_) => 1008,
+            Self::ValidationError(_)
+            | Self::ServiceSelectionInvalid { .. }
+            | Self::SkillDraftValidation(_) => 1008,
             Self::EmailSignupDisabled => 1009,
             Self::SshNodeKeyMissing(_) => 1011,
             Self::SshHostKeyMismatch(_) => 1012,
@@ -1176,7 +1201,7 @@ impl AppError {
             }
             Self::PendingCredentialPubkeyAwaiting(_) => PENDING_CREDENTIAL_PUBKEY_AWAITING_CODE,
             Self::PendingCredentialQueueFull(_) => PENDING_CREDENTIAL_QUEUE_FULL_CODE,
-            Self::ApiKeyScopeForbidden(_) => 9000,
+            Self::ApiKeyScopeForbidden(_) | Self::GuestModelRouteRequired => 9000,
             Self::ApiKeyScopeInactive => 9001,
             Self::ApiKeyScopeNotFound(_) => 9002,
             Self::ApiKeyScopePlanNotFound(_) => 9003,
@@ -1310,6 +1335,7 @@ impl AppError {
     /// Each variant maps to a standard OAuth error string — no string matching.
     pub(crate) fn oauth_error_code(&self) -> &'static str {
         match self {
+            Self::RefreshRefused { source, .. } => source.oauth_error_code(),
             Self::MfaRequired { .. } => "mfa_required",
             Self::MfaStepUpRequired => "mfa_step_up_required",
             Self::OAuthAuthorityUnavailable => "temporarily_unavailable",
@@ -1333,6 +1359,7 @@ impl AppError {
     /// HTTP status to use when emitting an RFC 6749 §5.2 error response.
     pub(crate) fn oauth_status(&self) -> StatusCode {
         match self {
+            Self::RefreshRefused { source, .. } => source.oauth_status(),
             Self::OAuthAuthorityUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unauthorized(_)
             | Self::AuthenticationFailed(_)
@@ -1347,6 +1374,7 @@ impl AppError {
 
     pub(crate) fn error_key(&self) -> &str {
         match self {
+            Self::RefreshRefused { source, .. } => source.error_key(),
             Self::VoiceStartFailed(failure) => failure.source.error_key(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
@@ -1370,7 +1398,9 @@ impl AppError {
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => "rate_limited",
             Self::Internal(_) | Self::PoolAttemptTransport(_) => "internal_error",
             Self::DatabaseError(_) => "database_error",
-            Self::ValidationError(_) | Self::SkillDraftValidation(_) => "validation_error",
+            Self::ValidationError(_)
+            | Self::ServiceSelectionInvalid { .. }
+            | Self::SkillDraftValidation(_) => "validation_error",
             Self::EmailSignupDisabled => "email_signup_disabled",
             Self::SshNodeKeyMissing(_) => "ssh_node_key_missing",
             Self::SshHostKeyMismatch(_) => "ssh_host_key_mismatch",
@@ -1452,6 +1482,7 @@ impl AppError {
             Self::PendingCredentialPubkeyAwaiting(_) => "pending_credential_pubkey_awaiting",
             Self::PendingCredentialQueueFull(_) => "pending_credential_queue_full",
             Self::ApiKeyScopeForbidden(_) => "api_key_scope_forbidden",
+            Self::GuestModelRouteRequired => "guest_model_route_required",
             Self::ApiKeyScopeInactive => "api_key_scope_inactive",
             Self::ApiKeyScopeNotFound(_) => "api_key_scope_not_found",
             Self::ApiKeyScopePlanNotFound(_) => "api_key_scope_plan_not_found",
@@ -1599,6 +1630,11 @@ impl AppError {
 
     /// The same client-safe payload for JSON responses and streaming errors.
     pub fn response_body(&self) -> ErrorResponse {
+        if let Self::RefreshRefused { source, reason } = self {
+            let mut response = source.response_body();
+            response.details = Some(serde_json::json!({"reason": reason}));
+            return response;
+        }
         if let Self::VoiceStartFailed(failure) = self {
             return failure.response();
         }
@@ -1620,6 +1656,9 @@ impl AppError {
             _ => None,
         };
         let details = match &self {
+            AppError::ServiceSelectionInvalid { reason, .. } => {
+                Some(serde_json::json!({"reason": reason}))
+            }
             AppError::SkillDraftValidation(diagnostic) => {
                 Some(serde_json::to_value(diagnostic).expect("fixed skill draft diagnostic"))
             }

@@ -38,6 +38,7 @@ pub fn metadata(turn: &ActiveTurn, now: DateTime<Utc>) -> TurnMetadata {
             (now - started).num_milliseconds().max(0) as u64
         });
     TurnMetadata {
+        failure_reason: None,
         channel_delivery: None,
         attempts: Some(turn.engine_attempts),
         capacity_wait_ms: Some(turn.capacity_wait_ms.saturating_add(active_wait_ms)),
@@ -142,6 +143,7 @@ pub async fn failed_in_session(
     audit_service::log_actor_event_in_transaction(db, session, &actor(&row.user_id), "assistant_turn_failed", json!({
         "conversation_id": row.id, "turn_id": turn.turn_id, "code": error.code, "stage": error.stage,
         "upstream_code": error.upstream_code, "http_status": error.http_status, "origin": origin(turn),
+        "failure_reason": error.metadata.as_ref().and_then(|data| data.failure_reason.as_ref()),
         "attempts": data.attempts, "capacity_wait_ms": data.capacity_wait_ms, "trigger_run_id": turn.trigger_run_id,
         "worker_instance": turn.worker_instance, "settled_by_worker_instance": super::assistant_engine_worker::instance(),
         "heartbeat_age_ms": heartbeat_age(turn, Some(error), now),
@@ -188,6 +190,9 @@ pub fn settled(
 ) {
     let data = metadata(turn, now);
     let worker = super::assistant_engine_worker::instance();
+    let failure = error
+        .and_then(|error| error.metadata.as_ref())
+        .and_then(|data| data.failure_reason.as_ref());
     tracing::info!(target: "nyxid::assistant_engine", conversation_id = %row.id, turn_id = %turn.turn_id,
         worker_instance = %worker.id, worker_hostname = worker.hostname.as_deref(),
         turn_worker_instance = turn.worker_instance.as_ref().map(|worker| worker.id.as_str()),
@@ -195,6 +200,11 @@ pub fn settled(
         heartbeat_age_ms = heartbeat_age(turn, error, now),
         code = error.map_or("completed", |e| e.code), stage = error.map(|e| e.stage),
         upstream_code = error.and_then(|e| e.upstream_code.as_deref()), http_status = error.and_then(|e| e.http_status),
+        failure_source = failure.map(|reason| reason.source.as_str()),
+        failure_stage = failure.map(|reason| reason.stage.as_str()),
+        failure_code = failure.map(|reason| reason.code.as_str()),
+        failure_http_status = failure.and_then(|reason| reason.http_status),
+        failure_nyxid_error_code = failure.and_then(|reason| reason.nyxid_error_code),
         attempts = error.and_then(TurnError::attempts).or(data.attempts),
         capacity_wait_ms = error.and_then(TurnError::capacity_wait_ms).or(data.capacity_wait_ms).unwrap_or(0),
         duration_ms = (now - turn.started_at).num_milliseconds().max(0), origin = origin(turn),

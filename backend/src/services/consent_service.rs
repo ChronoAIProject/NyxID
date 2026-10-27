@@ -1675,7 +1675,8 @@ mod tests {
             None,
             None,
         )
-        .await;
+        .await
+        .map_err(AppError::into_refresh_source);
         assert!(matches!(refresh_result, Err(AppError::Unauthorized(_))));
     }
 

@@ -299,6 +299,7 @@ pub mod assistant_service_execution;
 pub mod assistant_settings_service;
 pub(crate) mod assistant_ssh_session;
 pub mod assistant_steering;
+pub mod assistant_task_status;
 pub mod assistant_team_service;
 pub mod assistant_team_tools;
 pub mod channel_image_audience;
@@ -366,6 +367,8 @@ pub mod service_pool_routing;
 
 #[cfg(test)]
 mod agent_operation_scope_tests;
+#[cfg(test)]
+mod guest_access_tests;
 pub mod permission_policy_service;
 
 pub mod agent_skill_service;

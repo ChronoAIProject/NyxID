@@ -338,6 +338,7 @@ describe("canonical chat presentation", () => {
           error: "Stopped responding",
           errorDetail: {
             stage: "no_progress",
+            failureReason: { source: "nyxid", stage: "model_proxy", code: "api_key_scope_forbidden", http_status: 403, nyxid_error_code: 9000 },
             upstreamCode: "turn_failed",
             httpStatus: 503,
             upstreamRequestId: "req-1",
@@ -350,14 +351,14 @@ describe("canonical chat presentation", () => {
       />,
     );
     fireEvent.click(screen.getByText("Details"));
-    for (const value of ["turn_failed", "no_progress", "503", "turn-1", "resp_1", "req-1", "2"]) {
+    for (const value of ["turn_failed", "no_progress", "503", "turn-1", "resp_1", "req-1", "2", "nyxid / model_proxy / api_key_scope_forbidden / HTTP 403 / NyxID 9000"]) {
       expect(screen.getByText(value)).toBeInTheDocument();
     }
     expect(
       within(screen.getByText("Details").closest("details")!).getByRole("time"),
     ).toHaveAttribute("datetime", "2026-01-01T00:00:00Z");
     fireEvent.click(screen.getByRole("button", { name: "Copy diagnostic ID" }));
-    expect(writeText).toHaveBeenCalledWith("turn turn-1 / upstream turn_failed / response resp_1 / request req-1");
+    expect(writeText).toHaveBeenCalledWith("turn turn-1 / upstream turn_failed / cause nyxid / model_proxy / api_key_scope_forbidden / HTTP 403 / NyxID 9000 / response resp_1 / request req-1");
   });
 
   it("shows thinking treatment only for a content-free streaming message", () => {

@@ -278,12 +278,36 @@ delegated routes.
 The agent document is the durable source; thread keys mirror it at every turn
 start, rotation and replacement. NyxAgent calls its model through NyxID's proxy
 (`/api/v1/proxy/s/{model service}`, e.g. `chrono-llm-public`, `llm-deepseek`)
-with the thread's own key. The proxy therefore lets a live assistant
+with the thread's own key. During an owner turn, the proxy lets a live assistant
 conversation key (an `assistant_agent_credentials` row, which people cannot
-create) reach any active catalog service with `inference` metadata even outside
+create) reach active catalog services with `inference` metadata even outside
 its grants (`proxy::assistant_model_call`), whether the owner's own row, an org
 row or the catalog row resolves it. Nothing else widens: the key's allowlist,
 inventory, delegation tokens, consent screens and MCP tools stay its grants.
+For a live guest turn, the exception requires the agent's server-established
+`owner_model_route`. A normal owner model admission during the engine's model
+attempt records one route for the agent's configured profile: exact catalog ID,
+saved connection ID (or explicitly catalog-only), model/endpoint/query/semantic
+header identity and resolved execution digest with durable credential identity
+and epoch (not process-local fingerprints or refreshed token bytes). NyxAgent's
+profile list does not publish its proxy path, so a guest callback is never used
+to discover this route.
+Different connections, models, pool routing, stateful/non-generation requests
+and method overrides are refused. The current turn must also have its server-written
+`input_admission`; as for owners, this binds the generation rounds to an admitted
+turn, not literal prompt bytes (context and tool results evolve during a turn).
+Saved-connection admissions revalidate the route at egress.
+
+An absent, changed or mismatched route returns HTTP 403 / `9000`,
+`guest_model_route_required`, with guidance for the owner to run the configured
+model first. An owner may establish the route in another thread of the same
+agent. Guests cannot create or replace it and never mint model consent. The
+additive agent field is optional for older records; old writers that remove it
+cause new replicas to refuse guest inference until an owner establishes it again.
+The model connection does not need to be a specialist tool grant. Guest service
+limits, explicit approval requirements, platform-key ACLs, billing and concurrency
+still apply. NyxBot guest tool calls remain refused; specialists keep their
+configured per-service guest access. The owner model path is unchanged.
 
 Legacy settings rows without `access_mode` are read with the Auto default and
 are migrated on settings writes. The retired
@@ -529,7 +553,16 @@ NyxBot-only native tools (`nyxid__` prefix): `spawn_subagent`, `message_subagent
 `destroy_subagent`, `create_group`, `list_groups`, `post_to_group`,
 `update_group`, `delete_group`, `settings_link`, `channel_bot_setup_link`,
 `connect_channel_bot`, `link_channel_bot`, `list_channel_agents`,
-`disconnect_channel_bot`. Every agent has `remember` and
+`disconnect_channel_bot`. Every agent also has the owner-turn-only, read-only
+`task_status` tool: bounded correlated execution evidence for the acting person's
+other private threads of that same agent (including hidden voice tasks). Guests
+cannot list or call it. It returns thread/turn/request/result IDs, state, last
+completed activity label, bounded settled answer or stable error, and timestamps.
+Stale/absent evidence is unknown; question excerpts must never substantiate progress
+claims. The stable instruction fingerprint includes this rule, so resumed sessions
+receive it too. The tool is not offered to external MCP callers. See
+[the cross-thread contract](09-nyxbot-orchestrator.md#grounded-cross-thread-task-status) for scope
+and limits. Every agent has `remember` and
 `forget` (which refuses obvious credential shapes); its memory notes are
 supplied in each turn's input and are not part of stable instructions. A specialist calling a NyxBot-only tool gets
 `orchestrator_only`. Grants resolve slugs or IDs through the owner's MCP catalog.
@@ -1913,6 +1946,20 @@ Generic copy is “The assistant could not complete this turn. Try again.”;
 `model_interrupted` warns that some actions may already have completed and must
 be checked before retrying. Old rows and old clients remain readable; existing
 failed rows are not backfilled.
+
+Failed turns additionally retain `turn_metadata.failure_reason` in history and
+the terminal event. It contains only `{source,stage,code,http_status,nyxid_error_code}`.
+The model observer starts before scope, approval and concurrency admission, so a
+generic `turn_failed` or `nyxid_error` can identify a rejected NyxID model callback
+as `source: nyxid`, `stage: model_proxy`, with its stable AppError key, HTTP status
+and numeric NyxID code. It uses the same 120-second, latest-attempt and
+non-overlap fences as billing attribution; success clears the refusal. Without
+that evidence, it records only NyxAgent's sanitized error code and stage. Old
+replicas' refusal rows without the new status/code fields use this fallback.
+The owner's Details panel and copied diagnostic ID show the reason, and the
+failure audit/settlement log include the same metadata. Upstream error prose,
+request bodies, prompts, headers and key material are never copied. Reading the
+stored NyxAgent response or exposing its thread credential is unnecessary.
 
 ### Capacity wait visibility and engine diagnostics
 

@@ -125,7 +125,8 @@ specialty, optional task), `message_subagent` (runs in the specialist's home
 thread; returns started, busy or pool_full), `wait_for_subagents` (≤ 120 s),
 `list_subagents`, `read_subagent`, `grant_subagent`, `revoke_subagent`,
 `set_guest_access` (what guests may do with a specialist's services: `read`,
-`use` or `all`), `update_subagent`, `decide_permission`, `destroy_subagent`,
+`use` or `all`, plus `none` and guest-only operation selections behind
+`assistant:guest-operation-scopes`), `update_subagent`, `decide_permission`, `destroy_subagent`,
 `create_group`, `list_groups`, `post_to_group`, `update_group`, `delete_group`,
 `settings_link` (the exact NyxID page for configuration the tools do not cover,
 such as creating an agent key, security, profile, billing, organizations or
@@ -773,14 +774,54 @@ guest authorization; their catalog inclusion grants no execution access.
     who mounts a hosted overlay on another API applies that overlay's marks
     to it. A DELETE, and an operation
     Aevatar's `x-aevatar-tool.destructive` marks (Telegram's `deleteMessage`,
-    Sheets' `values:clear` and `values:append`, Docs' `batchUpdate`, IFTTT's
-    triggers and tool calls), never. NyxID adds its own marker rather than
+    Sheets' `values:clear`, Docs' `batchUpdate`, IFTTT's
+    triggers and tool calls), never, except a POST with a compiled NyxID
+    `x-nyxid-append-only: true` attestation. This attests adding data without
+    changing or removing existing data; it does not clear Aevatar's marker or
+    bypass owner approvals. A compiled `x-nyxid-append-only-query` object may
+    require exact query values. Sheets `values:append` requires
+    `insertDataOption=INSERT_ROWS`; absent, duplicate, or overwrite values are
+    refused under `use`. DELETE and `changes-existing: true` always win.
+    Remote and mounted remote specs cannot assert this exception; the trusted
+    attestation is matched by exact method/path only. Generic MCP fallbacks and
+    raw calls also apply the compiled contract to their concrete route, even
+    when stored endpoint rows are missing. NyxID adds its own marker rather than
     change Aevatar's, which Aevatar's approvals read. So editing a sheet, doc,
     Notion page or calendar event, trashing a Drive file or running an IFTTT
     applet is beyond `use`;
   - `all`: everything the specialist may do with the service, changing and
     deleting included (NyxBot's `nyxid__set_guest_access` says so when it sets
     it).
+  Guest-only operation limits are stored in additive
+  `guest_operation_scopes` and `guest_operation_scope_revisions` fields beside
+  grants. They intersect the level and the specialist's ordinary scopes; owner
+  turns ignore them. An empty guest selection withholds the service entirely
+  (`none` in the management tool); an absent selection preserves today's `use`
+  default. Selections use server-resolved catalog endpoint IDs, never names,
+  and cannot introduce explicit rules or resource-value limits in this release.
+  Grants exposes **No guest access**, **Selected operations**, and **All
+  operations permitted by guest level**. NyxBot first calls
+  `get_agent_operations` with `guests: true`, then `set_guest_access` with
+  exactly one service and `selection: {expected_revision, endpoint_ids}`.
+  `access: "none"` requires that revision and saves an empty selection;
+  `selection.all_operations: true` removes the selection. A level-only write
+  preserves it. Human management uses the agent's `GET /guest-operations` and
+  `PUT /guest-operations/{service_id}` routes with the same revision fence.
+  Every guest execution and discovery request enforces the saved selection,
+  including raw proxy and final pool-member/LLM routes. Method overrides and
+  WebSockets cannot bypass a guest selection. Guest execution never follows
+  redirects or issues downstream delegation tokens, which cannot carry this
+  turn's guest restrictions. Changing grants preserves limits
+  for retained services and removes them for revoked services.
+
+  Configuration of these new limits is default-off behind
+  `assistant:guest-operation-scopes`, resolved for the managing person. Deploy
+  all auth/proxy/MCP replicas before enabling it; the existing security-readiness
+  roster must attest this capability. Old readers deserialize the
+  additive fields without a new `GuestAccess` enum value, but cannot enforce
+  them. Disabling the flag stops configuration, never enforcement. Before a
+  rollback to old binaries, stop guest admission for affected agents (or remove
+  the affected grants); disabling the flag alone is not a safe rollback.
   A guest call never carries a method override (a header like
   `X-HTTP-Method-Override`, a `_method` or `_HttpMethod` query or body field,
   or a `method` field naming a changing verb other than the one sent, as in
@@ -794,8 +835,9 @@ guest authorization; their catalog inclusion grants no execution access.
   catalog service's instance-mounted spec where its operations match, and
   from a mounted spec's own markers (which only narrow). Specs an admin adds to
   the catalog outside NyxID's overlays are stored as rows without markers, and
-  services without typed operations (the generic proxy) have none: they are
-  judged by the method alone, so a POST that deletes there (an RPC-style API)
+  custom services without typed operations or a matching compiled catalog
+  contract (the generic proxy) have none: they are judged by the method alone,
+  so a POST that deletes there (an RPC-style API)
   is within `use`, and a GET that deletes (Telegram's Bot API accepts GET) is
   within `read`, as are batch envelopes (a `requests` array naming methods):
   do not give such a service to a specialist that answers guests unless they
@@ -966,10 +1008,45 @@ within twenty-four hours. Expired or invalid sources settle durably, including
 poison queue heads. A failed turn retains the genuine failure/partial/stopped
 policy; successful silence closes each eligible source without a send.
 
-The agent's own threads are also told, in the owner's turn instructions,
-what its other threads are answering right now (thread title and question
-excerpt, the same question marked), so it does not start that work again;
-channel threads never get this note, so no chat hears about another.
+### Grounded cross-thread task status
+
+Owner turns may receive other-thread title/question excerpts for duplicate-work
+**discovery only**. These do not prove that work is running. Stable instructions
+require `nyxid__task_status` evidence before reporting progress, completion or
+failure, and require “unknown” when evidence is absent or stale. Guests receive
+neither this note nor the status tool.
+
+`nyxid__task_status` is a read-only native tool for live owner turns. It reads only
+the acting person's private threads of the **same agent**, including that agent's
+hidden voice task threads. NyxBot does not gain cross-specialist or organization
+member history through it; its existing team tools retain their authority.
+Optional `thread_id` (visible or execution thread), `turn_id` and `limit` narrow
+the bounded result. Each item correlates the visible and execution thread, turn,
+voice request and result message where available. `result_message_id` belongs to
+the visible thread; `execution_result_message_id` belongs to the execution thread.
+Before voice publication only the latter is available. It reports queued, running,
+awaiting acknowledgement, completed, failed, stopped or unknown; the last
+completed activity label and time; a ≤600-character settled answer excerpt or
+stable error; start/update/settled timestamps (null when unavailable). No tool
+arguments, raw tool results, credential material or acknowledgement content are
+included. Answer excerpts are explicitly untrusted quoted data.
+
+The tool is callable only from a private owner thread (not a channel or group).
+It rechecks the caller's live turn and current conversation key. A guest,
+stopped/stale turn or rotated key cannot use it. Queries are on demand, bounded
+to 20 recent threads and three settled turns per thread, returning at most 20
+items and a truncation indicator. Unfiltered reply scans cover only each thread's
+last 200 message sequences; an exact `turn_id` uses the turn index instead. A stale heartbeat/lease reports unknown rather
+than repeating an “in progress” claim. There are no new reads on unrelated turns.
+
+Voice result publication uses one transaction for the visible reply and the
+request's `result_message_id` receipt. Racing runtime/sweeper publishers return
+the same receipt. Old replicas' replies already in the visible thread are adopted
+without copying. Refused/expired/cancelled requests can lack a hidden assistant
+reply; those now publish a fixed failure with a stable code, including legacy
+cancelled rows, instead of remaining silent and occupying the bounded delivery
+sweep. This does not replay execution. Speech retains its existing at-most-once
+send receipt; persisted delivery is not proof the caller heard the audio.
 
 ## 13. No-break guarantees
 
@@ -1471,3 +1548,35 @@ copy the sanitized Markdown displayed in the message; users copy the original
 body. Hidden tool markup, thinking, controls and receipts are excluded. Blank,
 image-only and streaming assistant messages have no Copy action. Clipboard
 success is reported only after the write resolves; a failure remains retryable.
+
+
+### Resource limits for guests — proposal, not implemented (#1996)
+
+The current ordinary operation scope already supports validated exact/one-of
+path values, closed query rules and closed JSON body schemas. Those scopes
+apply to both owner and guest turns. The new guest-only picker intentionally
+selects operations only; it does not accept value rules.
+
+1. Extend guest selections with the existing input-rule engine. Pin a Sheet ID,
+   file ID, Base/table ID or record ID in its catalog path variable; require
+   specific query/body fields when that is where the operation takes identity.
+   Raw proxy, MCP, LLM and the final pool member must check the same normalized
+   inputs. This is the smallest engineering change, roughly 3–5 days including
+   negative tests; a readable per-operation editor adds roughly 3–5 days.
+2. Offer catalog-declared resource selectors above those rules: a file/Sheet
+   picker generates exact constraints and explains which operations it covers.
+   Never infer resource parameters from names. Schemas need explicit resource
+   identity and expansion semantics. Expect roughly 1–2 weeks per API family.
+3. For folder or collection access, use a managed resource facade that checks
+   current containment and returns only allowed rows. A query such as Drive's
+   `q` is a program, not a folder ACL: pinning text alone does not constrain
+   direct downloads, shortcuts, shared-drive moves, exports, recursive folders,
+   batches or responses. Do not claim row-level isolation without resolving
+   those cases. Budget several weeks for a provider-specific first version.
+
+The UI should distinguish operation access from data access, show the exact
+pinned IDs alongside friendly names, preview blocked operations and fail closed
+when a resource moves or a contract changes. Search/list operations need either
+a proven constrained upstream query or server-side filtering; response fields,
+indirect references, batches, alternate encodings and MIME/upload routes all
+need adversarial tests. No owner-specific values belong in audit metadata.

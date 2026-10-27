@@ -44,7 +44,7 @@ export interface ChatMessage {
   readonly capacityWaitDeadline?: string | null;
   readonly channelDelivery?: { readonly status: string; readonly heard_prefix_chars?: number | null; readonly heard_prefix_matches_sent: boolean } | null;
   readonly turnMetadata?: { readonly attempts?: number | null; readonly capacityWaitMs?: number | null } | null;
-  readonly errorDetail?: { readonly attempts?: number | null; readonly capacityWaitMs?: number | null; readonly upstreamCode?: string | null; readonly stage: string; readonly httpStatus?: number | null; readonly upstreamRequestId?: string | null; readonly responseId?: string | null; readonly continuations: number; readonly turnId: string; readonly occurredAt?: string } | null;
+  readonly errorDetail?: { readonly failureReason?: import("@/schemas/assistant-nyxagent").NyxAgentFailureReason | null; readonly attempts?: number | null; readonly capacityWaitMs?: number | null; readonly upstreamCode?: string | null; readonly stage: string; readonly httpStatus?: number | null; readonly upstreamRequestId?: string | null; readonly responseId?: string | null; readonly continuations: number; readonly turnId: string; readonly occurredAt?: string } | null;
   readonly errorCode?: string | null;
   readonly events?: RuntimeEvent[];
   readonly pendingApproval?: RuntimeToolApprovalRequestInfo;
