@@ -61,8 +61,10 @@ impl AsyncFixture {
                 let malformed_status = !uri.path().ends_with("/result")
                     && override_body.as_ref().and_then(Value::as_str)
                         == Some("__malformed_json_after_result_status__");
-                if uri.path().ends_with("/result") {
-                    if let Some(next) = after_result.lock().unwrap().take() { *status_body.lock().unwrap() = Some(next); }
+                if uri.path().ends_with("/result")
+                    && let Some(next) = after_result.lock().unwrap().take()
+                {
+                    *status_body.lock().unwrap() = Some(next);
                 }
                 async move {
                     let _result_permit = if uri.path().ends_with("/result") { Some(result_wait.acquire().await.unwrap()) } else { None };
