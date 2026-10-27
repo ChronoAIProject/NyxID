@@ -151,12 +151,12 @@ export function GeneratedAttachment({
             <Download className="h-3.5 w-3.5" aria-hidden="true" />
             Download {name}
           </a>
-          {attachment.expiresAt && (
-            <p className="text-11 text-muted-foreground">
-              Available until {new Date(attachment.expiresAt).toLocaleString()}
-            </p>
-          )}
         </>
+      )}
+      {attachment.expiresAt && (
+        <p className="text-11 text-muted-foreground">
+          Available until {new Date(attachment.expiresAt).toLocaleString()}
+        </p>
       )}
     </div>
   );

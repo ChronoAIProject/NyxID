@@ -68,37 +68,47 @@ it("preserves generated image thumbnail/full preview/download on the same attach
     expect.objectContaining({ signal: expect.any(AbortSignal) }),
   );
 });
-it("offers downloads for unsupported types without a play control", async () => {
-  const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+it.each(["download", undefined] as const)("loads unsupported files only on owner download with previewKind=%s", async (previewKind) => {
+  const clicked: { href: string; filename: string }[] = [];
+  const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+    clicked.push({ href: this.href, filename: this.download });
+  });
   const { unmount } = render(
     <ToolImage
       image={{
         ...video,
         contentType: "application/octet-stream",
         filename: "report.html",
-        previewKind: "download",
+        previewKind,
+        expiresAt: "2099-01-01T00:00:00Z",
       }}
     />,
   );
-  expect(assistantHttp).not.toHaveBeenCalled();
-  expect(URL.createObjectURL).not.toHaveBeenCalled();
-  expect(screen.getByRole("status")).toHaveTextContent("Preview unavailable for this type");
-  fireEvent.click(screen.getByRole("button", { name: "Download report.html" }));
-  expect(screen.getByRole("status")).toHaveTextContent("Loading");
-  const download = await screen.findByRole("link", { name: "Download report.html" });
-  expect(download).toHaveAttribute("href", "blob:private2037");
-  expect(download).toHaveAttribute("download", "report.html");
-  expect(assistantHttp).toHaveBeenCalledTimes(1);
-  expect(assistantHttp).toHaveBeenCalledWith(video.endpoint, expect.objectContaining({ signal: expect.any(AbortSignal) }));
-  expect(click).toHaveBeenCalledTimes(1);
-  expect(screen.getByRole("status")).toHaveTextContent(
-    "Preview unavailable for this type",
-  );
-  expect(screen.queryByLabelText(/Preview report/)).not.toBeInTheDocument();
-  unmount();
-  expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:private2037");
-  click.mockRestore();
+  try {
+    expect(assistantHttp).not.toHaveBeenCalled();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(screen.getByText(/Available until/)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Preview unavailable for this type");
+    fireEvent.click(screen.getByRole("button", { name: "Download report.html" }));
+    expect(screen.getByRole("status")).toHaveTextContent("Loading");
+    const download = await screen.findByRole("link", { name: "Download report.html" });
+    expect(download).toHaveAttribute("href", "blob:private2037");
+    expect(download).toHaveAttribute("download", "report.html");
+    expect(assistantHttp).toHaveBeenCalledTimes(1);
+    expect(assistantHttp).toHaveBeenCalledWith(video.endpoint, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(clicked).toEqual([{ href: "blob:private2037", filename: "report.html" }]);
+    const blob = vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob;
+    expect(await blob.text()).toBe("fixture");
+    expect(screen.getByRole("status")).toHaveTextContent("Preview unavailable for this type");
+    expect(screen.queryByLabelText(/Preview report/)).not.toBeInTheDocument();
+    unmount();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:private2037");
+  } finally {
+    unmount();
+    click.mockRestore();
+  }
 });
+
 it.each([
   [410, 12101, "expired"],
   [404, 404, "not found"],
