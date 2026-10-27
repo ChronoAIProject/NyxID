@@ -1,0 +1,90 @@
+//! Optional metadata shared by pending files and durable private attachments.
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+pub const COLLECTION_NAME: &str = "async_service_operation_artifacts";
+pub const DELIVERIES: &str = "assistant_artifact_deliveries";
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Metadata {
+    pub filename: Option<String>,
+    pub source: Option<String>,
+    pub source_watch_id: Option<String>,
+    pub source_turn_id: Option<String>,
+    pub source_operation_id: Option<String>,
+    pub source_result_identity: Option<String>,
+    pub source_status_version: Option<String>,
+    pub content_revision: Option<String>,
+    pub preview_kind: Option<String>,
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+impl std::fmt::Debug for Metadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GeneratedArtifactMetadata([REDACTED])")
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ResultManifest {
+    pub source_result_identity: String,
+    pub source_status_version: Option<String>,
+    pub content_revision: String,
+    pub count: usize,
+    pub delivery_reason: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PendingArtifact {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub watch_id: String,
+    pub user_id: String,
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub operation_id: String,
+    pub source_result_identity: String,
+    pub artifact_index: usize,
+    pub filename: String,
+    pub source_path: String,
+    pub content_type: String,
+    pub size: i64,
+    pub sha256: String,
+    pub preview_kind: String,
+    pub source_status_version: Option<String>,
+    pub content_revision: String,
+    pub state: String,
+    pub assistant_attachment_id: String,
+    #[serde(default, with = "super::bson_bytes::optional")]
+    pub data_encrypted: Option<Vec<u8>>,
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub expires_at: DateTime<Utc>,
+}
+impl std::fmt::Debug for PendingArtifact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PendingArtifact([REDACTED])")
+    }
+}
+
+/// Written only by completion settlement, never from request/model arguments.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Delivery {
+    #[serde(rename = "_id")]
+    pub message_id: String,
+    pub user_id: String,
+    pub conversation_id: String,
+    pub originating_turn_id: String,
+    pub event_turn_id: String,
+    pub watch_id: String,
+    pub operation_id: String,
+    pub source_result_identity: String,
+    pub attachment_ids: Vec<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub expires_at: DateTime<Utc>,
+}

@@ -714,6 +714,7 @@ async fn lark_attachment_tool_images_keep_producing_turn_and_origin_without_fall
     u.f.state.encryption_keys = std::sync::Arc::new(keys);
     let auth = authenticate(&u.f).await;
     let mut image = crate::models::assistant_attachment::AssistantAttachment {
+        artifact: Default::default(),
         secret_context_versions: Default::default(),
         id: Uuid::new_v4().to_string(),
         origin: "tool".into(),

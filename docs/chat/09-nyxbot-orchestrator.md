@@ -1471,3 +1471,38 @@ copy the sanitized Markdown displayed in the message; users copy the original
 body. Hidden tool markup, thinking, controls and receipts are excluded. Blank,
 image-only and streaming assistant messages have no Copy action. Clipboard
 success is reported only after the write resolves; a failure remains retryable.
+
+### Verified Sandbox files and recovery
+
+For an admitted Web user watch, the worker retrieves only the declared
+`GET /executions/{operation_id}/result` operation through the ordinary MCP
+credential, grant, billing, concurrency and destination checks. Its larger body
+limit is scoped to that result operation; status and legacy results remain
+16 KiB. `succeeded` plus `result_available` is a source claim. The adapter also
+checks `ExecuteResponse.success` and the nullable `output.files` contract;
+a nonzero script exit can still contain verified files. File errors, invalid
+base64, excess limits or malformed media reject the whole file set.
+
+The worker checks the exact operation status before and after reading bytes.
+A `410` or elapsed source expiry prevents publication. SHA-256 over the operation
+ID, ordered normalized file metadata and decoded bytes is the immutable source
+identity; Sandbox status `version` is diagnostic only. A changed verified digest
+for the same operation fails closed. A content modification requires a new
+Sandbox execution, new identity and distinct attachment IDs. Its local revision
+starts at 1; a failed later operation never relabels earlier attachments.
+
+NyxBot must distinguish submitted, source-completed, verified/retained,
+materialized and currently readable. It must never send an owner to machine
+setup, handle base64 in its prompt, or invent a public URL to recover a cloud
+result. The owner button uses the empty-body owner/message recovery route.
+Natural-language recovery uses `nyx__artifact_delivery` with `{}`. That internal
+action requires a live owner Web user turn and selects the immediately preceding
+assistant message on the server. It accepts no IDs, URLs or revisions; the saved
+message association is the sole authority. It never calls Sandbox or generic
+failed-turn retry. Direct and wrapped calls share the owner's action policy.
+If that policy asks for approval, the next browser continuation supplies the
+server-written initiating message/card; the tool still accepts only `{}` and
+resolves the original recovery request and preceding result on the server.
+Missing, ambiguous, foreign, stale or expired associations
+fail closed. Automation may report execution completion independently of this
+persisted file-delivery state.

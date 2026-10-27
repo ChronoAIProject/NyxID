@@ -77,6 +77,12 @@ pub struct DeliveryBinding {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AsyncServiceOperation {
     #[serde(default)]
+    pub artifact_mode: Option<String>,
+    #[serde(default)]
+    pub artifact_result: Option<super::generated_artifact::ResultManifest>,
+    #[serde(default)]
+    pub artifact_event_turn_id: Option<String>,
+    #[serde(default)]
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default)]
     pub cma: Option<CmaOperation>,

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ApiError } from "@/lib/api-client";
 import { ImageOff } from "lucide-react";
+import { GeneratedAttachment } from "./generated-attachment";
 import { DocumentAttachment } from "./document-attachment";
 import { assistantHttp } from "@/lib/assistant/assistant-http";
 import type { ChatImage } from "@/lib/assistant/chat-types";
@@ -11,6 +12,7 @@ import type { ChatImage } from "@/lib/assistant/chat-types";
  * owner-only attachment route never needs cookies or a public link.
  */
 export function ToolImage({ image }: { readonly image: ChatImage }) {
+  if (image.origin === "generated_artifact") return <GeneratedAttachment attachment={image} />;
   if (image.expired) return <ExpiredAttachment />;
   return image.contentType.startsWith("image/")
     ? <RasterAttachment image={image} />

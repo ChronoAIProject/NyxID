@@ -2535,6 +2535,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::assistant_nyxagent::recovery),
         )
         .route(
+            "/nyxagent/conversations/{id}/messages/{message_id}/artifact-delivery",
+            post(handlers::assistant_nyxagent::artifact_delivery)
+                .layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
             "/nyxagent/conversations/{id}/model",
             patch(handlers::assistant_nyxagent::change_model),
         )

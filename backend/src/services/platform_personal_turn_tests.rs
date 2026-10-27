@@ -1169,6 +1169,9 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
         }
         let now = chrono::Utc::now();
         let watch = AsyncServiceOperation {
+            artifact_mode: None,
+            artifact_result: None,
+            artifact_event_turn_id: None,
             secret_context_versions: Default::default(),
             cma: None,
             id: uuid::Uuid::new_v4().to_string(),

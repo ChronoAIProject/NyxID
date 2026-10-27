@@ -1,0 +1,312 @@
+{
+  "issue": 2037,
+  "branch": "feat/chat-file-delivery-2037",
+  "worktree_id": "01a17a96-a542-7c40-ac74-8a2076acc0a3",
+  "worktree": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts",
+  "plan_path": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/docs/plans/2026-10-27-artifacts-implementation.md",
+  "plan_revision": "v4",
+  "plan_sha256": "7f5226f241b7a826c58be216f12dd4416471a48d91e67e4ed65871b811bd8493",
+  "review_ledger_path": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/docs/plans/2026-10-27-artifacts-review.md",
+  "plan_gate": "ASTRA_PLAN_APPROVED",
+  "opus_reviewer_id": null,
+  "opus_session_id": null,
+  "sol_implementer_id": "01a17afe-64ad-7ed1-bd1f-8b75d719d9f9",
+  "sol_session_id": "01a17afe-64ad-7ed1-bd1f-8b98e1a1ec1a",
+  "current_commit": "b1dd6548a",
+  "implementation_gate": "SOL_IMPLEMENTATION_IN_PROGRESS",
+  "shared_contract_changes": [
+    "Defaulted flattened generated metadata on AssistantAttachment/TurnAttachment includes source_turn_id; AsyncServiceOperation adds artifact_mode, artifact_result, artifact_event_turn_id. AttachmentResponse exposes safe filename/source/result_version/preview_kind/expiry only.",
+    "New encrypted async_service_operation_artifacts collection keyed by watch/source-result identity/artifact index, with a BSON-under-16-MiB proof for encrypted 8 MiB rows.",
+    "Operation-scoped Sandbox result adapter with a separate bounded body limit; existing 16 KiB async text and live MEDIA_CONTENT contracts stay unchanged.",
+    "Shared 192 MiB byte budget covers result JSON, decode, hashing, encryption, persistence, and authenticated egress through one bounded reservation.",
+    "Default-off assistant:generated-artifacts feature flag admits only Web user-origin watches after all replicas/workers upgrade and old writers drain; channel/scheduled/trigger/voice paths remain fenced.",
+    "Owner/message-bound empty-body artifact-delivery recovery route uses a server-written association and cannot accept client-selected watch/result IDs or submit a new execution.",
+    "Owner attachment response gains preview kind and safe file metadata; authenticated attachment route and ACL remain the retrieval authority.",
+    "Frontend attachment mapper and ToolImage gain structured MP4 validation/playback-error fallback/download-only behavior while preserving image behavior and HTTP range semantics.",
+    "Delivery association expiry is the minimum persisted generated-attachment expiry once IDs exist; recovery checks current policy/attachment availability in-session and history applies live retention. Legacy tool/user-upload MIME and exact inline disposition are preserved.",
+    "Generated-artifact encrypted summary and model context are metadata-only. Stdout/stderr are discarded and older free-form generated summaries are withheld; unmarked legacy bounded text stays supported.",
+    "Read-only overlap assessment confirms generated-artifact provenance/event binding remains separate from protocol-v2 trigger continuation and Stop state; combined acceptance must prove coexistence and cancellation ordering."
+  ],
+  "open_acceptance": [
+    "Backend compilation and focused Rust tests are pending explicit coordinator release of the active resource hold. No Cargo/rustc/build/backend-test command is launched or queued.",
+    "Previous backend check was not green. Its Send-not-general-enough diagnostics in async sweep/team dispatch remain unverified after source changes; route/module/model-literal fixes require compilation.",
+    "Authorized live Sandbox-to-originating-Web-chat acceptance has not run. Fixture browser tests are separate evidence.",
+    "Combined automation/artifacts acceptance after sibling integration: coexistence of a Web artifact completion and protocol-v2 trigger event, exact event selection, Stop cancellation, and no trigger recovery/materialization."
+  ],
+  "evidence": {
+    "issue": "Issue body read; no comments returned.",
+    "sandbox_openapi": "Verified https://sandbox.chrono-ai.fun/openapi.json version 0.3.0.",
+    "source_inspection": "Async result, MCP response, assistant attachment, and frontend media paths inspected.",
+    "tests": {
+      "frontend_focused": {
+        "status": "passed",
+        "files": 4,
+        "tests": 141,
+        "log": "/tmp/nyxid-artifacts-2037-unit.log"
+      },
+      "frontend_typecheck": {
+        "status": "passed",
+        "command": "npx tsc -b --pretty false",
+        "log": "/tmp/nyxid-artifacts-2037-tsc.log"
+      },
+      "frontend_lint": {
+        "status": "passed",
+        "errors": 0,
+        "existing_warnings": 33,
+        "log": "/tmp/nyxid-artifacts-2037-lint.log"
+      },
+      "browser": {
+        "status": "passed",
+        "log": "/tmp/nyxid-artifacts-2037-browser.log",
+        "config": "frontend/playwright.artifacts.config.ts",
+        "port": 49237,
+        "workers": 1,
+        "source": "fixture HTTP/history, not live Sandbox",
+        "tests": 2,
+        "duration_seconds": 14.4,
+        "evidence": "Actual Chromium playback/time advance/pause, byte-identical video/image downloads, refresh/revisit, simulated decoder error followed by byte-identical download. Fixture-only HTTP/history."
+      },
+      "browser_fixture_failure": {
+        "status": "fixed",
+        "cause": "New unrelated machine-list fixture initially returned an object instead of the hook contract array; corrected fixture only, no checks weakened.",
+        "log": "/tmp/nyxid-artifacts-2037-browser-fixture-shape-failure.log"
+      },
+      "rust_format": {
+        "status": "passed",
+        "command": "direct rustfmt --edition 2024 --config skip_children=true on changed feature sources; no Cargo invocation",
+        "scope": "all 44 changed Rust files, including A-002, A-003 and arbitrary-length range-position follow-up"
+      },
+      "backend": {
+        "status": "not_compiled_or_tested_after_changes",
+        "reason": "active coordinator resource hold",
+        "database_url": "mongodb://127.0.0.1:29237/?replicaSet=artifacts2037",
+        "database_isolation": "managed unique test databases",
+        "required_threads": 1,
+        "required_cargo_config": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml"
+      },
+      "prettier": {
+        "status": "passed",
+        "scope": "all new frontend feature files, browser test and isolated config"
+      },
+      "diff_check": {
+        "status": "passed",
+        "command": "git diff --check"
+      },
+      "A-002": {
+        "status": "prepared_not_run",
+        "reason": "active coordinator backend resource hold; no Cargo/rustc/build/backend-test command launched or queued",
+        "tests": [
+          "generated_summary_selects_metadata_and_discards_process_streams",
+          "generated_artifact_persisted_summary_and_input_context_exclude_process_streams"
+        ],
+        "coverage": "Path/content/secret markers excluded from parsed and persisted decrypted summary, admitted Event model context, and older saved generated-summary context; exact metadata shape, wire type, body bound and legacy handling preserved."
+      },
+      "A-003": {
+        "status": "prepared_not_run",
+        "reason": "active coordinator backend resource hold; no Cargo/rustc/build/backend-test command launched or queued",
+        "test": "generated_artifact_worker_fences_lifecycle_version_across_result_fetch",
+        "coverage": "Version 1->2, 1->absent and absent->1 reject with no artifact/attachment rows, manifest or encrypted summary. Stable 1->1, 2->2 and absent->absent preserve canonical byte identity and diagnostic version. All cases assert exact operation-scoped one-result/two-status calls. Parser also rejects malformed present version values."
+      }
+    },
+    "user_amendment": "Astra-Sol personal implementation; Opus gates superseded. No reviewer or subagent created, called or awaited.",
+    "astra_plan_approval": "ASTRA_PLAN_APPROVED for exact v4 SHA 7f5226f241b7a826c58be216f12dd4416471a48d91e67e4ed65871b811bd8493.",
+    "sol_runtime_settings_observed": {
+      "agent_id": "01a17afe-64ad-7ed1-bd1f-8b75d719d9f9",
+      "session_id": "01a17afe-64ad-7ed1-bd1f-8b98e1a1ec1a",
+      "provider_session_id": "01a17afe-665a-7d11-aa64-ebac87a34a20",
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "xhigh",
+      "mode": "full-access",
+      "thinking_option": "x_high",
+      "worktree_id": "01a17a96-a542-7c40-ac74-8a2076acc0a3",
+      "cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts",
+      "state_at_observation": "running",
+      "observed_via": "heca_agent_status"
+    },
+    "fixture_verification": {
+      "manifest": "backend/tests/fixtures/generated-artifacts/README.md",
+      "baseline_ffprobe": "h264 Constrained Baseline, 160x96, yuv420p, 1.000000 seconds",
+      "high_profile": "h264 High download-only fixture; parser test prepared"
+    },
+    "live_acceptance": {
+      "status": "open",
+      "journey_run": false,
+      "blocking_state": "Backend implementation build/test window held. No verified feature build deployed for this journey. In-app browser skill requires Node REPL js/browser-client; available tool inventory has no Node REPL js or tool_search. No alternative browser transport used.",
+      "account_authentication_status": "not determined; no live navigation attempted"
+    },
+    "personal_source_inspection": {
+      "status": "source_only_no_compile_or_execution_claim",
+      "scope": [
+        "A-003 snapshot comparison precedes pending persistence; exact operation and canonical byte identity preserved",
+        "Recovery policy and generated attachment availability use the transaction session and write fences",
+        "Generated owner HTTP keeps weighted reservation with the actual Bytes owner through response slices/clones",
+        "No extra plaintext copy in read_attachment: protected buffer is moved out with mem::take",
+        "Legacy tool/user-upload HTTP policy is preserved by origin",
+        "Generated model attachment listing uses fixed label and filters user_upload only",
+        "Direct and wrapped recovery retain the same owner action gate and fixed audit payload",
+        "Read-only sibling automation overlap: Web artifact admission provenance, exact completion-event binding, trigger continuation event selection, Stop cancellation ordering, and pending-row transaction lifecycle."
+      ],
+      "new_concrete_source_findings": [],
+      "automation_overlap_review": {
+        "status": "no_artifact_defect_found; combined_acceptance_required",
+        "sibling_worktree": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-automation",
+        "admission_boundary": "artifact_mode is written only for original TurnOrigin::User WebOnly delivery with channel/group/voice/invocation/trigger provenance absent",
+        "consumption_boundary": "bind_in_session requires the exact server-created completion event ID, original user turn, one async completion event, owner/conversation lineage, and saved Web provenance",
+        "automation_boundary": "protocol-v2 trigger continuation consumes only matching trigger_run_id events; Stop removes trigger state before shared async cancellation removes artifact pending rows and the matching async event",
+        "materializing_state": "cleanup-only and unreachable because attachment insert plus pending-to-materialized transition are one transaction",
+        "combined_test_obligation": "exercise coexistence, exact event selection, Stop cancellation, and no trigger recovery/materialization after sibling integration"
+      }
+    }
+  },
+  "implementation_status": "Source changes and frontend verification prepared; Astra personal source review has no open artifact defect; A-002 and A-003 resolved after inspection with regressions prepared; backend validation held by coordinator; combined automation-overlap acceptance and live acceptance remain open.",
+  "updated_at": "2026-10-27T03:26:33.093318Z",
+  "resource_hold": {
+    "active": true,
+    "explicit_release_received": false,
+    "terminated_pids_confirmed_absent": [
+      99540,
+      15898,
+      15937
+    ],
+    "cargo_target_dir": "/Users/chronoai/Desktop/projects/nyxid/target",
+    "cargo_build_jobs": 2,
+    "normal_cargo_locking_required": true,
+    "shared_target_locks_and_caches_preserved": true,
+    "commands_queued": false,
+    "allowed_work": [
+      "source",
+      "direct rustfmt",
+      "frontend checks",
+      "fixtures",
+      "documentation",
+      "test preparation"
+    ],
+    "latest_artifacts_worktree_cargo_rustc_processes": [],
+    "other_worktree_processes_left_untouched": "Cargo/rustc observed under the nyxid-permissions coordinator runner; left untouched.",
+    "designated_retry_stream": "Telegram only; artifacts remains HOLD",
+    "required_cargo_config": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+    "required_cargo_argument_order": "cargo --config <required_cargo_config> <subcommand>",
+    "resource_config_observed": {
+      "profile": {
+        "dev": {
+          "package": {
+            "nyxid": {
+              "debug": 0,
+              "incremental": false
+            }
+          }
+        },
+        "test": {
+          "package": {
+            "nyxid": {
+              "debug": 0,
+              "incremental": false
+            }
+          }
+        }
+      }
+    },
+    "resource_config_sha256": "b2c2c52277e36fde7ab2b01ea7746e9fdcd811e8eba833ebccefc748439fd277",
+    "independent_profile_changes_or_extra_flags": false,
+    "stream_cleanup_authorized": false,
+    "coordinator_reported_recovery": "Fourth exact cleanup reclaimed 16.49 GiB; 23.40 GiB free. This is not release of the artifacts window."
+  },
+  "findings_addressed_in_source": {
+    "range_policy": "206 for one satisfiable range; 416 with bytes */size only for a valid unsatisfiable single range; unsupported/malformed/multi-header/multi-range ignored with 200. Arbitrary-length decimal positions use saturating arithmetic plus full decimal ordering, so huge starts are unsatisfiable and huge ends/suffixes remain satisfiable. Focused parser and owner-response cases prepared, unrun.",
+    "delivery_lineage_idempotence": "Exact saved event/watch/operation/source/original-turn/attachment lineage; unique watch/event identity, setOnInsert and typed exact readback. Duplicate settlement and conflicting lineage cases prepared.",
+    "transaction_reads": "Retention policy singleton and generated attachment metadata are read/fenced in the materialization/recovery session. Recovery fences conversation/watch/message state; tests cover abort rollback and nonterminal source refusal.",
+    "legacy_http": "Generated safe filename/disposition/octet-stream policy is scoped by origin. Tool documents, actual user text/image uploads and tool PNG/JPEG retain stored MIME plus exact inline. Regression and generated active-content response cases prepared.",
+    "audit": "Fixed-name assistant_mcp_tool_call request audit for direct MCP, wrapped MCP and HTTP; event data contains only tool_name/outcome/transport. Actor attribution uses existing audit service. Refusal audit test prepared.",
+    "storage_module": "Exactly one pub(crate) mod storage declaration at module top; GeneratedArtifact dispatch in verify/migrate matches. Both operator walk and finding lookup reserve shared budget and use a one-row generated-artifact batch. Compilation pending.",
+    "effective_expiry": "Association derives its deadline from persisted attachment expiry; recovery preserves the minimum and checks live retention/tombstones. History marks live-retention expiry. Shorter-normal-retention regression prepared.",
+    "native_owner_policy": "Direct and wrapped recovery share Change acknowledgement policy. Tool schema remains empty (maxProperties 0); approval uses server-written continuation/card and original initiating message. No client/model lineage IDs accepted. Integration case prepared.",
+    "A-002": {
+      "state": "RESOLVED_AFTER_INSPECTION",
+      "finding": "Generated-artifact stdout/stderr can contain file names, paths, bytes or secrets and must not enter model context.",
+      "fix": "Parser validates and discards stdout/stderr; encrypted summary contains only typed success, optional numeric exit code and verified file count. Generated input_context reconstructs a closed metadata schema and withholds older free-form summaries. Delivery state remains a separate server field. Unmarked legacy text and existing bounds remain.",
+      "inspection": "Personally inspected parser, summary encryption/persistence, input_context reconstruction, fixed generated attachment label and user-upload-only model listing.",
+      "regression_execution": "pending explicit coordinator backend resource release",
+      "ledger": "docs/plans/2026-10-27-artifacts-review.md"
+    },
+    "A-003": {
+      "state": "RESOLVED_AFTER_INSPECTION",
+      "finding": "Artifact worker validated both status snapshots but did not fence lifecycle version drift across result retrieval.",
+      "fix": "Compare optional before/after lifecycle tokens before persistence. Changed, added or removed tokens fail with artifact_source_changed. Malformed present tokens fail with artifact_invalid. Exact operation, canonical operation/metadata/byte-derived identity, expiry minimum, privacy, budget and legacy behavior are preserved.",
+      "inspection": "Personally inspected the equality fence before artifacts::persist, optional-token parser, identity hash, reservation scope, metadata-only context and unmarked legacy branch.",
+      "regression_execution": "pending explicit coordinator backend resource release",
+      "ledger": "docs/plans/2026-10-27-artifacts-review.md"
+    }
+  },
+  "changed_files": [
+    "backend/src/handlers/assistant_nyxagent.rs",
+    "backend/src/handlers/async_service_operation_tests.rs",
+    "backend/src/handlers/async_service_operations.rs",
+    "backend/src/handlers/generated_artifact_delivery_tests.rs",
+    "backend/src/handlers/mcp_attachment_upload_tests.rs",
+    "backend/src/handlers/mcp_config_routes_tests.rs",
+    "backend/src/handlers/mcp_transport.rs",
+    "backend/src/handlers/nyxbot_gateway_thread_tests.rs",
+    "backend/src/handlers/nyxbot_image_delivery_tests.rs",
+    "backend/src/models/assistant_attachment.rs",
+    "backend/src/models/assistant_conversation.rs",
+    "backend/src/models/async_service_operation.rs",
+    "backend/src/models/generated_artifact.rs",
+    "backend/src/models/mod.rs",
+    "backend/src/routes.rs",
+    "backend/src/services/assistant_acknowledgement_service.rs",
+    "backend/src/services/assistant_instruction_context.rs",
+    "backend/src/services/assistant_nyxagent.rs",
+    "backend/src/services/assistant_nyxagent_tests.rs",
+    "backend/src/services/assistant_record_service.rs",
+    "backend/src/services/assistant_upload_retention.rs",
+    "backend/src/services/assistant_upload_retention_tests.rs",
+    "backend/src/services/assistant_upload_service.rs",
+    "backend/src/services/assistant_upload_service/byte_budget.rs",
+    "backend/src/services/async_service_operation.rs",
+    "backend/src/services/encrypted_record_migration.rs",
+    "backend/src/services/feature_flag_service.rs",
+    "backend/src/services/generated_artifacts/http.rs",
+    "backend/src/services/generated_artifacts/mod.rs",
+    "backend/src/services/generated_artifacts/mp4.rs",
+    "backend/src/services/generated_artifacts/recovery.rs",
+    "backend/src/services/generated_artifacts/sandbox.rs",
+    "backend/src/services/generated_artifacts/storage.rs",
+    "backend/src/services/generated_artifacts/tests.rs",
+    "backend/src/services/machine_activity_service.rs",
+    "backend/src/services/machine_activity_tests.rs",
+    "backend/src/services/mcp_service.rs",
+    "backend/src/services/mod.rs",
+    "backend/src/services/org_group_service.rs",
+    "backend/src/services/personal_erasure_service/local.rs",
+    "backend/src/services/platform_manager_journey_tests/outbound.rs",
+    "backend/src/services/platform_personal_turn_tests.rs",
+    "backend/src/services/security_readiness_service.rs",
+    "backend/src/services/trigger_run_images_tests.rs",
+    "backend/tests/fixtures/generated-artifacts/README.md",
+    "backend/tests/fixtures/generated-artifacts/blue.jpg",
+    "backend/tests/fixtures/generated-artifacts/blue.png",
+    "backend/tests/fixtures/generated-artifacts/visual-avc.mp4",
+    "backend/tests/fixtures/generated-artifacts/visual-high.mp4",
+    "docs/API_DISCOVERY.md",
+    "docs/chat/03-stream-protocol.md",
+    "docs/chat/05-frontend-ui.md",
+    "docs/chat/08-nyxagent-engine.md",
+    "docs/chat/09-nyxbot-orchestrator.md",
+    "docs/chat/10-uploads.md",
+    "docs/plans/2026-10-27-artifacts-review.md",
+    "docs/plans/2026-10-27-artifacts-status.json",
+    "frontend/e2e/generated-artifacts.spec.ts",
+    "frontend/playwright.artifacts.config.ts",
+    "frontend/src/components/assistant/blocks/artifact-delivery.test.tsx",
+    "frontend/src/components/assistant/blocks/artifact-delivery.tsx",
+    "frontend/src/components/assistant/blocks/generated-attachment.test.tsx",
+    "frontend/src/components/assistant/blocks/generated-attachment.tsx",
+    "frontend/src/components/assistant/blocks/tool-image.tsx",
+    "frontend/src/components/assistant/chat-message.tsx",
+    "frontend/src/lib/assistant/attachment-errors.ts",
+    "frontend/src/lib/assistant/chat-types.ts",
+    "frontend/src/lib/assistant/nyxagent-transport.ts",
+    "frontend/src/schemas/assistant-nyxagent.ts"
+  ]
+}

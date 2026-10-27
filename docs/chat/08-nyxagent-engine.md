@@ -2035,3 +2035,35 @@ old records without retained proof remain excluded platform-wide candidates;
 confirmed assistant records without execution evidence have separate excluded
 costs. See [Billing analytics](../BILLING_ANALYTICS.md#nyxbot-model-usage) for the
 precise population, ranking, and coverage contract.
+
+## Generated Sandbox attachments
+
+The default-off personal flag `assistant:generated-artifacts` admits files only
+when a declared Sandbox submission is made in an owner Web user turn. Admission
+saves `artifact_mode: generated_artifact_v1` on the async watch, the original
+user turn, and Web-only delivery provenance. Channel, group, scheduled/event,
+trigger, invocation and voice destinations cannot opt into this mode. An old
+watch without the marker continues through the existing 16 KiB text path.
+Disabling the flag stops new admission; it does not prevent upgraded workers
+from draining an already admitted watch.
+
+Only the server-created completion Event whose event ID is that watch can
+materialize its files. The transaction checks owner, conversation, original
+user turn, saved completion turn, operation ID and verified source identity.
+It reads and fences the retention policy in the same transaction. Eight turn
+attachment slots remain the limit. Materialization inserts encrypted private
+attachments, appends their metadata to the active turn, and clears pending
+ciphertext atomically. Settlement copies the metadata to the assistant message
+and idempotently writes its exact recovery association before consuming the
+watch. A materialized association uses the minimum persisted attachment expiry;
+recovery fences current retention, source message state and attachment lineage
+in the same transaction. Async execution completion and attachment delivery are separate facts;
+only a materialized, currently readable attachment permits an attached/download
+claim. The bounded result context includes the server delivery state and count.
+
+History adds optional safe attachment filename, source, local `result_version`,
+preview kind and expiry, plus a message `artifact_delivery` state. Internal watch,
+operation and content-digest identifiers are never exposed as retrieval URLs.
+Legacy tool-image delivery and the live AG-UI media path retain their contracts.
+See [uploads](10-uploads.md#generated-result-storage-and-owner-delivery) for
+limits, encryption, recovery, retention and rollout.

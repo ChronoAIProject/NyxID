@@ -2773,6 +2773,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
         | "nyx__oracle_attach"
         | "nyx__oracle_extract" => (false, false, true),
         "nyx__resource_get" => (false, false, true),
+        "nyx__artifact_delivery" => (false, false, false),
         "nyx__call_tool" | "nyx__ssh_exec" => (false, true, true),
         _ => {
             let (service, endpoint) = resolve_tool_call(name, services)?;
@@ -2805,6 +2806,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
 pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
     let fixed = match name {
         "nyx__resource_get" => "Retrieve a source image",
+        "nyx__artifact_delivery" => "Recover the saved cloud result",
         "nyx__search_tools" => "Search service tools",
         "nyx__call_tool" => "Call a service tool",
         "nyx__connect_service" => "Connect a service",

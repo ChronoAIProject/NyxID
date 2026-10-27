@@ -340,6 +340,7 @@ async fn manager_outbound_revalidates_stop_after_an_accepted_prefix() {
 async fn attach(j: &Journey, saved: &mut AssistantMessage, mime: &str, bytes: &[u8]) -> String {
     let id = uuid::Uuid::new_v4().to_string();
     let mut attachment = crate::models::assistant_attachment::AssistantAttachment {
+        artifact: Default::default(),
         secret_context_versions: Default::default(),
         id: id.clone(),
         user_id: j.owner.clone(),
@@ -374,6 +375,7 @@ async fn attach(j: &Journey, saved: &mut AssistantMessage, mime: &str, bytes: &[
     saved
         .attachments
         .push(crate::models::assistant_conversation::TurnAttachment {
+            artifact: Default::default(),
             id: id.clone(),
             origin: "tool".into(),
             content_type: mime.into(),

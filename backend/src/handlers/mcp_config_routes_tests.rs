@@ -247,6 +247,15 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
         definitions.push(crate::services::assistant_upload_service::definition());
         definitions.push(crate::services::assistant_upload_service::list_definition());
         definitions.push(crate::services::assistant_nyxagent::conversation_history_definition());
+        if !chat.platform_thread
+            && !chat.invocation_controlled
+            && chat.turn_live
+            && !chat.turn_stopped
+            && chat.channel_adapter_origin.is_none()
+            && chat.org_agent_access.is_none()
+        {
+            definitions.push(crate::services::generated_artifacts::recovery_definition());
+        }
     }
     if auth
         .chat

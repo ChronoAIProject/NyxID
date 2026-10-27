@@ -392,7 +392,8 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
             | "attachment_read"
             | "machine_list"
             | "saved_logins" => Read,
-            "connect_service" | "oracle_ask" | "oracle_attach" | "oracle_extract" => Change,
+            "connect_service" | "oracle_ask" | "oracle_attach" | "oracle_extract"
+            | "artifact_delivery" => Change,
             // A wrapped service call is classified from the operation it reaches.
             "call_tool" => Read,
             "ssh_exec" => Destructive,
