@@ -120,7 +120,8 @@ async fn ingress_correlated_inner(
                     .key,
                 &b.account_id,
             )?;
-            protocol::verify_twilio(
+            protocol::verify_twilio_configured(
+                &state.config,
                 headers,
                 &send
                     .map(|id| format!("{}/sms-receipts/{id}", webhook_url(&state, &b)))
@@ -788,7 +789,12 @@ pub async fn authenticate_socket(
     let r = binding::live(state, b).await?;
     if b.profile == Profile::TwilioRelay {
         let (_, secret) = protocol::twilio_key(&r.key, &b.account_id)?;
-        protocol::verify_twilio_upgrade(headers, &websocket_url(state, b, s, raw)?, secret)?;
+        protocol::verify_twilio_upgrade_configured(
+            &state.config,
+            headers,
+            &websocket_url(state, b, s, raw)?,
+            secret,
+        )?;
     }
     carrier::prove_call(state, b, &r, &s.provider_call_id, &s.from, &s.to).await?;
     Ok(())

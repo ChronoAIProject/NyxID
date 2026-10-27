@@ -80,6 +80,7 @@ pub async fn upload_tool(
             actor,
             first_party_human: true,
             admin_required: super::services_helpers::is_admin(&state, &auth).await?,
+            catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
             catalog_base_url: state.config.base_url.clone(),
         },
         &mongodb::bson::doc! {"icon_url":&icon_url,"updated_at":mongodb::bson::DateTime::now()},

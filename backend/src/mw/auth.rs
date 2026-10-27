@@ -800,11 +800,14 @@ pub(crate) async fn validate_dpop_bound_access(
         .ok_or_else(|| AppError::Unauthorized("DPoP proof required".to_string()))?
         .to_str()
         .map_err(|_| AppError::Unauthorized("invalid DPoP proof".to_string()))?;
-    let expected_htu =
-        crate::crypto::dpop::htu_from_base_and_path(&state.config.base_url, parts.uri.path())?;
-    let proof_jkt =
-        crate::crypto::dpop::validate_proof(proof, parts.method.as_str(), &expected_htu, &state.db)
-            .await?;
+    let proof_jkt = crate::crypto::dpop::validate_configured_proof(
+        proof,
+        parts.method.as_str(),
+        parts.uri.path(),
+        &state.config,
+        &state.db,
+    )
+    .await?;
     if proof_jkt != expected_jkt {
         return Err(AppError::Unauthorized("DPoP cnf mismatch".to_string()));
     }

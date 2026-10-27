@@ -55,7 +55,7 @@ pub async fn get_operation_catalog(
         .await?
         .ok_or_else(invalid_catalog_authority)?;
 
-    if !grant_matches_token(&grant, &auth_user) {
+    if !grant_matches_token(&grant, &auth_user, &state.config) {
         return Err(invalid_catalog_authority());
     }
 
@@ -133,7 +133,11 @@ fn require_catalog_authority(auth_user: &AuthUser) -> AppResult<&str> {
 /// token whose claims have diverged from it is treated as invalid rather than
 /// reconciled. Missing actor/receiving client identity is also a rejection —
 /// a delegated token without both is never a valid catalog caller.
-fn grant_matches_token(grant: &CatalogDelegationGrant, auth_user: &AuthUser) -> bool {
+fn grant_matches_token(
+    grant: &CatalogDelegationGrant,
+    auth_user: &AuthUser,
+    config: &crate::config::AppConfig,
+) -> bool {
     let (Some(actor_client_id), Some(receiving_client_id)) = (
         auth_user.acting_client_id.as_deref(),
         auth_user.oauth_client_id.as_deref(),
@@ -145,7 +149,10 @@ fn grant_matches_token(grant: &CatalogDelegationGrant, auth_user: &AuthUser) -> 
         && grant.actor_client_id == actor_client_id
         && grant.receiving_client_id == receiving_client_id
         && grant.scope == auth_user.scope
-        && grant.resources == auth_user.resource_uris.clone().unwrap_or_default()
+        && config.resources_equal(
+            &grant.resources,
+            auth_user.resource_uris.as_deref().unwrap_or_default(),
+        )
         && grant.allow_all_services == auth_user.allow_all_services
         && grant.allowed_service_ids == auth_user.allowed_service_ids
         && grant.allow_all_nodes == auth_user.allow_all_nodes
@@ -4817,9 +4824,28 @@ mod tests {
     }
 
     #[test]
+    fn domain_alias_catalog_grant_preserves_every_non_url_restriction() {
+        let mut config = crate::test_utils::test_app_config();
+        config.base_url = "https://new.example".into();
+        let mut auth = catalog_auth(AuthMethod::Delegated);
+        auth.resource_uris = Some(vec!["https://new.example/mcp".into()]);
+        let mut grant = matching_grant(&auth);
+        grant.resources = vec!["https://old.example/mcp".into()];
+        assert!(!grant_matches_token(&grant, &auth, &config));
+        config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        assert!(grant_matches_token(&grant, &auth, &config));
+        grant.allow_all_nodes = !grant.allow_all_nodes;
+        assert!(!grant_matches_token(&grant, &auth, &config));
+    }
+
+    #[test]
     fn grant_agreeing_on_every_bound_field_is_accepted() {
         let auth = catalog_auth(AuthMethod::Delegated);
-        assert!(grant_matches_token(&matching_grant(&auth), &auth));
+        assert!(grant_matches_token(
+            &matching_grant(&auth),
+            &auth,
+            &crate::test_utils::test_app_config()
+        ));
     }
 
     #[test]
@@ -4873,7 +4899,7 @@ mod tests {
             let mut grant = matching_grant(&auth);
             mutate(&mut grant);
             assert!(
-                !grant_matches_token(&grant, &auth),
+                !grant_matches_token(&grant, &auth, &crate::test_utils::test_app_config()),
                 "drift in `{field}` was accepted; catalog authority must fail closed"
             );
         }
@@ -4892,7 +4918,7 @@ mod tests {
                 "oauth_client_id"
             };
             assert!(
-                !grant_matches_token(&grant, &auth),
+                !grant_matches_token(&grant, &auth, &crate::test_utils::test_app_config()),
                 "missing `{dropped}` must fail closed"
             );
         }
