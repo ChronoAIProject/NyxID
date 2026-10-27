@@ -1,0 +1,46 @@
+name: CI Cache Maintenance
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/actions/ci-rust-cache/action.yml
+      - .github/scripts/cache_budget.py
+      - .github/workflows/cache-maintenance.yml
+      - .github/workflows/ci.yml
+      - .github/workflows/backend-tests.yml
+  schedule:
+    - cron: '25 */6 * * *'
+  workflow_run:
+    workflows: [CI, Publish Images]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ci-cache-maintenance
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-24.04
+    # Run trusted main code only; never consume an upstream artifact or PR code.
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Remove retired Docker caches and superseded CI generations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --repo "$GITHUB_REPOSITORY" --limit 10000 \
+            --json id,key,ref,sizeInBytes,createdAt,lastAccessedAt > "$RUNNER_TEMP/caches.json"
+          python3 .github/scripts/cache_budget.py "$RUNNER_TEMP/caches.json" \
+            --repo "$GITHUB_REPOSITORY" --apply | tee -a "$GITHUB_STEP_SUMMARY"

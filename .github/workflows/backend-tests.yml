@@ -19,6 +19,7 @@ env:
   SHARD_COUNT: 4
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   # libtest runs each #[tokio::test] body on a 2 MiB thread by default. Debug
   # builds keep a slot for every temporary of a long async test on that stack
@@ -44,10 +45,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: ${{ inputs.coverage && 'llvm-tools-preview' || '' }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/ci-rust-cache
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
-          key: ${{ inputs.coverage && 'coverage-backend' || 'backend' }}
+          shared-key: ${{ inputs.coverage && 'coverage-backend-build' || 'backend-build' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: ${{ inputs.coverage && 'cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146' || 'cargo-nextest@0.9.146' }}

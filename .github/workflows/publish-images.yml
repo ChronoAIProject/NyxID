@@ -151,11 +151,10 @@ jobs:
           # Image layer caches exceed the shared 10 GB Actions cache budget and
           # evicted the Rust release caches, so every component now writes a
           # per-platform registry cache (backend did first). Only this trusted
-          # publish workflow writes it. Keep the old Actions cache as a
-          # read-only import fallback during the transition.
+          # publish workflow writes it. Imports use the registry exclusively so
+          # retired Actions cache indexes cannot reference pruned blobs.
           cache-from: |
             type=registry,ref=${{ steps.repo.outputs.image }}:buildcache-${{ matrix.platform_pair }}
-            type=gha,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
           cache-to: type=registry,ref=${{ steps.repo.outputs.image }}:buildcache-${{ matrix.platform_pair }},mode=max,ignore-error=true
           provenance: false
 

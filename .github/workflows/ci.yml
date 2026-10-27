@@ -32,6 +32,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
+  # Preserve file/line diagnostics while shrinking compiled dependency caches.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 # Backend test and coverage jobs start an explicit single-node replica set and use this
 # authoritative URI. Multi-document transaction tests must never fall back to a
@@ -272,9 +275,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/ci-rust-cache
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
+          shared-key: permissions-test
       - run: cargo fmt -p nyxid-permissions --check
       - run: cargo clippy -p nyxid-permissions --all-targets --locked -- -D warnings
       - run: cargo test -p nyxid-permissions --locked
@@ -403,9 +406,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/ci-rust-cache
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
+          shared-key: rust-clippy
       - name: Check Clippy with resource samples
         run: python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --all-targets -- -D warnings
 
@@ -442,10 +445,10 @@ jobs:
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/ci-rust-cache
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
-          key: backend-billing-smoke
+          shared-key: backend-build
+          save-if: 'false'
       - name: Billing route coverage smoke
         run: python3 .github/scripts/ci_resources.py billing-smoke cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
       - name: Test MongoDB diagnostics
@@ -478,10 +481,9 @@ jobs:
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/ci-rust-cache
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
-          key: backend-image-inputs
+          shared-key: backend-image-inputs-backend-image-inputs
       - name: Check dependency recipe invariants
         run: python3 scripts/test-docker-dependency-recipe.py
       - name: Build backend image binary
@@ -521,11 +523,10 @@ jobs:
           push: false
           cache-from: |
             type=registry,ref=${{ steps.backend-cache.outputs.ref }}
-            type=gha,scope=backend-pr-linux-amd64
-            type=gha,scope=backend-linux-amd64
-          # Import only: even mode=min GHA export stalled for ~40 minutes after
-          # compilation in #2052. Trusted publishing retains compiler layers in
-          # the registry; PRs neither overwrite it nor add Actions cache storage.
+          # Import only from the registry: even mode=min GHA export stalled for
+          # ~40 minutes after compilation in #2052. Trusted publishing retains
+          # compiler layers in the registry; PRs neither overwrite it nor use
+          # Actions cache storage.
           provenance: false
 
   # ---------------------------------------------------------------------------
@@ -544,6 +545,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v4
+      - name: Locate published machine build cache
+        id: machine-cache
+        shell: bash
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "ref=ghcr.io/${owner}/nyxid/nyxid-node-machine:buildcache-linux-amd64" >> "$GITHUB_OUTPUT"
       - name: Build machine image
         uses: docker/build-push-action@v7
         with:
@@ -551,8 +558,9 @@ jobs:
           file: cli/Dockerfile.machine
           load: true
           tags: nyxid-node-machine:ci
-          cache-from: type=gha,scope=machine-pr
-          cache-to: type=gha,mode=max,scope=machine-pr
+          cache-from: |
+            type=registry,ref=${{ steps.machine-cache.outputs.ref }}
+          # Import only: registry publishing retains the full compiler layers.
       - name: Verify sandbox, isolation, saved logins, takeover and live desktop
         run: |
           docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:ci -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
@@ -590,10 +598,9 @@ jobs:
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/ci-rust-cache
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
-          key: cli
+          shared-key: cli-cli-test
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.146
@@ -656,10 +663,9 @@ jobs:
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/ci-rust-cache
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
-          key: features-${{ matrix.cache-suffix }}
+          shared-key: features-${{ matrix.cache-suffix }}-rust-features
       - name: Build with --features ${{ matrix.features }}
         run: python3 .github/scripts/ci_resources.py features-${{ matrix.cache-suffix }} cargo build -p nyxid --features ${{ matrix.features }}
       - name: Upload resource samples
@@ -752,10 +758,10 @@ jobs:
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/ci-rust-cache
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
-          key: wizard-freshness
+          shared-key: cli-cli-test
+          save-if: 'false'
       - name: Verify wizard bundle freshness
         run: cargo test -p nyxid-cli --test wizard_bundle_freshness
 
@@ -947,10 +953,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/ci-rust-cache
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/rollup-') }}
-          key: coverage-cli
+          shared-key: coverage-cli-coverage-cli
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov@0.9.1
