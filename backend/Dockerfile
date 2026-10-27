@@ -3,8 +3,12 @@ FROM rust:1.93-bookworm AS builder
 
 WORKDIR /build
 
-# Bound simultaneous compiler work in both backend release builds.
-ENV CARGO_BUILD_JOBS=1
+# Keep native amd64/arm64 builds bounded while allowing two compiler jobs.
+# CI prepares 24 GiB total swap for the large server crate. Small builders can
+# override this to 1; Cargo's default would otherwise use every available CPU.
+ARG CARGO_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+ENV CARGO_INCREMENTAL=0
 
 # Copy workspace manifests and lock file for dependency caching.
 # `cloud-auth/` (NyxID#716) and `nyxid-crypto/` (NyxID#773) are workspace
@@ -39,7 +43,7 @@ RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs \
     && mkdir -p machine/src && echo "" > machine/src/lib.rs \
     && mkdir -p machine-updater/src && echo "fn main() {}" > machine-updater/src/main.rs \
     && echo "" > machine-updater/src/lib.rs
-RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
+RUN cargo build --locked --release --manifest-path backend/Cargo.toml --bin nyxid-server --features gcp-kms
 
 # Remove the dummy build artifacts (forces recompilation of our code only).
 # Drop the cloud-auth artifacts too so its real source is recompiled.
@@ -86,12 +90,10 @@ COPY integrations/oracle/cdp-worker/worker.mjs integrations/oracle/cdp-worker/wo
 # Touch entry points so cargo sees them as newer than the cached dummies.
 RUN touch backend/src/main.rs cloud-auth/src/lib.rs service-adapters/src/lib.rs machine/src/lib.rs machine-updater/src/lib.rs permissions/src/lib.rs
 
-# Build the real binary
-# Scope the per-commit identity to the application build. Declaring it before
-# dependency compilation invalidates that expensive layer on every commit.
-ARG NYXID_GIT_HASH=unknown
-ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
-RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
+# Build the real binary without a per-commit input. The runtime stage stamps
+# /health below; unchanged Rust/embedded inputs reuse this entire layer even
+# when the release commit changes. .git is excluded from the build context.
+RUN cargo build --locked --release --manifest-path backend/Cargo.toml --bin nyxid-server --features gcp-kms
 
 # The standalone page is served by the backend with its own SRI-bound CSP.
 # Keep the Node/lockfile/source/epoch inputs identical to the frontend build.
@@ -138,5 +140,10 @@ VOLUME ["/var/lib/nyxid/tuf"]
 USER nyxid
 
 EXPOSE 3001
+
+# Image identity must not invalidate either Cargo build. Non-container builds
+# retain the build.rs fallback; the credential page keeps its own release stamp.
+ARG NYXID_GIT_HASH=unknown
+ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
 
 ENTRYPOINT ["nyxid-server"]

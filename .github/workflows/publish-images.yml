@@ -76,6 +76,8 @@ jobs:
           - component: backend
             context: .
             file: backend/Dockerfile
+            # Same bounded concurrency as the PR smoke build, on both arches.
+            cargo_build_args: CARGO_BUILD_JOBS=2
           - component: frontend
             # Repo-root context (not frontend/): the frontend image needs the
             # docs source at docs/site, read by the vite docs-sync publish-gate
@@ -144,6 +146,7 @@ jobs:
           # build-args for telemetry are needed here.
           build-args: |
             NYXID_GIT_HASH=${{ steps.git.outputs.hash }}
+            ${{ matrix.cargo_build_args }}
           outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           # Image layer caches exceed the shared 10 GB Actions cache budget and
           # evicted the Rust release caches, so every component now writes a

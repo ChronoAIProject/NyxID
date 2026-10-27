@@ -54,12 +54,20 @@ pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse>
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        commit: env!("NYXID_GIT_HASH").to_string(),
+        commit: reported_commit(std::env::var("NYXID_GIT_HASH").ok()),
         encryption: EncryptionHealthResponse {
             previous_key_configured: state.encryption_keys.has_previous(),
             decrypt_stats: state.encryption_keys.decrypt_stats(),
         },
     })
+}
+
+/// Container releases stamp this after compilation. Standalone binaries keep
+/// their build.rs identity when there is no nonempty runtime override.
+fn reported_commit(runtime: Option<String>) -> String {
+    runtime
+        .filter(|commit| !commit.is_empty())
+        .unwrap_or_else(|| env!("NYXID_GIT_HASH").to_owned())
 }
 
 #[derive(Serialize)]
@@ -161,6 +169,16 @@ pub async fn public_config(State(state): State<AppState>) -> AppResult<Json<Publ
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_commit_prefers_runtime_stamp_and_preserves_standalone_fallback() {
+        assert_eq!(
+            reported_commit(Some("runtime-release".into())),
+            "runtime-release"
+        );
+        assert_eq!(reported_commit(None), env!("NYXID_GIT_HASH"));
+        assert_eq!(reported_commit(Some(String::new())), env!("NYXID_GIT_HASH"));
+    }
 
     // ---- HealthResponse serialization ----
 
