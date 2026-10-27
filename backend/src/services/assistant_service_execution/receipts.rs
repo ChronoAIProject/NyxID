@@ -95,8 +95,10 @@ impl Decision {
         approval: Option<HttpApprovalReceipt>,
     ) -> futures::future::BoxFuture<'static, axum::response::Response> {
         let head = method == "HEAD";
-        let activity = crate::services::machine_activity_service::activity_id();
         Box::pin(async move {
+            // Read on first poll, which runs inside the tool call's activity
+            // scope; the body's EOF (and the receipt) come after it has ended.
+            let activity = crate::services::machine_activity_service::activity_id();
             let Some(chat) = chat else {
                 return response;
             };
