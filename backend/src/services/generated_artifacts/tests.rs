@@ -184,6 +184,23 @@ fn sandbox_files_contract_and_structured_visual_track_validation() {
     for end in [32, fragmented.len() - 1] {
         assert!(mp4::validate(&fragmented[..end]).is_err());
     }
+    let mixed = include_bytes!("../../../tests/fixtures/generated-artifacts/visual-mixed.mp4");
+    assert_eq!(mp4::validate(mixed), Ok(false));
+    assert_eq!(
+        sandbox::parse(&body("mixed.mp4", mixed), "op")
+            .unwrap()
+            .files[0]
+            .preview,
+        "download"
+    );
+    // Genuine encoder output contains both classic and fragmented samples;
+    // malformed extents in either half must still reject the whole container.
+    for kind in [b"stco", b"trun"] {
+        let mut damaged = mixed.to_vec();
+        let offset = damaged.windows(4).position(|b| b == kind).unwrap() + 4;
+        damaged[offset + 8..offset + 12].copy_from_slice(&i32::MAX.to_be_bytes());
+        assert!(mp4::validate(&damaged).is_err());
+    }
     let mut high_tampered = high.to_vec();
     let offset = high_tampered.windows(4).position(|b| b == b"avcC").unwrap() + 4;
     high_tampered[offset + 1] = 66; // A profile byte alone is not codec proof.

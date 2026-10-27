@@ -522,7 +522,12 @@ pub fn validate(data: &[u8]) -> Checked<bool> {
             visual: handler == b"vide",
         });
         if fragmented {
-            empty_samples(&stbl)?;
+            if u32_at(one(&stbl, b"stsz")?.data, 8)? == 0 {
+                empty_samples(&stbl)?;
+            } else {
+                // Fragmented containers may retain genuine initial samples.
+                samples(&stbl, &top, data, entries.len())?;
+            }
         }
         if handler != b"vide" {
             continue;
