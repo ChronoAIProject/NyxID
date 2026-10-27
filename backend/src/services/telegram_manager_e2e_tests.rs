@@ -1014,3 +1014,427 @@ async fn telegram_new_creation_recovery_http_authentication_and_middleware_bound
     );
     task.abort();
 }
+
+mod production_router_recovery {
+    use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+        response::Response,
+    };
+    use tower::ServiceExt;
+
+    fn production_router(state: crate::AppState) -> Router {
+        crate::routes::build_router_with_state(state.clone())
+            .1
+            .with_state(state)
+    }
+
+    async fn post_recovery(
+        app: &Router,
+        endpoint: &str,
+        credential: Option<(&str, &str)>,
+        body: Body,
+    ) -> Response {
+        let mut request = Request::builder().method("POST").uri(endpoint);
+        if let Some((header, value)) = credential {
+            request = request.header(header, value);
+        }
+        app.clone()
+            .oneshot(request.body(body).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn assert_denied(
+        response: Response,
+        status: StatusCode,
+        error: &str,
+        code: u32,
+        credential_type: Option<&str>,
+        protected: &[&str],
+    ) {
+        assert_eq!(response.status(), status);
+        let bytes = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        // Boolean-only diagnostics: never print a response or credential if a
+        // disclosure regression puts private material in an unexpected field.
+        assert!(body["error"] == error, "unexpected refusal category");
+        assert!(body["error_code"] == code, "unexpected refusal code");
+        assert!(body.get("creation_url").is_none());
+        assert!(body.get("request").is_none());
+        if let Some(credential_type) = credential_type {
+            assert!(body["details"]["reason"] == "credential_type_unsupported");
+            assert!(body["details"]["credential_type"] == credential_type);
+            assert!(body["details"]["accepted"] == json!(["user_session"]));
+        }
+        let text = std::str::from_utf8(&bytes).unwrap();
+        for value in protected {
+            assert!(
+                !text.contains(value),
+                "refusal disclosed protected fixture material"
+            );
+        }
+    }
+
+    async fn saved_request(state: &crate::AppState, id: &str) -> bson::Document {
+        state
+            .db
+            .collection::<bson::Document>(REQUESTS)
+            .find_one(doc! {"_id": id})
+            .await
+            .unwrap()
+            .expect("the seeded request must remain present")
+    }
+
+    async fn assert_effects(
+        state: &crate::AppState,
+        server: &MockServer,
+        id: &str,
+        expected: &bson::Document,
+        provider_calls: usize,
+    ) {
+        assert!(
+            saved_request(state, id).await == *expected,
+            "unexpected request or recovery issuance mutation"
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(BOTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            provider_calls
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_new_creation_recovery_production_router_enforces_human_owner_boundary() {
+        // This fixture requires a real writable transaction-capable database;
+        // only the initial private Telegram handoff uses the local provider.
+        let (state, actor, server) = fixture().await;
+        let base = server.uri();
+        let service = service(&state, &base);
+        let (request, launch) = service
+            .begin(&actor, &actor, "Scoped recovery", true)
+            .await
+            .unwrap();
+        let challenge = reqwest::Url::parse(&launch)
+            .unwrap()
+            .query_pairs()
+            .find(|(key, _)| key == "start")
+            .unwrap()
+            .1
+            .into_owned();
+        webhook(
+            &service,
+            &headers(&state).await,
+            message(json!({"text": format!("/start {challenge}")})),
+        )
+        .await;
+        let bound = service.get(&actor, &request.id).await.unwrap();
+        assert_eq!(bound.status, Status::WaitingBot);
+        assert_eq!(bound.telegram_user_id, Some(700));
+        assert_eq!(bound.start_update_id, Some(1));
+        let before = saved_request(&state, &request.id).await;
+        let provider_calls = server.received_requests().await.unwrap().len();
+        assert_eq!(provider_calls, 2);
+
+        let foreign = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&foreign, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let owner_token = access_token(&state, &actor);
+        let foreign_token = access_token(&state, &foreign);
+        let expired_token = crate::crypto::jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &uuid::Uuid::parse_str(&actor).unwrap(),
+            "read write",
+            None,
+            Some(-3600),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let delegated_token = crate::crypto::jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &uuid::Uuid::parse_str(&actor).unwrap(),
+            "account:read",
+            "telegram-router-recovery",
+            600,
+            None,
+        )
+        .unwrap();
+        let key = crate::services::key_service::create_api_key(
+            &state.db,
+            &actor,
+            "recovery route credential",
+            "proxy",
+            None,
+            None,
+            Some(&[]),
+            Some(&[]),
+            Some(false),
+            Some(false),
+            Some(false),
+            None,
+            None,
+            Some("generic"),
+            None,
+        )
+        .await
+        .unwrap();
+        let (account, service_secret) =
+            crate::services::service_account_service::create_service_account(
+                &state.db,
+                "telegram-router-recovery",
+                None,
+                "proxy",
+                &[],
+                None,
+                &actor,
+            )
+            .await
+            .unwrap();
+        let service_token =
+            crate::services::service_account_service::authenticate_client_credentials(
+                &state.db,
+                &state.config,
+                &state.jwt_keys,
+                &account.client_id,
+                &service_secret,
+                Some("proxy"),
+            )
+            .await
+            .unwrap()
+            .access_token;
+        let relay_token = crate::crypto::jwt::generate_relay_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &uuid::Uuid::parse_str(&actor).unwrap(),
+            "proxy",
+            None,
+            &crate::crypto::jwt::RelayAgentScope {
+                api_key_id: key.id.clone(),
+                api_key_name: key.name.clone(),
+                allowed_service_ids: vec![],
+                allowed_node_ids: vec![],
+                allow_all_services: false,
+                allow_all_nodes: false,
+            },
+        )
+        .unwrap();
+        let owner = format!("Bearer {owner_token}");
+        let foreign = format!("Bearer {foreign_token}");
+        let expired = format!("Bearer {expired_token}");
+        let delegated = format!("Bearer {delegated_token}");
+        let api_key = format!("Bearer {}", key.full_key);
+        let service_account = format!("Bearer {service_token}");
+        let relay = format!("Bearer {relay_token}");
+        let protected = [
+            "t.me/",
+            "creation_url",
+            request.id.as_str(),
+            actor.as_str(),
+            "Scoped recovery",
+            challenge.as_str(),
+            MANAGER,
+            CHILD,
+            key.full_key.as_str(),
+            service_secret.as_str(),
+            owner_token.as_str(),
+            foreign_token.as_str(),
+            expired_token.as_str(),
+            delegated_token.as_str(),
+            service_token.as_str(),
+            relay_token.as_str(),
+            before.get_str("challenge_hash").unwrap(),
+        ];
+
+        // No test route, AuthUser extension, or credential rejection layer is
+        // substituted: these requests enter the actual production router.
+        let app = production_router(state.clone());
+        let endpoint = format!(
+            "/api/v1/channel-bots/telegram-new/requests/{}/creation-link",
+            request.id
+        );
+        for (credential, status, error, code, credential_type) in [
+            (None, StatusCode::UNAUTHORIZED, "unauthorized", 1001, None),
+            (
+                Some(("authorization", foreign.as_str())),
+                StatusCode::NOT_FOUND,
+                "not_found",
+                1003,
+                None,
+            ),
+            (
+                Some(("authorization", expired.as_str())),
+                StatusCode::UNAUTHORIZED,
+                "token_expired",
+                2001,
+                None,
+            ),
+            (
+                Some(("authorization", delegated.as_str())),
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                1002,
+                Some("delegated"),
+            ),
+            (
+                Some(("x-api-key", key.full_key.as_str())),
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                1002,
+                Some("api_key"),
+            ),
+            (
+                Some(("authorization", api_key.as_str())),
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                1002,
+                Some("api_key"),
+            ),
+            (
+                Some(("authorization", service_account.as_str())),
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                1002,
+                Some("service_account"),
+            ),
+            (
+                Some(("authorization", relay.as_str())),
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                1002,
+                Some("relay"),
+            ),
+        ] {
+            assert_denied(
+                post_recovery(&app, &endpoint, credential, Body::empty()).await,
+                status,
+                error,
+                code,
+                credential_type,
+                &protected,
+            )
+            .await;
+            assert_effects(&state, &server, &request.id, &before, provider_calls).await;
+        }
+        assert_denied(
+            post_recovery(
+                &app,
+                &endpoint,
+                Some(("authorization", &owner)),
+                Body::from("{}"),
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            1000,
+            None,
+            &protected,
+        )
+        .await;
+        assert_effects(&state, &server, &request.id, &before, provider_calls).await;
+
+        let response = post_recovery(
+            &app,
+            &endpoint,
+            Some(("authorization", &owner)),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+        let bytes = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body["request"]["id"] == request.id);
+        assert!(body["request"]["owner_user_id"] == actor);
+        assert!(body["request"]["label"] == "Scoped recovery");
+        assert!(body["request"]["status"] == "waiting_bot");
+        assert!(body["request"]["revision"] == bound.revision);
+        assert!(body["request"]["expires_at"] == bound.expires_at.to_rfc3339());
+        assert!(body["request"]["can_open_creation_form"] == true);
+        assert!(
+            body["creation_url"]
+                == "https://t.me/newbot/NyxSetupBot/scoped_recovery_bot?name=Scoped+recovery"
+        );
+        for field in [
+            "challenge_hash",
+            "consent_hash",
+            "creation_context",
+            "telegram_user_id",
+        ] {
+            assert!(body["request"].get(field).is_none());
+        }
+        let mut issued = before.clone();
+        issued.insert(
+            "creation_link_generation",
+            before.get_i64("creation_link_generation").unwrap_or(0) + 1,
+        );
+        assert_effects(&state, &server, &request.id, &issued, provider_calls).await;
+
+        // Expiring a request legitimately closes it in get()/expire(). Refuse
+        // issuance without mistaking that existing lifecycle write for a leak.
+        state.db.collection::<bson::Document>(REQUESTS).update_one(
+            doc! {"_id": &request.id},
+            doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}},
+        ).await.unwrap();
+        let mut expected_expired = saved_request(&state, &request.id).await;
+        assert_denied(
+            post_recovery(
+                &app,
+                &endpoint,
+                Some(("authorization", &owner)),
+                Body::empty(),
+            )
+            .await,
+            StatusCode::CONFLICT,
+            "conflict",
+            1004,
+            None,
+            &protected,
+        )
+        .await;
+        let expired = saved_request(&state, &request.id).await;
+        let purge_after = *expired.get_datetime("purge_after").unwrap();
+        assert!(purge_after.to_chrono() > Utc::now() + Duration::hours(23));
+        assert!(purge_after.to_chrono() < Utc::now() + Duration::hours(25));
+        expected_expired.insert("active", false);
+        expected_expired.insert("status", "expired");
+        expected_expired.insert("revision", issued.get_i64("revision").unwrap() + 1);
+        expected_expired.insert("purge_after", purge_after);
+        expected_expired.remove("consent_hash");
+        assert_effects(
+            &state,
+            &server,
+            &request.id,
+            &expected_expired,
+            provider_calls,
+        )
+        .await;
+        state.db.drop().await.unwrap();
+    }
+}
