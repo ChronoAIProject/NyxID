@@ -9,7 +9,6 @@
   "frozen_plan_path": "docs/plans/2026-10-27-automation-implementation.freeze-5e3469b2.md",
   "historical_plan_sha256": "0633146fbe464aa94fd6a3a98ba7c0a2b4ef0ce00da147bc5bc2741cbbfb96d4",
   "historical_frozen_plan_path": "docs/plans/2026-10-27-automation-implementation.freeze-0633146f.md",
-  "current_commit": "2434ffc8c",
   "user_amendment": "SUPERSEDES Opus plan and final implementation gates; pure Astra-Sol workflow authorized.",
   "opus": {
     "agent_id": "01a17aa2-d74e-7151-9efa-b40638c3befb",
@@ -39,15 +38,21 @@
     "mode": "full-access",
     "worktree_id": "01a17a96-a01b-7f10-a98b-646d494dc1d5",
     "notify_on_finish": true,
-    "gate": "IN_PROGRESS"
+    "gate": "SOURCE_DRAFT_LIGHTWEIGHT_CHECKED_BACKEND_DEFERRED"
   },
   "astra_review": "not_started",
   "final_opus_review": "SUPERSEDED_BY_USER",
   "remaining_acceptance": [
-    "Implement and verify every acceptance-matrix row",
-    "Astra personal code review with zero unresolved findings",
+    "Compile and execute the drafted Rust fixtures and focused regressions after the user relays a backend window",
+    "Complete open acceptance-matrix evidence, including webhook migration and performance measurements",
+    "Run required cargo clippy --all-targets --all-features -- -D warnings after focused tests",
+    "Astra personal complete-diff review with zero unresolved findings",
     "Resolve all Astra findings including nits through the same Sol session",
-    "Record ASTRA_IMPLEMENTATION_APPROVED for the exact final commit"
+    "Record ASTRA_IMPLEMENTATION_APPROVED only for the exact final accepted commit"
   ],
-  "ledger_path": "docs/plans/2026-10-27-automation-review.md"
+  "ledger_path": "docs/plans/2026-10-27-automation-review.md",
+  "plan_approval_commit": "2434ffc8c",
+  "implementation_diff_base": "87158b6623e7ba2dab0ca0adbc2a60753812ed5c",
+  "implementation_commit_reference": "The WIP automation #2040 handoff commit containing this status file; exact SHA is reported in the session handoff.",
+  "backend_verification": "NOT RUN: user reserved shared backend window for another stream; do not queue cargo check/test/build/clippy until explicitly cleared."
 }

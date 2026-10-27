@@ -473,6 +473,8 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             if row.pending_events.len()>=super::assistant_nyxagent::MAX_PENDING_EVENTS {return Ok(false);}
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
             let event = AgentEvent {
+                trigger_run_id: None,
+                continuation_protocol_version: 0,
                 media_event_ids: Vec::new(),
                 media_declared: None,
                 media_sent_at: None,
@@ -630,7 +632,7 @@ pub fn select_events(row: &mut AssistantConversation, origin: TurnOrigin) -> Vec
         && let Some(index) = row
             .pending_events
             .iter()
-            .position(|e| e.invocation_id.is_some())
+            .position(|e| e.invocation_id.is_some() && e.trigger_run_id.is_none())
     {
         // Exactly one async result per turn: its payload/delivery is selected
         // through event_id(), even when several results share an invocation.
@@ -645,21 +647,30 @@ pub fn select_events(row: &mut AssistantConversation, origin: TurnOrigin) -> Vec
         return selected;
     }
     if origin == TurnOrigin::Event
-        && let Some(index) = row.pending_events.iter().position(|e| e.kind == EVENT_KIND)
+        && let Some(index) = row
+            .pending_events
+            .iter()
+            .position(|e| e.kind == EVENT_KIND && e.trigger_run_id.is_none())
     {
         return vec![row.pending_events.remove(index)];
     }
     // One accepted source question per event turn. App/channel turns leave
     // these questions queued; system events retain their existing coalescing.
     if origin == TurnOrigin::Event
-        && let Some(index) = row.pending_events.iter().position(channel_question)
+        && let Some(index) = row
+            .pending_events
+            .iter()
+            .position(|e| channel_question(e) && e.trigger_run_id.is_none())
     {
         return vec![row.pending_events.remove(index)];
     }
     let (deferred, ordinary) = std::mem::take(&mut row.pending_events)
         .into_iter()
         .partition(|e: &AgentEvent| {
-            e.kind == EVENT_KIND || e.invocation_id.is_some() || channel_question(e)
+            e.kind == EVENT_KIND
+                || e.invocation_id.is_some()
+                || e.trigger_run_id.is_some()
+                || channel_question(e)
         });
     row.pending_events = deferred;
     ordinary

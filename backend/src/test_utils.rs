@@ -223,6 +223,9 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
     crate::services::assistant_access_policy::ensure_cutover(&db)
         .await
         .expect("initialize fresh test assistant cutover");
+    db.collection::<mongodb::bson::Document>("trigger_migrations").insert_one(
+        mongodb::bson::doc! {"_id":"continuation-v2","completed_at":mongodb::bson::DateTime::now()},
+    ).await.expect("initialize fresh automation migration marker");
     Some(db)
 }
 

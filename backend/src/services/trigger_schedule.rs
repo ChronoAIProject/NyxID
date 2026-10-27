@@ -1,6 +1,7 @@
 //! Trigger schedules: derived leased work, durable UUID-v5 occurrence identity,
 //! and admission fenced in the same transaction as an assistant turn.
 pub mod compute;
+pub mod continuation;
 pub mod result_delivery;
 use super::api_key_mutation_service as transactions;
 use super::assistant_engine_policy as policy;
@@ -175,6 +176,12 @@ pub async fn set_schedule_job(
 
 pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) -> TriggerRun {
     TriggerRun {
+        wait_kind: None,
+        coordinator_wait: None,
+        coordinator_deadline: Some((deadline + Duration::hours(1)).min(at + Duration::days(90))),
+        continuation_count: 0,
+        continuation_limit: 0,
+        continuation_protocol_version: 0,
         trigger_generation: None,
         dispatch_at: None,
         terminal_result_recorded: false,
@@ -254,6 +261,21 @@ pub(crate) async fn insert_run(
         .session(&mut *session)
         .await?;
     let mut run = run.clone();
+    if matches!(trigger.delivery, TriggerDelivery::Assistant { .. }) {
+        continuation::ready_in_session(db, session).await?;
+        let settings = db
+            .collection::<crate::models::assistant_settings::AssistantSettings>(
+                crate::models::assistant_settings::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": &run.user_id})
+            .session(&mut *session)
+            .await?
+            .unwrap_or_else(|| {
+                crate::models::assistant_settings::AssistantSettings::defaults(&run.user_id)
+            });
+        run.continuation_protocol_version = 2;
+        run.continuation_limit = settings.max_auto_continuations.clamp(0, 32) as u32;
+    }
     if outstanding > 0 && trigger.overlap == crate::models::trigger_schedule::OverlapPolicy::Skip {
         run.reason = Some("overlap_skip".into());
     } else if outstanding >= 2 {
@@ -618,6 +640,7 @@ async fn finish_update(
         ))
         .await?;
         run.terminal_result_recorded = true;
+        continuation::cleanup_in_session(db, run, session).await?;
     }
     Ok(run)
 }
@@ -778,11 +801,14 @@ pub fn admit_turn<'a>(
     claim: &'a TurnClaim,
     thread: &'a str,
     turn: &'a str,
+    origin: crate::models::assistant_conversation::TurnOrigin,
     session: &'a mut ClientSession,
 ) -> futures::future::BoxFuture<'a, AppResult<()>> {
     // Keep the schedule's transaction state out of the enclosing owner-turn
     // admission future, which also carries the assistant's authority fences.
-    Box::pin(admit_turn_inner(db, owner, claim, thread, turn, session))
+    Box::pin(admit_turn_inner(
+        db, owner, claim, thread, turn, origin, session,
+    ))
 }
 
 async fn admit_turn_inner(
@@ -791,6 +817,7 @@ async fn admit_turn_inner(
     claim: &TurnClaim,
     thread: &str,
     turn: &str,
+    origin: crate::models::assistant_conversation::TurnOrigin,
     session: &mut ClientSession,
 ) -> AppResult<()> {
     let now = Utc::now();
@@ -812,6 +839,37 @@ async fn admit_turn_inner(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("trigger_run_unavailable".into()))?;
+    use crate::models::{assistant_conversation::TurnOrigin, trigger_run::RunWaitKind};
+    let coordinator = claim.continuation && run.wait_kind == Some(RunWaitKind::Coordinator);
+    let expected_origin = if coordinator {
+        TurnOrigin::Event
+    } else {
+        TurnOrigin::Trigger
+    };
+    if origin != expected_origin || (claim.continuation && run.thread_id.as_deref() != Some(thread))
+    {
+        return Err(AppError::Conflict(
+            "trigger_continuation_identity_mismatch".into(),
+        ));
+    }
+    if coordinator {
+        if let Some(reason) = continuation::exhausted(&run, now) {
+            return Err(AppError::Conflict(reason.into()));
+        }
+        if run
+            .coordinator_wait
+            .as_ref()
+            .is_none_or(|w| w.thread_id != thread)
+            || run.trigger_generation != Some(claim.trigger_updated_at)
+        {
+            return Err(AppError::Conflict(
+                "trigger_continuation_identity_mismatch".into(),
+            ));
+        }
+        if db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME).find_one(doc!{"_id":thread,"user_id":owner,"pending_events":{"$elemMatch":{"trigger_run_id":&run.id,"continuation_protocol_version":2}}}).session(&mut *session).await?.is_none() {
+            return Err(AppError::Conflict("trigger_event_unavailable".into()));
+        }
+    }
     if db
         .collection::<Document>(WORK)
         .update_one(
@@ -843,6 +901,14 @@ async fn admit_turn_inner(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("trigger_paused".into()))?;
+    if matches!(trigger.delivery, TriggerDelivery::Assistant { .. }) {
+        continuation::ready_in_session(db, session).await?;
+        if run.continuation_protocol_version != 2 {
+            return Err(AppError::Conflict(
+                "automation_run_migration_required".into(),
+            ));
+        }
+    }
     let running = db
         .collection::<TriggerRun>(RUNS)
         .count_documents(doc! {
@@ -885,7 +951,7 @@ async fn admit_turn_inner(
     if !owner_row.user_type.is_person() {
         return Err(AppError::Forbidden("Automations belong to a person".into()));
     }
-    if !claim.continuation {
+    if !claim.continuation || coordinator {
         let settings = db
             .collection::<crate::models::assistant_settings::AssistantSettings>(
                 crate::models::assistant_settings::COLLECTION_NAME,
@@ -940,7 +1006,13 @@ async fn admit_turn_inner(
         "thread_id": thread,
         "turn_id": turn,
         "waiting_for": [],
+        "wait_kind": null,
+        "coordinator_wait": null,
     };
+    if coordinator {
+        set.insert("continuation_count", run.continuation_count + 1);
+        set.insert("coordinator_capacity_retry", false);
+    }
     if !claim.continuation {
         set.insert("trigger_generation", date(trigger.updated_at));
         set.insert("started_at", date(now));

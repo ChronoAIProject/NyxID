@@ -124,6 +124,9 @@ pub async fn create(
     encryption_keys: &EncryptionKeys,
     input: CreateInput,
 ) -> AppResult<CreatedTrigger> {
+    if matches!(input.delivery, TriggerDelivery::Assistant { .. }) {
+        schedules::continuation::ready(db, schedules::continuation::enabled()).await?;
+    }
     let label = validate_label(&input.label)?;
     validate_associations(
         db,
@@ -204,6 +207,11 @@ pub async fn create(
         }
     }
     let trigger = Trigger {
+        continuation_protocol_version: if matches!(delivery, TriggerDelivery::Assistant { .. }) {
+            2
+        } else {
+            0
+        },
         secret_context_versions,
         id: id.clone(),
         source: input.source,
@@ -439,6 +447,12 @@ pub async fn update(
         } else {
             schedules::compute::next(spec, Utc::now())?
         };
+    }
+    if next.status == TriggerStatus::Active
+        && matches!(next.delivery, TriggerDelivery::Assistant { .. })
+    {
+        schedules::continuation::ready(db, schedules::continuation::enabled()).await?;
+        next.continuation_protocol_version = 2;
     }
     let schedule_changed = next.schedule != current.schedule || input.status.is_some();
     let target_changed = match (&next.delivery, &current.delivery) {
@@ -1854,6 +1868,7 @@ mod tests {
 
     fn trigger(verification: TriggerVerification, encrypted: Option<Vec<u8>>) -> Trigger {
         Trigger {
+            continuation_protocol_version: 0,
             secret_context_versions: Default::default(),
             source: Default::default(),
             setup_watch_id: None,

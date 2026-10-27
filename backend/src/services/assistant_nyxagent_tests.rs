@@ -1120,6 +1120,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        coordinator_run_ids: Vec::new(),
         invocation_controlled: false,
         credential_invocation_id: None,
         platform_thread: None,

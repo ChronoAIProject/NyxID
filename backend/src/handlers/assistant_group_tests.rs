@@ -1156,7 +1156,7 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
         "@researcher please summarize",
         std::slice::from_ref(&researcher.id),
         Vec::new(),
-        Some(&home.id),
+        Some((&home.id, None)),
     )
     .await
     .unwrap();
@@ -1270,12 +1270,16 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
     // after it was created.
     for stale in [
         GroupFollower {
+            trigger_run_id: None,
+            notification: None,
             conversation_id: home.id.clone(),
             since_seq: 1,
             created_at: Utc::now() - chrono::Duration::hours(30),
             expires_at: Some(Utc::now() - chrono::Duration::minutes(1)),
         },
         GroupFollower {
+            trigger_run_id: None,
+            notification: None,
             conversation_id: home.id.clone(),
             since_seq: 1,
             created_at: Utc::now() - chrono::Duration::hours(25),
@@ -1386,18 +1390,24 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
     // classification is frozen afterwards.
     let at = Utc::now();
     let live = GroupFollower {
+        trigger_run_id: None,
+        notification: None,
         conversation_id: home.id.clone(),
         since_seq: 3,
         created_at: at - chrono::Duration::hours(1),
         expires_at: Some(at + chrono::Duration::hours(1)),
     };
     let expired_at_take = GroupFollower {
+        trigger_run_id: None,
+        notification: None,
         conversation_id: "nyxa-other".into(),
         since_seq: 4,
         created_at: at - chrono::Duration::hours(24),
         expires_at: Some(at - chrono::Duration::milliseconds(1)),
     };
     let legacy_expired = GroupFollower {
+        trigger_run_id: None,
+        notification: None,
         conversation_id: "nyxa-legacy".into(),
         since_seq: 5,
         created_at: at - chrono::Duration::hours(25),
@@ -1508,6 +1518,7 @@ async fn nyxbot_posts_register_followers_atomically_and_receive_bounded_summarie
         "@researcher summarize the launch notes",
         Some(&nyxbot),
         &home.id,
+        None,
     )
     .await
     .unwrap();
@@ -1551,6 +1562,7 @@ async fn nyxbot_posts_register_followers_atomically_and_receive_bounded_summarie
         "just a note",
         Some(&nyxbot),
         &home.id,
+        None,
     )
     .await
     .unwrap();

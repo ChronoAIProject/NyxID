@@ -95,6 +95,10 @@ pub struct GroupMessage {
 /// member cards.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupFollower {
+    #[serde(default)]
+    pub trigger_run_id: Option<String>,
+    #[serde(default)]
+    pub notification: Option<FollowerNotification>,
     pub conversation_id: String,
     /// Its post; the summary covers the messages after it.
     pub since_seq: i64,
@@ -104,6 +108,16 @@ pub struct GroupFollower {
     /// use the same rule from `created_at`.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// The snapshot survives a claimant crash; only the lease/fence changes on retry.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FollowerNotification {
+    pub upper_seq: i64,
+    pub event_id: String,
+    pub fence: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub lease_until: DateTime<Utc>,
 }
 
 impl GroupFollower {

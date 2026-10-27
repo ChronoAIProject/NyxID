@@ -174,7 +174,20 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         )
         .await;
     }
-    let continuation_text = if continuation {
+    let coordinator =
+        continuation && run.wait_kind == Some(crate::models::trigger_run::RunWaitKind::Coordinator);
+    if coordinator && let Some(reason) = schedules::continuation::exhausted(&run, Utc::now()) {
+        return schedules::finish_claimed(
+            &state.db,
+            job,
+            id,
+            RunOutcome::Failed,
+            Some(reason),
+            &state.config.frontend_url,
+        )
+        .await;
+    }
+    let continuation_text = if continuation && !coordinator {
         use futures::TryStreamExt;
         let cards: Vec<crate::models::assistant_acknowledgement::AssistantAcknowledgement> = state
             .db
@@ -277,6 +290,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         }
         return deliver_existing(state, job, &run, &trigger).await;
     };
+    schedules::continuation::ready(&state.db, schedules::continuation::enabled()).await?;
     let agent = match team::agent(&state.db, &run.user_id, agent_id).await {
         Ok(agent) if agent.destroyed_at.is_none() => agent,
         Ok(_) | Err(AppError::NotFound(_)) => {
@@ -361,17 +375,68 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         return defer(state, job, &run, "overlap").await;
     }
     let row = if continuation {
-        engine::get(
+        match engine::get(
             &state.db,
             &run.user_id,
             run.thread_id
                 .as_deref()
                 .ok_or(AppError::TriggerDeliveryFailed)?,
         )
-        .await?
+        .await
+        {
+            Ok(row) => row,
+            Err(AppError::NotFound(_)) => {
+                return schedules::finish_claimed(
+                    &state.db,
+                    job,
+                    id,
+                    RunOutcome::Failed,
+                    Some("thread_deleted"),
+                    &state.config.frontend_url,
+                )
+                .await;
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         schedules::run_thread(&state.db, &state.encryption_keys, &run, &trigger).await?
     };
+    if coordinator {
+        schedules::continuation::queue_capacity_retry(&state.db, &run).await?;
+        let row = engine::get(&state.db, &run.user_id, &row.id).await?;
+        if run.trigger_generation != Some(trigger.updated_at) {
+            return schedules::finish_claimed(
+                &state.db,
+                job,
+                id,
+                RunOutcome::Failed,
+                Some("target_changed"),
+                &state.config.frontend_url,
+            )
+            .await;
+        }
+        let at = (Utc::now() + Duration::seconds(5))
+            .min(run.coordinator_deadline.unwrap_or(run.deadline));
+        schedules::reschedule(&state.db, job, Some(at)).await?;
+        if row.pending_events.iter().any(|e| {
+            e.trigger_run_id.as_deref() == Some(run.id.as_str())
+                && e.continuation_protocol_version == 2
+        }) {
+            Box::pin(super::assistant_team::wake_with_claim(
+                state,
+                &run.user_id,
+                &row.id,
+                Some(schedules::TurnClaim {
+                    run_id: run.id.clone(),
+                    fence: job.get_str("fence").unwrap_or_default().into(),
+                    trigger_updated_at: trigger.updated_at,
+                    continuation: true,
+                }),
+            ))
+            .await;
+        }
+        return Ok(());
+    }
     let payload = if trigger.source == crate::models::trigger_schedule::TriggerSource::Webhook {
         state
             .db
@@ -560,7 +625,10 @@ async fn notification(
     .await
 }
 
-async fn budget_notice(state: &AppState, run: &TriggerRun) -> AppResult<chrono::DateTime<Utc>> {
+pub(super) async fn budget_notice(
+    state: &AppState,
+    run: &TriggerRun,
+) -> AppResult<chrono::DateTime<Utc>> {
     let now = Utc::now();
     let hour = now.timestamp().div_euclid(3600);
     let day = now.timestamp().div_euclid(86400);
@@ -598,7 +666,11 @@ async fn budget_notice(state: &AppState, run: &TriggerRun) -> AppResult<chrono::
         )
         .await;
     }
-    let seconds = if field == "notice_day" {
+    let coordinator_hour_reset = run.wait_kind
+        == Some(crate::models::trigger_run::RunWaitKind::Coordinator)
+        && budget.get_i64("hour").ok() == Some(hour)
+        && budget.get_i32("hourly").unwrap_or_default() >= settings.trigger_runs_per_hour;
+    let seconds = if field == "notice_day" && !coordinator_hour_reset {
         (day + 1) * 86400
     } else {
         (hour + 1) * 3600
@@ -632,6 +704,7 @@ async fn deliver_existing(
                     &claim,
                     "",
                     &admission_run.id,
+                    crate::models::assistant_conversation::TurnOrigin::Trigger,
                     session,
                 )
                 .await,
@@ -755,6 +828,8 @@ pub(super) async fn settle_result(
                                     "$set": {
                                         "outcome": RunOutcome::Waiting.as_str(),
                                         "reason": "confirmation_required",
+                                        "wait_kind": "confirmation",
+                                        "coordinator_wait": null,
                                         "waiting_for": &ids,
                                     },
                                 },
@@ -823,6 +898,9 @@ pub(super) async fn settle_result(
             }
             return Ok(());
         }
+    }
+    if error.is_none() && schedules::continuation::mark_coordinator_waiting(&state.db, run).await? {
+        return Ok(());
     }
     schedules::terminal_result(&state.db, run, error, &state.config.frontend_url).await?;
     if matches!(run.deliver_to, DeliverTo::Chat { .. }) {
@@ -1059,6 +1137,7 @@ pub(crate) async fn webhook(
     else {
         return Err(AppError::TriggerDeliveryUnsupported);
     };
+    schedules::continuation::ready(&state.db, schedules::continuation::enabled()).await?;
     let agent = team::agent(&state.db, &run.user_id, agent_id).await?;
     let policy =
         thread_policy.unwrap_or_else(|| schedules::default_thread_policy(trigger.source, &agent));

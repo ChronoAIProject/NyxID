@@ -89,6 +89,8 @@ impl fmt::Debug for TriggerDelivery {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Trigger {
     #[serde(default)]
+    pub continuation_protocol_version: u32,
+    #[serde(default)]
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
     pub id: String,
@@ -165,6 +167,7 @@ mod tests {
     fn bson_roundtrip_and_debug_redaction() {
         let now = Utc::now();
         let trigger = Trigger {
+            continuation_protocol_version: 0,
             secret_context_versions: Default::default(),
             source: Default::default(),
             setup_watch_id: None,

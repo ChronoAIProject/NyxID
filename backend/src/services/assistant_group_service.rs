@@ -463,7 +463,7 @@ pub async fn append_following(
     text: &str,
     recipients: &[String],
     extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
-    follower: Option<&str>,
+    follower: Option<(&str, Option<&str>)>,
 ) -> AppResult<GroupMessage> {
     let filter = owner_filter(owner, group_id)?;
     let db = db.clone();
@@ -474,7 +474,7 @@ pub async fn append_following(
     let agent_name = agent.map(|agent| agent.name.clone());
     let text = text.to_owned();
     let recipients = recipients.to_vec();
-    let follower = follower.map(str::to_owned);
+    let follower = follower.map(|(thread, run)| (thread.to_owned(), run.map(str::to_owned)));
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
@@ -516,17 +516,27 @@ pub async fn append_following(
                     .insert_one(&message)
                     .session(&mut *session)
                     .await?;
-                if let Some(conversation_id) = follower.as_deref() {
+                if let Some((conversation_id, trigger_run_id)) = &follower {
                     follow_in_session(
                         &db,
                         &owner,
                         &group_id,
                         conversation_id,
+                        trigger_run_id.as_deref(),
                         message.seq,
                         now,
                         session,
                     )
                     .await?;
+                    if trigger_run_id.is_some() {
+                        db.collection::<AssistantGroup>(GROUPS)
+                            .update_one(
+                                filter.clone(),
+                                doc! {"$addToSet":{"pending_agent_ids":{"$each":&recipients}}},
+                            )
+                            .session(&mut *session)
+                            .await?;
+                    }
                 }
                 Ok(message)
             })
@@ -760,6 +770,7 @@ pub async fn follow(
                 &owner,
                 &group_id,
                 &conversation_id,
+                None,
                 since_seq,
                 Utc::now(),
                 session,
@@ -771,11 +782,13 @@ pub async fn follow(
         .map_err(transactions::map_transaction_error)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn follow_in_session(
     db: &Database,
     owner: &str,
     group_id: &str,
     conversation_id: &str,
+    trigger_run_id: Option<&str>,
     since_seq: i64,
     now: chrono::DateTime<Utc>,
     session: &mut ClientSession,
@@ -783,35 +796,56 @@ async fn follow_in_session(
     let mut filter = owner_filter(owner, group_id)?;
     filter.insert("created_by_user_id", bson::Bson::Null);
     let groups = db.collection::<AssistantGroup>(GROUPS);
-    // Only an older follower of this thread is replaced: a replay of the same
-    // (or an older) post keeps the existing window and deadline.
-    groups
-        .update_one(
-            filter.clone(),
-            doc! {"$pull": {"followers": {"conversation_id": conversation_id,
-            "since_seq": {"$lt": since_seq}}}},
-        )
+    if let Some(run) = trigger_run_id {
+        if db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME).update_one(doc!{"_id":conversation_id,"user_id":owner,"active_turn.trigger_run_id":run,"active_turn.stop_requested":{"$ne":true}},doc!{"$inc":{"automation_handoff_version":1_i64}}).session(&mut *session).await?.matched_count != 1 {return Err(AppError::AssistantTurnRequired)}
+        // Serialize registration against terminal/Stop settlement. The caller
+        // identity was derived from its live turn, never the tool body.
+        let changed = db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
+            .update_one(doc! {"_id":run,"user_id":owner,"thread_id":conversation_id,"outcome":"started","continuation_protocol_version":2},doc! {"$inc":{"handoff_version":1_i64},"$set":{"coordinator_capacity_retry":false}}).session(&mut *session).await?;
+        if changed.matched_count != 1 {
+            return Err(AppError::Conflict("trigger_run_unavailable".into()));
+        }
+    }
+    let group = groups
+        .find_one(filter.clone())
         .session(&mut *session)
-        .await?;
-    let follower = bson::to_bson(&GroupFollower {
+        .await?
+        .ok_or_else(not_found)?;
+    let mut followers = group.followers;
+    if followers.iter().any(|f| {
+        f.conversation_id == conversation_id
+            && f.trigger_run_id.as_deref() == trigger_run_id
+            && f.since_seq >= since_seq
+    }) {
+        return Ok(());
+    }
+    followers.retain(|f| {
+        !(f.conversation_id == conversation_id
+            && f.trigger_run_id.as_deref() == trigger_run_id
+            && f.since_seq < since_seq
+            && f.notification.is_none())
+    });
+    if followers.len() >= MAX_FOLLOWERS {
+        if trigger_run_id.is_some() {
+            return Err(AppError::Conflict("group_follower_capacity".into()));
+        }
+        let Some(index) = followers
+            .iter()
+            .position(|f| f.trigger_run_id.is_none() && f.notification.is_none())
+        else {
+            return Err(AppError::Conflict("group_follower_capacity".into()));
+        };
+        followers.remove(index);
+    }
+    followers.push(GroupFollower {
+        trigger_run_id: trigger_run_id.map(str::to_owned),
+        notification: None,
         conversation_id: conversation_id.into(),
         since_seq,
         created_at: now,
         expires_at: Some(now + chrono::Duration::hours(FOLLOWER_TTL_HOURS)),
-    })
-    .map_err(|_| AppError::Internal("Follower encoding failed".into()))?;
-    filter.insert(
-        "followers",
-        doc! {"$not": {"$elemMatch": {"conversation_id": conversation_id}}},
-    );
-    groups
-        .update_one(
-            filter,
-            doc! {"$push": {"followers": {"$each": [follower],
-            "$slice": -(MAX_FOLLOWERS as i64)}}},
-        )
-        .session(&mut *session)
-        .await?;
+    });
+    groups.update_one(filter,doc! {"$set":{"followers":bson::to_bson(&followers).map_err(|_|AppError::Internal("Follower encoding failed".into()))?}}).session(session).await?;
     Ok(())
 }
 
@@ -829,7 +863,7 @@ pub(crate) fn followers_live_at(
 
 /// The upper bound comes from the same update as the take, so later messages
 /// never enter a summary.
-pub async fn take_followers_if_quiet(
+pub async fn claim_followers_if_quiet(
     db: &Database,
     owner: &str,
     group_id: &str,
@@ -863,38 +897,40 @@ pub async fn take_followers_if_quiet(
     {
         return Ok((Vec::new(), 0));
     }
-    // Identity and length, not whole-array equality: legacy rows have no
-    // `expires_at` and would never compare equal to a re-serialized document.
-    let identities: Vec<bson::Document> = live
-        .iter()
-        .map(|follower| {
-            doc! {"$elemMatch": {"conversation_id": &follower.conversation_id,
-            "since_seq": follower.since_seq}}
-        })
-        .collect();
-    let mut filter = owner_filter(owner, group_id)?;
-    filter.insert("pending_agent_ids", doc! {"$size": 0});
-    filter.insert(
-        "$and",
-        vec![
-            doc! {"followers": {"$size": live.len() as i64}},
-            doc! {"followers": {"$all": identities}},
-        ],
-    );
-    let before = groups
-        .find_one_and_update(filter, doc! {"$set": {"followers": []}})
-        .return_document(ReturnDocument::Before)
-        .await?;
-    // Sampled after the acknowledgement: a follower that expired during the
-    // quiet checks is dropped without a summary.
-    let taken_at = Utc::now();
-    Ok(match before {
-        Some(before) => (
-            followers_live_at(before.followers, taken_at),
-            before.message_count,
-        ),
-        None => (Vec::new(), 0),
-    })
+    let mut claimed = Vec::new();
+    for mut follower in live {
+        if follower
+            .notification
+            .as_ref()
+            .is_some_and(|n| n.lease_until > Utc::now())
+        {
+            continue;
+        }
+        let upper_seq = follower
+            .notification
+            .as_ref()
+            .map_or(group.message_count, |n| n.upper_seq);
+        let notification = crate::models::assistant_group::FollowerNotification {
+            upper_seq,
+            event_id: follower_event_id(group_id, &follower, upper_seq),
+            fence: Uuid::new_v4().to_string(),
+            lease_until: Utc::now() + chrono::Duration::seconds(30),
+        };
+        let mut identity = doc! {"conversation_id":&follower.conversation_id,"trigger_run_id":&follower.trigger_run_id,"since_seq":follower.since_seq,
+        "$or":[{"notification":null},{"notification.lease_until":{"$lte":bson::DateTime::now()}}]};
+        identity.insert(
+            "created_at",
+            bson::DateTime::from_chrono(follower.created_at),
+        );
+        let mut filter = owner_filter(owner, group_id)?;
+        filter.insert("pending_agent_ids", doc! {"$size":0});
+        filter.insert("message_count", group.message_count);
+        filter.insert("followers", doc! {"$elemMatch":identity});
+        if groups.update_one(filter,doc!{"$set":{"followers.$.notification":bson::to_bson(&notification).map_err(|_|AppError::Internal("Follower claim encoding failed".into()))?}}).await?.modified_count == 1 {
+            follower.notification=Some(notification); claimed.push(follower);
+        }
+    }
+    Ok((claimed, group.message_count))
 }
 
 /// What the members said in `(since_seq, upper_seq]`, for a follower's summary.
@@ -1103,4 +1139,63 @@ pub async fn remove_agent(db: &Database, owner: &str, agent_id: &str) -> AppResu
             .await?;
     }
     Ok(())
+}
+
+pub fn follower_event_id(group: &str, follower: &GroupFollower, upper: i64) -> String {
+    // Length-framed JSON avoids ambiguous separators in externally assigned IDs.
+    let identity = serde_json::to_vec(&(
+        group,
+        &follower.conversation_id,
+        &follower.trigger_run_id,
+        follower.since_seq,
+        upper,
+    ))
+    .expect("string handoff identity");
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, &identity).to_string()
+}
+
+/// Queue acceptance and follower removal commit together. A lost response is
+/// harmless: replay uses the same ID, and an expired claimant cannot finalize.
+pub async fn deliver_follower(
+    db: &Database,
+    owner: &str,
+    group: &str,
+    follower: &GroupFollower,
+    event: &crate::models::assistant_conversation::AgentEvent,
+) -> AppResult<bool> {
+    let db = db.clone();
+    let owner = owner.to_owned();
+    let group = group.to_owned();
+    let follower = follower.clone();
+    let event = event.clone();
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().and_run2(async move |session| {
+        let result:AppResult<bool>=async {
+            let Some(notification)=&follower.notification else {return Ok(false)};
+            let identity=doc!{"conversation_id":&follower.conversation_id,"trigger_run_id":&follower.trigger_run_id,"since_seq":follower.since_seq,"notification.fence":&notification.fence,"notification.event_id":&event.id,"notification.lease_until":{"$gt":bson::DateTime::now()}};
+            let filter=doc!{"_id":&group,"user_id":&owner,"followers":{"$elemMatch":identity.clone()}};
+            if db.collection::<AssistantGroup>(GROUPS).find_one(filter.clone()).session(&mut *session).await?.is_none() {return Ok(false)}
+            let live=if let Some(run)=&follower.trigger_run_id {
+                db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME).find_one(doc!{"_id":run,"user_id":&owner,"thread_id":&follower.conversation_id,"outcome":{"$in":["started","waiting"]},"continuation_protocol_version":2}).session(&mut *session).await?.is_some()
+            } else {true};
+            let accepted=if live && follower.expiry()>Utc::now() {
+                super::assistant_nyxagent::append_events_in_session(&db,&owner,&follower.conversation_id,std::slice::from_ref(&event),session).await?
+            } else {false};
+            db.collection::<AssistantGroup>(GROUPS).update_one(filter,doc!{"$pull":{"followers":identity}}).session(&mut *session).await?;
+            Ok(accepted)
+        }.await;transactions::transaction_result(result)
+    }).await.map_err(transactions::map_transaction_error)
+}
+
+#[cfg(test)]
+pub async fn take_followers_if_quiet(
+    db: &Database,
+    owner: &str,
+    group: &str,
+) -> AppResult<(Vec<GroupFollower>, i64)> {
+    let (followers, upper) = claim_followers_if_quiet(db, owner, group).await?;
+    for f in &followers {
+        db.collection::<AssistantGroup>(GROUPS).update_one(owner_filter(owner,group)?,doc!{"$pull":{"followers":{"conversation_id":&f.conversation_id,"trigger_run_id":&f.trigger_run_id,"since_seq":f.since_seq}}}).await?;
+    }
+    Ok((followers, upper))
 }

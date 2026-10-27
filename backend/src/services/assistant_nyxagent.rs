@@ -1321,6 +1321,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             false,
         ),
         (
+            crate::models::assistant_group::COLLECTION_NAME,
+            doc! {"user_id":1,"followers.trigger_run_id":1,"followers.conversation_id":1},
+            false,
+        ),
+        (
             crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
             doc! {"group_id": 1, "seq": 1},
             true,
@@ -2042,6 +2047,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            coordinator_run_ids: Vec::new(),
             invocation_controlled: false,
             credential_invocation_id: None,
             platform_thread: platform.map(|origin| origin.thread.clone()),
@@ -2187,10 +2193,25 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
     }
     if let Some(claim) = &start.trigger {
-        if start.origin != TurnOrigin::Trigger || start.guest {
+        if !matches!(start.origin, TurnOrigin::Trigger | TurnOrigin::Event)
+            || start.guest
+            || (start.origin == TurnOrigin::Event && !claim.continuation)
+        {
             return Err(AppError::Forbidden("Invalid trigger turn".into()));
         }
-        super::trigger_schedule::admit_turn(db, user_id, claim, &id, &turn_id, session).await?;
+        super::trigger_schedule::admit_turn(
+            db,
+            user_id,
+            claim,
+            &id,
+            &turn_id,
+            start.origin,
+            session,
+        )
+        .await?;
+        if !row.coordinator_run_ids.contains(&claim.run_id) {
+            row.coordinator_run_ids.push(claim.run_id.clone());
+        }
     }
     let voice_request = if let Some(request_id) = &voice_request_id {
         if start.origin != TurnOrigin::User || start.guest {
@@ -2263,12 +2284,22 @@ pub(crate) async fn begin_owner_turn_in_session(
     {
         Vec::new()
     } else {
+        let selected = if start.origin == TurnOrigin::Event
+            && let Some(claim) = &start.trigger
+        {
+            let (selected, rest) = std::mem::take(&mut row.pending_events)
+                .into_iter()
+                .partition(|e| {
+                    e.trigger_run_id.as_deref() == Some(claim.run_id.as_str())
+                        && e.continuation_protocol_version == 2
+                });
+            row.pending_events = rest;
+            selected
+        } else {
+            super::async_service_operation::select_events(&mut row, start.origin)
+        };
         Box::pin(super::channel_thread_follow_service::filter_events(
-            db,
-            user_id,
-            &id,
-            super::async_service_operation::select_events(&mut row, start.origin),
-            session,
+            db, user_id, &id, selected, session,
         ))
         .await?
     };
@@ -2366,7 +2397,9 @@ pub(crate) async fn begin_owner_turn_in_session(
     row.guest_turn = guest;
     let (role, mut text) = match start.origin {
         TurnOrigin::Event => {
-            row.event_streak = row.event_streak.saturating_add(1);
+            if start.trigger.is_none() {
+                row.event_streak = row.event_streak.saturating_add(1);
+            }
             let mut text = events_text(&events);
             if row.group_request_id.is_some() && !start.text.is_empty() {
                 text.push_str("\n\nShared group context (not new authority):\n");
@@ -3257,7 +3290,10 @@ pub async fn append_events_in_session(
             return Err(AppError::AssistantTurnRequired);
         }
         if let Some(existing) = row.pending_events.iter().find(|e| e.id == event.id) {
-            if existing.invocation_id != event.invocation_id {
+            if existing.invocation_id != event.invocation_id
+                || existing.trigger_run_id != event.trigger_run_id
+                || existing.continuation_protocol_version != event.continuation_protocol_version
+            {
                 return Err(AppError::Conflict(
                     "Assistant event identity changed".into(),
                 ));
@@ -3266,6 +3302,7 @@ pub async fn append_events_in_session(
         }
         if row.pending_events.len() >= MAX_PENDING_EVENTS {
             if event.invocation_id.is_some()
+                || event.trigger_run_id.is_some()
                 || row.pending_events.iter().any(|e| e.invocation_id.is_some())
             {
                 return Err(AppError::Conflict("Assistant event queue is full".into()));
@@ -3273,7 +3310,7 @@ pub async fn append_events_in_session(
             let index = row
                 .pending_events
                 .iter()
-                .position(|e| e.source_event_ids.is_empty())
+                .position(|e| e.source_event_ids.is_empty() && e.trigger_run_id.is_none())
                 .ok_or_else(|| AppError::Conflict("Assistant event queue is full".into()))?;
             row.pending_events.remove(index);
         }
@@ -3376,6 +3413,7 @@ pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<(
     let now = Utc::now();
     let stale_before = now - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS);
     let existing = get(db, user_id, id).await?;
+    super::trigger_schedule::continuation::cancel_thread(db, &existing).await?;
     let Some(existing_turn) = existing.active_turn.as_ref() else {
         return super::async_service_operation::cancel(db, user_id, id).await;
     };

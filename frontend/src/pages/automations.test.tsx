@@ -442,3 +442,15 @@ it("keeps expired setup instructions unavailable", () => {
   expect(screen.getByText("Setup link expired")).toBeInTheDocument();
   expect(screen.queryByLabelText("Instruction")).not.toBeInTheDocument();
 });
+
+
+it("shows coordinator waits with the completion deadline and exact thread link", async () => {
+  mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+  mocks.history.mockReturnValue({ data: { pages: [{ runs: [{ id: "automation-2040-wait", outcome: "waiting", wait_kind: "coordinator", coordinator_deadline: "2026-10-02T02:00:00Z", scheduled_at: "2026-10-02T00:00:00Z", reason: "coordinator_pending", thread_id: "nyxa-automation-2040", duration_ms: null }], next_cursor: null }] } });
+  render(<AutomationsPage />);
+  fireEvent.click(screen.getAllByRole("button", { name: "Morning summary" })[0]!);
+  expect(await screen.findByText("Waiting for coordinator work")).toBeInTheDocument();
+  expect(screen.getByText(/Completion deadline/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /thread/i })).toHaveAttribute("href", expect.stringContaining("nyxa-automation-2040"));
+  expect(screen.queryByText("Completed")).not.toBeInTheDocument();
+});

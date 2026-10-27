@@ -604,3 +604,68 @@ the shared ten-second admission delay; policy constants live in
 `services/assistant_engine_policy.rs`. Exhaustion
 reports the measured wait. A missing wait field on older runs is not a zero-wait
 claim.
+
+
+## Coordinator completion and continuation-v2 operations
+
+An assistant automation that delegates group work keeps its run waiting until
+its exact coordinator has consumed the attributable replies and produced a final
+result. History labels this state “Waiting for coordinator work” and shows the
+completion deadline. Confirmation waits keep their existing acknowledgement IDs
+and confirmation flow. Ordinary group notices and asynchronous service watches
+retain their own event admission rules.
+
+The server carries the live trigger run ID through the coordinator's chat
+authority, group follower and queued event. Follower notification uses a durable
+lease and a deterministic ID for the complete run/sequence identity. Queue
+acceptance and follower removal commit together. Trigger followers and events
+cannot be evicted to make room for an ordinary notice; full capacity leaves the
+handoff retryable. Stop cancels the thread's tracked automation runs and removes
+their bound work.
+
+Each admitted assistant run snapshots a protocol version and continuation limit
+from the owner's `max_auto_continuations`, clamped to 0–32. Each coordinator
+continuation consumes both this per-run allowance and the existing persisted
+owner hourly/daily trigger budget in the turn admission transaction. Temporary
+owner budget exhaustion waits for the next applicable UTC reset. Completion is
+bounded by one hour after the dispatch/grace deadline, capped by retention;
+`coordinator_timeout`, `continuation_limit_exceeded`, `thread_deleted` and
+`cancelled` remain terminal reasons rather than successful results.
+
+`AUTOMATION_CONTINUATION_V2_ENABLED` defaults to false and requires the durable
+`trigger_migrations/continuation-v2.completed_at` marker. It is an operator drain
+assertion, not a worker-version registry. While unready, assistant trigger
+creation, active updates and admission refuse execution; history, disabling and
+non-assistant deliveries remain available.
+
+Activation requires an operator-controlled maintenance window:
+
+1. Upgrade every API replica and worker. Pause schedule and webhook assistant
+   ingress and stop all scheduler workers, including old processes. Record the
+   UTC drain start time and wait at least two `trigger_schedule::LEASE_SECONDS`
+   intervals. Keep `AUTOMATION_CONTINUATION_V2_ENABLED` false.
+2. Invoke the upgraded server binary once with
+   `AUTOMATION_CONTINUATION_V2_MIGRATE_DRAIN_STARTED_AT=<RFC3339 UTC timestamp>`.
+   This mode connects to the configured database, verifies no live work lease,
+   runs the fenced migration in bounded batches and exits before normal workers
+   start. Clear this variable after the invocation. A failed/partial invocation
+   leaves readiness closed and can be retried after resolving its cause.
+3. Inspect the marker's `classified`, `triggers`, `ambiguous_count` and bounded
+   `ambiguous` list. Every ambiguous wait also has a stable metadata-only
+   `continuation-v2:ambiguous:<run_id>` row. A wait with acknowledgement IDs stays
+   a confirmation wait; an exact matching follower/event becomes coordinator
+   work; an unclassifiable wait fails as `legacy_wait_unclassified`. Historical
+   terminal runs are preserved.
+4. Start only upgraded workers, enable `AUTOMATION_CONTINUATION_V2_ENABLED=true`
+   on the upgraded processes and resume ingress. Monitor waiting duration,
+   continuation counts and terminal reasons in run history, plus metadata-only
+   `trigger_run_waiting` audits and scheduler deferral logs.
+
+Before rollback, pause new admission and drain or explicitly Stop every v2 run
+using upgraded processes. Disabling the flag also blocks coordinator wake, so a
+waiting run requires explicit cancellation if the flag is already off. Invoke
+with `AUTOMATION_CONTINUATION_V2_CHECK_ROLLBACK=true` to check that no nonterminal
+v2 run, bound pending event or bound follower remains; this mode exits without
+starting workers. Only after a successful check may old binaries return. Keep
+old workers stopped throughout migration and rollback; the marker does not
+attest that an operator stopped them.

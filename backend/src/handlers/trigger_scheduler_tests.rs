@@ -645,6 +645,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        trigger_run_id: None,
         channel_adapter_origin: None,
         invocation_controlled: false,
         invocation_id: None,
@@ -676,6 +677,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     .await;
     assert!(refused);
     let guest = ChatAuthority {
+        trigger_run_id: None,
         invocation_controlled: false,
         invocation_id: None,
         report_to: None,
@@ -1117,7 +1119,16 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .start_transaction()
         .and_run2(async move |session| {
             crate::services::api_key_mutation_service::transaction_result(
-                schedules::admit_turn(&db, OWNER, &claim, &thread_id, &user_run.id, session).await,
+                schedules::admit_turn(
+                    &db,
+                    OWNER,
+                    &claim,
+                    &thread_id,
+                    &user_run.id,
+                    crate::models::assistant_conversation::TurnOrigin::Trigger,
+                    session,
+                )
+                .await,
             )
         })
         .await
@@ -1888,7 +1899,16 @@ async fn schedule_queue_one_busy_grace_and_edit_fence() {
         .start_transaction()
         .and_run2(async move |session| {
             crate::services::api_key_mutation_service::transaction_result(
-                schedules::admit_turn(&db, OWNER, &claim, "thread", "turn", session).await,
+                schedules::admit_turn(
+                    &db,
+                    OWNER,
+                    &claim,
+                    "thread",
+                    "turn",
+                    crate::models::assistant_conversation::TurnOrigin::Trigger,
+                    session,
+                )
+                .await,
             )
         })
         .await;
@@ -3881,3 +3901,5 @@ async fn invocation_mounted_routes_enforce_credentials_flags_and_recover_lost_re
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     server.abort();
 }
+
+include!("trigger_scheduler_completion_tests.rs");

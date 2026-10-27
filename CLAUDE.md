@@ -413,7 +413,7 @@ New browser chats default to `assistant:nyxagent-engine` (on), then the experime
 All NyxID replicas must be upgraded before any agent skill pin is disabled because `SkillReference` uses `deny_unknown_fields`.
 
 
-Automation turns share the engine and team pool, with admission fenced inside `begin_turn` and no trigger lookup on ordinary turns. Schedule tools are NyxBot-only; webhook thread isolation and confirmation rules are in Rule 14 and `docs/NYXBOT_SCHEDULES.md`.
+Automation turns share the engine and team pool, with admission fenced inside `begin_turn` and no trigger lookup on ordinary turns. Schedule tools are NyxBot-only; webhook thread isolation and confirmation rules are in Rule 14 and `docs/NYXBOT_SCHEDULES.md`. Coordinator group work carries a server-derived exact trigger-run identity through durable follower leases and non-evictable events; an event continuation drains only its run and atomically consumes its immutable continuation allowance plus the existing owner trigger hourly/daily budget. Confirmation waits retain their own path. `AUTOMATION_CONTINUATION_V2_ENABLED` is default-off and requires the completed `trigger_migrations/continuation-v2` marker after an all-worker operator drain; migration/rollback invocation and terminal reasons are documented in `docs/NYXBOT_SCHEDULES.md#coordinator-completion-and-continuation-v2-operations`. Never restart old workers while v2 work remains.
 
 ## Channel Bot Notes
 
