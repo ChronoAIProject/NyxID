@@ -3689,6 +3689,7 @@ async fn finish_turn_inner(
                         activity
                     })
                     .collect();
+                super::generated_artifacts::prepare_settlement_in_session(&db, &mut current, session).await?;
                 let attachments = current
                     .active_turn
                     .as_ref()

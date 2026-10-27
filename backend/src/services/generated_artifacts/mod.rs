@@ -268,6 +268,15 @@ pub async fn persist(
         rows.push(row);
     }
     let manifest = ResultManifest {
+        files: rows
+            .iter()
+            .map(|row| crate::models::generated_artifact::AcceptedFile {
+                index: row.artifact_index,
+                pending_id: row.id.clone(),
+                attachment_id: row.assistant_attachment_id.clone(),
+                filename: row.filename.clone(),
+            })
+            .collect(),
         rejected: result.rejected.clone(),
         source_result_identity: result.identity.clone(),
         source_status_version: status.version.clone(),
@@ -301,11 +310,16 @@ pub async fn persist(
             if manifest.expires_at <= Utc::now() {return Err(AppError::AssistantAttachmentExpired);}
             // Conversation write conflicts with owner deletion and cancellation.
             if database.collection::<Document>(CONVERSATIONS).update_one(doc!{"_id":&watch.conversation_id,"user_id":&watch.user_id},doc!{"$inc":{"async_operation_generation":1}}).session(&mut *session).await?.matched_count != 1 {return Err(missing());}
-            for row in &rows {
+            let committed_manifest = current.artifact_result.as_ref().unwrap_or(&manifest);
+            if current.artifact_result.is_some() {
+                let existing = pending_rows_in_session(&database, session, &current, committed_manifest, false).await?;
+                if existing.len() != committed_manifest.count { return Err(invalid()) }
+            }
+            for row in rows.iter().filter(|_| current.artifact_result.is_none()) {
                 database.collection::<Document>(ARTIFACTS).update_one(doc!{"watch_id":&row.watch_id,"source_result_identity":&row.source_result_identity,"artifact_index":row.artifact_index as i64},doc!{"$setOnInsert":bson::to_document(row).map_err(|_|invalid())?}).upsert(true).session(&mut *session).await?;
             }
             database.collection::<Document>(WATCHES).update_one(doc!{"_id":&watch.id,"state":&watch.state,"lease_id":&watch.lease_id},doc!{"$set":{
-                "artifact_result":bson::to_bson(&manifest).map_err(|_|invalid())?,"result_encrypted":bson::to_bson(&Some(&encrypted)).map_err(|_|invalid())?,"secret_context_versions":bson::to_bson(&versions).map_err(|_|invalid())?,
+                "artifact_result":bson::to_bson(committed_manifest).map_err(|_|invalid())?,"result_encrypted":bson::to_bson(&Some(&encrypted)).map_err(|_|invalid())?,"secret_context_versions":bson::to_bson(&versions).map_err(|_|invalid())?,
                 "state":"ready","reason":if success {"completed"}else{"operation_failed"},"lease_id":null,"lease_until":null,"poll_at":bson::DateTime::now()}}).session(&mut *session).await?;
             Ok(())
         }).await; transactions::transaction_result(operation)
@@ -333,6 +347,238 @@ fn exact_pending(row: &PendingArtifact, w: &AsyncServiceOperation, m: &ResultMan
         && Some(row.operation_id.as_str()) == w.operation_id.as_deref()
         && row.source_result_identity == m.source_result_identity
 }
+/// Fetch by saved IDs as well as watch: a present moved/tampered row is never
+/// mistaken for absence. Legacy complete manifests retain their prior checks.
+async fn pending_rows_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    w: &AsyncServiceOperation,
+    manifest: &ResultManifest,
+    ciphertext: bool,
+) -> AppResult<Vec<PendingArtifact>> {
+    let ids: Vec<&str> = manifest
+        .files
+        .iter()
+        .map(|f| f.pending_id.as_str())
+        .collect();
+    let collection = db.collection::<PendingArtifact>(ARTIFACTS);
+    let mut find = collection
+        .find(doc! {
+            "$or":[{"watch_id":&w.id},{"_id":{"$in":ids}}],
+        })
+        .sort(doc! {"artifact_index":1})
+        .limit(9);
+    if !ciphertext {
+        find = find.projection(doc! {"data_encrypted":0});
+    }
+    let mut cursor = find.session(&mut *session).await?;
+    let rows: Vec<PendingArtifact> = cursor.stream(&mut *session).try_collect().await?;
+    if manifest.count > 8
+        || rows.len() > manifest.count
+        || rows.iter().any(|r| !exact_pending(r, w, manifest))
+    {
+        return Err(invalid());
+    }
+    if !manifest.files.is_empty()
+        && (manifest.files.len() != manifest.count
+            || manifest.files.iter().enumerate().any(|(i, f)| {
+                f.index >= 8
+                    || manifest.files[..i].iter().any(|p| {
+                        p.index == f.index
+                            || p.pending_id == f.pending_id
+                            || p.attachment_id == f.attachment_id
+                    })
+            })
+            || rows.iter().any(|r| {
+                !manifest.files.iter().any(|f| {
+                    f.pending_id == r.id
+                        && f.index == r.artifact_index
+                        && f.attachment_id == r.assistant_attachment_id
+                        && f.filename == r.filename
+                })
+            }))
+    {
+        return Err(invalid());
+    }
+    Ok(rows)
+}
+async fn mark_missing_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    w: &AsyncServiceOperation,
+    files: &[crate::models::generated_artifact::AcceptedFile],
+) -> AppResult<()> {
+    use crate::models::generated_artifact::{RejectedFile, RejectionReason};
+    for file in files {
+        let rejected = RejectedFile {
+            index: file.index,
+            filename: file.filename.clone(),
+            reason: RejectionReason::Missing,
+        };
+        db.collection::<Document>(WATCHES).update_one(doc! {"_id":&w.id},
+            doc! {"$addToSet":{"artifact_result.rejected":bson::to_bson(&rejected).map_err(|_|invalid())?}})
+            .session(&mut *session).await?;
+        db.collection::<Document>(ARTIFACTS).update_one(doc! {"_id":&file.pending_id},
+            doc! {"$set":{"state":"missing","data_encrypted":null,"secret_context_versions":{}}})
+            .session(&mut *session).await?;
+    }
+    Ok(())
+}
+/// Reconcile genuine absence before the engine clones reply attachments. Present
+/// rows with contradictory authority remain errors, including rows moved away
+/// from the ordinary watch query. Missing saved bytes are never recreated.
+pub async fn prepare_settlement_in_session(
+    db: &Database,
+    row: &mut AssistantConversation,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let Some(id) = super::async_service_operation::event_id(row).map(str::to_owned) else {
+        return Ok(());
+    };
+    let Some(w) = db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .find_one(doc! {
+            "_id":&id,"user_id":&row.user_id,"conversation_id":&row.id,"state":"queued",
+        })
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(());
+    };
+    if w.artifact_mode.is_none() {
+        return Ok(());
+    }
+    let turn = row.active_turn.as_ref().ok_or_else(invalid)?;
+    if !admitted(&w)
+        || turn.origin != TurnOrigin::Event
+        || w.artifact_event_turn_id.as_deref() != Some(turn.turn_id.as_str())
+    {
+        return Err(invalid());
+    }
+    let Some(manifest) = &w.artifact_result else {
+        return Ok(());
+    };
+    let rows = pending_rows_in_session(db, session, &w, manifest, false).await?;
+    let mut missing: Vec<_> = manifest
+        .files
+        .iter()
+        .filter(|f| !rows.iter().any(|r| r.id == f.pending_id))
+        .cloned()
+        .collect();
+    let mut remove = Vec::new();
+    for attachment in turn
+        .attachments
+        .iter()
+        .filter(|a| a.artifact.source_watch_id.as_deref() == Some(id.as_str()))
+    {
+        if !manifest.files.is_empty()
+            && !manifest
+                .files
+                .iter()
+                .any(|f| f.attachment_id == attachment.id)
+        {
+            return Err(invalid());
+        }
+        let pending = rows
+            .iter()
+            .find(|r| r.assistant_attachment_id == attachment.id);
+        if pending.is_none() && manifest.files.is_empty() {
+            // Legacy missing rows have no saved IDs. Check the attachment-index
+            // lookup too, so a moved present row still fails closed.
+            if db
+                .collection::<Document>(ARTIFACTS)
+                .find_one(doc! {"assistant_attachment_id":&attachment.id})
+                .session(&mut *session)
+                .await?
+                .is_some()
+            {
+                return Err(invalid());
+            }
+        }
+        if let Some(pending) = pending
+            && (attachment.origin != "generated_artifact"
+                || pending.state != "materialized"
+                || attachment.content_type != pending.content_type
+                || attachment.size != pending.size
+                || attachment.artifact.source_turn_id.as_deref() != Some(w.turn_id.as_str())
+                || attachment.artifact.source_operation_id != w.operation_id
+                || attachment.artifact.source_result_identity.as_deref()
+                    != Some(manifest.source_result_identity.as_str()))
+        {
+            return Err(invalid());
+        }
+        let saved = db
+            .collection::<Document>(ATTACHMENTS)
+            .find_one(doc! {"_id":&attachment.id})
+            .projection(doc! {"data_encrypted":0})
+            .session(&mut *session)
+            .await?;
+        if let Some(saved) = &saved
+            && ([
+                ("user_id", w.user_id.as_str()),
+                ("conversation_id", w.conversation_id.as_str()),
+                ("turn_id", turn.turn_id.as_str()),
+                ("origin", "generated_artifact"),
+                ("source_watch_id", w.id.as_str()),
+                ("source_turn_id", w.turn_id.as_str()),
+                (
+                    "source_operation_id",
+                    w.operation_id.as_deref().ok_or_else(invalid)?,
+                ),
+                (
+                    "source_result_identity",
+                    manifest.source_result_identity.as_str(),
+                ),
+                ("content_type", attachment.content_type.as_str()),
+            ]
+            .iter()
+            .any(|(key, value)| saved.get_str(key).ok() != Some(*value))
+                || saved.get_i64("size").ok() != Some(attachment.size))
+        {
+            return Err(invalid());
+        }
+        if pending.is_none() || saved.is_none() {
+            remove.push(attachment.id.clone());
+            if manifest.files.is_empty()
+                && let Some(pending) = pending
+            {
+                missing.push(crate::models::generated_artifact::AcceptedFile {
+                    index: pending.artifact_index,
+                    pending_id: pending.id.clone(),
+                    attachment_id: pending.assistant_attachment_id.clone(),
+                    filename: pending.filename.clone(),
+                });
+            }
+            if let Some(file) = manifest
+                .files
+                .iter()
+                .find(|f| f.attachment_id == attachment.id)
+                && !missing.iter().any(|f| f.pending_id == file.pending_id)
+            {
+                missing.push(file.clone());
+            }
+        }
+    }
+    mark_missing_in_session(db, session, &w, &missing).await?;
+    if manifest.files.is_empty() && rows.len() < manifest.count {
+        // Incomplete old manifests cannot invent missing IDs or recovery lineage.
+        // Settle an explicit bounded failure instead of stranding the reply.
+        db.collection::<Document>(WATCHES)
+            .update_one(
+                doc! {"_id":&w.id},
+                doc! {"$set":{"artifact_result.delivery_reason":"delivery_missing"}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
+    row.active_turn
+        .as_mut()
+        .ok_or_else(invalid)?
+        .attachments
+        .retain(|a| !remove.contains(&a.id));
+    Ok(())
+}
+
 /// Use persisted expiry and lineage, with no ciphertext reads or new deadline.
 async fn attachment_expiry_in_session(
     db: &Database,
@@ -390,23 +636,22 @@ async fn materialize(
         return Ok((Vec::new(), "result_expired"));
     }
     let _reservation = byte_budget::reserve(sandbox::RESERVATION).await?;
-    let mut cursor = db
-        .collection::<PendingArtifact>(ARTIFACTS)
-        .find(doc! {"watch_id":&w.id,"source_result_identity":&manifest.source_result_identity})
-        .sort(doc! {"artifact_index":1})
-        .limit(9)
-        .session(&mut *session)
-        .await?;
-    let rows: Vec<PendingArtifact> = cursor.stream(&mut *session).try_collect().await?;
-    if rows.len() != manifest.count
-        || rows.len() > 8
-        || rows.iter().any(|r| !exact_pending(r, w, manifest))
-    {
-        return Err(invalid());
+    let rows = pending_rows_in_session(db, session, w, manifest, true).await?;
+    if manifest.files.is_empty() && rows.len() != manifest.count {
+        return Ok((Vec::new(), "delivery_failed"));
     }
+    let missing: Vec<_> = manifest
+        .files
+        .iter()
+        .filter(|f| !rows.iter().any(|r| r.id == f.pending_id))
+        .cloned()
+        .collect();
+    mark_missing_in_session(db, session, w, &missing).await?;
     let additional = rows
         .iter()
-        .filter(|r| !existing.iter().any(|a| a.id == r.assistant_attachment_id))
+        .filter(|r| {
+            r.state != "missing" && !existing.iter().any(|a| a.id == r.assistant_attachment_id)
+        })
         .count();
     if existing.len() + additional > super::assistant_nyxagent::MAX_TURN_ATTACHMENTS {
         return Ok((Vec::new(), "delivery_capacity_exhausted"));
@@ -415,6 +660,9 @@ async fn materialize(
     let mut attachments = Vec::new();
     let mut total = 0usize;
     for row in rows {
+        if row.state == "missing" {
+            continue;
+        }
         if row.expires_at <= Utc::now() {
             return Ok((Vec::new(), "result_expired"));
         }
@@ -598,20 +846,9 @@ pub async fn associate_in_session(
         return Err(invalid());
     }
     let operation = w.operation_id.as_deref().ok_or_else(invalid)?;
-    let mut cursor = db
-        .collection::<PendingArtifact>(ARTIFACTS)
-        .find(doc! {"watch_id":&w.id,"source_result_identity":&manifest.source_result_identity})
-        .projection(doc! {"data_encrypted":0})
-        .sort(doc! {"artifact_index":1})
-        .limit(9)
-        .session(&mut *session)
-        .await?;
-    let pending: Vec<PendingArtifact> = cursor.stream(&mut *session).try_collect().await?;
-    if pending.len() != manifest.count
-        || pending.len() > 8
-        || pending.iter().any(|p| !exact_pending(p, &w, manifest))
-    {
-        return Err(invalid());
+    let pending = pending_rows_in_session(db, session, &w, manifest, false).await?;
+    if manifest.files.is_empty() && pending.len() != manifest.count {
+        return Ok(()); // Explicit legacy failure snapshot, no invented recovery IDs.
     }
     let selected: Vec<&TurnAttachment> = turn
         .attachments
@@ -643,7 +880,19 @@ pub async fn associate_in_session(
         .map(|p| p.assistant_attachment_id.clone())
         .collect();
     if ids != expected_ids
-        || (manifest.delivery_reason == "materialized" && ids.len() != manifest.count)
+        || (manifest.delivery_reason == "materialized"
+            && ids.len()
+                + manifest
+                    .rejected
+                    .iter()
+                    .filter(|f| {
+                        matches!(
+                            f.reason,
+                            crate::models::generated_artifact::RejectionReason::Missing
+                        )
+                    })
+                    .count()
+                != manifest.count)
     {
         return Err(invalid());
     }

@@ -55,7 +55,16 @@ pub struct RejectedFile {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct AcceptedFile {
+    pub index: usize,
+    pub pending_id: String,
+    pub attachment_id: String,
+    pub filename: String,
+}
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ResultManifest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<AcceptedFile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rejected: Vec<RejectedFile>,
     pub source_result_identity: String,

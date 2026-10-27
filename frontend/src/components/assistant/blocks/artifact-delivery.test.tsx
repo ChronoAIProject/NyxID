@@ -52,6 +52,7 @@ it.each([
   ["cancelled", "cancelled"],
   ["delivery_capacity_exhausted", "attachment limit"],
   ["delivery_failed", "delivery failed"],
+  ["delivery_missing", "saved generated files are no longer available"],
 ])("renders %s without an unavailable recovery action", (state, copy) => {
   render(
     <ArtifactDelivery

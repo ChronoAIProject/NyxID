@@ -1634,7 +1634,17 @@ async fn generated_artifact_worker_reserves_shared_budget_before_result_body_and
 
 #[tokio::test]
 async fn generated_artifact_worker_delivers_valid_peers_and_settles_envelope_refusals() {
-    check_artifact_partial_worker("mixed").await;
+    for case in [
+        "mixed",
+        "missing_pending",
+        "missing_saved",
+        "moved_pending",
+        "tampered_saved",
+        "legacy",
+        "legacy_missing",
+    ] {
+        check_artifact_partial_worker(case).await;
+    }
     check_artifact_partial_worker("overcount").await;
     check_artifact_partial_worker("transport_limit").await;
 }
@@ -1659,11 +1669,23 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
         let calls = a.calls.lock().unwrap().len();
         Box::pin(async_operations::sweep(&a.f.state)).await.unwrap();
         assert_eq!(a.calls.lock().unwrap().len(), calls);
+        let refused = matches!(case, "overcount" | "transport_limit");
+        if case.starts_with("legacy") {
+            a.f.state
+                .db
+                .collection::<bson::Document>(WATCHES)
+                .update_one(
+                    doc! {"_id":&a.watch().await.id},
+                    doc! {"$unset":{"artifact_result.files":""}},
+                )
+                .await
+                .unwrap();
+        }
         finish(&a, &a.f.row, "submitted").await;
         let event = admit_event(&a).await;
         let attachments = &event.active_turn.as_ref().unwrap().attachments;
-        assert_eq!(attachments.len(), usize::from(case == "mixed"));
-        if case == "mixed" {
+        assert_eq!(attachments.len(), usize::from(!refused));
+        if !refused {
             let (mime, bytes) = engine::read_attachment(
                 &a.f.state.db,
                 &a.f.state.encryption_keys,
@@ -1690,6 +1712,78 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
                 0
             );
         }
+        let missing = matches!(case, "missing_pending" | "missing_saved" | "legacy_missing");
+        if !refused {
+            let attachment = &attachments[0];
+            let pending = a.f.state.db.collection::<bson::Document>(ARTIFACTS);
+            let saved =
+                a.f.state.db.collection::<bson::Document>(
+                    crate::models::assistant_attachment::COLLECTION_NAME,
+                );
+            match case {
+                "missing_pending" | "legacy_missing" => {
+                    pending
+                        .delete_one(doc! {"assistant_attachment_id":&attachment.id})
+                        .await
+                        .unwrap();
+                }
+                "missing_saved" => {
+                    saved.delete_one(doc! {"_id":&attachment.id}).await.unwrap();
+                }
+                "moved_pending" => {
+                    pending
+                        .update_one(
+                            doc! {"assistant_attachment_id":&attachment.id},
+                            doc! {"$set":{"watch_id":"foreign-watch"}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                "tampered_saved" => {
+                    saved
+                        .update_one(
+                            doc! {"_id":&attachment.id},
+                            doc! {"$set":{"user_id":"foreign-owner"}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+        if matches!(case, "moved_pending" | "tampered_saved") {
+            let before = a.watch().await;
+            let failure = engine::finish_turn(
+                &a.f.state.db,
+                &event,
+                &event.credential_api_key_id,
+                &uuid::Uuid::new_v4().to_string(),
+                &engine::TurnResult {
+                    text: "must not settle tampered lineage".into(),
+                    session_id: None,
+                    response_id: None,
+                    error: None,
+                },
+            )
+            .await;
+            assert!(matches!(failure, Err(crate::errors::AppError::Conflict(_))));
+            let after = a.watch().await;
+            assert_eq!(
+                bson::to_document(&before).unwrap(),
+                bson::to_document(&after).unwrap()
+            );
+            assert_eq!(
+                a.f.state
+                    .db
+                    .collection::<bson::Document>(DELIVERIES)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(a.calls.lock().unwrap().len(), calls);
+            return;
+        }
         finish(&a, &event, "File delivery has settled.").await;
         let axum::Json(history) = crate::handlers::assistant_nyxagent::history(
             axum::extract::State(a.f.state.clone()),
@@ -1712,15 +1806,17 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
         let outcome = &message["artifact_delivery"];
         assert_eq!(
             outcome["state"],
-            if case == "mixed" {
-                "materialized"
-            } else {
+            if refused {
                 "artifact_too_large"
+            } else if case == "legacy_missing" {
+                "delivery_missing"
+            } else {
+                "materialized"
             }
         );
         assert_eq!(outcome["recovery_available"], false);
-        assert_eq!(outcome["count"], usize::from(case == "mixed"));
-        if case == "mixed" {
+        assert_eq!(outcome["count"], usize::from(!refused && !missing));
+        if !refused && !missing {
             assert_eq!(
                 outcome["rejected"],
                 json!([
@@ -1728,7 +1824,7 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
                     {"index":2,"filename":"bad.mp4","reason":"unavailable"}
                 ])
             );
-        } else {
+        } else if refused || case == "legacy_missing" {
             assert_eq!(
                 a.f.state
                     .db
@@ -1738,6 +1834,56 @@ fn check_artifact_partial_worker(case: &'static str) -> futures::future::BoxFutu
                     .unwrap(),
                 0
             );
+        } else {
+            assert_eq!(
+                outcome["rejected"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|r| r["reason"] == "missing" && r["index"] == 1)
+                    .count(),
+                1
+            );
+            let before = a
+                .f
+                .state
+                .db
+                .collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap();
+            artifacts::recover(
+                &a.f.state.db,
+                &a.f.state.encryption_keys,
+                &a.f.owner,
+                &event.id,
+                message["id"].as_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                a.f.state
+                    .db
+                    .collection::<bson::Document>(
+                        crate::models::assistant_attachment::COLLECTION_NAME
+                    )
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                before,
+                "missing bytes must never be recreated"
+            );
+        }
+        if case == "legacy" {
+            artifacts::recover(
+                &a.f.state.db,
+                &a.f.state.encryption_keys,
+                &a.f.owner,
+                &event.id,
+                message["id"].as_str().unwrap(),
+            )
+            .await
+            .unwrap();
         }
         assert!(!outcome.to_string().contains("private"));
         assert_eq!(a.calls.lock().unwrap().len(), calls);

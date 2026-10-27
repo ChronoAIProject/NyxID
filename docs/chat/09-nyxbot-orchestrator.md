@@ -1574,7 +1574,16 @@ holds a 22 MiB payload reservation (13 MiB response + 9 MiB accepted output),
 charged as 44 MiB of permits at the existing 2× weight, through decode/encryption/
 persist. Owner egress has its own weighted reservation through body lifetime.
 Settled owner replies retain bounded failure/rejection metadata after watch TTL,
-without retaining source ciphertext or granting recovery authority. Real Sandbox
+without retaining source ciphertext or granting recovery authority.
+New manifests retain server-written accepted-entry references so settlement can
+recognize an absent pending row or vanished saved attachment. Genuine absence
+removes only that file from the reply and records a missing-file outcome before
+the reply is saved. Any present row with contradictory owner/source/turn identity
+still fails closed, including a row moved away from the normal watch query.
+A missing saved attachment is never recreated from pending bytes. Complete older
+manifests without these references retain valid owner reads/recovery; incomplete
+older manifests settle a conservative explicit failure without inventing IDs or
+new recovery authority. Real Sandbox
 acceptance must confirm the producer's result envelope fits these bounds; larger
 producer sets require a manifest/per-file acquisition follow-up, not a raised
 in-memory ceiling.

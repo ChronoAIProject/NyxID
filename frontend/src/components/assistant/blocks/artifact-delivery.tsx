@@ -13,21 +13,23 @@ export function ArtifactDelivery({
   if (delivery.state === "materialized" && !delivery.rejected?.length)
     return null;
   const copy =
-    delivery.state === "source_verification_failed"
-      ? "The generated result could not be verified. No files were attached and no saved-result recovery is available."
-      : delivery.state === "artifact_too_large"
-        ? "The generated result exceeded the supported response limit (13 MiB and eight files). No files were attached."
-        : delivery.state === "materialized"
-          ? `${delivery.count} verified file${delivery.count === 1 ? "" : "s"} attached. Some generated files could not be delivered.`
-          : delivery.state === "result_expired"
-            ? "The generated result expired before delivery. Ask for a new execution to generate it again."
-            : delivery.state === "cancelled" || delivery.state === "discarded"
-              ? "File delivery was cancelled."
-              : delivery.state === "delivery_pending"
-                ? "The result is verified. Attachment delivery is pending."
-                : delivery.state === "delivery_capacity_exhausted"
-                  ? "The result is verified. This reply reached its attachment limit; the files have not been delivered."
-                  : "The result is verified, but attachment delivery failed.";
+    delivery.state === "delivery_missing"
+      ? "Some saved generated files are no longer available. Other attachments in this reply remain available."
+      : delivery.state === "source_verification_failed"
+        ? "The generated result could not be verified. No files were attached and no saved-result recovery is available."
+        : delivery.state === "artifact_too_large"
+          ? "The generated result exceeded the supported response limit (13 MiB and eight files). No files were attached."
+          : delivery.state === "materialized"
+            ? `${delivery.count} verified file${delivery.count === 1 ? "" : "s"} attached. Some generated files could not be delivered.`
+            : delivery.state === "result_expired"
+              ? "The generated result expired before delivery. Ask for a new execution to generate it again."
+              : delivery.state === "cancelled" || delivery.state === "discarded"
+                ? "File delivery was cancelled."
+                : delivery.state === "delivery_pending"
+                  ? "The result is verified. Attachment delivery is pending."
+                  : delivery.state === "delivery_capacity_exhausted"
+                    ? "The result is verified. This reply reached its attachment limit; the files have not been delivered."
+                    : "The result is verified, but attachment delivery failed.";
   async function recover() {
     if (busy) return;
     setBusy(true);
