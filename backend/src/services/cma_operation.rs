@@ -31,6 +31,13 @@ pub fn apply_contracts(catalog_slug: &str, endpoints: &mut [McpToolEndpoint]) {
                     vec!["completed"],
                     vec!["failed", "incomplete", "cancelled"],
                 ),
+                "/api/v2/responses" | "/api/v2/agents/{agent_id}/responses" => (
+                    Presentation::Response,
+                    "/api/v2/responses/{response_id}",
+                    "response_id",
+                    vec!["completed"],
+                    vec!["failed", "incomplete"],
+                ),
                 "/api/v1/agents/{id}/input" | "/api/v1/agui/run" => (
                     Presentation::Agent,
                     "/api/v1/agents/{id}",
@@ -82,17 +89,16 @@ pub(super) fn identifier(value: Option<&str>, prefix: Option<&str>) -> Option<St
 
 pub fn metadata(contract: &AsyncOperationContract, args: &Value) -> Option<CmaOperation> {
     let kind = contract.presentation?;
-    let agent_id = identifier(
-        ["id", "conversation", "threadId"]
-            .into_iter()
-            .find_map(|key| args[key].as_str()),
-        Some("agt_"),
-    );
+    let agent_id = ["id", "agent_id", "conversation", "threadId"]
+        .into_iter()
+        .find_map(|key| identifier(args[key].as_str(), Some("agt_")))
+        .or_else(|| identifier(args.pointer("/conversation/id")?.as_str(), Some("agt_")));
     Some(CmaOperation {
         receipt_id: None,
         seen_working: false,
         kind,
         agent_id,
+        callback_url: None,
         idempotency_key: identifier(args["Idempotency-Key"].as_str(), None),
         status: None,
         phase: None,
@@ -110,7 +116,8 @@ pub fn poll_id(
 }
 
 /// CMA Responses and AG-UI calls may return an SSE transcript. Retain only the
-/// response identity/status, never text, tool arguments, errors or output.
+/// response observation for the durable watch. A sparse later frame preserves
+/// callback metadata from earlier frames of the same response.
 pub fn response_metadata(text: &str) -> Option<Value> {
     if let Ok(value) = serde_json::from_str::<Value>(text) {
         return Some(value);
@@ -119,10 +126,25 @@ pub fn response_metadata(text: &str) -> Option<Value> {
         .filter_map(|line| line.strip_prefix("data:"))
         .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
         .filter_map(|event| event.get("response").cloned())
-        .rfind(|v| v["id"].is_string())
+        .filter(|v| v["id"].is_string())
+        .fold(None, |previous: Option<Value>, mut current| {
+            if current.get("callback_url").is_none()
+                && let Some(previous) = previous
+                && current["id"] == previous["id"]
+                && let Some(callback) = previous.get("callback_url")
+            {
+                current["callback_url"] = callback.clone();
+            }
+            Some(current)
+        })
 }
 
 pub fn observed(cma: &mut CmaOperation, value: &Value) {
+    // Only authenticated CMA observations supply links. Typed request arguments
+    // never do. Missing means unchanged; null or invalid explicitly hides it.
+    if let Some(callback) = value.get("callback_url") {
+        cma.callback_url = validated_callback_url(callback.as_str());
+    }
     cma.seen_working |= matches!(
         value["status"].as_str(),
         Some("working" | "running" | "in_progress")
@@ -168,9 +190,44 @@ pub fn observed(cma: &mut CmaOperation, value: &Value) {
             )
         })
         .map(str::to_owned);
-    if let Some(id) = identifier(value["agent_id"].as_str(), Some("agt_")) {
+    if let Some(id) = identifier(value["agent_id"].as_str(), Some("agt_"))
+        .or_else(|| identifier(value.pointer("/conversation/id")?.as_str(), Some("agt_")))
+        .or_else(|| {
+            (cma.kind == Presentation::Agent)
+                .then(|| identifier(value["id"].as_str(), Some("agt_")))
+                .flatten()
+        })
+    {
         cma.agent_id = Some(id);
     }
+}
+
+/// A browser-only link: no DNS lookup, server-side fetch, or URL derivation.
+fn validated_callback_url(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    if !(value.starts_with("https://") || value.starts_with("http://"))
+        || value
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    {
+        return None;
+    }
+    super::url_validation::validate_advisory_http_url(
+        value,
+        "callback_url",
+        super::url_validation::MAX_URL_LEN,
+    )
+    .ok()?;
+    let url = url::Url::parse(value).ok()?;
+    if url.query().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+pub fn card_url(cma: &CmaOperation) -> Option<String> {
+    // Revalidate persisted metadata too, including rows from older binaries.
+    validated_callback_url(cma.callback_url.as_deref())
 }
 
 pub async fn record_observation(
@@ -297,5 +354,161 @@ mod tests {
         )).unwrap();
         assert_eq!(response["id"], "resp_agt_test_1");
         assert_eq!(response["status"], "completed");
+    }
+
+    #[test]
+    fn cma_v2_responses_track_the_exact_response_on_the_same_destination() {
+        for path in ["/api/v2/responses", "/api/v2/agents/{agent_id}/responses"] {
+            let mut eps = vec![
+                McpToolEndpoint {
+                    name: "submit_v2".into(),
+                    method: "POST".into(),
+                    path: path.into(),
+                    ..Default::default()
+                },
+                McpToolEndpoint {
+                    name: "status_v2".into(),
+                    method: "GET".into(),
+                    path: "/api/v2/responses/{response_id}".into(),
+                    ..Default::default()
+                },
+            ];
+            eps[1].target_id = Some("different".into());
+            apply_contracts("cma", &mut eps);
+            assert!(eps[0].async_operation.is_none());
+            eps[1].target_id = None;
+            apply_contracts("cma", &mut eps);
+            let contract = eps[0].async_operation.as_ref().unwrap();
+            assert_eq!(contract.presentation, Some(Presentation::Response));
+            assert_eq!(contract.status_operation, "status_v2");
+            assert_eq!(contract.id_parameter, "response_id");
+            assert_eq!(contract.success_states, ["completed"]);
+            assert_eq!(contract.failure_states, ["failed", "incomplete"]);
+        }
+    }
+
+    #[test]
+    fn cma_v2_stream_supplies_the_agent_identity_and_callback() {
+        let mut eps = endpoints();
+        apply_contracts("cma", &mut eps);
+        let contract = eps[0].async_operation.as_ref().unwrap();
+        for args in [
+            json!({"agent_id":"agt_test"}),
+            json!({"conversation":{"id":"agt_test"}}),
+        ] {
+            assert_eq!(
+                metadata(contract, &args).unwrap().agent_id.as_deref(),
+                Some("agt_test")
+            );
+        }
+        let mut cma = metadata(contract, &json!({})).unwrap();
+        let response = response_metadata(concat!(
+            "event: response.created\ndata: {\"response\":{\"id\":\"resp_test\",\"conversation\":{\"id\":\"agt_test\"},\"status\":\"queued\",\"callback_url\":\"https://staging.example:8443/agents/agt_test\"}}\n\n",
+            "event: response.completed\ndata: {\"response\":{\"id\":\"resp_test\",\"conversation\":{\"id\":\"agt_test\"},\"status\":\"completed\"}}\n\n",
+        )).unwrap();
+        observed(&mut cma, &response);
+        assert_eq!(cma.agent_id.as_deref(), Some("agt_test"));
+        assert_eq!(cma.status.as_deref(), Some("completed"));
+        assert_eq!(
+            card_url(&cma).as_deref(),
+            Some("https://staging.example:8443/agents/agt_test")
+        );
+    }
+
+    #[test]
+    fn cma_links_only_come_from_observed_callbacks_and_survive_old_rows() {
+        let mut eps = endpoints();
+        apply_contracts("cma", &mut eps);
+        let mut cma = metadata(
+            eps[0].async_operation.as_ref().unwrap(),
+            &json!({"agent_id":"agt_test","callback_url":"https://request.example/agents/agt_test"}),
+        ).unwrap();
+        assert!(card_url(&cma).is_none());
+        observed(
+            &mut cma,
+            &json!({"id":"operation-1","status":"succeeded","agent_id":"agt_test"}),
+        );
+        assert!(card_url(&cma).is_none());
+        for callback in [
+            "https://cma.example/agents/agt_test",
+            "https://staging.example:8443/agents/agt_test",
+            "http://localhost:8080/agents/agt_test",
+        ] {
+            observed(&mut cma, &json!({"callback_url":callback}));
+            assert_eq!(card_url(&cma).as_deref(), Some(callback));
+            // A sparse observation preserves the last supplied destination.
+            observed(&mut cma, &json!({"status":"working"}));
+            let saved = mongodb::bson::to_document(&cma).unwrap();
+            let restored: CmaOperation = mongodb::bson::from_document(saved).unwrap();
+            assert_eq!(card_url(&restored).as_deref(), Some(callback));
+        }
+        let mut old = mongodb::bson::to_document(&cma).unwrap();
+        old.remove("callback_url");
+        let restored: CmaOperation = mongodb::bson::from_document(old).unwrap();
+        assert!(card_url(&restored).is_none());
+        observed(&mut cma, &json!({"callback_url":null}));
+        assert!(card_url(&cma).is_none());
+    }
+
+    #[test]
+    fn cma_invalid_callbacks_are_cleared_before_storage_and_revalidated_on_read() {
+        let mut eps = endpoints();
+        apply_contracts("cma", &mut eps);
+        let mut cma = metadata(eps[0].async_operation.as_ref().unwrap(), &json!({})).unwrap();
+        for callback in [
+            json!(null),
+            json!(false),
+            json!({"url":"https://cma.example"}),
+            json!(""),
+            json!("/agents/agt_test"),
+            json!("//cma.example/agents/agt_test"),
+            json!("javascript:alert(1)"),
+            json!("data:text/html,secret"),
+            json!("https://user:secret@cma.example/agents/agt_test"),
+            json!("https://cma.example/agents/agt_test?token=secret"),
+            json!("https://cma.example/agents/agt_test#secret"),
+            json!(" https://cma.example/agents/agt_test"),
+            json!("https://cma.example/agents/agt_\ntest"),
+            json!("https://cma.example/agents/agt_\\test"),
+            json!("http://metadata.google.internal/secret"),
+            json!(format!("https://cma.example/{}", "a".repeat(2048))),
+        ] {
+            cma.callback_url = Some("https://cma.example/agents/agt_test".into());
+            observed(
+                &mut cma,
+                &json!({"callback_url":callback,"status":"working"}),
+            );
+            assert!(cma.callback_url.is_none(), "{callback}");
+            assert_eq!(cma.status.as_deref(), Some("working"));
+            cma.callback_url = callback.as_str().map(str::to_owned);
+            assert!(card_url(&cma).is_none(), "{callback}");
+        }
+    }
+
+    #[test]
+    fn cma_stream_callbacks_do_not_cross_response_ids_and_can_be_withdrawn() {
+        for callback in [json!(null), json!("javascript:alert(1)")] {
+            let stream = format!(
+                "data: {{\"response\":{{\"id\":\"resp_1\",\"callback_url\":\"https://cma.example/agents/agt_test\"}}}}\n\n\
+                 data: {{\"response\":{{\"id\":\"resp_1\",\"callback_url\":{callback}}}}}\n\n\
+                 data: {{\"response\":{{\"id\":\"resp_1\",\"status\":\"completed\"}}}}\n\n"
+            );
+            let response = response_metadata(&stream).unwrap();
+            assert_eq!(response["callback_url"], callback);
+        }
+        let response = response_metadata(concat!(
+            "data: {\"response\":{\"id\":\"resp_1\",\"callback_url\":\"https://cma.example/agents/agt_test\"}}\n\n",
+            "data: {\"response\":{\"id\":\"resp_2\",\"status\":\"completed\"}}\n\n",
+        )).unwrap();
+        assert_eq!(response["id"], "resp_2");
+        assert!(response.get("callback_url").is_none());
+        let response = response_metadata(
+            r#"{"id":"resp_1","callback_url":"https://cma.example/agents/agt_test"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            response["callback_url"],
+            "https://cma.example/agents/agt_test"
+        );
     }
 }
