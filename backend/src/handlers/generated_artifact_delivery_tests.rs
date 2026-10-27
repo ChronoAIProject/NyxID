@@ -187,7 +187,7 @@ async fn generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after
     assert_eq!(delivery.attachment_ids, vec![attachment.id.clone()]);
     let calls = a.calls.lock().unwrap().len();
     for _ in 0..2 {
-        crate::handlers::assistant_nyxagent::artifact_delivery(
+        let axum::Json(acknowledgement) = crate::handlers::assistant_nyxagent::artifact_delivery(
             axum::extract::State(a.f.state.clone()),
             crate::test_utils::test_auth_user(&a.f.owner),
             axum::extract::Path((event.id.clone(), messages[0].id.clone())),
@@ -195,6 +195,7 @@ async fn generated_artifact_flag_off_uses_legacy_and_admitted_watch_drains_after
         )
         .await
         .unwrap();
+        assert_eq!(acknowledgement, json!({"status":"materialized"}));
     }
     assert!(
         crate::handlers::assistant_nyxagent::artifact_delivery(
