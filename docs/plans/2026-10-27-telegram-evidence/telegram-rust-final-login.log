@@ -1,0 +1,14 @@
+
+running 10 tests
+test services::login_code_service::tests::expiry_cancellation_and_invalid_selection_issue_nothing ... ok
+test services::login_code_service::tests::concurrent_redemption_commits_exactly_one_grant_of_either_kind ... ok
+test services::login_code_service::tests::issuer_revocation_blocks_initial_and_refreshed_access_at_authentication ... ok
+test services::login_code_service::tests::failed_issuance_rolls_back_claim_and_all_rows_then_can_retry ... ok
+test services::login_code_service::tests::mint_freezes_default_intent_and_old_shaped_pending_codes_remain_readable ... ok
+test services::login_code_service::tests::mfa_browser_handoff_inherits_device_assurance_and_rejects_unassured_delivery ... ok
+test services::login_code_service::tests::refresh_refuses_expired_deleted_or_revoked_bound_session_before_rotation ... ok
+test services::login_code_service::tests::restricted_browser_handoff_and_direct_delivery_cannot_both_win ... ok
+test services::login_code_service::tests::source_and_owner_budgets_throttle_distributed_attempts ... ok
+test services::login_code_service::tests::third_party_oauth_cannot_mint_or_approve_human_login_grants ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 10462 filtered out; finished in 172.96s

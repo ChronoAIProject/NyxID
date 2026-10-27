@@ -1,0 +1,14 @@
+
+> frontend@0.73.1 test
+> NODE_ENV=test vitest run src/components/channels/telegram-new.test.tsx src/components/channels/telegram-new-connect.test.tsx
+
+(node:35563) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+ RUN  v4.1.4 /Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-telegram-onboarding/frontend
+
+
+ Test Files  2 passed (2)
+      Tests  31 passed (31)
+   Start at  10:28:16
+   Duration  3.87s (transform 1.68s, setup 1.46s, import 1.99s, tests 1.50s, environment 1.21s)

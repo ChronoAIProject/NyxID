@@ -1,0 +1,723 @@
+{
+  "workstream": "telegram",
+  "issues": [
+    2045,
+    1974
+  ],
+  "branch": "fix/telegram-onboarding-2045-1974",
+  "worktree_id": "01a17a96-885c-7042-bf1c-6e33531a2117",
+  "pm_agent_id": "01a17a9b-2cf3-79e3-9177-1aa759f5eb61",
+  "coordinator_agent_id": "01a17a8a-e916-77a0-a565-083ca25e2aa3",
+  "plan_path": "docs/plans/2026-10-27-telegram-implementation.md",
+  "plan_version": "v6",
+  "plan_sha256": "7cebb035bde823e2a78290393ec2f61cc982fb8a38d6ac3112abacb2f05edec7",
+  "reviewer_agent_id": "01a17aa3-1dae-7e80-b8c0-c4fd9a511f2b",
+  "reviewer_session_id": "01a17aa3-1daf-7a31-9ba3-c86a3fece909",
+  "reviewer_verified": {
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "effort": "x_high",
+    "mode": "default",
+    "worktree_id": "01a17a96-885c-7042-bf1c-6e33531a2117"
+  },
+  "implementer_agent_id": "01a17afc-03c3-74f3-8206-1235e8b89954",
+  "head": "1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+  "plan_gate": "ASTRA_PLAN_APPROVED",
+  "reviewer_error": "Failed to authenticate: OAuth session expired and could not be refreshed",
+  "astra_review": "exact_candidate_personal_review_complete_A_R21_copy_and_A_R22_validation_open",
+  "opus_implementation_gate": "SUPERSEDED_BY_USER",
+  "acceptance": {
+    "T1": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+    "T2": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+    "T3": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+    "T4": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+    "T5": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+    "T6": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+    "T7": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+    "G1": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+    "G2": "PARTIAL_PASS_A_R21_completion_copy_and_A_R22_current_row_regression_open",
+    "G3": "PASS_local_on_1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+    "L1": "open",
+    "L2": "open",
+    "L3": "open",
+    "I-07": "OPEN_combined_router_commit_and_owner_auth_tests_required"
+  },
+  "updated_at": "2026-10-27T05:09:11.965017+00:00",
+  "test_environment": {
+    "cargo_target": "/Users/chronoai/Desktop/projects/nyxid/target",
+    "cargo_build_jobs": 2,
+    "mongo_uri": "mongodb://127.0.0.1:27457/?directConnection=true",
+    "mongo_version": "8.0.17",
+    "mongo_replica_set": "nyxidTelegramReview",
+    "mongo_pid": 61027,
+    "mongo_data": ".tmp/telegram-mongo8/data",
+    "ui_port": 4317,
+    "baseline_fmt": "pass",
+    "baseline_diff_check": "pass",
+    "initial_rust_compile": {
+      "command": "cargo test --manifest-path backend/Cargo.toml telegram_new --no-run",
+      "exit": 130,
+      "result": "interrupted_by_own_sigint_at_disk_guard_not_pass",
+      "log": ".tmp/telegram-rust-build.log"
+    },
+    "frontend_unit_candidate": {
+      "files": 6,
+      "tests": 81,
+      "result": "pass",
+      "log": ".tmp/telegram-vitest.log",
+      "final_candidate_review_pending": true
+    },
+    "initial_rust_compile_retry": {
+      "command": "cargo test --manifest-path backend/Cargo.toml telegram_new --no-run",
+      "exit": 130,
+      "result": "Send_HRTB_diagnostic_then_owned_remaining_compile_interrupted_not_pass",
+      "log": ".tmp/telegram-rust-build-retry.log",
+      "reported_free_gib": 12
+    },
+    "astra_ui_candidate": {
+      "result": "pass",
+      "tests": 6,
+      "duration_secs": 11.4,
+      "log": ".tmp/telegram-astra-ui.log",
+      "external_telegram": "intercepted_fixture",
+      "final_review_pending": true
+    },
+    "frontend_r11_candidate": {
+      "files": 1,
+      "tests": 46,
+      "result": "pass",
+      "log": ".tmp/telegram-r11-api-envelope-vitest.log",
+      "typecheck": "pass",
+      "eslint": "pass",
+      "build": "pass",
+      "backend_tool_guidance_execution": "pending"
+    },
+    "frontend_final_build": {
+      "result": "pass",
+      "log": ".tmp/telegram-frontend-build-final.log",
+      "includes_typecheck": true
+    },
+    "verified_backend_module_filters": [
+      "telegram_new",
+      "nyxbot_gateway",
+      "handlers::nyxbot::tests::release_tests",
+      "handlers::nyxbot::tests"
+    ],
+    "backend_counts_verification": "compiled_list_pass_nonzero_counts_independently_verified",
+    "current_rust_compile": {
+      "command": "CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo test --manifest-path backend/Cargo.toml telegram_new --no-run",
+      "result": "four_E0433_missing_test_import_then_obsolete_remaining_target_interrupted",
+      "log": ".tmp/telegram-rust-build-current.log",
+      "reported_start_free_gib": 5.4,
+      "exit": 1,
+      "children_exited": true,
+      "reported_end_free_gib": 8.9
+    },
+    "import_fix_rust_compile": {
+      "command": "CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo test --manifest-path backend/Cargo.toml telegram_new --no-run",
+      "result": "resource_guard_interrupted_no_new_diagnostics_not_pass",
+      "log": ".tmp/telegram-rust-build-import-fix.log",
+      "cargo_pid": 46785,
+      "rustc_pid": 46875,
+      "reported_free_gib": 3.3,
+      "reported_elapsed": "10m12",
+      "resource_guard": "5s_check_stop_owned_cargo_below2GiB",
+      "exit": 1,
+      "children_exited": true,
+      "stop_free_bytes": 2068398080,
+      "reported_end_free_gib": 6.9,
+      "guard_log": ".tmp/telegram-resource-import-fix.log"
+    },
+    "cargo_resource_profile": {
+      "path": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+      "sha256": "e49399085773e10768e037557bcdae57126d6de289a12b1b243a19e3199fe1f3",
+      "scope": "nyxid dev/test debug=0 incremental=false only",
+      "actual_compiler_options": {
+        "observed": "nyxid_server --test",
+        "debuginfo": "absent_default0",
+        "incremental": "absent",
+        "opt_level": "absent_default0",
+        "disabled_debug_assertions": false,
+        "disabled_overflow_checks": false,
+        "log": ".tmp/telegram-rust-build-resource-profile-rustc-options.log",
+        "astra_personally_read": true
+      },
+      "original_usage_comment_sha256": "b2c2c52277e36fde7ab2b01ea7746e9fdcd811e8eba833ebccefc748439fd277",
+      "clippy_command": "cargo clippy --config SHARED_FILE --manifest-path backend/Cargo.toml --all-targets -- -D warnings"
+    },
+    "resource_profile_rust_compile": {
+      "result": "pass",
+      "cargo_pid": 54308,
+      "log": ".tmp/telegram-rust-build-resource-profile.log",
+      "resource_log": ".tmp/telegram-rust-build-resource-profile-resource.log",
+      "preflight_free_bytes": 25083572224,
+      "exit": 0,
+      "duration": "9m47s",
+      "binary": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+      "end_free_bytes": 23193759744,
+      "children_exited": true,
+      "astra_log_review": true
+    },
+    "test_execution_method": "exact_successfully_compiled_libtest_binary_backend_cwd_explicit_mongo_thread2",
+    "cargo_rebuild_issue": "existing build.rs watches absent package-local .git paths; repeated Cargo invocation recompiles unchanged CLI/backend; no build script edit",
+    "compiled_binary": {
+      "binary": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+      "sha256": "5fd2b8d96c5fce15fd0de3d353a7b6a6b2a1f371677b522cc7bef477c4f6cc07",
+      "size": 756187696,
+      "mtime_ns": 1793071716545770526,
+      "runtime_cwd": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-telegram-onboarding/backend"
+    },
+    "backend_inventory": {
+      "total": 10472,
+      "selected_unique": 360,
+      "filters": {
+        "telegram_new": 94,
+        "telegram_manager": 22,
+        "channel_connect_link": 19,
+        "platform_provisioning": 12,
+        "nyxbot_gateway": 16,
+        "handlers::nyxbot::tests": 219
+      },
+      "included_release": 32,
+      "included_continuity": 7,
+      "included_gateway_creator": 6,
+      "execution": "original_candidate_complete_corrected_candidate_pending"
+    },
+    "backend_initial_telegram_new": {
+      "result": "failed",
+      "passed": 91,
+      "failed": 3,
+      "ignored": 0,
+      "duration_secs": 77.35,
+      "log": ".tmp/telegram-rust-tests-telegram-new.log",
+      "binary_sha256": "5fd2b8d96c5fce15fd0de3d353a7b6a6b2a1f371677b522cc7bef477c4f6cc07",
+      "astra_failure_review": true
+    },
+    "mongo_fd_limit": {
+      "soft": 65536,
+      "scope": "owned_process_only",
+      "retained_data_and_replica": true,
+      "reported_primary_insert_abort_probe": "pass",
+      "reported_after_restart_fds": 67
+    },
+    "backend_original_suites": {
+      "manager": {
+        "passed": 21,
+        "failed": 1,
+        "ignored": 0,
+        "duration_secs": 14.77,
+        "log": ".tmp/telegram-rust-tests-manager-original.log"
+      },
+      "hosted": {
+        "passed": 19,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 2.45,
+        "log": ".tmp/telegram-rust-tests-hosted-original.log"
+      },
+      "provisioning": {
+        "passed": 12,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 26.86,
+        "log": ".tmp/telegram-rust-tests-provisioning-original.log"
+      },
+      "gateway": {
+        "passed": 16,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 24.8,
+        "log": ".tmp/telegram-rust-tests-gateway-original.log"
+      },
+      "handlers": {
+        "selected": 219,
+        "result": "failed",
+        "observed_failure": "hosted_watch fixture exact link.platform telegram-new vs bot.platform telegram caused completion NotFound before diagnostics; real Telegram manual fixture correction reviewed",
+        "passed": 218,
+        "failed": 1,
+        "ignored": 0,
+        "duration_secs": 638.59,
+        "exit": 101,
+        "log": ".tmp/telegram-rust-tests-handlers-original.log",
+        "release_passed": 32,
+        "continuity_passed": 7,
+        "children_exited": true
+      }
+    },
+    "backend_original_unique": {
+      "executed": 360,
+      "passed": 356,
+      "failed": 4,
+      "ignored": 0,
+      "astra_independently_reconciled_logs": true
+    },
+    "fixture_correction_compile": {
+      "result": "pass",
+      "cargo_pid": 67461,
+      "log": ".tmp/telegram-rust-build-fixture-corrections.log",
+      "profile": "shared_package_only_config",
+      "source_review": "astra_personally_reviewed_test_only_corrections",
+      "preflight_reported_free_gib": 22,
+      "exit": 0,
+      "duration": "10m24s",
+      "children_exited": true,
+      "end_free_bytes": 21643866112,
+      "astra_personal_log_and_options_review": true
+    },
+    "corrected_compiled_binary": {
+      "path": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+      "sha256": "cd6f7105e84334a4fffd4bc1e67e6e80fd0115ea3698b3d4580a358e65cc215f",
+      "size": 767218592,
+      "mtime_ns": 1793074138924362983,
+      "manifest": ".tmp/telegram-test-binary-corrected-identity.json",
+      "source_manifest": ".tmp/telegram-corrected-compiled-source-sha256.json",
+      "source_manifest_entries": 1284,
+      "astra_independently_verified": true
+    },
+    "corrected_exact_tests": {
+      "org_http": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 2.94,
+        "log": ".tmp/telegram-rust-org-e2e-corrected.log",
+        "cause": "correlated HTTP update15/txn29/request423 update/users/owner_org_fence Mongo112+TransientTransactionError maps exact Conflict1004; identical event redelivery succeeds"
+      },
+      "first_rejection": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 0.81,
+        "log": ".tmp/telegram-rust-first-rejection-corrected.log"
+      },
+      "public_guidance": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 0.93,
+        "log": ".tmp/telegram-rust-public-guidance-corrected.log"
+      },
+      "hosted_gateway": {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0,
+        "duration_secs": 4.51,
+        "log": ".tmp/telegram-rust-hosted-gateway-corrected.log",
+        "root": "fixture default jwt_issuer nyxid rejected by existing HTTPS/localhost guard before gateway HTTP; actual gateway401 classification not yet exercised",
+        "correction": "test HTTPS issuer; prove watch and direct-tool POST /channels separately; no production authority change",
+        "astra_source_review": true
+      }
+    },
+    "clippy_resource_forwarding": {
+      "state": "coordinator_confirmed_after_clippy_config_placement_for_required_reruns",
+      "command": "cargo --config SHARED_FILE clippy --manifest-path backend/Cargo.toml --all-targets -- -D warnings",
+      "observed_child": "cargo check --manifest-path backend/Cargo.toml --all-targets; config argument absent",
+      "actual_backend_codegen": [
+        "debuginfo=2",
+        "split-debuginfo=unpacked",
+        "incremental=shared-target/debug/incremental"
+      ],
+      "optimization_assertions_overflow": "no overrides",
+      "proposed_same_config_placement": "cargo clippy --config SHARED_FILE --manifest-path backend/Cargo.toml --all-targets -- -D warnings",
+      "log": ".tmp/telegram-rust-clippy-all-targets.log",
+      "options_log": ".tmp/telegram-rust-clippy-all-targets-rustc-options.log",
+      "astra_personally_verified_process_tree": true,
+      "profile_values_changed": false
+    },
+    "clippy_findings": {
+      "state": "resolved_on_committed_candidate_387_and_clippy_pass",
+      "owned": [
+        "large_enum_variant CreationContext; approve Option<Box<CreationWatch>> with same serde shape",
+        "unused_io_amount telegram_new_api.rs377 interrupted-response test; use actual nonzero read count"
+      ],
+      "baseline": [
+        "login_code_service.rs268 nonminimal_bool",
+        "service_pool_routing.rs78 nonminimal_bool",
+        "lark_base_writes/ledger.rs72 nonminimal_bool",
+        "nyxbot_gateway_release_service.rs741 nonminimal_bool"
+      ],
+      "baseline_files_identical_to_head": true,
+      "baseline_disposition": "coordinator_approved_exact4_files_isolated_prerequisite_commit",
+      "suppression_or_check_reduction": false
+    },
+    "clippy_initial": {
+      "exit": 101,
+      "distinct_diagnostics": 6,
+      "children_exited": true,
+      "reported_end_free_bytes": 20059254784,
+      "log": ".tmp/telegram-rust-clippy-all-targets.log",
+      "profile_forwarding_issue_retained": true,
+      "astra_full_diff_review": true
+    },
+    "clippy_corrected": {
+      "result": "pass",
+      "cargo_clippy_pid": 82450,
+      "cargo_check_pid": 82452,
+      "backend_pids": [
+        82535,
+        82538
+      ],
+      "log": ".tmp/telegram-rust-clippy-corrected-profile.log",
+      "config_forwarded_to_both_children": true,
+      "actual_backend_debug_incremental": "disabled",
+      "opt_assertion_overflow_overrides": false,
+      "astra_personally_verified_live_argv": true,
+      "exit": 0,
+      "duration": "6m22s",
+      "children_exited": true,
+      "end_free_bytes": 20008153088,
+      "all_targets": true,
+      "warnings_denied": true,
+      "astra_final_log_and_unchanged_source_review": true
+    },
+    "final_compile": {
+      "result": "pass",
+      "exit": 0,
+      "duration": "9m41s",
+      "log": ".tmp/telegram-rust-build-final.log",
+      "children_exited": true,
+      "end_free_bytes": 20008542208,
+      "actual_options_verified": true,
+      "astra_personally_verified": true
+    },
+    "final_compiled_binary": {
+      "path": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+      "sha256": "1060f46cade1f49edbd68242d003eab3cb90f52609a12b0fb5eaaedf412f9ee1",
+      "size": 757234992,
+      "mtime_ns": 1793076008793457273,
+      "source_manifest": ".tmp/telegram-final-compiled-source-sha256.json",
+      "source_entries": 1288,
+      "astra_independent_hash_and_source_match": true
+    },
+    "final_inventory": {
+      "total": 10472,
+      "filters": {
+        "telegram_new": 94,
+        "telegram_manager": 22,
+        "channel_connect_link": 19,
+        "platform_provisioning": 12,
+        "nyxbot_gateway": 16,
+        "services::nyxbot_gateway_service::creator_tests": 6,
+        "handlers::nyxbot::tests": 219,
+        "handlers::nyxbot::tests::release_tests": 32,
+        "handlers::nyxbot::tests::release_tests::continuity_": 7,
+        "login_code_service": 10,
+        "lark_base_writes": 15,
+        "service_pool_routing": 1,
+        "handlers::service_pool_proxy_tests::runtime::pool_proxy_excluded_node_member_is_skipped_before_credential_materialization": 1
+      },
+      "selected_unique": 387
+    },
+    "final_exact_hosted": {
+      "result": "pass",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "duration_secs": 8.45,
+      "exit": 0,
+      "log": ".tmp/telegram-rust-hosted-gateway-final.log",
+      "classes": [
+        "configuration",
+        "401",
+        "403",
+        "503"
+      ],
+      "astra_personally_verified": true
+    },
+    "final_telegram_new": {
+      "result": "pass",
+      "passed": 94,
+      "failed": 0,
+      "ignored": 0,
+      "duration_secs": 87.73,
+      "exit": 0,
+      "log": ".tmp/telegram-rust-final-telegram-new.log",
+      "astra_individual_results_verified": true
+    },
+    "final_completed_suites": {
+      "telegram-new": {
+        "passed": 94,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 87.73,
+        "log": ".tmp/telegram-rust-final-telegram-new.log",
+        "astra_individual_results_verified": true
+      },
+      "manager": {
+        "passed": 22,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 16.43,
+        "log": ".tmp/telegram-rust-final-manager.log",
+        "astra_individual_results_verified": true
+      },
+      "hosted": {
+        "passed": 19,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 2.99,
+        "log": ".tmp/telegram-rust-final-hosted.log",
+        "astra_individual_results_verified": true
+      },
+      "provisioning": {
+        "passed": 12,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 31.33,
+        "log": ".tmp/telegram-rust-final-provisioning.log",
+        "astra_individual_results_verified": true
+      },
+      "gateway": {
+        "passed": 16,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 23.25,
+        "log": ".tmp/telegram-rust-final-gateway.log",
+        "astra_individual_results_verified": true
+      },
+      "handlers": {
+        "passed": 219,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 620.75,
+        "log": ".tmp/telegram-rust-final-handlers.log",
+        "astra_individual_results_verified": true
+      },
+      "login": {
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 172.96,
+        "log": ".tmp/telegram-rust-final-login.log",
+        "astra_individual_results_verified": true
+      },
+      "lark": {
+        "passed": 15,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 10.28,
+        "log": ".tmp/telegram-rust-final-lark.log",
+        "astra_individual_results_verified": true
+      },
+      "pool": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 0.2,
+        "log": ".tmp/telegram-rust-final-pool.log",
+        "astra_individual_results_verified": true
+      },
+      "pool-node-exclusion": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "duration_secs": 22.51,
+        "log": ".tmp/telegram-rust-final-pool-node-exclusion.log",
+        "astra_individual_results_verified": true
+      }
+    },
+    "final_handler_suite": {
+      "state": "pass",
+      "passed": 219,
+      "failed": 0,
+      "ignored": 0,
+      "duration_secs": 620.75,
+      "exit": 0,
+      "log": ".tmp/telegram-rust-final-handlers.log",
+      "release_passed": 32,
+      "continuity_passed": 7,
+      "astra_individual_results_verified": true
+    },
+    "mongo_last_report": {
+      "fds": 20466,
+      "soft_limit": 65536,
+      "healthy_primary": true,
+      "fd_errors": false
+    },
+    "final_main_unique": {
+      "executed": 360,
+      "passed": 360,
+      "failed": 0,
+      "ignored": 0,
+      "astra_reconciled": true
+    },
+    "final_unique": {
+      "executions": 409,
+      "unique": 387,
+      "passed": 387,
+      "failed": 0,
+      "ignored": 0,
+      "astra_independently_reconciled": true,
+      "implementation_commit": "1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+      "archived_logs": "docs/plans/2026-10-27-telegram-evidence/",
+      "source_inputs_matched_exact_commit": 1288
+    }
+  },
+  "opus_plan_gate": "SUPERSEDED_BY_USER",
+  "workflow": "astra_sol",
+  "user_amendment": "lets skip opus authenthication entirely for now. lets just roll with a pure ASTRA - SOL approach",
+  "implementer_session_id": "01a17afc-03c3-74f3-8206-125edb599f7c",
+  "implementation": "committed_candidate_387_unique_pass_followup_copy_correction_uncommitted_validation_pending",
+  "implementer_verified": {
+    "provider": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "x_high",
+    "mode": "full-access",
+    "worktree_id": "01a17a96-885c-7042-bf1c-6e33531a2117",
+    "state_at_verification": "running"
+  },
+  "plan_history": [
+    {
+      "version": "v1",
+      "sha256": "c99cc67c2452738ceecd78dbf68c320837d998abe9d5d2b0b788bbce5358fb24",
+      "gate": "SUPERSEDED_BY_USER"
+    },
+    {
+      "version": "v2",
+      "sha256": "8eaf1ef5d3e584715496114ddccc2255edf112716c2ccbffdfb6283de958be6e",
+      "gate": "ASTRA_PLAN_APPROVED",
+      "superseded_by": "v3"
+    },
+    {
+      "version": "v3",
+      "sha256": "cec3fc2c74c3ec14013ceeac7c7d2da154629d8bb7539ff3325b7e6aedd4f69b",
+      "gate": "ASTRA_PLAN_APPROVED",
+      "superseded_by": "v4"
+    },
+    {
+      "version": "v4",
+      "sha256": "1b96853398e20c33fbf93ce06fdc546da8c3e91dd27fa343347d9fea8f130558",
+      "gate": "ASTRA_PLAN_APPROVED",
+      "superseded_by": "v5"
+    },
+    {
+      "version": "v5",
+      "sha256": "43158abb55c362ca66711b1432a83c6a3bc464ced4362f3f1473b4b30d1c4df1",
+      "gate": "ASTRA_PLAN_APPROVED",
+      "superseded_by": "v6"
+    }
+  ],
+  "open_findings": [
+    "A-R21",
+    "A-R22"
+  ],
+  "build_window": "released_coordinator_hold_no_heavy_command_queued",
+  "resource_state": "coordinator_fourth_reclaim_and_explicit_package_only_profile_clearance",
+  "resolved_findings": [
+    "A-R04",
+    "A-R05",
+    "A-R08",
+    "A-R10",
+    "A-R14",
+    "A-R15",
+    "A-R16",
+    "A-R17",
+    "A-R03",
+    "A-R11",
+    "A-R01",
+    "A-R02",
+    "A-R06",
+    "A-R07",
+    "A-R09",
+    "A-R12",
+    "A-R13",
+    "A-R18",
+    "A-R20",
+    "A-R19"
+  ],
+  "candidate_closure_sha256": {
+    "frontend/src/pages/channel-connect-link.tsx": "639fe3d4eaa542fb631f79cec5727dc49cd586da4779f8eb4c8a2e02a38906d9",
+    "frontend/src/components/channels/telegram-new.tsx": "3c07c01c0ad7209d853dda4775966bcf311820d3446492a3ffc17f36a77f7bff",
+    "frontend/src/components/channels/telegram-prompt-status.tsx": "eec4b9c86d33dd868673a8ffb90d64e8764d9a21f0821fcfdb31b4bdace0ea59",
+    "frontend/e2e/channel-telegram-new.spec.ts": "775f328c1f83bd579cb9f41ef49133909617915c389b521a1f4d9f1285f825e9",
+    "docs/TELEGRAM_NEW.md": "023ceffd122369199f4e23a722cbe91ac26c7a176c91aa3797c8304e44ee3f79"
+  },
+  "next_backend_command": "CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test --manifest-path backend/Cargo.toml telegram_new --no-run",
+  "implementer_state": "same_sol_idle_source_ready_awaiting_explicit_backend_window",
+  "finding_closure_evidence": {
+    "A-R01": {
+      "binary_sha256": "1060f46cade1f49edbd68242d003eab3cb90f52609a12b0fb5eaaedf412f9ee1",
+      "log": ".tmp/telegram-rust-final-telegram-new.log",
+      "evidence": "hosted_recovery_refuses_deleted_replaced_or_retargeted_authority + watch_revocation_between_instructions_and_keyboard_stops_dispatch",
+      "final_commit_gate": "pending"
+    },
+    "A-R02": {
+      "binary_sha256": "1060f46cade1f49edbd68242d003eab3cb90f52609a12b0fb5eaaedf412f9ee1",
+      "log": ".tmp/telegram-rust-final-telegram-new.log",
+      "evidence": "legacy_generation_and_metadata_absence_preserve_start",
+      "final_commit_gate": "pending"
+    },
+    "A-R06": {
+      "binary_sha256": "1060f46cade1f49edbd68242d003eab3cb90f52609a12b0fb5eaaedf412f9ee1",
+      "log": ".tmp/telegram-rust-final-telegram-new.log",
+      "evidence": "closed_hosted_authority_is_acked_but_database_admission_errors_retry",
+      "final_commit_gate": "pending"
+    },
+    "A-R07": {
+      "binary_sha256": "1060f46cade1f49edbd68242d003eab3cb90f52609a12b0fb5eaaedf412f9ee1",
+      "log": ".tmp/telegram-rust-final-telegram-new.log",
+      "evidence": "consumption_rechecks_expiry_and_exact_request_snapshot + consumption_contention_retries_and_only_one_fresh_bot_is_consumed + hosted mutation matrix",
+      "final_commit_gate": "pending"
+    },
+    "A-R09": {
+      "binary_sha256": "1060f46cade1f49edbd68242d003eab3cb90f52609a12b0fb5eaaedf412f9ee1",
+      "log": ".tmp/telegram-rust-final-telegram-new.log",
+      "evidence": "org_hosted_creator_and_initiating_admin_remain_distinct",
+      "final_commit_gate": "pending"
+    },
+    "A-R12": {
+      "binary_sha256": "1060f46cade1f49edbd68242d003eab3cb90f52609a12b0fb5eaaedf412f9ee1",
+      "log": ".tmp/telegram-rust-final-telegram-new.log",
+      "evidence": "dispatch_reserves_full_provider_budget_after_slow_commit + stale_expired_observation_cannot_replace_committed_phase_renewal + phase_lease_renews_without_reviving_expired_instructions",
+      "final_commit_gate": "pending"
+    },
+    "A-R13": {
+      "binary_sha256": "1060f46cade1f49edbd68242d003eab3cb90f52609a12b0fb5eaaedf412f9ee1",
+      "log": ".tmp/telegram-rust-final-telegram-new.log",
+      "evidence": "nonstandard_http_status_keeps_request_dto_bounded_and_recovery_visible + diagnostics_are_bounded_closed_and_secret_free",
+      "final_commit_gate": "pending"
+    },
+    "A-R18": {
+      "binary_sha256": "1060f46cade1f49edbd68242d003eab3cb90f52609a12b0fb5eaaedf412f9ee1",
+      "log": ".tmp/telegram-rust-final-telegram-new.log",
+      "evidence": "required clippy PASS + real BSON-hosted request persistence/read/recovery and exact snapshot/legacy tests",
+      "final_commit_gate": "pending"
+    },
+    "A-R20": {
+      "binary_sha256": "1060f46cade1f49edbd68242d003eab3cb90f52609a12b0fb5eaaedf412f9ee1",
+      "log": ".tmp/telegram-rust-final-telegram-new.log",
+      "evidence": "required clippy PASS + timeout_and_interrupted_body_remain_unknown preserves InvalidResponse/uncertain/redaction",
+      "final_commit_gate": "pending"
+    },
+    "A-R19": {
+      "commit": "336405f8e667ea2eb2c6513effec3d15fd960b02",
+      "review": "APPROVED",
+      "tests": "login10/Lark15/pool1/exact_node_exclusion1 plus release32",
+      "clippy": "PASS_all_targets_D_warnings",
+      "reviewer": "01a17a9b-2cf3-79e3-9177-1aa759f5eb61"
+    }
+  },
+  "base_sha": "b1dd6548ade04ec4f0051203e1353796331c7f87",
+  "implementation_commit": "1b078ab9345bcd1d0eecf5e555ae8d7ee4de42ca",
+  "prerequisite_commit": "336405f8e667ea2eb2c6513effec3d15fd960b02",
+  "prerequisite_review": "APPROVED_exact_commit_personal_diff_surroundings_27_regressions_release32_clippy",
+  "implementation_gate": "OPEN",
+  "signoff_path": "docs/plans/2026-10-27-telegram-signoff.md",
+  "ticket_verdicts": {
+    "2045": "BLOCKED",
+    "1974": "BLOCKED"
+  },
+  "current_reviewer_agent_id": "01a17a9b-2cf3-79e3-9177-1aa759f5eb61",
+  "followup_candidate": {
+    "state": "source_reviewed_execution_pending_uncommitted",
+    "files": {
+      "backend/src/services/telegram_new_connect.rs": "e2518da7899d5df5ca37dc895dfb918b54b05ef370e4189ee335e0f1d0b4418a",
+      "backend/src/services/telegram_new_tests.rs": "e4b87725278874aedfed2d385d1383c5c2bc833bea0a71dde441455d1a22761c"
+    },
+    "targeted_tests": [
+      "services::telegram_new_tests::telegram_new_creation_webhook_completes_without_consent_or_browser_connect",
+      "services::nyxbot_channel_query_service::tests::current_channels_rank_live_then_latest_before_limiting_and_order_ties"
+    ],
+    "no_new_backend_window": true
+  }
+}

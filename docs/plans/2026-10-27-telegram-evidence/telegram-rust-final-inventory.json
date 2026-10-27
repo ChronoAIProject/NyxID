@@ -1,0 +1,18 @@
+{
+  "total": 10472,
+  "filters": {
+    "telegram_new": 94,
+    "telegram_manager": 22,
+    "channel_connect_link": 19,
+    "platform_provisioning": 12,
+    "nyxbot_gateway": 16,
+    "services::nyxbot_gateway_service::creator_tests": 6,
+    "handlers::nyxbot::tests": 219,
+    "handlers::nyxbot::tests::release_tests": 32,
+    "handlers::nyxbot::tests::release_tests::continuity_": 7,
+    "login_code_service": 10,
+    "lark_base_writes": 15,
+    "service_pool_routing": 1,
+    "handlers::service_pool_proxy_tests::runtime::pool_proxy_excluded_node_member_is_skipped_before_credential_materialization": 1
+  }
+}
