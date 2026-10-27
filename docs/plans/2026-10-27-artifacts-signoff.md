@@ -1,6 +1,6 @@
 # NyxID Artifacts ticket sign-off — #2037
 
-**Review time:** 2026-10-27 05:08:30 UTC
+**Review time:** 2026-10-27 08:29:45 UTC
 **Reviewer:** GPT-6-Astra PM, Heca agent `01a17a9b-50ea-7b43-a3d2-b5f39245cfc4`  
 **Implementer:** Heca agent `01a17afe-64ad-7ed1-bd1f-8b75d719d9f9`, provider `codex`, model `gpt-6.1-sol`, effort `xhigh`, mode `full-access`, Heca session `01a17afe-64ad-7ed1-bd1f-8b98e1a1ec1a`, provider session `01a17afe-665a-7d11-aa64-ebac87a34a20`  
 **Worktree:** `/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts`  
@@ -45,9 +45,9 @@ The coordinator-authorized shared lint prerequisite was reviewed and imported se
 - Applied cherry-pick in this worktree: `5b44175af5d69af272200a2fc7f374d4b10355f2`.
 - The applied commit changes exactly four baseline files: `login_code_service.rs`, `service_pool_routing.rs`, `lark_base_writes/ledger.rs`, and `nyxbot_gateway_release_service.rs`, with one equivalent guard rewrite per file (four rewrites, 8 additions and 8 deletions). `git diff --check` passed, and the original and applied four-file patch bytes compare identical. No Telegram feature changes were imported.
 
-The current source is therefore the composition of the Artifacts candidate plus the independently reviewed four-file prerequisite. The prerequisite is recorded as a separate identity; the candidate identity remains `9886d262…`.
+The current source is therefore the composition of the Artifacts candidate plus the independently reviewed four-file prerequisite and the bounded correction commits described below. The prerequisite and corrections are recorded as separate identities; the candidate identity remains `9886d262…`.
 
-**Effective reviewed source tip for this report:** `5b44175af5d69af272200a2fc7f374d4b10355f2`. Any later documentation-only commit must be recorded separately and must not replace this source identity. Since backend execution is still pending, this effective tip is not a final approved implementation commit.
+**Effective reviewed source tip for this report:** `47a2f3f1845b1896e172e68ec077bb8270ee2e33`. It is the final test-correction tip after prerequisite `5b44175af5d69af272200a2fc7f374d4b10355f2` and source correction `91ef35238a0e81f46628fd377d3d7f6a74c9b08c`; later documentation-only commits must be recorded separately and must not replace this source identity. Since backend execution is still pending, this effective tip is not a final approved implementation commit.
 
 The original Opus plan/final gates were **SUPERSEDED_BY_USER**, not passed. No Opus reviewer was created or awaited. This report uses the authorized pure Astra–Sol workflow.
 
@@ -57,13 +57,19 @@ Astra read the exact candidate diff and surrounding contracts, then separately r
 
 The review checked the seven shared files identified by the coordinator for Automation overlap. The Artifacts boundary remains original Web user admission, exact server-created completion-event consumption, owner/conversation lineage, and no trigger/channel/voice/group/invocation admission. Automation’s trigger continuation remains run/protocol-specific. Combined execution is still required to prove those source boundaries after integration.
 
-The review found no additional concrete source defect after resolving A-002, A-003, and the range-policy follow-up. This source result is not being substituted for backend execution or live acceptance.
+The follow-up review resolved the concrete malformed-status finding and verified the production-router, reservation-lifetime and legacy-route corrections at `91ef35238…`. The same Sol review then added exact composed response-header assertions in test-only commit `47a2f3f1845b1896e172e68ec077bb8270ee2e33`; Astra inspected the final four-file plus one-file correction diff and found no further source or test-quality finding. This source result is not being substituted for backend execution or live acceptance.
+
+The malformed-status correction is precise: an admitted generated-artifact watch with successful but malformed initial status JSON settles terminal `artifact_invalid` before any result fetch; malformed successful post-result status also settles `artifact_invalid` after exactly one result fetch. Ordinary async watches preserve `ValidationError("Invalid async operation status")` and their existing retry/defer behavior. The prepared regression asserts no pending artifact persistence, no materialization, and no repeated result fetch after terminalization.
+
+The production-router regression uses `build_router_with_state(state.clone())`, then `private.with_state(state.clone())`, and calls the actual mounted owner attachment and empty-body artifact-delivery routes. Its success path uses a signed first-party owner JWT on a completed/idle conversation and checks exact range bytes, `206`, `Content-Range`, MP4 content type and safe filename. It also checks anonymous, foreign-owner, expired, delegated, API-key, service-account and relay rejection, no body disclosure and no recovery effect. Recovery's success selects the server-written message association and makes no Sandbox request; a non-empty body is rejected. No `AuthUser` injection was used.
+
+The shared 192 MiB budget regressions keep the weighted reservation through decode, encryption, persistence and response-body consumption, and cover stale-lease release. The BSON regression encrypts the maximum 8 MiB file plus metadata, asserts the document is below MongoDB's 16 MiB limit, and rejects an oversized row. The earlier attempted legacy `thread_image` broadening was reverted; `assistant_uploads.rs` remains SHA-256 `a0815a26c651918e9c5498bc8cce3ce1e8d66b6b50c8d90d25359e47206a2a83` and continues `uploads::chat_bytes` behavior.
 
 ## Evidence ledger
 
 | Area | Exact command/filter or artifact | Result and identity | State for sign-off |
 | --- | --- | --- | --- |
-| Source candidate | `git show 9886d2620d69ec456f3c1fd814ec12aa972ee2cc`; 70-file diff against `b1dd6548a` | Candidate and parent verified; source review complete | **PASS — source review only** |
+| Source candidate and correction tips | `git show 9886d2620d69ec456f3c1fd814ec12aa972ee2cc`; `git show 91ef35238a0e81f46628fd377d3d7f6a74c9b08c`; `git show 47a2f3f1845b1896e172e68ec077bb8270ee2e33`; 70-file diff against `b1dd6548a` plus correction commits | Candidate, prerequisite `5b44175a…`, both correction tips and ancestry verified; Astra source review complete | **PASS — source review only** |
 | Shared prerequisite | `git show 336405f8e667ea2eb2c6513effec3d15fd960b02`; `git diff --check`; original/applied patch byte comparison | Four files only; applied as `5b44175af5d69af272200a2fc7f374d4b10355f2`; equivalent semantics reviewed by Astra/coordinator | **PASS — prerequisite only** |
 | Plan gate | SHA-256 of v4 plan | `ASTRA_PLAN_APPROVED`, exact SHA `7f5226f…` | **PASS** |
 | Sandbox contract | Read `https://sandbox.chrono-ai.fun/openapi.json` | Chrono Sandbox API version `0.3.0`; result files expose path/base64/error/size and no MIME field | **PASS — contract inspection** |
@@ -73,6 +79,11 @@ The review found no additional concrete source defect after resolving A-002, A-0
 | Browser fixture | `npx playwright test --config=playwright.artifacts.config.ts > /tmp/nyxid-artifacts-2037-browser.log 2>&1`, cwd `frontend/`; config uses port `49237` and one worker | 2 Chromium tests passed: real MP4 playback/time advance/pause, byte-identical video/image downloads, refresh/revisit, decoder-error download fallback | **PASS — fixture only** |
 | Browser fixture correction | `/tmp/nyxid-artifacts-2037-browser-fixture-shape-failure.log` | Initial unrelated machine-list fixture shape failure corrected; final run passed without reducing checks | **RESOLVED** |
 | Rust formatting | Direct `rustfmt --edition 2024 --config skip_children=true` over all 44 changed Rust files; no Cargo invocation | Passed; includes A-002/A-003/range changes | **PASS — formatting only** |
+| Correction formatting and hygiene | `rustfmt --edition 2024 --config skip_children=true --check backend/src/handlers/async_service_operation_tests.rs backend/src/handlers/async_service_operations.rs backend/src/handlers/generated_artifact_delivery_tests.rs backend/src/services/generated_artifacts/tests.rs`; `git diff --check`, cwd `/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts` | Both passed on `91ef35238…`; no Cargo/rustc/backend test/build/check/Clippy command was launched or queued | **PASS — lightweight validation only** |
+| Final mounted-header assertions | `rustfmt --edition 2024 --config skip_children=true --check backend/src/handlers/generated_artifact_delivery_tests.rs`; `git diff --check`, cwd `/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts` | `47a2f3f1845b1896e172e68ec077bb8270ee2e33` asserts exact `Content-Length`, `Accept-Ranges`, cache/security headers, CSP and generated `Content-Disposition`; passed lightweight checks only | **PASS — lightweight validation only** |
+| Malformed-status regression | `generated_artifact_malformed_status_is_terminal_before_or_after_result_fetch` in `backend/src/handlers/generated_artifact_delivery_tests.rs` | Prepared raw malformed JSON fixture; execution pending backend hold | **OPEN** |
+| Production-router regression | `generated_artifact_production_routes_enforce_owner_bytes_and_recovery_lineage` in `backend/src/handlers/generated_artifact_delivery_tests.rs` | Prepared real `build_router_with_state`/`private.with_state` mounted owner and recovery checks with signed first-party owner credential; execution pending backend hold | **OPEN** |
+| Byte-budget/BSON regressions | `generated_artifact_worker_reservation_spans_persist_and_releases_on_error`; `generated_artifact_worker_reserves_shared_budget_before_result_body_and_releases_on_cancel`; `maximum_encrypted_pending_document_fits_bson_and_rejects_oversize` | Prepared shared 192 MiB lifetime and encrypted 8 MiB/16 MiB BSON assertions; execution pending backend hold | **OPEN** |
 | Diff hygiene | `git diff --check` | Passed | **PASS** |
 | Backend build | Required shared-target Cargo build/test commands | Not run after implementation changes because coordinator’s Artifacts resource hold remains active; no Cargo/rustc command was queued | **OPEN** |
 | A-002 regression | `generated_summary_selects_metadata_and_discards_process_streams`; `generated_artifact_persisted_summary_and_input_context_exclude_process_streams` | Prepared in `generated_artifact_delivery_tests.rs`; execution pending backend window | **OPEN** |

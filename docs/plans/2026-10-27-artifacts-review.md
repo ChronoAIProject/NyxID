@@ -245,3 +245,126 @@ automation acceptance or live Sandbox-to-Web acceptance. The coordinator's
 explicit Artifacts Cargo hold remains active, and
 `ASTRA_IMPLEMENTATION_APPROVED` remains unset pending backend evidence and the
 open acceptance gates.
+
+## Correction loop — production route and bounded malformed-status evidence
+
+The source-only correction pass addressed the remaining Astra findings without
+changing the runtime route policy:
+
+- `generated_artifact_production_routes_enforce_owner_bytes_and_recovery_lineage`
+  now builds the production router with `build_router_with_state(state.clone())`
+  and mounts the returned private router with the same state. The owner byte
+  success uses a signed first-party owner access token on the completed/idle
+  conversation, sends one satisfiable range, and checks the exact `206` bytes,
+  `Content-Range`, stored MP4 type and generated safe filename disposition.
+  The same mounted routes check anonymous, foreign-owner and expired owner
+  requests, plus the existing delegated, API-key, service-account and relay
+  rejection layers. Recovery checks anonymous, foreign, delegated,
+  service-account, relay, non-empty-body and expired-lineage rejection before
+  the successful empty-body server-associated message recovery. Every denied
+  request consumes a bounded body and proves the Sandbox call count and body
+  content are unchanged.
+- `assistant_uploads.rs` is preserved byte-for-byte (SHA-256
+  `a0815a26c651918e9c5498bc8cce3ce1e8d66b6b50c8d90d25359e47206a2a83`). The
+  legacy `thread_image` route still dispatches through `uploads::chat_bytes`
+  and retains its stored MIME and attachment behavior; generated HTTP policy
+  remains scoped to the owner session attachment route's `generated_artifact`
+  origin.
+- The malformed-status fixture now returns a typed Axum response for both its
+  malformed and normal branches. An admitted generated watch settles
+  successful malformed initial or post-result JSON as terminal
+  `artifact_invalid`; the post-result case fetches the result once and a later
+  sweep performs no repeat fetch or publication. Ordinary async watches retain
+  `ValidationError("Invalid async operation status")`, while transport/5xx
+  retry and expiry/claim fences remain unchanged.
+- The reservation seam regression captures its baseline in the test that owns
+  the reservation, proves the reservation remains held through decode,
+  encryption and `persist`, and proves release after both success and stale
+  lease failure. Owner egress continues to assert one weighted reservation
+  (`2 * stored payload bytes`) remains held until the response body is
+  consumed. No Cargo, rustc, backend test/build/check or Clippy command was
+  started or queued under the coordinator hold; direct rustfmt and
+  `git diff --check` are the only validation performed in this correction
+  loop.
+
+The correction is committed as source tip
+`47a2f3f1845b1896e172e68ec077bb8270ee2e33`, after the reviewed prerequisite
+`5b44175af5d69af272200a2fc7f374d4b10355f2` and the original feature candidate
+`9886d2620d69ec456f3c1fd814ec12aa972ee2cc`. Backend execution, combined
+I-01–I-05 and I-07 acceptance on an integrated Automation/Artifacts tip, and
+the live Sandbox-to-originating-Web journey remain open coordinator-owned
+gates.
+
+## Astra correction review — source tip 47a2f3f1
+
+I personally reread the complete correction commits and the relevant
+surrounding worker, router, auth, recovery, byte-budget and legacy upload code.
+The implementation review is complete at the exact source tip; the execution
+gate is still held.
+
+The concrete malformed-status finding is resolved in source. In
+`async_service_operations::step`, a successful response with malformed JSON
+settles an admitted generated-artifact watch as terminal `artifact_invalid`
+before any result call. Ordinary async watches still return their existing
+`ValidationError("Invalid async operation status")`, which the ordinary sweep
+path continues to defer/retry. In `artifact_result`, malformed successful
+post-result status also settles `artifact_invalid`; transport failures, 5xx
+defer, 410 expiry, claim fences and reservation release paths remain intact.
+The prepared regression uses raw `{` JSON and asserts zero result calls for
+the initial case, one result call and no repeat fetch/materialization after a
+post-result terminalization, and unchanged ordinary-async waiting behavior.
+
+The production-route regression now constructs the real
+`build_router_with_state(state.clone())` private router and calls
+`private.with_state(state.clone())`. It exercises the mounted
+`assistant_nyxagent::attachment` and `artifact_delivery` paths with a signed
+first-party owner access token on a completed/idle conversation. It checks the
+exact range bytes, `206`/`Content-Range`, MP4 type and safe filename, plus
+anonymous, foreign-owner, expired, delegated, API-key, service-account and
+relay rejection. Empty-body recovery uses the server-written message
+association and proves no Sandbox resubmission; non-empty recovery is denied.
+No `AuthUser` injection or legacy route broadening is present.
+
+The shared memory tests now capture their own reservation baselines and keep
+the reservation alive through decode, encryption and `persist`, including the
+stale-lease error path. Owner egress keeps the weighted permit (`2 * stored
+payload bytes`) with the actual response body until consumption. The BSON test
+encrypts the maximum 8 MiB file with metadata, asserts the serialized row is
+below MongoDB's 16 MiB document limit, and rejects an oversized row.
+
+An earlier source attempt routed legacy Agent Key image delivery through the
+generated-artifact HTTP policy. Astra rejected that behavior because it changed
+legacy `thread_image` MIME/disposition/range semantics. The attempt was
+reverted; `assistant_uploads.rs` remains byte-identical to HEAD (SHA-256
+`a0815a26c651918e9c5498bc8cce3ce1e8d66b6b50c8d90d25359e47206a2a83`) and
+`thread_image` still dispatches through `uploads::chat_bytes`.
+
+Direct validation of this correction commit passed:
+
+```text
+rustfmt --edition 2024 --config skip_children=true --check \
+  backend/src/handlers/async_service_operation_tests.rs \
+  backend/src/handlers/async_service_operations.rs \
+  backend/src/handlers/generated_artifact_delivery_tests.rs \
+  backend/src/services/generated_artifacts/tests.rs
+git diff --check
+```
+
+No Cargo, rustc, backend test/build/check or Clippy command was started or
+queued in this worktree because the coordinator's explicit Artifacts hold is
+still active. The four Rust regressions above are prepared evidence, not
+executed evidence. This section supersedes the earlier statement that there
+was no remaining source finding; the malformed-status finding was an
+intermediate concrete review finding, now resolved in source with execution
+pending.
+
+The same Sol review then found one test-quality gap in the mounted owner route:
+the success assertion checked bytes and the main range headers but not the
+complete composed response-header contract. Sol committed the bounded test-only
+correction `47a2f3f1845b1896e172e68ec077bb8270ee2e33`, adding exact assertions
+for `Content-Length`, `Accept-Ranges`, `Cache-Control: private, no-store`,
+`X-Content-Type-Options: nosniff`, the CSP, and the complete generated
+`Content-Disposition`. I personally inspected those assertions against
+`generated_artifacts::http::owner_response`; they match the implementation and
+do not broaden legacy behavior. Direct rustfmt on the changed test and
+`git diff --check` passed. No backend execution claim is made.
