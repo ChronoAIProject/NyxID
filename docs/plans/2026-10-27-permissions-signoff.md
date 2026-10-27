@@ -1,5 +1,21 @@
 # Permissions issue sign-off — #2004 and #2007
 
+## Draft publication and integration hold — 2026-10-27
+
+The coordinator published [draft PR #2058](https://github.com/ChronoAIProject/NyxID/pull/2058)
+to `main` at `7185b5ef7eb56194b2e1cbf42f045536a9cb7847` on
+`fix/assistant-permissions-2004-2007`. That commit contains the previously
+reviewed six-line replacement-key regression; earlier references below to its
+uncommitted state describe the source-review checkpoint. Its execution remains
+pending the later narrow Permissions window. The 169-pass and Clippy evidence
+remains bound to the earlier tested source and original test set.
+
+The coordinator reports that GitHub marks this draft as conflicting with
+current `main`. Reconciliation is OPEN for later integration work; it has not
+been attempted and is separate from the accepted source review. Permissions
+remains on backend HOLD until explicit coordinator clearance. Both issue
+verdicts remain BLOCKED for the applicable local, live and combined gates.
+
 ## Astra final source review — 2026-10-27T07:38:15Z
 
 Astra personally reread the complete exact implementation commit

@@ -34,7 +34,21 @@
   },
   "implementation_gate": "SOURCE_REVIEW_COMPLETE_LOCAL_VALIDATION_PENDING",
   "current_commit": "493b5c2dc012cc4de80c00f33f7cddf489cb316d",
+  "draft_pr": {
+    "url": "https://github.com/ChronoAIProject/NyxID/pull/2058",
+    "base": "main",
+    "published_commit": "7185b5ef7eb56194b2e1cbf42f045536a9cb7847",
+    "published_by": "coordinator",
+    "state": "DRAFT_FINAL_ACCEPTANCE_BLOCKED",
+    "test_follow_up": "Six-line reviewed replacement-key regression committed; execution pending later narrow slot",
+    "integration": {
+      "state": "OPEN_MAIN_CONFLICT_RECONCILIATION_PENDING",
+      "evidence": "Coordinator reports GitHub conflict with current main; no local reconciliation attempted",
+      "backend": "HOLD_UNTIL_EXPLICIT_COORDINATOR_WINDOW"
+    }
+  },
   "acceptance_open": [
+    "Reconcile draft PR #2058 with current main during later integration work",
     "Narrow test-only follow-up validation on the exact committed source/binary identity",
     "Astra implementation approval after narrow local validation and live/combined gates",
     "Live callback shape and deployed NyxAgent/NyxID versions",
