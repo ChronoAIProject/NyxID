@@ -14,6 +14,7 @@ export function GeneratedAttachment({
   const [error, setError] = useState<string>();
   const [decodeFailed, setDecodeFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [downloadRequested, setDownloadRequested] = useState(false);
   const [locallyExpired, setLocallyExpired] = useState(() =>
     Boolean(
       attachment.expiresAt && Date.parse(attachment.expiresAt) <= Date.now(),
@@ -32,8 +33,9 @@ export function GeneratedAttachment({
   }, [attachment.expiresAt]);
   const name = attachment.filename ?? "Generated file";
   const preview = attachment.previewKind;
+  const inline = preview === "image" || preview === "video";
   useEffect(() => {
-    if (expired) return;
+    if (expired || (!inline && !downloadRequested)) return;
     const controller = new AbortController();
     let objectUrl: string | undefined;
     let active = true;
@@ -43,6 +45,13 @@ export function GeneratedAttachment({
         if (!active) return;
         objectUrl = URL.createObjectURL(blob);
         setUrl(objectUrl);
+        if (!inline) {
+          const link = document.createElement("a");
+          link.href = objectUrl;
+          link.download = name;
+          link.rel = "noopener noreferrer";
+          link.click();
+        }
       })
       .catch((failure: unknown) => {
         if (active) setError(attachmentFailure(failure));
@@ -52,7 +61,7 @@ export function GeneratedAttachment({
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [attachment.endpoint, expired, attempt]);
+  }, [attachment.endpoint, expired, attempt, inline, downloadRequested, name]);
   return (
     <div className="min-w-0 max-w-full space-y-2 rounded-lg border border-hairline bg-card p-3">
       <p className="break-words text-xs font-medium">{name}</p>
@@ -82,6 +91,20 @@ export function GeneratedAttachment({
             Load attachment again
           </button>
         </div>
+      ) : !inline && !downloadRequested ? (
+        <>
+          <p role="status" className="text-xs text-muted-foreground">
+            Preview unavailable for this type. Download the file to open it.
+          </p>
+          <button
+            type="button"
+            onClick={() => setDownloadRequested(true)}
+            className="inline-flex items-center gap-1.5 text-xs underline"
+          >
+            <Download className="h-3.5 w-3.5" aria-hidden="true" />
+            Download {name}
+          </button>
+        </>
       ) : !url ? (
         <p role="status" className="text-xs text-muted-foreground">
           Loading generated file…
