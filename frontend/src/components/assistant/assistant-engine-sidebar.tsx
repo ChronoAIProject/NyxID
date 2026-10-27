@@ -1,3 +1,4 @@
+import { useConnectionDown } from "@/hooks/use-connection-down";
 import { useState, useSyncExternalStore, type ComponentProps } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
@@ -136,11 +137,20 @@ export function AssistantEngineSidebar({
         onNewGroup: () => setCreatingGroup(true),
       }
     : undefined;
-  const loadError = agents.error
-    ? `Could not load agents. ${agents.error.message}`
-    : groups.error
-      ? `Could not load groups. ${groups.error.message}`
-      : undefined;
+  // Offline, the window's banner says it once; the lists refresh when the
+  // connection returns. A dropped connection is not a sent message here.
+  const online = !useConnectionDown();
+  const loadFailure = (what: string, error: Error) =>
+    error.message.startsWith("Connection interrupted")
+      ? `Could not load ${what}. Check your connection; they reload when it's back.`
+      : `Could not load ${what}. ${error.message}`;
+  const loadError = !online
+    ? undefined
+    : agents.error
+      ? loadFailure("agents", agents.error)
+      : groups.error
+        ? loadFailure("crews", groups.error)
+        : undefined;
 
   return (
     <>

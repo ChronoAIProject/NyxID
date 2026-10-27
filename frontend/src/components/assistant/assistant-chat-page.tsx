@@ -1,3 +1,4 @@
+import { useConnectionDown } from "@/hooks/use-connection-down";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { PreparedMicrophone } from "@/lib/microphone-capture";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
@@ -889,6 +890,14 @@ function NyxAgentThreadPage() {
         .find(
           (message) => message.role === "assistant" || message.role === "user",
         );
+  // While the window's banner reports the connection, a dropped request is
+  // not repeated here; the open chat reloads once the connection returns.
+  const connectionDown = useConnectionDown();
+  const wasDown = useRef(connectionDown);
+  useEffect(() => {
+    if (wasDown.current && !connectionDown && selectedId) void chat.refreshHistory();
+    wasDown.current = connectionDown;
+  }, [connectionDown, selectedId, chat]);
   const turnError =
     lastReply?.status === "error"
       ? withAssistantTrace(
@@ -897,6 +906,10 @@ function NyxAgentThreadPage() {
           lastReply.turnId ?? null,
         )
       : undefined;
+  const dockedError =
+    chat.error ??
+    (requestError?.scope === errorScope ? requestError.message : undefined) ??
+    turnError;
   const threadPanels = headerAgent && !showHome ? (
     <ThreadPanels>
       <ThreadHeader
@@ -1187,17 +1200,11 @@ function NyxAgentThreadPage() {
               onClose={() => setVoiceSettingsOpen(false)} />
           </DialogContent>
         </Dialog>}
-        <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
+        <div ref={composerRef} data-composer-dock="" className="absolute inset-x-0 bottom-0 z-10">
           {/* Failures sit with the composer, where the next attempt starts. */}
           <AssistantErrorNotice
             docked
-            message={
-              chat.error ??
-              (requestError?.scope === errorScope
-                ? requestError.message
-                : undefined) ??
-              turnError
-            }
+            message={connectionDown && dockedError?.startsWith("Connection interrupted") ? undefined : dockedError}
           />
           <NyxAgentComposer
             onVoiceSettings={voiceEnabled && !destroyed && !channelPlatform ? () => setVoiceSettingsOpen(true) : undefined}

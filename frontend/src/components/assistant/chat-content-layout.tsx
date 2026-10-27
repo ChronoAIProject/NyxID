@@ -52,7 +52,10 @@ export function ChatContentLayout({ children }: { readonly children: ReactNode }
       updateHeader();
     });
     function findTranscript() {
-      const nextComposer = element!.querySelector<HTMLElement>("[data-composer-surface], [data-composer-band]:not(:has([data-composer-surface]))");
+      // A dock holds the composer and anything stacked on it (a failure
+      // notice); its top is where the transcript's overlays must stop.
+      const nextComposer = element!.querySelector<HTMLElement>("[data-composer-dock]")
+        ?? element!.querySelector<HTMLElement>("[data-composer-surface], [data-composer-band]:not(:has([data-composer-surface]))");
       if (nextComposer !== composer) {
         if (composer) observer.unobserve(composer);
         composer = nextComposer;

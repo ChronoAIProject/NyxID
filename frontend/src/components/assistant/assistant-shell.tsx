@@ -16,6 +16,7 @@ import { useThemeStore } from "@/stores/theme-store";
 import { SidebarResizeHandle } from "@/components/layout/sidebar-resize-handle";
 import { useScrollFades } from "@/hooks/use-scroll-fades";
 import { ChatContentLayout } from "./chat-content-layout";
+import { OfflineBanner } from "./offline-banner";
 import { ChatGripSlotContext } from "./chat-header-context";
 import { AssistantSearchButton, AssistantSearchDialog } from "./assistant-search";
 import { useAssistantSearchShortcut } from "@/hooks/use-assistant-search-shortcut";
@@ -111,6 +112,7 @@ export function AssistantShell({
             paddingRight: "var(--sar)",
           }}
         >
+          <OfflineBanner />
           {/* Mobile only: the drawer opener. On desktop the sidebar column
               carries the brand and there is no top row. */}
           <header className="flex h-[52px] shrink-0 items-center gap-2 px-3 sm:px-4 md:hidden">
