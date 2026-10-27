@@ -226,6 +226,12 @@ fn unsafe_callbacks() -> Vec<(&'static str, Value)> {
     let mut unknown = callback();
     unknown["client_metadata"]["unknown"] = json!("fixture");
     cases.push(("unknown metadata key", unknown));
+    let mut replacement = callback();
+    let metadata = replacement["client_metadata"].as_object_mut().unwrap();
+    assert!(metadata.remove("x-codex-turn-metadata").is_some());
+    metadata.insert("unknown".into(), json!("fixture"));
+    assert_eq!(metadata.len(), 7);
+    cases.push(("replacement metadata key", replacement));
     let mut missing = callback();
     missing.as_object_mut().unwrap().remove("store");
     cases.push(("missing store", missing));
