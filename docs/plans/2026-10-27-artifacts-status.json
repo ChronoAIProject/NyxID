@@ -327,7 +327,7 @@
     }
   },
   "implementation_status": "Reviewed and locally validated source tip 3a2c9c996a756ed4f58673c122a6d4775f0e66b7, composed from candidate 9886d2620d69ec456f3c1fd814ec12aa972ee2cc plus prerequisite 5b44175af5d69af272200a2fc7f374d4b10355f2. Astra personally reviewed the complete implementation and the bounded Clippy correction; required rebuild, malformed-status regression, current-tip router/process-stream/lifecycle regressions, focused generated-artifact regressions, and all-target warnings-denied Clippy passed with exact source/binary identities. Combined I-01–I-05/I-07 acceptance and live Sandbox-to-Web acceptance remain open, so ASTRA_IMPLEMENTATION_APPROVED is not recorded.",
-  "updated_at": "2026-10-27T11:34:42Z",
+  "updated_at": "2026-10-27T11:36:30Z",
   "resource_hold": {
     "active": false,
     "explicit_release_received": true,
@@ -486,7 +486,7 @@
   "applied_prerequisite_commit": "5b44175af5d69af272200a2fc7f374d4b10355f2",
   "prerequisite_source_commit": "336405f8e667ea2eb2c6513effec3d15fd960b02",
   "effective_source_tip": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
-  "signoff_commit": "PENDING_DOCUMENTATION_COMMIT",
+  "signoff_commit": "95d169336da97db3b3aabb51f3dbbfc5efb13234",
   "prerequisite_commit": "5b44175af5d69af272200a2fc7f374d4b10355f2",
   "source_tip_commit": "3a2c9c996a756ed4f58673c122a6d4775f0e66b7",
   "source_review_state": "SOURCE_REVIEW_COMPLETE",
