@@ -14,6 +14,9 @@ use tokio::sync::Mutex;
 #[path = "nyxbot_transport_tests.rs"]
 mod transport_tests;
 
+#[path = "nyxbot_discord_tests.rs"]
+mod discord_tests;
+
 #[path = "nyxbot_release_tests.rs"]
 mod release_tests;
 

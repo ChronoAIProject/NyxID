@@ -130,6 +130,13 @@ const ASSISTANT_VOICE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const DISCORD_GATEWAY_FLAG_KEY: &str = "channel:discord-gateway";
+const DISCORD_GATEWAY_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: DISCORD_GATEWAY_FLAG_KEY,
+    description: "Receive ordinary Discord messages through leased Gateway sessions. Interactions remain independent.",
+    default_enabled: false,
+};
+
 pub const NYXBOT_THREAD_FOLLOW_FLAG_KEY: &str = "nyxbot:thread-follow";
 pub const NYXBOT_ADAPTERS_FLAG_KEY: &str = "nyxbot:service-adapters";
 const NYXBOT_ADAPTERS_FLAG: FeatureFlagDef = FeatureFlagDef {
@@ -325,6 +332,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
@@ -365,6 +373,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
+    DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
@@ -2869,6 +2878,7 @@ mod tests {
                 "assistant:workspace-preview",
                 "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
+                "channel:discord-gateway",
                 "nyxbot:service-adapters",
                 "assistant:operation-scopes",
                 "assistant:guest-operation-scopes",

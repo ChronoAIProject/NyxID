@@ -299,7 +299,16 @@ pub struct ChannelBotSubscriptionResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DiscordGatewayStatusResponse {
+    pub state: String,
+    pub reason: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ChannelBotDiagnosticsResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discord_gateway: Option<DiscordGatewayStatusResponse>,
     pub last_inbound_at: Option<String>,
     pub last_inbound_source: Option<String>,
     pub last_outbound_at: Option<String>,
@@ -399,6 +408,14 @@ fn diagnostics_response(
         at: e.at.to_rfc3339(),
     };
     ChannelBotDiagnosticsResponse {
+        discord_gateway: d
+            .discord_gateway
+            .as_ref()
+            .map(|gateway| DiscordGatewayStatusResponse {
+                state: gateway.state.clone(),
+                reason: gateway.reason.clone(),
+                updated_at: gateway.updated_at.to_rfc3339(),
+            }),
         last_inbound_at: d.last_inbound_at.map(|v| v.to_rfc3339()),
         last_inbound_source: d.last_inbound_source.clone(),
         last_outbound_at: d.last_outbound_at.map(|v| v.to_rfc3339()),

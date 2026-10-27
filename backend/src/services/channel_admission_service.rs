@@ -14,6 +14,7 @@ pub(crate) async fn claim(
 ) -> AppResult<EventDedupClaimResult> {
     let event = message.platform_message_id.as_deref().unwrap_or_default();
     let namespace = match message.platform.as_str() {
+        "discord" if super::discord_gateway::valid_message_id(event) => "discord-inbound",
         "whatsapp" if super::channel_delivery_service::valid_message_id(event) => {
             "whatsapp-inbound"
         }
@@ -59,12 +60,23 @@ pub(crate) async fn admit(
     claim: &EventDedupClaim,
     message: &ChannelMessage,
 ) -> AppResult<bool> {
+    admit_fenced(db, claim, message, None).await
+}
+
+async fn admit_fenced(
+    db: &mongodb::Database,
+    claim: &EventDedupClaim,
+    message: &ChannelMessage,
+    fence: Option<&super::discord_gateway::Fence>,
+) -> AppResult<bool> {
     let result: Result<bool, mongodb::error::Error> = async {
         let mut session = db.client().start_session().await?;
         session.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run(
-            (db.clone(), claim.clone(), message.clone()),
-            |session, (db, claim, message)| {
+            (db.clone(), claim.clone(), message.clone(), fence.cloned()),
+            |session, (db, claim, message, fence)| {
                 Box::pin(async move {
+                    if let Some(fence) = fence
+                        && !fence.touch(db, session).await? { return Ok(false); }
                     // Contend with accepted personal erasure/account closure,
                     // including a webhook authenticated before that transition.
                     // A dedup claim alone conveys no current owner authority.
@@ -111,6 +123,58 @@ pub(crate) async fn store(
             Ok(admit(db, &claim, &message).await?.then_some(message))
         }
     }
+}
+
+pub(crate) async fn store_discord(
+    db: &mongodb::Database,
+    message: ChannelMessage,
+    fence: &super::discord_gateway::Fence,
+) -> AppResult<Option<ChannelMessage>> {
+    if message.platform != "discord"
+        || message.channel_bot_id.as_deref() != Some(&fence.bot.id)
+        || message.user_id != fence.bot.user_id
+    {
+        return Err(AppError::ValidationError(
+            "Discord Gateway admission scope mismatch".into(),
+        ));
+    }
+    match claim(db, &message).await? {
+        EventDedupClaimResult::Duplicate => {
+            if discord_committed(db, &message).await? {
+                Ok(None)
+            } else {
+                Err(AppError::ChannelPlatformError(
+                    "Discord Gateway admission pending; retain resume cursor".into(),
+                ))
+            }
+        }
+        EventDedupClaimResult::Claimed(claim) => {
+            if admit_fenced(db, &claim, &message, Some(fence)).await? {
+                Ok(Some(message))
+            } else if discord_committed(db, &message).await? {
+                Ok(None)
+            } else {
+                // A stale holder or expired admission claim is not delivery.
+                // Releasing only this claim lets the successor retry immediately.
+                let _ = EventDedupStore::release(db, &claim).await;
+                Err(AppError::ChannelBotInactive(
+                    "Discord Gateway admission fence lost".into(),
+                ))
+            }
+        }
+    }
+}
+
+async fn discord_committed(db: &mongodb::Database, message: &ChannelMessage) -> AppResult<bool> {
+    let scope = serde_json::to_string(&(&message.channel_bot_id, &message.user_id))
+        .map_err(|_| AppError::Internal("Unable to encode message admission".into()))?;
+    EventDedupStore::is_committed(
+        db,
+        "discord-inbound",
+        &scope,
+        message.platform_message_id.as_deref().unwrap_or_default(),
+    )
+    .await
 }
 
 /// Platforms with their own duplicate/lifecycle protocol still need the same
