@@ -74,6 +74,22 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      # Hand-added (allow-dirty = ["ci"]); keep identical in release.yml and
+      # release-cache.yml. The x86_64 Linux dist build (thin LTO) exceeds the
+      # 16 GB hosted runner's memory and the runner is killed with exit 143,
+      # so neither the release nor the warm cache ever completes. Swap lets it
+      # finish. It sets no CARGO_* variable, so rust-cache keys are unchanged.
+      # Container jobs cannot add swap and have not needed it.
+      - name: Add swap space
+        if: ${{ runner.os == 'Linux' && !matrix.container }}
+        shell: bash
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /mnt/nyxid-build-swap
+          sudo chmod 600 /mnt/nyxid-build-swap
+          sudo mkswap /mnt/nyxid-build-swap
+          sudo swapon /mnt/nyxid-build-swap
+          free -h
       # Keep in sync with the cache step in release.yml's build-local-artifacts.
       - name: Restore Rust build cache
         id: cache
