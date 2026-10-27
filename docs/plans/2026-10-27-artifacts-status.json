@@ -393,7 +393,7 @@
   "prerequisite_commit": "5b44175af5d69af272200a2fc7f374d4b10355f2",
   "source_tip_commit": "47a2f3f1845b1896e172e68ec077bb8270ee2e33",
   "source_review_state": "SOURCE_REVIEW_COMPLETE",
-  "local_validation_state": "LOCAL_VALIDATION_COMPLETE",
+  "local_validation_state": "LOCAL_VALIDATION_PENDING_BACKEND",
   "astra_implementation_approval": null,
   "opus_gate_status": "SUPERSEDED_BY_USER",
   "opus_gate_history": {
@@ -415,5 +415,12 @@
       "scope": "Exact mounted owner response header assertions",
       "review_state": "SOURCE_REVIEW_COMPLETE"
     }
-  ]
+  ],
+  "lightweight_validation_state": "LIGHTWEIGHT_CHECKS_COMPLETE",
+  "lightweight_validation_evidence": {
+    "frontend": "focused unit tests (141 across four files), TypeScript typecheck, ESLint and Chromium fixture evidence are recorded under evidence.tests; no live Sandbox journey is implied.",
+    "formatting": "Direct rustfmt checks and git diff --check passed for the reviewed source corrections; no Cargo invocation was used.",
+    "prettier": "Frontend feature files, browser test and isolated Playwright config passed the recorded Prettier check.",
+    "backend": "Compilation, focused Rust tests and all-target warnings-denied Clippy remain pending the coordinator-owned Artifacts window."
+  }
 }
