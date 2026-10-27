@@ -201,3 +201,15 @@ not an unresolved defect in the artifact candidate. The pending-row
 `materializing` state is currently cleanup-only and unreachable by design:
 attachment insertion and the `pending -> materialized` transition share one
 transaction, so crash recovery cannot expose a partially committed state.
+
+## Candidate implementation commit — 2026-10-27
+
+The existing Sol session created the implementation candidate at
+`9886d2620d69ec456f3c1fd814ec12aa972ee2cc` (parent
+`b1dd6548ade04ec4f0051203e1353796331c7f87`). The candidate contains the
+70-file implementation and the previously recorded frontend/direct-format
+evidence; it was created without starting or queuing Cargo under the active
+coordinator hold. This candidate identity is deliberately separate from the
+status file's historical `current_commit` base and from any later
+documentation-only review/status commit. Astra's exact-commit source review is
+still in progress; `ASTRA_IMPLEMENTATION_APPROVED` is not recorded.

@@ -8,6 +8,7 @@
   "plan_sha256": "7f5226f241b7a826c58be216f12dd4416471a48d91e67e4ed65871b811bd8493",
   "review_ledger_path": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-artifacts/docs/plans/2026-10-27-artifacts-review.md",
   "plan_gate": "ASTRA_PLAN_APPROVED",
+  "candidate_commit": "9886d2620d69ec456f3c1fd814ec12aa972ee2cc",
   "opus_reviewer_id": null,
   "opus_session_id": null,
   "sol_implementer_id": "01a17afe-64ad-7ed1-bd1f-8b75d719d9f9",
@@ -159,7 +160,7 @@
       }
     }
   },
-  "implementation_status": "Source changes and frontend verification prepared; Astra personal source review has no open artifact defect; A-002 and A-003 resolved after inspection with regressions prepared; backend validation held by coordinator; combined automation-overlap acceptance and live acceptance remain open.",
+  "implementation_status": "Candidate commit 9886d2620d69ec456f3c1fd814ec12aa972ee2cc contains the prepared source changes and frontend verification; Astra personal source review of the candidate is in progress with no open artifact defect so far; A-002 and A-003 resolved after inspection with regressions prepared; backend validation held by coordinator; combined automation-overlap acceptance and live acceptance remain open.",
   "updated_at": "2026-10-27T03:26:33.093318Z",
   "resource_hold": {
     "active": true,
