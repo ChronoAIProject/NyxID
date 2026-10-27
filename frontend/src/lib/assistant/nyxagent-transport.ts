@@ -110,7 +110,8 @@ function images(
         size: attachment.size,
         expiresAt: attachment.expires_at ?? undefined,
       } : {}),
-      origin: attachment.origin || undefined,
+      origin: attachment.origin === "tool" || attachment.origin === "user_upload" || attachment.origin === "generated_artifact"
+        ? attachment.origin : undefined,
       ...(attachment.image_input ? { imageInput: attachment.image_input } : {}),
     })),
   };

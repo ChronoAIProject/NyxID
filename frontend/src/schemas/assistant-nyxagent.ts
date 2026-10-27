@@ -20,7 +20,7 @@ export const nyxAgentTurnActivitySchema = z.object({
 });
 export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
 
-/// A tool image or human upload, fetched from the owner-only attachment route.
+/// Attachment readers accept future types; upload policy remains server-owned.
 export const nyxAgentAttachmentSchema = z.object({
   filename: z.string().nullable().optional(),
   source: z.string().nullable().optional(),
@@ -28,12 +28,8 @@ export const nyxAgentAttachmentSchema = z.object({
   preview_kind: z.enum(["image", "video", "download"]).nullable().optional(),
   expires_at: z.string().nullable().optional(),
   id: z.string(),
-  content_type: z.enum([
-    "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "text/plain", "text/markdown", "text/csv", "application/json", "video/mp4", "application/octet-stream",
-  ]),
-  origin: z.enum(["tool", "user_upload", "generated_artifact", ""]).optional(),
+  content_type: z.string(),
+  origin: z.string().optional(),
   pages: z.number().int().nonnegative().nullable().optional(),
   expired: z.boolean().optional(),
   image_input: z.enum(["sent", "unavailable"]).nullable().optional(),

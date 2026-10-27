@@ -14,7 +14,7 @@ import type { ChatImage } from "@/lib/assistant/chat-types";
 export function ToolImage({ image }: { readonly image: ChatImage }) {
   if (image.origin === "generated_artifact") return <GeneratedAttachment attachment={image} />;
   if (image.expired) return <ExpiredAttachment />;
-  return image.contentType.startsWith("image/")
+  return ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(image.contentType)
     ? <RasterAttachment image={image} />
     : <DocumentAttachment attachment={image} />;
 }

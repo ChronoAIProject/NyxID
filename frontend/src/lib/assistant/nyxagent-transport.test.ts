@@ -1290,6 +1290,23 @@ describe("NyxBot agents", () => {
   });
 });
 
+it("loads history with a future attachment origin and type through the same private endpoint", async () => {
+  globalThis.__nyxidAssistantHttpMock = () => {
+    const page = history();
+    return json({ ...page, messages: page.messages.map((message, index) => index === 1
+      ? { ...message, attachments: [{ id: "future-file", content_type: "application/x-future-format", origin: "future_generator", size: 12, label: "future-file" }] }
+      : message) });
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages[1]?.images).toEqual([{
+    id: "future-file",
+    endpoint: `/assistant/nyxagent/conversations/${id}/attachments/future-file`,
+    contentType: "application/x-future-format",
+    label: "future-file",
+  }]);
+});
+
 it("retains a settled reply's tool activity as done tool calls", async () => {
   globalThis.__nyxidAssistantHttpMock = () => {
     const page = history();
