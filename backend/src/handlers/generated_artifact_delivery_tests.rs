@@ -400,11 +400,17 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         response.headers()["content-range"],
         format!("bytes 4-15/{}", MP4.len())
     );
-    assert!(
-        response.headers()["content-disposition"]
-            .to_str()
-            .unwrap()
-            .contains("movie.mp4")
+    assert_eq!(response.headers()["content-length"], "12");
+    assert_eq!(response.headers()["accept-ranges"], "bytes");
+    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        "default-src 'none'; sandbox"
+    );
+    assert_eq!(
+        response.headers()["content-disposition"],
+        "inline; filename=\"movie.mp4\"; filename*=UTF-8''movie.mp4"
     );
     assert_eq!(
         &axum::body::to_bytes(response.into_body(), 1024)
