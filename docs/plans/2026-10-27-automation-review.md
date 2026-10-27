@@ -15,8 +15,8 @@ Branch: `fix/automation-completion-2040`
 | --- | --- | --- | --- | --- |
 | Historical Opus plan review | Claude Opus 5.5 (`01a17aa2-d74e-7151-9efa-b40638c3befb`, provider `claude`, model `claude-opus-5-5`, effort `xhigh`, mode `default`) | Historical revision 2, SHA `0633146fbe464aa94fd6a3a98ba7c0a2b4ef0ce00da147bc5bc2741cbbfb96d4` | **SUPERSEDED_BY_USER** | Two read-only prompts were sent with `notify_on_finish=true`; both failed before review with `Failed to authenticate: OAuth session expired and could not be refreshed` and `401 OAuth access token has expired. Re-authenticate to continue.` Heca activity sequences 1–10. No approval was inferred. The reviewer ID and failures remain historical evidence; do not resume or retry it under the amendment. |
 | Astra plan assessment | GPT-6-Astra PM (`01a17a9b-50b4-7e41-bb3b-dcbbf6204ad3`) | Active revision 3, SHA `5e3469b2754b8ca8127519c19ba1349049288f70371c4d9a2de5a1a761799fc7`, frozen at `freeze-5e3469b2.md` | **ASTRA_PLAN_APPROVED** | Astra personally re-read the charter, prepared plan, coordinator findings, relevant scheduler/group/event source, and shared ownership boundary. The amendment records the user's pure Astra-Sol workflow and closes the owner-wide continuation-budget gap by charging continuation claims against the existing persisted hourly/daily trigger budget atomically with the per-run continuation claim. |
-| Implementation | GPT-6.1-Sol | Exact Astra-approved revision 3 plan | **SOURCE DRAFT; BACKEND VERIFICATION DEFERRED** | Verified Heca session `01a17b03-c22c-7c50-a038-27bf595a74fd`, model `gpt-6.1-sol`, exact worktree/branch; no agents spawned. |
-| Astra implementation review | GPT-6-Astra PM | Exact final implementation commit | **IN PROGRESS; APPROVAL PENDING** | Astra is personally reviewing the draft and has returned F-1/F-2/F-3 to this same Sol session. Astra will read the complete diff and relevant surrounding code, run the acceptance matrix, and resolve every valid finding including nits through the same Sol session. |
+| Implementation | Existing GPT-6.1-Sol agent `01a17b03-c22c-7c50-a038-27bf595a74fd` | `6df83d87b826141ec025ce2276f66cb147cbfe33` | **LOCAL_VALIDATION_COMPLETE** | 136 successful executions / 134 unique passes; required all-target/all-feature Clippy and final formatting pass. Heca session and provider session remain separately recorded. |
+| Astra implementation review | GPT-6-Astra PM | `6df83d87b826141ec025ce2276f66cb147cbfe33` | **SOURCE_REVIEW_COMPLETE; FINAL APPROVAL PENDING** | Cumulative review plus exact final committed diff and actual results personally reviewed at 09:25:14 UTC. Local F-1–F-11 resolved. Combined I-01–I-04/I-06 remain OPEN; no implementation approval. |
 | Historical Opus final implementation review | Same Claude Opus 5.5 session | Exact final commit | **SUPERSEDED_BY_USER** | The user explicitly removed the Opus final gate. This is not an approval and the historical reviewer will not be resumed. |
 
 The user's amendment supersedes both earlier Opus requirements. Claude authentication is
@@ -88,10 +88,17 @@ below; neither sibling branch is imported.
   session and re-run affected checks.
 - Record `ASTRA_IMPLEMENTATION_APPROVED` only for the exact final commit after acceptance
   evidence and required checks pass.
-- Keep any missing live client/destination/production evidence explicitly OPEN; it must not
-  be replaced by a caveat or treated as completed.
+- #2040 requires fake NyxAgent and local publisher/readback evidence. It has no live X
+  publication or deployed-client gate. Keep applicable combined I-01–I-04/I-06 OPEN
+  until executed on the exact integration candidate.
 
-## Sol implementation evidence
+## Historical Sol implementation evidence
+
+The sections through F-7 below preserve the state at each earlier review. Current
+execution and acceptance status is in the gate table and F-8–F-11/final evidence
+sections; old hold/unexecuted statements are not the present result.
+
+### Original implementation handoff
 
 - Verified active plan and frozen revision 3 SHA-256 `5e3469b2754b8ca8127519c19ba1349049288f70371c4d9a2de5a1a761799fc7` before source edits. The plan header's historical “revision: 2” is preserved because the exact approved bytes are authoritative.
 - Pre-edit shared runtime notification attempted via Heca `heca_agent_send_prompt` with `notify_on_finish=true` to coordinator `01a17a8a-e916-77a0-a565-083ca25e2aa3` and Astra PM `01a17a9b-50b4-7e41-bb3b-dcbbf6204ad3`. Both rejected by Heca caller ACL: “a caller may act only on itself, agents it spawned, or (as an orchestrator or team lead) the fleet / its team.” Notification remains undelivered; no approval inferred and no additional agent created. Contracts are documented above and in session commentary.
@@ -207,7 +214,7 @@ below describes drafted coverage, not a passing result.
 | Active plan area | Draft evidence / passing lightweight evidence | Remaining evidence |
 | --- | --- | --- |
 | Reproduction | `automation_v2_completion_barrier_claim_restart_and_selective_drain` asserts waiting/no terminal result when handoff arrives before settlement | Compile/run fixture; assert external terminal delivery remains suppressed |
-| End-to-end progress | `automation_v2_fake_agent_research_edit_review_fixture_publish_readback` drives real native group posting through a fake model, delayed/out-of-order researchers, editor, independent reviewer, local publish/readback | Compile/run full workflow; live client/destination evidence remains OPEN |
+| End-to-end progress | `automation_v2_fake_agent_research_edit_review_fixture_publish_readback` drives real native group posting through a fake model, delayed/out-of-order researchers, editor, independent reviewer, local publish/readback | Compile/run full local fixture workflow; no live publication gate belongs to #2040 |
 | Binding | Barrier/selective-drain fixture checks wrong thread, other run, ordinary event and exact active-turn identity | Compile/run; extend explicit second real run/thread interleavings if needed |
 | Crash/retry | `automation_v2_follower_lost_claim_queue_full_expiry_and_cross_run_ids` covers persisted snapshot, lost claimant, new fence, queue failure, dedup and cross-run identity | Compile/run; real replica/process restart and concurrent-claim convergence still OPEN |
 | Guards | `automation_v2_owner_budget_wait_deadline_limit_and_stop`, `automation_v2_follower_capacity_never_evicts_or_completes`; existing scheduler confirmation/overlap tests retained | Compile/run; independent hourly/daily boundaries, pool-full, busy thread and high ordinary event-hour/streak cases require evidence |
@@ -265,7 +272,7 @@ CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=
 CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test -p nyxid trigger_scheduler::tests -- --nocapture
 CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test -p nyxid assistant_group::tests -- --nocapture
 CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 AUTOMATION_CONTINUATION_V2_ENABLED=true cargo --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' test -p nyxid async_service_operation -- --nocapture
-CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo clippy --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' --manifest-path backend/Cargo.toml --all-targets -- -D warnings
+CARGO_TARGET_DIR=/Users/chronoai/Desktop/projects/nyxid/target CARGO_BUILD_JOBS=2 cargo clippy --config '/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml' --manifest-path backend/Cargo.toml --all-targets --all-features -- -D warnings
 ```
 
 After the first focused results, run the remaining applicable ordinary-event,
@@ -583,5 +590,173 @@ The frozen plan SHA is unchanged. For the eventual shared backend window, built-
 Cargo test/build/check commands use `cargo --config <shared-resource-profile>
 <subcommand>`. Clippy uses the coordinator-verified argv:
 `cargo clippy --config <shared-resource-profile> --manifest-path backend/Cargo.toml
---all-targets -- -D warnings`. This stream has not started or queued either form;
+--all-targets --all-features -- -D warnings`. This stream has not started or queued either form;
 actual process arguments will be checked in the clippy evidence before approval.
+
+
+## Astra targeted review and executed validation — F-8 through F-11
+
+This current record supersedes the historical unexecuted/hold snapshots above.
+Automation received the exclusive backend window from the coordinator at 06:31 UTC.
+The same Sol remains codex / gpt-6.1-sol / x_high / full-access in the assigned
+worktree; status was personally reverified at 09:06 UTC. No Opus gate was resumed.
+
+### F-8 — migration safety and executable acceptance
+
+Personally reviewed implementation `2bf59012f80dc82b0bf113977562d9617c278990`
+and its surrounding migration, admission, follower, scheduler and transaction code.
+The cumulative earlier F-1–F-7 review is carried forward. Concrete corrections:
+
+- Migration cannot seal readiness for a missing, changed, wrong-owner or unsupported
+  nonterminal target. It preserves reachable non-assistant pending work instead of
+  stamping it as assistant v2 work.
+- A follower is attributable only to the exact live coordinator thread; a dangling
+  follower cannot make migration infer safe resumable work.
+- Protocol comparisons handle Mongo BSON int32 and int64 representations. Terminal
+  bookkeeping, audit, work removal, history trimming, generation fences and migration
+  progress share the real transaction and are asserted after abort and replay.
+- Legacy discovery uses the bounded indexed production query. Read-count/explain
+  fixtures inspect actual Mongo commands and assert a nonempty intended workload;
+  no local predicate copy substitutes for the production query.
+- Real concurrency tests cover competing work/follower claims, last-owner-budget-slot
+  contention, independent hourly/daily exhaustion and reset, exact two-run selection,
+  completion-registration/Stop conflicts, and ordinary event-hour/streak safeguards.
+
+The strict transaction fixture verifies Mongo topology, logical sessions and an actual
+transactional write/abort. The acceptance suite fails if Mongo is unavailable; it cannot
+silently return a pass. The fake NyxAgent test drives delayed/out-of-order research,
+edit, independent review, local publish and readback through production orchestration.
+No external publisher write is attempted or required.
+
+Five successful logs contain 107 executions / 106 unique passed / zero failures or
+ignored tests. Source/binary/log binding and all exact test names are in
+[`automation-2bf59012-validation.json`](2026-10-27-automation-evidence/automation-2bf59012-validation.json).
+The five actual commands were recovered from this Astra session's Heca tool records in
+[`commands-2bf59012.json`](2026-10-27-automation-evidence/commands-2bf59012.json), not reconstructed from names.
+Historical binary SHA256: `a692860b8edbbd09c48a71f1199e56e0751ec0ea1d3300f1579aa64e39844a3a`.
+Source manifest SHA256: `48dc9c951134f23c27050951f760184c25dbc3b039f5042a3c2b0a12632efdec`.
+This binary was subsequently replaced by the required correction rebuild; old passes
+remain bound to the old identity.
+
+Measured S7 results: 10,000 schedules/one due yields a covered query with zero documents
+and one key examined; discovery 0.220 ms/query, 100-schedule list 7.815 ms/request,
+fenced CAS 9.471 ms/claim, idle tick 0.406 ms, confirmation-to-completed 228.004 ms,
+scheduled-to-started 296 ms, and three-day catch-up 49.893 ms. These are local fixture
+measurements. They do not assert production throughput or network latency.
+
+### F-9 — dead helper and follower deadline proof
+
+Required all-target/all-feature Clippy found the unused `followers_live_at` helper.
+Deleting it is a narrow production cleanup. Moving its filter into a copied test closure
+would prove only that closure, so Astra rejected that attempted replacement. The prior
+`automation_v2_follower_lost_claim_queue_full_expiry_and_cross_run_ids` test covers
+notification-lease expiry; it does not establish a follower deadline expiring after claim.
+
+The corrected regression obtains a real live quiet claim, persists/reloads its follower
+with an expired deadline while keeping the live notification fence/lease, calls production
+`deliver_follower`, and requires false acceptance, unchanged event queue/no event ID,
+and removal of the expired claimed follower. Existing raw legacy expiry cases remain.
+The actual contract freezes upper sequence/event identity at claim and rechecks follower
+expiry at delivery. It does not freeze expiry classification at an acknowledged take.
+No production expiry defect was demonstrated. The rebuilt group suite passed all 13 cases, including this regression; final all-target/all-feature Clippy passed.
+
+### F-10 — related normative documentation
+
+The engine and orchestrator docs now explain Event continuation claims, selective run
+selection, durable follower delivery, protected queue entries, owner hourly/daily and
+immutable run allowance limits, deadline outcomes, confirmation semantics and the real
+operator-drain/migration-marker gate. They link the existing schedule runbook. Astra also
+returned the Rule14 sentence that said all continuations were free: only confirmation
+resumes avoid another occurrence/coordinator debit. The complete committed doc diff was personally reviewed and matches these contracts.
+
+### F-11 — test filter omitted required scheduler evidence
+
+Personal name-by-name reconciliation found 16 tests in `trigger_scheduler_tests.rs`
+absent from the 106-pass record. They include the changed F-1 budget deferral test,
+confirmation/skill wake and terminal failure/generation/finalizer cases. The same Sol
+ran only the missing cases from the correction binary: 16 passed, child exit 0, with
+exact names/count verified independently. Existing successful suites were not broadly rerun.
+This is an execution coverage gap, not a newly alleged production defect.
+
+### Preserved failures and their causes
+
+- Initial focused compile: five malformed `json!` calls; corrected before retry.
+- Retry1: two missing `bson::doc` imports in `assistant_team`; corrected before retry.
+- Retry2: 18 passed / 3 failed; ordinary wake timing, fake research completion ordering,
+  and BSON integer representation assumptions were corrected with production semantics
+  preserved. Retry3 passed all 21.
+- Initial schedule batch: 17 passed / 16 failed with missing v2 activation environment;
+  the single diagnostic rerun failed for the same reason. Explicit-env retry passed 33.
+- Initial all-feature Clippy: unused follower helper; F-9 correction and final rerun passed.
+- First helper-only rebuild: compilation succeeded, then all 13 group cases failed
+  because the wrapper omitted `NYXID_TEST_DATABASE_URL` (exit 101). The strict harness
+  refused missing Mongo. The next wrapper explicitly sets Mongo, v2, serial test count,
+  FD limit, shared target/jobs/config, and an owned-process 2 GiB disk guard.
+- An intermediate formatter check found only formatting in the newly edited expiry
+  assertions. Formatting is required again after the completed correction.
+
+Failed logs are retained beside successful logs; no failed attempt is counted as a pass.
+No exit status absent from the original record is invented.
+
+### Shared-contract personal review
+
+Read-only comparison used Artifacts source `47a2f3f1845b1896e172e68ec077bb8270ee2e33`
+and Permissions source `493b5c2dc012cc4de80c00f33f7cddf489cb316d`; no sibling feature
+was imported. Preserve Artifacts' `bind_in_session(db, keys, row, session)`, original
+Web/User provenance, exact non-trigger completion identity, encrypted result association
+and Stop cancellation alongside Automation's exact trigger identity/selective drain.
+Permissions' bounded seven-scalar `client_metadata` classifier and independent guest
+HTTP callback guard remain outside Automation ownership. No proxy-marker bypass exists.
+F-7 itself did not touch artifact-shared files; cumulative Automation changes do.
+
+I-01/I-02 require mixed event queues to preserve and later consume only the original
+Web watch. I-03 requires both exact run cleanup and conversation Stop transactions.
+I-04 must refuse trigger/channel/voice/unrelated materialization and recovery. I-06
+must retain owner callback behavior, no guest egress/cards and exact cancelled denial
+identity. These are OPEN executable combined gates, not established by source review.
+I-05/I-07 belong to the coordinator/other workstreams and are not #2040 blockers.
+
+
+## Final local review record — 2026-10-27 09:25:14 UTC
+
+- **SOURCE_REVIEW_COMPLETE** for implementation
+  `6df83d87b826141ec025ce2276f66cb147cbfe33`.
+- **LOCAL_VALIDATION_COMPLETE**: 136 successful backend executions / 134 unique passed /
+  zero failures or ignored in the successful runs; required all-target/all-feature
+  warnings-denied Clippy, final formatting and whitespace checks passed. The unchanged
+  frontend retains its 17-test, lint and build passes.
+- **#2040 BLOCKED** only on combined I-01/I-02/I-03/I-04/I-06. No
+  `ASTRA_IMPLEMENTATION_APPROVED` is granted. No live X publication gate exists.
+
+Astra personally read the entire final five-file commit after reviewing its working
+source, verified all 42 source-manifest entries against exact committed/current bytes,
+and inspected the raw final logs, runner exit/guard records and actual compiler/Cargo
+arguments. Final source manifest SHA256:
+`25a9c5f4151a28dc49b7de051f93b39b415177debb01dbab8c0bacdeb0f4c1a0`.
+Final binary SHA256:
+`5c9a6b0c9c549009ffc700f08b329fc747f54ee495ac557d14408bc216a90057`.
+Final Clippy log SHA256:
+`7947200a011ef009cff4ca56235d674491d5fa6389bc9721627ab21fd6deaf05`.
+The [final evidence manifest](2026-10-27-automation-evidence/final-verification.json)
+contains source/base/plan/prerequisite identities, every successful test name and duplicate,
+source/binary/log bindings and remaining combined gates.
+
+The historical 106 unique passes at 2bf59012 are retained for unchanged behavior. The
+correction rebuild passed 13 group tests and the unchanged binary passed the 16 omitted
+scheduler cases. Two overlapping executions account for 136 executions / 134 names.
+The scheduler test child exited 0; its original wrapper returned 126 only because a
+nocapture timing line split one result. Raw metadata remains unchanged; the separate
+verification record and Astra's independent parse establish all 16 exact passes without
+rerunning them or presenting the wrapper as exit 0.
+
+Final Clippy exited 0 in 6m19s with config after the subcommand, all targets/features and
+warnings denied. Actual backend cfg includes AWS/GCP features, with no independent
+profile/optimization/assertion change. The 2 GiB owned-process guard did not fire;
+its minimum free space was 15.18 GiB. The guard returned only after owned PGID 40304
+was empty; the coordinator independently verified global heavy-process quiescence and
+17.21 GiB free and handed the window to Artifacts. No heavy work is queued here.
+
+All identified local findings F-1–F-11 are resolved. The next dependency is the
+coordinator-owned isolated integration commit containing all individually reviewed
+sources; Automation must inspect the resolved shared changes and actual results for
+its five applicable rows. No sibling feature source was imported into this worktree.

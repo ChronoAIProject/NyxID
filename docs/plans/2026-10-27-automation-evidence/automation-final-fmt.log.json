@@ -1,0 +1,11 @@
+{
+  "command": [
+    "cargo",
+    "fmt",
+    "--all",
+    "--check"
+  ],
+  "working_directory": "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-automation",
+  "exit": 0,
+  "checked_at": "2026-10-27T09:18:55.660312+00:00"
+}

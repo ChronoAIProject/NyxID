@@ -1,0 +1,7 @@
+
+running 2 tests
+test handlers::nyxbot::tests::direct_group_messages_need_a_mention_or_a_reply_to_the_bot ... ok
+test handlers::assistant_group::tests::group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 10468 filtered out; finished in 4.86s
+

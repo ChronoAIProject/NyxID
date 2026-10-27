@@ -1,0 +1,38 @@
+
+running 33 tests
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_automation_rebinds_run_to_result_turn_and_preserves_confirmation ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_capacity_and_stop_are_checked_before_submission ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_channel_event_validates_original_source_after_newer_message ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_delivery_binding_survives_thread_destination_changes ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_carriers_prove_report_targets_from_the_live_turn_snapshot_only ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_event_delivers_to_original_group_member ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_event_keeps_original_reply_place_for_nested_work ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_guest_refused_and_nonannotated_call_unchanged ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_lease_reclaim_fences_late_poll_and_stop_suppresses_queued_event ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_ordinary_tool_has_no_watch_database_reads ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_result_is_bounded_and_failures_are_quoted ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_revocation_and_timeout_wake_with_stable_reason_without_polling ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_stop_between_status_and_result_prevents_next_provider_call ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_stop_cancels_upstream_and_suppresses_wake ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_submit_mcp_polls_once_across_replicas_and_quotes_encrypted_result ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_universal_submit_deduplicates_and_live_grants_are_rechecked ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_voice_cancel_stops_hidden_watch_and_calls_cancel ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_voice_result_waits_then_publishes_to_original_visible_thread_once ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::cma_agent_input_receipts_deduplicate_by_idempotency_key ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::cma_submission_tracks_status_after_turn_settlement_and_projects_only_metadata ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::cma_agent_input_waits_for_activity_before_settling_ready ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::invocation_policy::invocation_async_cancel_after_settlement_keeps_only_one_cancel_and_status_cleanup ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::invocation_policy::invocation_async_cleanup_capability_cannot_fetch_results_after_cancel ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::invocation_policy::invocation_cleanup_deadline_exception_does_not_extend_ordinary_status_or_result ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::service_policy::approved_org_async_watch_runs_when_idle_or_on_a_later_turn_without_new_consent ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::invocation_policy::invocation_async_final_egress_rechecks_root_and_original_delivery_before_sweep ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::service_policy::legacy_submitted_org_watches_keep_bounded_result_and_cancel_lifecycle ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::service_policy::ordinary_mcp_stale_handler_auth_cannot_admit_a_revoked_personal_service ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::service_policy::org_owned_specialist_continues_approved_result_and_cancel_after_its_turn ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::service_policy::held_async_continuation_rechecks_lease_key_membership_and_execution_generation ... ok
+test services::async_service_operation::result_storage_tests::expiry_and_cancellation_retire_payload_markers_but_dangling_markers_stay_unresolved ... ok
+test services::async_service_operation::result_storage_tests::live_ready_result_migrates_to_strict_storage_and_exact_cas_preserves_successor ... ok
+test handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::service_policy::org_owned_specialist_executes_exact_granted_ordinary_mcp_and_proxy_connections ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 10437 filtered out; finished in 93.00s
+

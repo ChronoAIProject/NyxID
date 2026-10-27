@@ -1,0 +1,94 @@
+   Compiling ring v0.17.14
+    Checking rand v0.8.5
+    Checking aws-smithy-types v1.4.7
+   Compiling native-tls v0.2.18
+    Checking aws-smithy-async v1.2.14
+    Checking aws-smithy-runtime-api v1.11.6
+    Checking tokio-native-tls v0.3.1
+    Checking hyper-tls v0.6.0
+   Compiling rustls v0.21.12
+    Checking aws-credential-types v1.2.14
+    Checking aws-smithy-http v0.63.6
+    Checking h2 v0.3.27
+    Checking hyper v0.14.32
+    Checking rustls-webpki v0.103.16
+   Compiling rustls v0.23.46
+    Checking rustls-webpki v0.101.7
+    Checking sct v0.7.1
+    Checking tokio-rustls v0.26.4
+    Checking tokio-rustls v0.24.1
+    Checking hyper-rustls v0.27.7
+    Checking num-bigint-dig v0.8.6
+    Checking reqwest v0.12.28
+    Checking hyper-rustls v0.24.2
+    Checking aws-sigv4 v1.4.2
+    Checking num-bigint v0.4.6
+   Compiling aws-types v1.3.14
+    Checking aws-smithy-http-client v1.1.12
+    Checking aws-smithy-observability v0.2.6
+    Checking aws-smithy-runtime v1.10.3
+    Checking tungstenite v0.29.0
+   Compiling prost-derive v0.13.5
+    Checking rsa v0.9.10
+    Checking prost v0.13.5
+    Checking aws-runtime v1.7.2
+    Checking tokio-tungstenite v0.29.0
+    Checking simple_asn1 v0.6.4
+    Checking aws-smithy-json v0.62.5
+    Checking regex-lite v0.1.9
+    Checking axum v0.8.9
+    Checking oauth2 v5.0.0
+    Checking tower v0.4.13
+    Checking hyper-timeout v0.5.2
+    Checking rustls-pemfile v2.2.0
+    Checking tough v0.21.0
+    Checking oci-client v0.15.0
+    Checking tonic v0.12.3
+    Checking openidconnect v4.0.1
+    Checking google-cloud-token v0.1.2
+   Compiling google-cloud-googleapis v0.16.1
+    Checking xmlparser v0.13.6
+    Checking aws-smithy-xml v0.60.15
+    Checking rcgen v0.14.10
+    Checking sigstore v0.13.0
+    Checking jsonwebtoken v9.3.1
+    Checking prost-types v0.13.5
+    Checking nyxid-machine v0.1.0 (/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-automation/machine)
+    Checking google-cloud-metadata v0.5.1
+    Checking rustls-platform-verifier v0.7.0
+    Checking aws-smithy-query v0.60.15
+    Checking tokio-retry2 v0.5.8
+    Checking home v0.5.12
+    Checking google-cloud-gax v0.19.2
+    Checking google-cloud-auth v0.17.2
+    Checking aws-sdk-sts v1.100.0
+    Checking reqwest v0.13.3
+    Checking internal-russh-forked-ssh-key v0.6.16+upstream-0.6.7
+    Checking nyxid-service-adapters v0.1.0 (/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-automation/service-adapters)
+    Checking nyxid-cloud-auth v0.1.0 (/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-automation/cloud-auth)
+    Checking aws-sdk-ssooidc v1.98.0
+    Checking aws-sdk-sso v1.96.0
+    Checking jsonwebtoken v10.3.0
+   Compiling nyxid v0.73.1 (/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-automation/backend)
+   Compiling nyxid-cli v0.73.1 (/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-automation/cli)
+    Checking nyxid-machine-updater v0.1.0 (/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-automation/machine-updater)
+    Checking russh v0.58.0
+    Checking mongodb v3.5.2
+    Checking self_update v0.44.0
+    Checking axum-extra v0.12.6
+    Checking aws-config v1.8.15
+    Checking google-cloud-kms v0.6.0
+    Checking utoipa-swagger-ui v9.0.2
+    Checking nyxid-permissions v0.1.0 (/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/nyxid-automation/permissions)
+    Checking aws-sdk-kms v1.104.0
+error: function `followers_live_at` is never used
+   --> backend/src/services/assistant_group_service.rs:877:15
+    |
+877 | pub(crate) fn followers_live_at(
+    |               ^^^^^^^^^^^^^^^^^
+    |
+    = note: `-D dead-code` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: could not compile `nyxid` (bin "nyxid-server") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

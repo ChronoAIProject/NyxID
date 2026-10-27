@@ -1,0 +1,1047 @@
+{
+  "reviewer_agent_id": "01a17a9b-50b4-7e41-bb3b-dcbbf6204ad3",
+  "reviewed_at": "2026-10-27T09:25:14.745970+00:00",
+  "source_review_status": "SOURCE_REVIEW_COMPLETE",
+  "local_validation_status": "LOCAL_VALIDATION_COMPLETE",
+  "ticket_verdict": "BLOCKED",
+  "implementation_approval": "NOT_GRANTED_PENDING_COMBINED_ACCEPTANCE",
+  "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33",
+  "source_tree": "a74b57dd01115322fef6c75f7445e182bdd041ef",
+  "base_commit": "b1dd6548ade04ec4f0051203e1353796331c7f87",
+  "applied_prerequisite": "d151005983937693df0b716f87d1b78058e0e518",
+  "plan_sha256": "5e3469b2754b8ca8127519c19ba1349049288f70371c4d9a2de5a1a761799fc7",
+  "source_manifest": "automation-final-source.sha256",
+  "source_manifest_sha256": "25a9c5f4151a28dc49b7de051f93b39b415177debb01dbab8c0bacdeb0f4c1a0",
+  "source_manifest_entries": 42,
+  "final_binary_sha256": "5c9a6b0c9c549009ffc700f08b329fc747f54ee495ac557d14408bc216a90057",
+  "binary_path": "/Users/chronoai/Desktop/projects/nyxid/target/debug/deps/nyxid_server-a7bf57b9c4cb166a",
+  "binary_identity_note": "Compiled bytes match final committed source manifest; binary may embed pre-commit build Git metadata. Later shared-target replacement does not change recorded hash.",
+  "carried_forward_source_commit": "2bf59012f80dc82b0bf113977562d9617c278990",
+  "carry_forward_reason": "Only production change after2bf59012 deletes unused followers_live_at; affected group and added missing scheduler cases rebuilt/executed; other behavior and earlier passing tests unchanged. No broad repeated tests.",
+  "final_tests": [
+    {
+      "path": "automation-followers-expiry-test-20261027T090413Z.log",
+      "sha256": "f5d277a5ea9a54ee3e6861a60eb11ec3c0e175428a9abc723744ca5c77e0e890",
+      "test_count": 13,
+      "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33",
+      "test_process_exit": 0,
+      "wrapper_exit": 0
+    },
+    {
+      "path": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+      "sha256": "b81beed09dbd54c2f7fd53ab4d380b8cdc42e731ead984577011a0207691a2d9",
+      "test_count": 16,
+      "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33",
+      "test_process_exit": 0,
+      "wrapper_exit": 126
+    }
+  ],
+  "clippy": {
+    "path": "automation-followers-expiry-clippy-20261027T091635Z.log",
+    "sha256": "7947200a011ef009cff4ca56235d674491d5fa6389bc9721627ab21fd6deaf05",
+    "exit": 0,
+    "command": [
+      "cargo",
+      "clippy",
+      "--config",
+      "/Users/chronoai/Library/Application Support/heca/worktrees/eafaaf47/arctic-eagle/docs/plans/2026-10-27-nyxid-workstreams/cargo-resource-profile.toml",
+      "--manifest-path",
+      "backend/Cargo.toml",
+      "--all-targets",
+      "--all-features",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "actual_argv_record": "automation-followers-expiry-clippy-20261027T091635Z.log.json",
+    "guard_fired": false
+  },
+  "successful_executions": 136,
+  "unique_passed": 134,
+  "failed_or_ignored_in_successful_runs": 0,
+  "duplicates": {
+    "handlers::trigger_scheduler::tests::acceptance::automation_v2_migration_schedule_and_webhook_classify_real_waits_and_drain": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      },
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::assistant_group::tests::group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded": [
+      {
+        "log": "automation-group-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      },
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ]
+  },
+  "tests": {
+    "handlers::trigger_scheduler::tests::acceptance::automation_v2_migration_preserves_reachable_non_assistant_pending_work": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::acceptance::automation_v2_concurrent_follower_claims_commit_one_exact_event": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::acceptance::automation_v2_concurrent_work_claims_and_admission_charge_once": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::acceptance::automation_v2_mongo_source_work_history_and_readiness_query_bounds": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::acceptance::automation_v2_concurrent_runs_share_the_last_owner_budget_slot": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::acceptance::automation_v2_two_real_runs_cannot_consume_each_others_thread_events": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::automation_v2_completion_barrier_claim_restart_and_selective_drain": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::acceptance::automation_v2_mongo_migration_pages_and_durable_readiness_are_bounded": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::acceptance::automation_v2_owner_windows_exhaust_and_reset_independently": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::automation_v2_follower_capacity_never_evicts_or_completes": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::automation_v2_legacy_bson_and_unbound_event_guards": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::acceptance::automation_v2_wake_preserves_ordinary_hourly_and_streak_guards": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::acceptance::automation_v2_migration_missing_or_changed_target_cannot_seal_readiness": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::automation_v2_fake_agent_research_edit_review_fixture_publish_readback": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::automation_v2_follower_lost_claim_queue_full_expiry_and_cross_run_ids": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::automation_v2_migration_readiness_real_leases_confirmation_and_ambiguity": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::automation_v2_trigger_update_persists_protocol_and_preserves_other_states": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::automation_v2_completion_barrier_fences_registration_and_stop": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::automation_v2_deadline_limit_and_stop": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::automation_v2_migration_terminalization_is_atomic_and_generation_fenced": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::acceptance::automation_v2_migration_schedule_and_webhook_classify_real_waits_and_drain": [
+      {
+        "log": "automation-rust-focus-retry3.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      },
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "credit_schedule_tests::elapsed_incomplete_period_is_abandoned_without_dead_credit_backfill": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "credit_schedule_tests::frozen_period_policy_and_signup_snapshot_survive_mid_walk_edit": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "credit_schedule_tests::disburse_due_is_idempotent_across_replicas_and_crashes": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "credit_schedule_tests::pause_finishes_open_period_but_does_not_open_the_next_period": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "credit_schedule_tests::interrupted_walk_resumes_from_cursor_without_double_minting": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "credit_schedule_tests::schedule_expiry_policies_resolve_from_the_frozen_period": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "credit_schedule_tests::recipient_budget_exhaustion_resumes_next_tick_without_loss": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "credit_schedule_tests::schedule_windows_share_allowance_utc_boundaries": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "credit_schedule_tests::scheduled_grants_use_existing_active_listing_and_expiry_sweep": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::billing_credit_schedules::target_tests::schedule_and_frozen_period_dtos_round_trip_target_provenance": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::billing_credit_schedules::tests::schedule_crud_enforces_roles_writes_audits_and_rejects_recurrence_updates": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::billing_credit_schedules::tests::selected_schedule_reports_rollout_and_grant_listing_filters_by_schedule": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::billing_credits::allocation_tests::legacy_schedule_amount_errors_and_sparse_exact_updates_keep_existing_contract": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_schedule_dto::tests::api_offsets_become_utc_bson_dates_and_round_trip_as_rfc3339": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "credit_schedule_tests::schedule_origin_index_boots_with_legacy_grants": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_benchmark_10000_covering_discovery_and_100_list": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_confirmation_waits_and_resumes_without_another_budget": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_fake_agent_latency_authority_and_event_streak": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_full_owner_pool_waits_and_expires_without_charging_budget": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_history_counter_tracks_inserts_and_trims_only_excess": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_lease_expiry_and_duplicate_claim_are_fenced": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_long_downtime_records_skips_without_a_catchup_burst": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_missed_grace_overlap_and_budgets": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_queue_one_busy_grace_and_edit_fence": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_result_delivers_to_telegram_and_push_with_live_acl": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_specialist_authority_threads_and_guest_refusal": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_started_turn_is_never_replayed_and_audit_is_metadata_only": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_tools_controls_limits_and_owner_timezone": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_webhook_prefill_watch_and_human_api_boundary": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "services::billing::schedules::target_tests::selected_schedule_creation_validates_users_in_one_query": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "services::billing::schedules::update_tests::stale_schedule_update_returns_conflict_without_overwriting_winner": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::schedule_webhook_to_specialist_is_atomic_deduplicated_and_untrusted": [
+      {
+        "log": "automation-scheduler-regressions-retry1.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::direct_group_messages_need_a_mention_or_a_reply_to_the_bot": [
+      {
+        "log": "automation-group-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::assistant_group::tests::group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_are_bounded": [
+      {
+        "log": "automation-group-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      },
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_automation_rebinds_run_to_result_turn_and_preserves_confirmation": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_capacity_and_stop_are_checked_before_submission": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_channel_event_validates_original_source_after_newer_message": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_delivery_binding_survives_thread_destination_changes": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_carriers_prove_report_targets_from_the_live_turn_snapshot_only": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_event_delivers_to_original_group_member": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_event_keeps_original_reply_place_for_nested_work": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_guest_refused_and_nonannotated_call_unchanged": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_lease_reclaim_fences_late_poll_and_stop_suppresses_queued_event": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_ordinary_tool_has_no_watch_database_reads": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_result_is_bounded_and_failures_are_quoted": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_revocation_and_timeout_wake_with_stable_reason_without_polling": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_stop_between_status_and_result_prevents_next_provider_call": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_stop_cancels_upstream_and_suppresses_wake": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_submit_mcp_polls_once_across_replicas_and_quotes_encrypted_result": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_universal_submit_deduplicates_and_live_grants_are_rechecked": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_voice_cancel_stops_hidden_watch_and_calls_cancel": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::async_voice_result_waits_then_publishes_to_original_visible_thread_once": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::cma_agent_input_receipts_deduplicate_by_idempotency_key": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::cma_submission_tracks_status_after_turn_settlement_and_projects_only_metadata": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::cma_agent_input_waits_for_activity_before_settling_ready": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::invocation_policy::invocation_async_cancel_after_settlement_keeps_only_one_cancel_and_status_cleanup": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::invocation_policy::invocation_async_cleanup_capability_cannot_fetch_results_after_cancel": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::invocation_policy::invocation_cleanup_deadline_exception_does_not_extend_ordinary_status_or_result": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::service_policy::approved_org_async_watch_runs_when_idle_or_on_a_later_turn_without_new_consent": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::invocation_policy::invocation_async_final_egress_rechecks_root_and_original_delivery_before_sweep": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::service_policy::legacy_submitted_org_watches_keep_bounded_result_and_cancel_lifecycle": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::service_policy::ordinary_mcp_stale_handler_auth_cannot_admit_a_revoked_personal_service": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::service_policy::org_owned_specialist_continues_approved_result_and_cancel_after_its_turn": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::service_policy::held_async_continuation_rechecks_lease_key_membership_and_execution_generation": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "services::async_service_operation::result_storage_tests::expiry_and_cancellation_retire_payload_markers_but_dangling_markers_stay_unresolved": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "services::async_service_operation::result_storage_tests::live_ready_result_migrates_to_strict_storage_and_exact_cas_preserves_successor": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::mcp_transport::chat_authority_tests::async_service_operation_tests::service_policy::org_owned_specialist_executes_exact_granted_ordinary_mcp_and_proxy_connections": [
+      {
+        "log": "automation-async-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::accepted_queued_sources_mint_original_targets_without_a_turn_or_budget": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::assistant_invocations::tests::invocation_and_source_queues_preserve_work_and_rollback_overflow": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::channel_media_committed_queue_and_turn_never_become_interrupted": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::accepted_sources_cannot_be_evicted_by_any_generic_push_and_capacity_races": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::coalesced_sources_are_pruned_independently_and_only_valid_original_is_sent_once": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::every_coalesced_destination_is_revalidated_and_recipient_limit_is_atomic": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::generic_invalid_head_and_legacy_unanchored_messages_drain_durably": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::managed_telegram_raw_route_retains_canonical_channel_queue_authority": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::mixed_legacy_and_new_message_queues_isolate_questions_from_ordinary_turns": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::personal_channel_repeat_cannot_join_an_owner_invocation": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::personal_channel_repeat_joins_owner_app_turn_without_another_execution": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::post_admission_reply_preference_failure_preserves_queued_and_bound_sources": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::queue_transaction_rolls_back_source_acceptance_when_conversation_write_fails": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::queued_event_admission_binds_all_original_sources_and_settles_exactly_once": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::original_route_revocation_prunes_only_that_source_before_event_execution": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::queued_gateway_handler_is_quiet_and_duplicate_replay_never_adds_busy_output": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::specialist_owner_private_home_keeps_its_original_delivery_authority": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::successful_blank_stream_and_detached_duplicate_destinations_are_terminal_silence": [
+      {
+        "log": "automation-source-queue-regressions.log",
+        "result": "ok",
+        "source_commit": "2bf59012f80dc82b0bf113977562d9617c278990"
+      }
+    ],
+    "handlers::assistant_group::tests::confirmation_phrases_still_route_to_the_card_owner_despite_sticky_recipients": [
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::assistant_group::tests::explicit_recipient_ids_override_mentions_in_text": [
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::assistant_group::tests::followers_are_registered_with_the_post_bounded_by_the_take_and_expire": [
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::assistant_group::tests::groups_resist_forged_lines_and_loops_and_answer_confirmations": [
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::assistant_group::tests::groups_validate_members_and_delete_with_their_member_threads": [
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::assistant_group::tests::mentions_count_only_at_a_word_start": [
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::assistant_group::tests::nyxbot_post_to_group_is_never_sticky": [
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::assistant_group::tests::nyxbot_posts_register_followers_atomically_and_receive_bounded_summaries": [
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::assistant_group::tests::owners_set_hand_off_limits_and_nyxbot_follows_up_on_group_work": [
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::assistant_group::tests::sticky_recipients_clear_when_a_member_leaves_or_is_purged": [
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::assistant_group::tests::sticky_recipients_persist_after_a_multi_mention": [
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::assistant_group::tests::unknown_or_destroyed_recipient_ids_are_rejected": [
+      {
+        "log": "automation-followers-expiry-test-20261027T090413Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::automation_routes_require_first_party_owner_credentials": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::contention_retry_backoff_is_bounded_by_deadline": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::deferred_runs_wait_for_backoff_or_budget_window": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::invocation_mounted_routes_enforce_credentials_flags_and_recover_lost_response": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::nyxagent_route_group_rejects_developer_apps_and_accepts_first_party_clients": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::pause_transaction_deduplicates_runs_and_fences_resumed_generation": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::persisted_failure_streak_resets_on_success_transient_and_edit": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::recurring_dispatch_offset_is_stable_bounded_and_post_instant": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::recurring_offset_delays_only_eligibility_and_late_wakeup_keeps_identity": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::scheduled_skill_allow_keeps_work_wake_and_durable_nyxbot_event": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::scheduler_terminal_paths_reset_admitted_failure_streaks": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::setup_watch_prefill_is_private_expiring_and_consumed_atomically": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::terminal_failure_streak_resets_on_every_different_result": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::terminal_finalizer_reset_is_fenced_to_admitted_generation": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::terminal_finalizers_pause_once_with_configured_absolute_links": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ],
+    "handlers::trigger_scheduler::tests::webhook_nyxbot_defaults_to_dedicated_and_home_requires_explicit_policy": [
+      {
+        "log": "automation-followers-expiry-scheduler-20261027T091503Z.log",
+        "result": "ok",
+        "source_commit": "6df83d87b826141ec025ce2276f66cb147cbfe33"
+      }
+    ]
+  },
+  "remaining_combined_gates": [
+    "I-01",
+    "I-02",
+    "I-03",
+    "I-04",
+    "I-06"
+  ],
+  "backend_window": "RELEASED_TO_COORDINATOR_FOR_ARTIFACTS; no heavy commands queued",
+  "quiescence_evidence": "Guard PGID40304 returned after group empty; coordinator independently verified global quiescence and17.21GiB free at handoff."
+}

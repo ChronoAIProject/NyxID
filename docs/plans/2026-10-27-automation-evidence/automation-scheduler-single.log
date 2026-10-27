@@ -1,0 +1,15 @@
+
+running 1 test
+test handlers::trigger_scheduler::tests::schedule_fake_agent_latency_authority_and_event_streak ... 
+thread 'handlers::trigger_scheduler::tests::schedule_fake_agent_latency_authority_and_event_streak' (4822407) panicked at backend/src/handlers/trigger_scheduler_tests.rs:149:6:
+called `Result::unwrap()` on an `Err` value: AppError { kind: "conflict", code: 1004, .. }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    handlers::trigger_scheduler::tests::schedule_fake_agent_latency_authority_and_event_streak
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10469 filtered out; finished in 2.89s
+

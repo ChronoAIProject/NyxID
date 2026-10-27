@@ -1,0 +1,23 @@
+
+running 18 tests
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::accepted_queued_sources_mint_original_targets_without_a_turn_or_budget ... ok
+test handlers::assistant_invocations::tests::invocation_and_source_queues_preserve_work_and_rollback_overflow ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::channel_media_committed_queue_and_turn_never_become_interrupted ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::accepted_sources_cannot_be_evicted_by_any_generic_push_and_capacity_races ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::coalesced_sources_are_pruned_independently_and_only_valid_original_is_sent_once ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::every_coalesced_destination_is_revalidated_and_recipient_limit_is_atomic ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::generic_invalid_head_and_legacy_unanchored_messages_drain_durably ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::managed_telegram_raw_route_retains_canonical_channel_queue_authority ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::mixed_legacy_and_new_message_queues_isolate_questions_from_ordinary_turns ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::personal_channel_repeat_cannot_join_an_owner_invocation ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::personal_channel_repeat_joins_owner_app_turn_without_another_execution ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::post_admission_reply_preference_failure_preserves_queued_and_bound_sources ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::queue_transaction_rolls_back_source_acceptance_when_conversation_write_fails ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::queued_event_admission_binds_all_original_sources_and_settles_exactly_once ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::original_route_revocation_prunes_only_that_source_before_event_execution ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::queued_gateway_handler_is_quiet_and_duplicate_replay_never_adds_busy_output ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::specialist_owner_private_home_keeps_its_original_delivery_authority ... ok
+test handlers::nyxbot::tests::late_delivery_tests::source_queue_tests::successful_blank_stream_and_detached_duplicate_destinations_are_terminal_silence ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 10452 filtered out; finished in 48.07s
+
