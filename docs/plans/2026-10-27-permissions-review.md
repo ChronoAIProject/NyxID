@@ -331,3 +331,95 @@ valid; its real authenticated router HTTP403, default Use/generic-approval-disab
 and zero provider/consent/card assertions must remain. The existing Sol is
 preparing the separate scoped I-05/I-06/reconciliation tests. They are unexecuted;
 no combined source-review completion or implementation approval is claimed.
+
+## Astra isolated integration source review — 2026-10-27T13:01:14.040903+00:00
+
+**SOURCE_REVIEW_COMPLETE** for merge
+`26154051327a9b5692a63ad234eab7601853fb31` and its separate test commit
+`99f449b5e6c02da668abf2a72ed5a9e1a98c8b33` (tree
+`fb5d167015984f6d4e3f2782fe092586b90f09ed`). **Integrated execution remains
+UNEXECUTED; both tickets remain BLOCKED. ASTRA_IMPLEMENTATION_APPROVED is not
+granted.** Standalone source `7185b5ef7eb56194b2e1cbf42f045536a9cb7847`
+retains its completed source review and local validation; its results do not
+establish combined acceptance.
+
+Reviewer: GPT-6-Astra PM, Heca `01a17a9b-5082-7b83-8171-2e791e9fd01e`.
+I personally read the full exact five-file test diff and relevant surrounding
+code, including real MCP authentication/dispatch, signed-owner denial,
+artifact recovery provenance, trigger claims/settlement and guest admission/
+revalidation. This review carries forward the complete Permissions source
+review and the already-read main authorization implementation; it is not based
+on Sol's summary. I independently matched all five changed files to the exact
+commit and their SHA-256 manifest and checked the committed diff for whitespace
+errors. There are zero unresolved source findings at this checkpoint.
+
+The reconciliation preserves main's HTTP authorization blob exactly:
+`a1ba4959c1524d75b266691f6025f329a25dfe4a`. Main's early guest route check,
+owner-only model transport/route establishment and final admission revalidation
+remain intact. The F-001 unbound regression now explicitly proves no saved
+owner route and expects `GuestModelRouteRequired`; its authenticated HTTP403,
+default-Use/Read/All, generic-approval-disabled and zero-egress/consent/card
+assertions remain. Bounded client metadata confers no authority. No additional
+production source was changed by the test commit.
+
+| Reviewed coverage | Exact assertions prepared; execution pending |
+| --- | --- |
+| Three reconciliation tests | Real owner-established plain and 1,121-byte metadata callbacks; bound guest reuse; stateful/hosted/unknown effect/unknown metadata/replacement-key and semantic-header refusals; owner callback outside server model attempt cannot teach a route; stale input/target/route revalidation. |
+| I-05, two tests | Direct and wrapped artifact Change approval; signed-owner Deny; exact card/owner/turn/key and Web destination; forbidden client lineage IDs; unchanged hashed watch/pending-artifact/attachment/delivery records; no Sandbox effect, orphan card or second model card; real runtime explanation callback. |
+| I-06, three tests | Real schedule/run/lease owner callback; real Channel guest turn with an independent queued trigger event and coordinator fields; zero guest egress/consent/cards/route learning; exact denial continuation run/card/destination; Stop rejects late model/effect calls and leaves no pending card or consumable terminal claim. |
+
+The stale-admission route is explicitly a **revalidation seam**, with real
+`AuthUser` extraction, successful baseline production admission/revalidation,
+and the exact `GuestModelRouteRequired` after mutation. It does not dispatch a
+provider request and its zero-provider counter is supplementary; this is not
+proof of production dispatch interception. Actual proxy refusal scenarios keep
+their separate NyxID diagnostic and zero-egress assertions. New tests use the
+existing real credential helpers and production routes; no production visibility
+or authentication rule was weakened. The existing F-001 direct helper remains
+paired with its real authenticated HTTP path.
+
+| Finding | Resolution personally verified |
+| --- | --- |
+| R-I01: incorrect persisted connection field | Held admission queries exact owner plus `slug`, matching `UserService` and the fixture. |
+| R-I02: observer attribution incorrectly inherited by the seam | Seam assertions separated from real proxy diagnostics; no fabricated failure provenance; baseline success and exact revalidation failure retained. |
+| R-I03: nested helper visibility and overstated panic | Test-only `pub(super)` helper; precise unexpected-revalidation panic. |
+
+Sol also corrected the test route to the existing authorized `/api/v1/proxy/`
+prefix, used the production acknowledgement header constant and added explicit
+card-routing preservation. These changes were included in my final exact diff
+review. The same verified `codex / gpt-6.1-sol / x_high / full-access` agent
+`01a17b00-1ad2-7cc0-ada4-61d925daac94` and provider session
+`01a17b00-1c46-7753-a330-f48a830666bd` performed the work. No replacement or
+external reviewer is required; Opus remains superseded by the user.
+
+The [source handoff](evidence/permissions-integration-2026-10-27/sol-source-ready.json)
+records direct changed-file `rustfmt --check --edition 2024 --config skip_children=true`
+and staged/unstaged `git diff --check`, all exit0. Astra's exact-commit
+`git diff --check 26154051327a9b5692a63ad234eab7601853fb31 99f449b5e6c02da668abf2a72ed5a9e1a98c8b33`
+also exited0. No Cargo, direct test binary, Clippy or frontend command was run
+by Permissions during this source-only task. The eight new tests have no ignore
+attributes. Their names and 12 retained regression filters are
+[source-identified only](evidence/permissions-integration-2026-10-27/source-identified-filters.json),
+not a compiled nonzero inventory.
+
+Five-file manifest SHA-256:
+`adbd12610dc6a7c7c50bf26bbab917f591a17c84a1fa871818ef1a0de6703260`.
+Sol's broader 3,872-file source snapshot SHA-256:
+`018b3d995c0a4e6154e95684d6063abaaf34c1b65efb619a084c729fbd94d3c2`.
+The [archive index](evidence/permissions-integration-2026-10-27/index.json)
+preserves the original bytes and distinguishes Sol's pre-review handoff from
+[Astra's completed finding record](evidence/permissions-integration-2026-10-27/astra-findings.json).
+The PM independently verified the five changed files; the larger snapshot is
+recorded as Sol's source inventory, not a new PM review of unrelated files.
+
+Integration source ownership was released to the coordinator after this review.
+The original feature source stays frozen and no backend command is queued.
+The next required action is final-source combined compilation, nonzero exact
+inventories and execution of these eight cases plus the retained affected
+regressions and peer I-01–I-04/I-07 checks, followed by required formatting and
+all-target/all-feature warnings-denied Clippy under the shared resource policy.
+Only the coordinator can assign that backend window. I-05/I-06 acceptance,
+current-main validation, actual deployed callback/version/Lark-Web acceptance
+and applicable #2007 readiness/five-operation execution remain OPEN. The final
+implementation approval requires all applicable combined and live gates in
+addition to passing local checks.

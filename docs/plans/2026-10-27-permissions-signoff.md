@@ -1,5 +1,47 @@
 # Permissions issue sign-off — #2004 and #2007
 
+## Astra isolated integration source review — 2026-10-27T13:01:14.040903+00:00
+
+**SOURCE_REVIEW_COMPLETE** for isolated merge
+`26154051327a9b5692a63ad234eab7601853fb31` and separate test commit
+`99f449b5e6c02da668abf2a72ed5a9e1a98c8b33` (tree
+`fb5d167015984f6d4e3f2782fe092586b90f09ed`). **Combined validation remains
+UNEXECUTED; #2004 and #2007 remain BLOCKED. ASTRA_IMPLEMENTATION_APPROVED is
+not granted.** Standalone source `7185b5ef7eb56194b2e1cbf42f045536a9cb7847`
+retains SOURCE_REVIEW_COMPLETE and LOCAL_VALIDATION_COMPLETE.
+
+I, GPT-6-Astra PM `01a17a9b-5082-7b83-8171-2e791e9fd01e`, personally read
+the complete exact five-file test diff and relevant authentication, dispatch,
+artifact provenance, trigger settlement and guest-route code, carrying forward
+the prior full Permissions/main review. I independently verified the five
+changed file hashes against the commit. All three source findings are resolved;
+there are zero unresolved source findings. Main's HTTP authorization blob stays
+exactly `a1ba4959c1524d75b266691f6025f329a25dfe4a`; no production expansion was
+introduced by the test commit. The same Sol agent/session performed this work.
+
+Eight new cases cover real bound guest plain/1,121-byte metadata callbacks,
+closed effect/metadata/identity boundaries, stale admission revalidation,
+direct/wrapped artifact denial and exact automation denial/cancellation.
+They remain unexecuted. The revalidation seam proves the exact production
+method rejects changed authority; it does not claim actual dispatch interception.
+The source handoff records direct changed-file rustfmt and diff checks at exit0;
+Astra's exact-commit diff check also passed. No backend command is queued.
+
+The [review ledger](2026-10-27-permissions-review.md) contains the complete
+personal assessment, R-I01–R-I03 resolutions and proof limits. The
+[immutable evidence index](evidence/permissions-integration-2026-10-27/index.json)
+links source identities and [eight new plus 12 retained source-identified filters](evidence/permissions-integration-2026-10-27/source-identified-filters.json).
+The five-file manifest SHA-256 is
+`adbd12610dc6a7c7c50bf26bbab917f591a17c84a1fa871818ef1a0de6703260`.
+
+Integration source ownership is released to the coordinator for peer patch
+serialization. Next is the explicitly assigned final-source combined build,
+nonzero exact inventories/tests and required formatting/all-target/all-feature
+Clippy. Original Permissions source is frozen. Actual callback/version/Lark-Web,
+applicable readiness/five-operation execution, combined I-05/I-06 and final
+implementation approval remain OPEN. These local source results do not waive
+any live or combined requirement.
+
 ## Astra narrow local validation complete — 2026-10-27T12:41:02.142395+00:00
 
 **SOURCE_REVIEW_COMPLETE; LOCAL_VALIDATION_COMPLETE** for source
