@@ -2,6 +2,27 @@
 use super::*;
 use crate::services::{assistant_service_execution as execution, proxy_service as proxy};
 
+pub(super) async fn ask_every_time_callback_proxy(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    path: Path<(String, String)>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    let chat = auth.assistant_chat.as_ref().unwrap();
+    if !chat.guest {
+        assert!(chat.turn_live && !chat.turn_stopped);
+        assert_eq!(
+            crate::services::assistant_acknowledgement_service::effective_access_mode(
+                &state.db, chat
+            )
+            .await?,
+            crate::models::assistant_settings::AccessMode::AskEveryTime,
+            "actual authenticated owner callback must use AskEveryTime"
+        );
+    }
+    callback_proxy(State(state), auth, path, request).await
+}
+
 pub(super) fn metadata_callback(scenario: &str) -> Value {
     let mut body: Value = serde_json::from_str(include_str!(
         "../services/fixtures/permissions-codex-responses.json"
@@ -43,7 +64,7 @@ pub(super) fn metadata_callback(scenario: &str) -> Value {
 
 #[tokio::test]
 async fn codex_bound_guest_metadata_reuses_only_the_real_owner_route() {
-    Box::pin(guest_pipeline(
+    Box::pin(guest_pipeline_with_permissions(
         false,
         &[
             "owner",
@@ -58,22 +79,24 @@ async fn codex_bound_guest_metadata_reuses_only_the_real_owner_route() {
             "semantic_header",
             "metadata",
         ],
+        true,
     ))
     .await;
 }
 
 #[tokio::test]
 async fn codex_callback_without_server_model_attempt_cannot_establish_guest_route() {
-    Box::pin(guest_pipeline(
+    Box::pin(guest_pipeline_with_permissions(
         false,
         &["owner_no_attempt", "unbound", "owner_metadata", "metadata"],
+        true,
     ))
     .await;
 }
 
 #[tokio::test]
 async fn codex_bound_guest_admission_revalidate_seam_rejects_stale_input_target_and_route() {
-    Box::pin(guest_pipeline(
+    Box::pin(guest_pipeline_with_permissions(
         false,
         &[
             "owner_metadata",
@@ -84,6 +107,7 @@ async fn codex_bound_guest_admission_revalidate_seam_rejects_stale_input_target_
             "stale_route",
             "unbound",
         ],
+        true,
     ))
     .await;
 }
@@ -123,6 +147,45 @@ pub(super) async fn held_admission(
     .unwrap();
     let (parts, body) = request.into_parts();
     let body = axum::body::to_bytes(body, 64 * 1024).await.unwrap();
+    let selected = engine::get(&state.db, &chat.user_id, &chat.conversation_id).await?;
+    assert_eq!(selected.agent_id, chat.agent_id);
+    assert_eq!(selected.credential_api_key_id, chat.api_key_id);
+    assert_eq!(
+        selected.active_turn.as_ref().unwrap().turn_id.as_str(),
+        chat.turn_id.as_deref().unwrap()
+    );
+    assert_eq!(
+        selected.owner_model_route.as_ref().unwrap().profile,
+        selected.model
+    );
+    let agent = state
+        .db
+        .collection::<bson::Document>("assistant_agents")
+        .find_one(doc! {"_id":&chat.agent_id,"user_id":&chat.user_id})
+        .await?
+        .unwrap();
+    assert_eq!(
+        agent
+            .get_document("owner_model_route")
+            .unwrap()
+            .get_str("profile")
+            .unwrap(),
+        selected.model
+    );
+    let defaults: Value =
+        serde_json::from_str(include_str!("../../specs/assistant/model-routes.json")).unwrap();
+    let default_slug = defaults[&selected.model]["service_slug"].as_str().unwrap();
+    assert_ne!(resolved.target.service.slug, default_slug);
+    assert!(resolved.target.service.credential_encrypted.is_empty());
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>("downstream_services")
+            .count_documents(doc! {"slug":default_slug})
+            .await?,
+        0,
+        "the stale-route seam has no eligible server default to fall back to"
+    );
     let decision = execution::check_http(
         &state,
         &auth,
@@ -162,6 +225,18 @@ pub(super) async fn held_admission(
         "route" => {
             let changed = state
                 .db
+                .collection::<bson::Document>("assistant_conversations")
+                .update_one(
+                    doc! {"_id":&chat.conversation_id,"user_id":&chat.user_id,
+                    "agent_id":&chat.agent_id,"credential_api_key_id":&chat.api_key_id,
+                    "active_turn.turn_id":&chat.turn_id,"guest_turn":true},
+                    doc! {"$unset":{"owner_model_route":""}},
+                )
+                .await?;
+            assert_eq!(changed.matched_count, 1);
+            assert_eq!(changed.modified_count, 1);
+            let changed = state
+                .db
                 .collection::<bson::Document>("assistant_agents")
                 .update_one(
                     doc! {"_id":&chat.agent_id,"user_id":&chat.user_id},
@@ -169,6 +244,12 @@ pub(super) async fn held_admission(
                 )
                 .await?;
             assert_eq!(changed.modified_count, 1);
+            assert!(
+                engine::get(&state.db, &chat.user_id, &chat.conversation_id)
+                    .await?
+                    .owner_model_route
+                    .is_none()
+            );
         }
         _ => panic!("unrecognized authority mutation"),
     }

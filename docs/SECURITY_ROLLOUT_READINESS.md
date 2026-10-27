@@ -48,6 +48,7 @@ feature flags requires deployment readiness:
 
 | Capability | Existing boundary retained |
 | --- | --- |
+| `channel:discord-gateway` | Relay socket ownership and gateway transport handoff; every transport writer must wait for relay shutdown before remote setup. The socket worker additionally requires live readiness at acquisition and renewal. |
 | `assistant:org-agents` | Creation/configuration and use-oriented organization-agent discovery gate (`delegation_summaries`); direct use retains live membership/resource ACLs. |
 | `assistant:operation-scopes` | Scope editing gate; stored scopes are enforced during authentication and execution with the flag off. |
 | `assistant:machine-capabilities` | Capability editing and deliberate legacy-assignment materialization behavior; stored assignments and live machine ACLs retain their execution checks. |
@@ -65,6 +66,11 @@ report and warn/audit pair. The event includes the flag key, user ID and
 blockers, with the user as audit actor. Readiness report or rate-window errors
 are debug-logged and do not fail requests. An effective false value retains
 existing flag-off behavior and does not erase stored policy.
+
+Discord ingress additionally stops its socket on readiness loss. Flag resolution
+itself remains unchanged. Disable ingress and drain its socket holders before
+rolling back to writers that do not coordinate the gateway handoff; see
+[Discord relay setup](CHANNEL_BOT_RELAY.md#discord-ordinary-chat-and-interactions).
 
 The `approval:required-web-v1` capability is **diagnostic**, not an enforced
 activation switch. Required approval is implemented by every upgraded process

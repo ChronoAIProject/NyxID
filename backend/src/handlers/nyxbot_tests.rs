@@ -14,11 +14,17 @@ use tokio::sync::Mutex;
 #[path = "nyxbot_transport_tests.rs"]
 mod transport_tests;
 
+#[path = "nyxbot_discord_tests.rs"]
+mod discord_tests;
+
 #[path = "nyxbot_release_tests.rs"]
 mod release_tests;
 
 #[path = "nyxbot_x_bus_tests.rs"]
 mod x_bus_tests;
+
+#[path = "nyxbot_guest_model_tests.rs"]
+mod guest_model_tests;
 
 const LEGACY_PROVENANCE: crate::services::nyxbot_watch_service::ReportProvenance =
     crate::services::nyxbot_watch_service::ReportProvenance::LEGACY;

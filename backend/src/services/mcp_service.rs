@@ -5896,6 +5896,7 @@ async fn execute_tool_resolved_inner(
                 (!is_generic_proxy_endpoint).then_some(endpoint.name.as_str()),
             )
             .await?;
+        let billing_ctx = billing_ctx.with_assistant_payer(assistant_chat.as_ref());
         let billing_ctx = billing_ctx.with_assistant_provenance(
             assistant_chat.is_some(), false,
             super::llm_usage_service::model_execution(super::llm_usage_service::inference_service(&target.service), method.as_str(), &path, false),
@@ -14310,6 +14311,17 @@ mod tests {
         assert_eq!(billing_ctx.actor_user_id, actor_user_id);
         assert_ne!(billing_ctx.billing_owner_id, billing_ctx.actor_user_id);
         assert_eq!(billing_ctx.user_service_id.as_deref(), Some("user-service"));
+
+        let mut guest = test_chat(crate::models::assistant_conversation::AgentRole::Subagent);
+        guest.user_id.clone_from(&actor_user_id);
+        guest.guest = true;
+        let guest_billing = billing_ctx.with_assistant_payer(Some(&guest));
+        assert_eq!(guest_billing.billing_owner_id, actor_user_id);
+        assert_eq!(guest_billing.actor_user_id, actor_user_id);
+        assert_eq!(
+            guest_billing.user_service_id.as_deref(),
+            Some("user-service")
+        );
 
         // The same org connection can supply the master key or an agent's
         // override. Payer selection must use that final credential class.

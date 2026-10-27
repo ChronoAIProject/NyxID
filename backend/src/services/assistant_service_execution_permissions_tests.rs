@@ -455,6 +455,14 @@ async fn codex_callback_guest_does_not_gain_owner_model_consent() {
         .unwrap();
     assert!(chat.guest);
     assert!(
+        crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .owner_model_route
+            .is_none(),
+        "F001 also starts without a saved conversation model route"
+    );
+    assert!(
         f.state
             .db
             .collection::<Document>("assistant_agents")
@@ -466,6 +474,12 @@ async fn codex_callback_guest_does_not_gain_owner_model_consent() {
             .is_none_or(|value| value == &bson::Bson::Null),
         "F001 exercises an unbound guest, never authorized route reuse"
     );
+    let resolved = target(&f, &id).await;
+    assert_eq!(resolved.service.slug, "autoplatform");
+    assert!(
+        resolved.service.credential_encrypted.is_empty(),
+        "the F001 catalog has no eligible default master credential"
+    );
     let mut auth = f.auth.clone();
     auth.assistant_chat = Some(std::sync::Arc::new(chat));
     let decision = check_http_projected(
@@ -473,7 +487,7 @@ async fn codex_callback_guest_does_not_gain_owner_model_consent() {
         &auth,
         Some(&id),
         Some(&f.owner),
-        &target(&f, &id).await,
+        &resolved,
         "POST",
         "responses",
         None,
@@ -567,4 +581,22 @@ async fn codex_callback_guest_does_not_gain_owner_model_consent() {
         0
     );
     assert!(provider.received_requests().await.unwrap().is_empty());
+    assert!(
+        crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .owner_model_route
+            .is_none()
+    );
+    assert!(
+        f.state
+            .db
+            .collection::<Document>("assistant_agents")
+            .find_one(doc! {"_id":&f.chat.agent_id,"user_id":&f.owner})
+            .await
+            .unwrap()
+            .unwrap()
+            .get("owner_model_route")
+            .is_none_or(|value| value == &bson::Bson::Null)
+    );
 }

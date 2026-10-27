@@ -700,6 +700,7 @@ mod tests {
             .await
             .unwrap();
         super::super::catalog_mutation_service::Authority {
+            catalog_base_aliases: Vec::new(),
             catalog_base_url: "http://localhost:3001".into(),
             actor: actor(),
             first_party_human: true,

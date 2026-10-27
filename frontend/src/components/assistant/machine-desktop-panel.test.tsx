@@ -44,6 +44,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
+it("uses the browser's authenticated origin even when node ingress is on another host", () => {
+  render(<MachineDesktopPanel nodeId="node" conversationId="thread" />);
+  const url = new URL(Socket.instances[0]!.url);
+  expect(url.host).toBe(window.location.host);
+  expect(url.pathname).toBe("/api/v1/assistant/nyxagent/machines/node/desktop");
+  expect(url.searchParams.get("conversation_id")).toBe("thread");
+});
 it("watches, requests control, protects owner input, and hands back with a note", async () => {
   const view = render(
     <MachineDesktopPanel
