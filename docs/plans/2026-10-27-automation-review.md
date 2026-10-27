@@ -16,7 +16,7 @@ Branch: `fix/automation-completion-2040`
 | Historical Opus plan review | Claude Opus 5.5 (`01a17aa2-d74e-7151-9efa-b40638c3befb`, provider `claude`, model `claude-opus-5-5`, effort `xhigh`, mode `default`) | Historical revision 2, SHA `0633146fbe464aa94fd6a3a98ba7c0a2b4ef0ce00da147bc5bc2741cbbfb96d4` | **SUPERSEDED_BY_USER** | Two read-only prompts were sent with `notify_on_finish=true`; both failed before review with `Failed to authenticate: OAuth session expired and could not be refreshed` and `401 OAuth access token has expired. Re-authenticate to continue.` Heca activity sequences 1–10. No approval was inferred. The reviewer ID and failures remain historical evidence; do not resume or retry it under the amendment. |
 | Astra plan assessment | GPT-6-Astra PM (`01a17a9b-50b4-7e41-bb3b-dcbbf6204ad3`) | Active revision 3, SHA `5e3469b2754b8ca8127519c19ba1349049288f70371c4d9a2de5a1a761799fc7`, frozen at `freeze-5e3469b2.md` | **ASTRA_PLAN_APPROVED** | Astra personally re-read the charter, prepared plan, coordinator findings, relevant scheduler/group/event source, and shared ownership boundary. The amendment records the user's pure Astra-Sol workflow and closes the owner-wide continuation-budget gap by charging continuation claims against the existing persisted hourly/daily trigger budget atomically with the per-run continuation claim. |
 | Implementation | GPT-6.1-Sol | Exact Astra-approved revision 3 plan | **SOURCE DRAFT; BACKEND VERIFICATION DEFERRED** | Verified Heca session `01a17b03-c22c-7c50-a038-27bf595a74fd`, model `gpt-6.1-sol`, exact worktree/branch; no agents spawned. |
-| Astra implementation review | GPT-6-Astra PM | Exact final implementation commit | **NOT STARTED** | Astra will read the complete diff and relevant surrounding code, run the acceptance matrix, and resolve every valid finding including nits through the same Sol session. |
+| Astra implementation review | GPT-6-Astra PM | Exact final implementation commit | **IN PROGRESS; APPROVAL PENDING** | Astra is personally reviewing the draft and has returned F-1/F-2/F-3 to this same Sol session. Astra will read the complete diff and relevant surrounding code, run the acceptance matrix, and resolve every valid finding including nits through the same Sol session. |
 | Historical Opus final implementation review | Same Claude Opus 5.5 session | Exact final commit | **SUPERSEDED_BY_USER** | The user explicitly removed the Opus final gate. This is not an approval and the historical reviewer will not be resumed. |
 
 The user's amendment supersedes both earlier Opus requirements. Claude authentication is
@@ -99,7 +99,7 @@ below; neither sibling branch is imported.
 
 ### Shared build resource window
 
-User instruction received during implementation: Telegram's initial normal-profile Rust compilation is warming the shared target with `CARGO_BUILD_JOBS=2`; defer all new heavy backend build/link commands until Telegram PM reports completion. No backend compile, link, target change, lock deletion, or installation was started. `df -h .` reported **1.8 GiB available** (down from the user's approximately 7.7 GiB). Source, fixture and formatting work continue. The required focused tests/clippy remain queued, not passed.
+User instruction received during implementation: Telegram's initial normal-profile Rust compilation is warming the shared target with `CARGO_BUILD_JOBS=2`; defer all new heavy backend build/link commands until Telegram PM reports completion. No backend compile, link, target change, lock deletion, or installation was started. `df -h .` reported **1.8 GiB available** (down from the user's approximately 7.7 GiB). Source, fixture and formatting work continue. The required focused tests/clippy remain recorded for the coordinator/shared-window handoff, not queued or passed.
 
 Initial lightweight `cargo fmt --all --check` found a syntax error in newly expanded fixture constructors; corrected before proceeding. Log: `/tmp/nyxid-automation-2040-format-initial.log`.
 
@@ -110,8 +110,10 @@ The source and fixtures below are a **draft for the same Sol session and Astra's
 personal review**. They are not backend-validated implementation approval. The
 latest user instruction reserves the shared backend window for another stream,
 asks for a lightweight handoff now, and explicitly prohibits starting or queuing
-`cargo check`, `cargo test`, `cargo build` or clippy until a later window is
-relayed. No such command was started. No required check was weakened or recorded
+`cargo check`, `cargo test`, `cargo build` or clippy pending coordinator clearance
+through the shared-window handoff. Local tests are already authorized; no new
+user approval is needed to run them once the shared resource window is available.
+No such command was started. No required check was weakened or recorded
 as passed without execution. `notify_on_finish=true` remains recorded for Sol;
 the prior Heca ACL rejection still prevents direct coordinator notification.
 
@@ -166,7 +168,7 @@ the preserved revision-2 snapshot still hashes to
 | `npm run lint -- --quiet` | PASS, exit 0 | `/tmp/nyxid-automation-2040-frontend-lint-final.log` |
 | `npm run build` | PASS, exit 0 | `/tmp/nyxid-automation-2040-frontend-build-final.log`; TypeScript, Vite, prerender, credential-accept and footprint assertion completed; large-chunk advisory remains |
 | Constructor and changed-signature inspection | PASS for static field/call placement | 37 literals mechanically checked for duplicate/additive fields in `/tmp/nyxid-automation-2040-constructor-audit.log`; four further literals manually checked as detailed below |
-| Backend focused tests / compile / clippy | DEFERRED BY USER, not started | Shared backend window held by another stream; later explicit clearance required |
+| Backend focused tests / compile / clippy | DEFERRED BY USER, not started | Shared backend window held by another stream; coordinator/shared-window handoff required, with no new user approval |
 
 Earlier lightweight failures are preserved rather than treated as product
 failures: the first formatter invocation found misplaced fields from scripted
@@ -243,8 +245,10 @@ below describes drafted coverage, not a passing result.
 
 ### Backend commands reserved for the later window
 
-These commands are recorded for continuation, **not queued or executed**. Use
-normal Cargo locking, the shared target and two jobs. Tests invoking assistant
+These commands are recorded for continuation, **not queued or executed**. Resume
+them after coordinator clearance through the shared-window handoff; the local
+tests are already authorized and require no new user approval. Use normal Cargo
+locking, the shared target and two jobs. Tests invoking assistant
 admission require `AUTOMATION_CONTINUATION_V2_ENABLED=true`; test database setup
 seeds a fresh completed marker, while the migration fixture removes/rebuilds its
 own marker and injects flag-off checks without changing process environment.
@@ -304,3 +308,65 @@ handoff reports the containing commit SHA and `git show --stat` totals.
 - `frontend/src/pages/automations.test.tsx`
 - `frontend/src/pages/automations.tsx`
 - `frontend/src/schemas/automations.ts`
+
+
+## Astra personal review revision: F-1, F-2 and F-3
+
+Revision base: `2f57fbaf0f3f7387ff8f23ff6027876a67b0b5bd`. The containing
+fix commit is reported in the same-session handoff. Astra implementation review
+is **IN PROGRESS** and approval remains **PENDING**; these fixes still need
+Astra's verification.
+
+- **F-1:** `trigger_scheduler::defer` now caps an exhausted-owner-budget reset by
+  `coordinator_deadline` for `wait_kind=Coordinator`. Initial occurrence admission
+  retains its original grace deadline. Confirmation retries retain the separate
+  expiry/admission path and their existing short backoff. A legacy/malformed
+  coordinator with no completion deadline keeps the existing conservative
+  occurrence-deadline fallback; the scheduler's exhaustion check treats a missing
+  coordinator deadline as terminal timeout.
+- **F-1 regression:** extended
+  `deferred_runs_wait_for_backoff_or_budget_window` to inspect persisted
+  `trigger_work.at` for both hourly-only and daily-only owner exhaustion with an
+  expired occurrence deadline. Deadlines on either side of the UTC reset assert
+  `at=min(reset, coordinator_deadline)` and that immediate work re-claim fails.
+  Synthetic deadlines isolate this retry-bound regression; production completion
+  window initialization remains in `new_run`. A confirmation case asserts its
+  retry remains in the future despite expired occurrence/coordinator deadlines.
+  This Rust regression is drafted and **not executed** under the shared resource
+  restriction.
+- **F-2:** replaced the status/ledger's user-relay wording with coordinator
+  clearance through the shared-window handoff. Already-authorized local tests
+  require no additional user approval. The resource restriction still defers
+  backend execution.
+- **F-3:** the three readiness checks in `trigger_service::create` and `update`
+  explicitly borrow `&input.delivery`, `&delivery` and `&next.delivery`, preserving
+  their later reuse. Static inspection checked those exact sites; no redundant
+  implementation-mirroring unit test was added. Rust type checking remains
+  deferred.
+
+The latest instruction for this revision permits **lightweight formatting and
+Git diff checks only, with no Cargo commands**. Accordingly, this revision uses
+direct `rustfmt`, and does not repeat Cargo, frontend tests/lint/build or any
+backend execution. Earlier handoff check results above apply to that earlier
+commit; they are not presented as newly rerun checks for this revision.
+
+| Revision command/check | Result | Evidence |
+| --- | --- | --- |
+| `rustfmt --edition 2024 --check backend/src/handlers/trigger_scheduler.rs backend/src/handlers/trigger_scheduler_tests.rs backend/src/services/trigger_service.rs` | PASS, exit 0 | `/tmp/nyxid-automation-2040-f1-f3-rustfmt.log` |
+| `git diff --check` and staged/committed diff checks | PASS, exit 0 | `/tmp/nyxid-automation-2040-f1-f3-diff-check.log`; repeated at commit |
+| Static review of three borrowed delivery checks and touched constructor/signature sites | PASS for source placement | All three checks borrow; the affected Trigger constructor has no duplicate/misplaced fields, and no runtime signature changes |
+| Cargo / Rust execution / frontend checks | NOT RUN for this revision | Latest instruction: formatting/diff checks only; backend awaits coordinator clearance |
+
+Exact files changed in this revision:
+
+- `backend/src/handlers/trigger_scheduler.rs`
+- `backend/src/handlers/trigger_scheduler_tests.rs`
+- `backend/src/services/trigger_service.rs`
+- `docs/plans/2026-10-27-automation-review.md`
+- `docs/plans/2026-10-27-automation-status.json`
+
+Remaining concerns are unchanged backend type/fixture/race verification and open
+acceptance rows above. The focused regression should run first when the
+coordinator/shared-window handoff permits backend work. No backend process was
+started or queued, and no lock, shared target, approval gate or agent topology
+was changed.

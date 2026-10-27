@@ -2821,6 +2821,79 @@ async fn deferred_runs_wait_for_backoff_or_budget_window() {
         work.get_datetime("at").unwrap().timestamp_millis(),
         run.deadline.timestamp_millis()
     );
+
+    // A coordinator can still be waiting after occurrence grace expires. Its
+    // budget retry must use the UTC reset, capped only by its completion window.
+    run.outcome = RunOutcome::Waiting;
+    run.wait_kind = Some(crate::models::trigger_run::RunWaitKind::Coordinator);
+    run.deadline = Utc::now() - Duration::minutes(1);
+    let settings = crate::services::assistant_settings_service::get(&state.db, OWNER)
+        .await
+        .unwrap();
+    for daily in [false, true] {
+        let now = Utc::now();
+        state
+            .db
+            .collection::<Document>(schedules::BUDGETS)
+            .update_one(
+                doc! { "_id": OWNER },
+                doc! { "$set": {
+                    "hour": now.timestamp().div_euclid(3600),
+                    "day": now.timestamp().div_euclid(86400),
+                    "hourly": if daily { 0 } else { settings.trigger_runs_per_hour },
+                    "daily": if daily { settings.trigger_runs_per_day } else { 0 },
+                } },
+            )
+            .await
+            .unwrap();
+        let seconds = if daily { 86400 } else { 3600 };
+        let reset = chrono::DateTime::from_timestamp(
+            (now.timestamp().div_euclid(seconds) + 1) * seconds,
+            0,
+        )
+        .unwrap();
+        // Synthetic deadlines on either side isolate the persisted retry bound.
+        // Production initializes the completion window separately in new_run.
+        for deadline in [reset + Duration::seconds(1), now + (reset - now) / 2] {
+            run.coordinator_deadline = Some(deadline);
+            defer(&state, &job, &run, "budget_exhausted").await.unwrap();
+            let work = state
+                .db
+                .collection::<Document>(schedules::WORK)
+                .find_one(doc! { "_id": &run.id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                work.get_datetime("at").unwrap().timestamp_millis(),
+                reset.min(deadline).timestamp_millis(),
+                "coordinator daily={daily}, deadline={deadline}"
+            );
+            assert!(
+                schedules::claim(&state.db, &run.id, now)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "an expired occurrence deadline must not cause immediate retries"
+            );
+        }
+    }
+
+    // Confirmation retries retain their separate expiry/admission flow and do
+    // not become constrained by either the occurrence or coordinator deadline.
+    run.wait_kind = Some(crate::models::trigger_run::RunWaitKind::Confirmation);
+    run.coordinator_deadline = Some(run.deadline);
+    let before = Utc::now();
+    defer(&state, &job, &run, "target_busy").await.unwrap();
+    let work = state
+        .db
+        .collection::<Document>(schedules::WORK)
+        .find_one(doc! { "_id": &run.id })
+        .await
+        .unwrap()
+        .unwrap();
+    let at = work.get_datetime("at").unwrap().to_chrono();
+    assert!(at > before && at <= Utc::now() + Duration::seconds(30));
     server.abort();
 }
 

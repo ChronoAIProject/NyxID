@@ -576,7 +576,14 @@ fn retry_at(
 async fn defer(state: &AppState, job: &Document, run: &TriggerRun, reason: &str) -> AppResult<()> {
     let now = Utc::now();
     let at = if reason == "budget_exhausted" {
-        budget_notice(state, run).await?.min(run.deadline)
+        let deadline =
+            if run.wait_kind == Some(crate::models::trigger_run::RunWaitKind::Coordinator) {
+                // Coordinator work outlives the occurrence's dispatch/grace window.
+                run.coordinator_deadline.unwrap_or(run.deadline)
+            } else {
+                run.deadline
+            };
+        budget_notice(state, run).await?.min(deadline)
     } else {
         // Confirmation continuations have their own expiry and are no longer
         // constrained by the initial occurrence's grace window.

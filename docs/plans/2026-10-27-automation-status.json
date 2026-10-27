@@ -40,10 +40,10 @@
     "notify_on_finish": true,
     "gate": "SOURCE_DRAFT_LIGHTWEIGHT_CHECKED_BACKEND_DEFERRED"
   },
-  "astra_review": "not_started",
+  "astra_review": "in_progress_approval_pending",
   "final_opus_review": "SUPERSEDED_BY_USER",
   "remaining_acceptance": [
-    "Compile and execute the drafted Rust fixtures and focused regressions after the user relays a backend window",
+    "Compile and execute the drafted Rust fixtures and focused regressions after coordinator clearance through the shared-window handoff",
     "Complete open acceptance-matrix evidence, including webhook migration and performance measurements",
     "Run required cargo clippy --all-targets --all-features -- -D warnings after focused tests",
     "Astra personal complete-diff review with zero unresolved findings",
@@ -54,5 +54,5 @@
   "plan_approval_commit": "2434ffc8c",
   "implementation_diff_base": "87158b6623e7ba2dab0ca0adbc2a60753812ed5c",
   "implementation_commit_reference": "The WIP automation #2040 handoff commit containing this status file; exact SHA is reported in the session handoff.",
-  "backend_verification": "NOT RUN: user reserved shared backend window for another stream; do not queue cargo check/test/build/clippy until explicitly cleared."
+  "backend_verification": "NOT RUN: shared backend window reserved for another stream; resume already-authorized local tests after coordinator clearance through the shared-window handoff, without new user approval."
 }

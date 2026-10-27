@@ -124,7 +124,7 @@ pub async fn create(
     encryption_keys: &EncryptionKeys,
     input: CreateInput,
 ) -> AppResult<CreatedTrigger> {
-    if matches!(input.delivery, TriggerDelivery::Assistant { .. }) {
+    if matches!(&input.delivery, TriggerDelivery::Assistant { .. }) {
         schedules::continuation::ready(db, schedules::continuation::enabled()).await?;
     }
     let label = validate_label(&input.label)?;
@@ -207,7 +207,7 @@ pub async fn create(
         }
     }
     let trigger = Trigger {
-        continuation_protocol_version: if matches!(delivery, TriggerDelivery::Assistant { .. }) {
+        continuation_protocol_version: if matches!(&delivery, TriggerDelivery::Assistant { .. }) {
             2
         } else {
             0
@@ -449,7 +449,7 @@ pub async fn update(
         };
     }
     if next.status == TriggerStatus::Active
-        && matches!(next.delivery, TriggerDelivery::Assistant { .. })
+        && matches!(&next.delivery, TriggerDelivery::Assistant { .. })
     {
         schedules::continuation::ready(db, schedules::continuation::enabled()).await?;
         next.continuation_protocol_version = 2;
