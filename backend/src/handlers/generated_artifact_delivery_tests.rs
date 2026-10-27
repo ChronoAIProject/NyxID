@@ -373,7 +373,6 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         None,
         None,
         None,
-        None,
     )
     .unwrap();
     let (_, private) = crate::routes::build_router_with_state(a.f.state.clone());
@@ -513,7 +512,6 @@ async fn generated_artifact_production_routes_enforce_owner_bytes_and_recovery_l
         &a.f.state.config,
         &uuid::Uuid::parse_str(&foreign).unwrap(),
         "",
-        None,
         None,
         None,
         None,
