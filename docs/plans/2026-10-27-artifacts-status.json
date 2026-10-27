@@ -388,7 +388,7 @@
   "applied_prerequisite_commit": "5b44175af5d69af272200a2fc7f374d4b10355f2",
   "prerequisite_source_commit": "336405f8e667ea2eb2c6513effec3d15fd960b02",
   "effective_source_tip": "47a2f3f1845b1896e172e68ec077bb8270ee2e33",
-  "signoff_commit": "52e058025a60db64e0fdefe3cc0ed18e327740d0",
+  "signoff_commit": "c4ba8f8779501ebc766d7c91490104e7068874ef",
   "prerequisite_commit": "5b44175af5d69af272200a2fc7f374d4b10355f2",
   "source_tip_commit": "47a2f3f1845b1896e172e68ec077bb8270ee2e33",
   "source_review_state": "SOURCE_REVIEW_COMPLETE",
