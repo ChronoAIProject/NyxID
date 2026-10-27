@@ -454,6 +454,18 @@ async fn codex_callback_guest_does_not_gain_owner_model_consent() {
         .unwrap()
         .unwrap();
     assert!(chat.guest);
+    assert!(
+        f.state
+            .db
+            .collection::<Document>("assistant_agents")
+            .find_one(doc! {"_id":&chat.agent_id,"user_id":&f.owner})
+            .await
+            .unwrap()
+            .unwrap()
+            .get("owner_model_route")
+            .is_none_or(|value| value == &bson::Bson::Null),
+        "F001 exercises an unbound guest, never authorized route reuse"
+    );
     let mut auth = f.auth.clone();
     auth.assistant_chat = Some(std::sync::Arc::new(chat));
     let decision = check_http_projected(
@@ -472,7 +484,7 @@ async fn codex_callback_guest_does_not_gain_owner_model_consent() {
         &HttpProjection::default(),
     )
     .await;
-    assert!(matches!(decision, Err(AppError::ApiKeyScopeForbidden(_))));
+    assert!(matches!(decision, Err(AppError::GuestModelRouteRequired)));
     let key = credentials::load_for_conversation(
         &f.state.db,
         &f.state.encryption_keys,

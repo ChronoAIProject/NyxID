@@ -4,6 +4,9 @@ use crate::services::assistant_authority_tests::{connected, direct_fixture, orch
 use axum::{Extension, routing::any};
 use tower::ServiceExt;
 
+#[path = "assistant_guest_permissions_integration_tests.rs"]
+mod permissions_reconciliation;
+
 async fn callback_proxy(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -115,6 +118,10 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
     let callbacks = Router::new()
         .route("/api/v1/proxy/s/{slug}/{*path}", any(callback_proxy))
         .route(
+            "/api/v1/proxy/held/{mutation}",
+            any(permissions_reconciliation::held_admission),
+        )
+        .route(
             "/mcp",
             post(crate::handlers::mcp_transport::mcp_post).layer(Extension(
                 crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
@@ -157,12 +164,21 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                 let bytes = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024).await.unwrap();
                 observations.push(json!({"stage":method,"status":status,"body":serde_json::from_slice::<Value>(&bytes).unwrap()}));
             }
+            if scenario == "owner_no_attempt" {
+                db.collection::<bson::Document>("assistant_service_execution").delete_many(doc! {
+                    "conversation_id":&conversation,"kind":"model_attempt"
+                }).await.unwrap();
+            }
             if scenario == "missing_input" {
                 db.collection::<bson::Document>("assistant_service_execution").delete_many(doc! {
                     "conversation_id":&conversation,"kind":"input_admission"
                 }).await.unwrap();
             }
-            let response = callbacks.clone().oneshot(Request::builder().method("POST").uri("/api/v1/proxy/s/guest-model/v1/responses")
+            let uri = scenario.strip_prefix("stale_").map(|kind| format!("/api/v1/proxy/held/{kind}"))
+                .unwrap_or_else(|| "/api/v1/proxy/s/guest-model/v1/responses".into());
+            let mut request = Request::builder().method("POST").uri(uri);
+            if scenario == "semantic_header" { request = request.header("x-model-project", "other"); }
+            let response = callbacks.clone().oneshot(request
                 .header("authorization", bearer.clone()).header("content-type", "application/json")
                 .body(Body::from(input_source.lock().await.to_string())).unwrap()).await.unwrap();
             let status = response.status().as_u16();
@@ -319,6 +335,13 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
     for &scenario in scenarios {
         let provider_calls_before = provider.received_requests().await.unwrap().len();
         let guest = !scenario.starts_with("owner");
+        let cards_before = f
+            .state
+            .db
+            .collection::<bson::Document>("assistant_acknowledgements")
+            .count_documents(doc! {})
+            .await
+            .unwrap();
         *current_scenario.lock().await = scenario.to_owned();
         let route_before = f
             .state
@@ -332,6 +355,9 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
             .cloned();
         *model_input.lock().await =
             json!({"model":"test","store": scenario == "stateful","input":"test","stream":false});
+        if scenario.contains("metadata") {
+            *model_input.lock().await = permissions_reconciliation::metadata_callback(scenario);
+        }
         f.state
             .db
             .collection::<bson::Document>("service_approval_configs")
@@ -443,13 +469,44 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                 .unwrap()
                 .get("owner_model_route")
                 .cloned();
-            assert_eq!(
-                route_before, route_after,
-                "guest may not establish or replace a model route"
-            );
+            if scenario == "stale_route" {
+                assert!(route_before.is_some());
+                assert!(route_after.is_none());
+            } else {
+                assert_eq!(
+                    route_before, route_after,
+                    "guest may not establish or replace a model route"
+                );
+            }
             assert_eq!(f.state.db.collection::<bson::Document>("assistant_service_execution")
                 .count_documents(doc! {"conversation_id":&row.id,"turn_id":completed["turn_id"].as_str(),"kind":"model_consent"})
                 .await.unwrap(), 0, "guest may not mint owner consent");
+        }
+        if guest {
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>("assistant_acknowledgements")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                cards_before,
+                "guest creates no cards"
+            );
+        }
+        if scenario == "owner_no_attempt" {
+            assert!(
+                f.state
+                    .db
+                    .collection::<bson::Document>("assistant_agents")
+                    .find_one(doc! {"_id":&f.chat.agent_id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get("owner_model_route")
+                    .is_none_or(|value| value == &bson::Bson::Null),
+                "callback outside the server model attempt cannot learn a route"
+            );
         }
         let messages = engine::messages(&f.state.db, &f.owner, &row.id, 10, None)
             .await
@@ -488,13 +545,29 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         }
         let expected = match scenario {
             "approval" => Some((403, "api_key_scope_forbidden", 9000)),
-            "stateful" | "missing_input" | "unbound" | "catalog_unbound" => {
-                Some((403, "guest_model_route_required", 9000))
-            }
+            "stateful"
+            | "missing_input"
+            | "unbound"
+            | "catalog_unbound"
+            | "metadata_stateful"
+            | "metadata_hosted"
+            | "metadata_unknown"
+            | "metadata_unknown_effect"
+            | "metadata_replacement"
+            | "semantic_header" => Some((403, "guest_model_route_required", 9000)),
             "concurrency" => Some((429, "service_concurrency_limited", 12600)),
             _ => None,
         };
-        if let Some((status, code, numeric)) = expected {
+        if scenario.starts_with("stale_") {
+            // The held route is a narrow Admission::revalidate seam, not the proxy
+            // ModelRequest observer. Keep real proxy attribution below intact.
+            assert_eq!(calls[2]["status"], 403);
+            assert_eq!(reply.status, "failed");
+            assert_eq!(
+                provider.received_requests().await.unwrap().len(),
+                provider_calls_before
+            );
+        } else if let Some((status, code, numeric)) = expected {
             assert_eq!(calls[2]["status"], status, "{scenario}: {}", calls[2]);
             assert_eq!(
                 provider.received_requests().await.unwrap().len(),
