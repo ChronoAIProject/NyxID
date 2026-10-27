@@ -226,7 +226,11 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
     + tools.filter((tool) => tool.status === "error").length;
   const summary = activitySummary(message);
   return (
-    <div className="mb-2 overflow-hidden rounded-lg border border-hairline bg-overlay/35">
+    // Wide chat columns would otherwise push tool names far from their descriptions.
+    <div
+      data-activity-block
+      className="mb-2 w-full max-w-3xl overflow-hidden rounded-lg border border-hairline bg-overlay/35"
+    >
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}

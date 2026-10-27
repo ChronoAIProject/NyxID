@@ -863,6 +863,14 @@ describe("turn status and action ledger", () => {
     }
   });
 
+  it("caps the tool activity panel width so wide chat columns stay readable", () => {
+    const { container } = render(<ChatMessageBubble message={{ ...BASE, toolCalls: [
+      { id: "read", name: "github__read", status: "done", startedAt: 0, finishedAt: 1000 },
+    ] }} />);
+    const block = container.querySelector("[data-activity-block]")!;
+    expect(block).toHaveClass("w-full", "max-w-3xl");
+  });
+
   it("keeps each tool's own duration beside the correct action", () => {
     vi.useFakeTimers();
     try {
