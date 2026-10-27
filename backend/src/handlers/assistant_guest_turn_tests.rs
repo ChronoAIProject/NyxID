@@ -265,7 +265,14 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
             let uri = scenario.strip_prefix("stale_").map(|kind| format!("/api/v1/proxy/held/{kind}"))
                 .unwrap_or_else(|| format!("/api/v1/proxy/s/{model_slug}/{model_path}"));
             let mut request = Request::builder().method("POST").uri(uri);
-            if scenario == "semantic_header" { request = request.header("x-model-project", "other"); }
+            if scenario == "semantic_header" {
+                request = request.header("idempotency-key", "other");
+                assert_eq!(
+                    crate::services::proxy_service::collect_forward_headers(request.headers_ref().unwrap()),
+                    vec![("idempotency-key".to_string(), "other".to_string())],
+                    "semantic-header probe must change the effective forwarded headers"
+                );
+            }
             let response = callbacks.clone().oneshot(request
                 .header("authorization", bearer.clone()).header("content-type", "application/json").header("accept", "*/*")
                 .body(Body::from(input_source.lock().await.to_string())).unwrap()).await.unwrap();

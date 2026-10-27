@@ -475,11 +475,25 @@ async fn codex_callback_guest_does_not_gain_owner_model_consent() {
         "F001 exercises an unbound guest, never authorized route reuse"
     );
     let resolved = target(&f, &id).await;
-    assert_eq!(resolved.service.slug, "autoplatform");
+    assert_eq!(row.catalog_service_id.as_deref(), Some(c.as_str()));
+    let linked_catalog = f
+        .state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&c})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.service.id, linked_catalog.id);
+    assert_eq!(resolved.service.slug, "chrono-llm-public");
+    assert_eq!(linked_catalog.slug, "autoplatform");
     assert!(
-        resolved.service.credential_encrypted.is_empty(),
+        linked_catalog.credential_encrypted.is_empty(),
         "the F001 catalog has no eligible default master credential"
     );
+    assert!(resolved.service.credential_encrypted.is_empty());
     let mut auth = f.auth.clone();
     auth.assistant_chat = Some(std::sync::Arc::new(chat));
     let decision = check_http_projected(
